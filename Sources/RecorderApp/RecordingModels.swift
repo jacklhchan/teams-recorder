@@ -1,5 +1,33 @@
 import Foundation
 
+struct RecordingHealthReport: Equatable {
+    var systemSignalSeen = false
+    var micSignalSeen = false
+    var clippingEvents = 0
+    var droppedBuffers = 0
+    var startedAt: Date?
+    var endedAt: Date?
+
+    var summary: String {
+        var parts: [String] = []
+        parts.append(systemSignalSeen ? "system audio ok" : "no system audio")
+        parts.append(micSignalSeen ? "mic ok" : "no mic signal")
+        if clippingEvents > 0 {
+            parts.append("\(clippingEvents) clipping events")
+        }
+        if droppedBuffers > 0 {
+            parts.append("\(droppedBuffers) dropped buffers")
+        }
+        return parts.joined(separator: ", ")
+    }
+}
+
+struct RecordingResult: Equatable {
+    let folderURL: URL
+    let recordingURL: URL
+    let health: RecordingHealthReport
+}
+
 enum RecordingEngineError: LocalizedError {
     case noSystemDevice
     case noMicDevice

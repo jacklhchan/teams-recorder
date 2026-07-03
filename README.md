@@ -6,6 +6,9 @@ macOS SwiftUI MVP for recording meeting audio locally:
 - Capture a physical microphone at the same time.
 - Show live RMS/peak meters, rolling waveform, silence warnings, and clipping warnings.
 - Write one combined `recording.m4a` file per session.
+- Run a 10-second test recording and play it back immediately.
+- Review recent recordings from inside the app.
+- Check BlackHole, Multi-Output Device, and save-folder readiness.
 - Let the recorder app own the mic-track mute state.
 - Toggle recorder mic mute with `Option + Shift + M`.
 
@@ -67,6 +70,31 @@ Each session creates a folder under the selected output folder:
 meeting-YYYY-MM-DD-HHMMSS/
 └── recording.m4a
 ```
+
+## Test Recording
+
+Use `Test 10s` before joining or recording an important meeting. The app records 10 seconds, stops automatically, plays the file back, and shows a quick health summary:
+
+- system audio detected / missing
+- mic detected / missing
+- clipping events
+- dropped buffers
+
+## Routing Assistant
+
+The Routing Assistant checks:
+
+- BlackHole is installed and visible
+- System audio source is BlackHole
+- macOS default output is a Multi-Output Device
+- system alerts output is a Multi-Output Device
+- save folder is writable
+
+Use the `Audio MIDI` button to open macOS Audio MIDI Setup.
+
+## Session List
+
+The Recordings section scans the selected output folder for `meeting-*` and `test-*` folders with a `recording.m4a` file. You can play recent recordings or open their folder directly from the app.
 
 ## Mic Mute
 

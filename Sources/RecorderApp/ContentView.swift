@@ -21,11 +21,27 @@ struct ContentView: View {
                     ControlsView(
                         recorder: model.recorder,
                         startOrStop: model.startOrStop,
+                        runTestRecording: model.runTestRecording,
                         toggleRecorderMicMute: {
                             model.toggleRecorderMicMute()
                         },
                         chooseOutputFolder: model.chooseOutputFolder,
-                        openRecordingFolder: model.openRecordingFolder
+                        openRecordingFolder: model.openRecordingFolder,
+                        isRunningTestRecording: model.isRunningTestRecording
+                    )
+                    if let report = model.lastHealthReport {
+                        HealthSummaryView(report: report)
+                    }
+                    RoutingAssistantView(
+                        checks: model.routingChecks,
+                        refresh: model.refreshRoutingChecks,
+                        openAudioMIDISetup: model.openAudioMIDISetup
+                    )
+                    SessionListView(
+                        sessions: model.sessions,
+                        refresh: model.refreshSessions,
+                        play: model.play,
+                        open: model.open
                     )
                     FooterView(recorder: model.recorder, outputFolder: model.outputFolder)
                 }
@@ -162,9 +178,11 @@ private struct MeterSectionView: View {
 private struct ControlsView: View {
     @ObservedObject var recorder: RecordingEngine
     let startOrStop: () -> Void
+    let runTestRecording: () -> Void
     let toggleRecorderMicMute: () -> Void
     let chooseOutputFolder: () -> Void
     let openRecordingFolder: () -> Void
+    let isRunningTestRecording: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -177,6 +195,15 @@ private struct ControlsView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .tint(recorder.isRecording ? .red : .accentColor)
+
+            Button {
+                runTestRecording()
+            } label: {
+                Label(isRunningTestRecording ? "Testing..." : "Test 10s", systemImage: "waveform.badge.magnifyingglass")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(recorder.isRecording || isRunningTestRecording)
 
             Button {
                 toggleRecorderMicMute()
@@ -212,6 +239,154 @@ private struct ControlsView: View {
             }
             .buttonStyle(.bordered)
         }
+    }
+}
+
+private struct HealthSummaryView: View {
+    let report: RecordingHealthReport
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Label(report.systemSignalSeen ? "System audio captured" : "No system audio", systemImage: report.systemSignalSeen ? "checkmark.circle.fill" : "speaker.slash.fill")
+                .foregroundStyle(report.systemSignalSeen ? .green : .orange)
+            Label(report.micSignalSeen ? "Mic captured" : "No mic signal", systemImage: report.micSignalSeen ? "checkmark.circle.fill" : "mic.slash.fill")
+                .foregroundStyle(report.micSignalSeen ? .green : .orange)
+            if report.clippingEvents > 0 {
+                Label("\(report.clippingEvents) clipping events", systemImage: "waveform.path.badge.exclamationmark")
+                    .foregroundStyle(.red)
+            }
+            if report.droppedBuffers > 0 {
+                Label("\(report.droppedBuffers) dropped buffers", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator.opacity(0.55), lineWidth: 1)
+        )
+    }
+}
+
+private struct RoutingAssistantView: View {
+    let checks: [RoutingCheck]
+    let refresh: () -> Void
+    let openAudioMIDISetup: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Routing Assistant", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    refresh()
+                } label: {
+                    Label("Check", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                Button {
+                    openAudioMIDISetup()
+                } label: {
+                    Label("Audio MIDI", systemImage: "slider.horizontal.3")
+                }
+                .buttonStyle(.bordered)
+            }
+
+            VStack(spacing: 8) {
+                ForEach(checks) { check in
+                    HStack(spacing: 10) {
+                        Image(systemName: check.status.iconName)
+                            .foregroundStyle(check.status.color)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(check.title)
+                                .font(.callout.weight(.medium))
+                            Text(check.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator.opacity(0.55), lineWidth: 1)
+        )
+    }
+}
+
+private struct SessionListView: View {
+    let sessions: [RecordingSession]
+    let refresh: () -> Void
+    let play: (RecordingSession) -> Void
+    let open: (RecordingSession) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Recordings", systemImage: "list.bullet.rectangle")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    refresh()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if sessions.isEmpty {
+                Text("No recordings in the selected folder yet.")
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(sessions.prefix(8)) { session in
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(session.displayName)
+                                    .font(.callout.weight(.medium))
+                                Text("\(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(session.durationText) · \(session.fileSizeText)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button {
+                                play(session)
+                            } label: {
+                                Image(systemName: "play.fill")
+                            }
+                            .buttonStyle(.bordered)
+                            Button {
+                                open(session)
+                            } label: {
+                                Image(systemName: "folder")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .padding(.vertical, 8)
+                        if session.id != sessions.prefix(8).last?.id {
+                            Divider()
+                        }
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator.opacity(0.55), lineWidth: 1)
+        )
     }
 }
 

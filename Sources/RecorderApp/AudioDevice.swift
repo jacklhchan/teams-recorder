@@ -18,6 +18,26 @@ struct AudioDevice: Identifiable, Hashable {
 
 enum AudioDeviceManager {
     static func inputDevices() -> [AudioDevice] {
+        devices(scope: kAudioDevicePropertyScopeInput)
+    }
+
+    static func outputDevices() -> [AudioDevice] {
+        devices(scope: kAudioDevicePropertyScopeOutput)
+    }
+
+    static func defaultInputDeviceID() -> AudioDeviceID? {
+        defaultDeviceID(selector: kAudioHardwarePropertyDefaultInputDevice)
+    }
+
+    static func defaultOutputDeviceID() -> AudioDeviceID? {
+        defaultDeviceID(selector: kAudioHardwarePropertyDefaultOutputDevice)
+    }
+
+    static func defaultSystemOutputDeviceID() -> AudioDeviceID? {
+        defaultDeviceID(selector: kAudioHardwarePropertyDefaultSystemOutputDevice)
+    }
+
+    private static func devices(scope: AudioObjectPropertyScope) -> [AudioDevice] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -36,7 +56,7 @@ enum AudioDeviceManager {
         }
 
         return ids.compactMap { id in
-            let channels = inputChannelCount(for: id)
+            let channels = channelCount(for: id, scope: scope)
             guard channels > 0 else { return nil }
 
             return AudioDevice(
@@ -49,9 +69,9 @@ enum AudioDeviceManager {
         .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
-    static func defaultInputDeviceID() -> AudioDeviceID? {
+    private static func defaultDeviceID(selector: AudioObjectPropertySelector) -> AudioDeviceID? {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
@@ -61,10 +81,10 @@ enum AudioDeviceManager {
         return status == noErr ? deviceID : nil
     }
 
-    private static func inputChannelCount(for deviceID: AudioDeviceID) -> Int {
+    private static func channelCount(for deviceID: AudioDeviceID, scope: AudioObjectPropertyScope) -> Int {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioDevicePropertyScopeInput,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
 

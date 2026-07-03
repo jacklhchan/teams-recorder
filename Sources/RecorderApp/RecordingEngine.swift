@@ -18,6 +18,8 @@ final class RecordingEngine: ObservableObject {
     private var mixedFile: AVAudioFile?
     private var pendingSystemBuffers: [AVAudioPCMBuffer] = []
     private var pendingMicBuffers: [AVAudioPCMBuffer] = []
+    private var currentRecordingURL: URL?
+    private var currentHealth = RecordingHealthReport()
     private var latestSystemLevel = LevelSnapshot()
     private var latestMicLevel = LevelSnapshot()
     private var rollingSystemSamples = Array(repeating: Float(0), count: 160)
@@ -83,8 +85,9 @@ final class RecordingEngine: ObservableObject {
         stopMeterTimer()
     }
 
-    func start(systemDevice: AudioDevice?, micDevice: AudioDevice?, baseFolder: URL) throws {
-        guard !isRecording else { return }
+    @discardableResult
+    func start(systemDevice: AudioDevice?, micDevice: AudioDevice?, baseFolder: URL, folderPrefix: String = "meeting") throws -> URL {
+        guard !isRecording else { return outputFolder ?? baseFolder }
         guard let systemDevice else { throw RecordingEngineError.noSystemDevice }
         guard let micDevice else { throw RecordingEngineError.noMicDevice }
         if !isMonitoring {
@@ -92,7 +95,7 @@ final class RecordingEngine: ObservableObject {
         }
 
         let folder = baseFolder
-            .appendingPathComponent("meeting-\(Self.folderStamp.string(from: Date()))", isDirectory: true)
+            .appendingPathComponent("\(folderPrefix)-\(Self.folderStamp.string(from: Date()))", isDirectory: true)
 
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -107,21 +110,33 @@ final class RecordingEngine: ObservableObject {
             AVEncoderBitRateKey: 192_000
         ]
 
-        mixedFile = try AVAudioFile(forWriting: folder.appendingPathComponent("recording.m4a"), settings: fileSettings)
+        let recordingURL = folder.appendingPathComponent("recording.m4a")
+        mixedFile = try AVAudioFile(forWriting: recordingURL, settings: fileSettings)
+        currentRecordingURL = recordingURL
+        currentHealth = RecordingHealthReport(startedAt: Date())
         outputFolder = folder
         startedAt = Date()
         isRecording = true
+        return folder
     }
 
-    func stop() {
-        guard isRecording || systemEngine != nil || micEngine != nil else { return }
+    func stop() -> RecordingResult? {
+        guard isRecording || systemEngine != nil || micEngine != nil else { return nil }
 
         mixedFile = nil
+        currentHealth.endedAt = Date()
+        let result = outputFolder.flatMap { folder in
+            currentRecordingURL.map {
+                RecordingResult(folderURL: folder, recordingURL: $0, health: currentHealth)
+            }
+        }
         pendingSystemBuffers.removeAll()
         pendingMicBuffers.removeAll()
+        currentRecordingURL = nil
         startedAt = nil
         isRecording = false
         micMuted = false
+        return result
     }
 
     func toggleMicMute() {
@@ -157,6 +172,7 @@ final class RecordingEngine: ObservableObject {
 
         Task { @MainActor in
             guard self.isRecording else { return }
+            self.updateHealth(with: snapshot, kind: kind)
             do {
                 switch kind {
                 case .system:
@@ -200,10 +216,25 @@ final class RecordingEngine: ObservableObject {
     private func trimPendingBuffers() {
         let maxPendingBuffers = 20
         if pendingSystemBuffers.count > maxPendingBuffers {
+            currentHealth.droppedBuffers += pendingSystemBuffers.count - maxPendingBuffers
             pendingSystemBuffers.removeFirst(pendingSystemBuffers.count - maxPendingBuffers)
         }
         if pendingMicBuffers.count > maxPendingBuffers {
+            currentHealth.droppedBuffers += pendingMicBuffers.count - maxPendingBuffers
             pendingMicBuffers.removeFirst(pendingMicBuffers.count - maxPendingBuffers)
+        }
+    }
+
+    private func updateHealth(with snapshot: LevelSnapshot, kind: SourceKind) {
+        switch kind {
+        case .system:
+            currentHealth.systemSignalSeen = currentHealth.systemSignalSeen || snapshot.rms > -55
+        case .mic:
+            currentHealth.micSignalSeen = currentHealth.micSignalSeen || (!micMuted && snapshot.rms > -55)
+        }
+
+        if snapshot.isClipping {
+            currentHealth.clippingEvents += 1
         }
     }
 

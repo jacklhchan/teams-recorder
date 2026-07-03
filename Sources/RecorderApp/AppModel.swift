@@ -18,6 +18,9 @@ final class AppModel: ObservableObject {
     @Published var playbackProgress: TimeInterval = 0
     @Published var playbackDuration: TimeInterval = 0
     @Published var isPlaybackActive = false
+    @Published var transcribingSessionID: RecordingSession.ID?
+    @Published var transcriptionStatus: String = ""
+    @Published var transcriptURLsBySessionID: [RecordingSession.ID: URL] = [:]
 
     let recorder = RecordingEngine()
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -25,6 +28,7 @@ final class AppModel: ObservableObject {
     }
     private var audioPlayer: AVAudioPlayer?
     private var playbackTimer: Timer?
+    private var transcriptionProcess: Process?
 
     init() {
         refreshDevices()
@@ -186,6 +190,80 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(session.folderURL)
     }
 
+    func transcribe(session: RecordingSession) {
+        guard transcribingSessionID == nil else {
+            statusMessage = "A transcription is already running."
+            return
+        }
+
+        let scriptURL = Bundle.main.resourceURL?.appendingPathComponent("transcribe-qwen-asr.sh")
+            ?? URL(fileURLWithPath: "/Users/apple/Documents/recorder/scripts/transcribe-qwen-asr.sh")
+        guard FileManager.default.isExecutableFile(atPath: scriptURL.path) else {
+            statusMessage = "Missing transcription launcher: \(scriptURL.path)"
+            return
+        }
+
+        transcribingSessionID = session.id
+        transcriptionStatus = "Starting Qwen ASR..."
+        statusMessage = "Opening oMLX and starting transcription"
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptURL.path, session.recordingURL.path, session.folderURL.path]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        transcriptionProcess = process
+
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor in
+                self?.handleTranscriptionOutput(text, session: session)
+            }
+        }
+
+        process.terminationHandler = { [weak self] process in
+            Task { @MainActor in
+                pipe.fileHandleForReading.readabilityHandler = nil
+                self?.transcriptionProcess = nil
+                self?.transcribingSessionID = nil
+                if process.terminationStatus == 0 {
+                    self?.transcriptionStatus = "Transcription complete"
+                    self?.statusMessage = "Transcription complete"
+                } else {
+                    self?.transcriptionStatus = "Transcription failed"
+                    self?.statusMessage = "Transcription failed with exit code \(process.terminationStatus)"
+                }
+            }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            transcribingSessionID = nil
+            transcriptionProcess = nil
+            transcriptionStatus = "Transcription launch failed"
+            statusMessage = "Transcription launch failed: \(error.localizedDescription)"
+        }
+    }
+
+    func openTranscript(for session: RecordingSession) {
+        if let url = transcriptURLsBySessionID[session.id] {
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        let expected = session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_bf16_yue_trad.txt")
+        if FileManager.default.fileExists(atPath: expected.path) {
+            transcriptURLsBySessionID[session.id] = expected
+            NSWorkspace.shared.open(expected)
+        } else {
+            statusMessage = "No transcript found for \(session.displayName)"
+        }
+    }
+
     func openAudioMIDISetup() {
         NSWorkspace.shared.openApplication(
             at: URL(fileURLWithPath: "/System/Applications/Utilities/Audio MIDI Setup.app"),
@@ -275,6 +353,20 @@ final class AppModel: ObservableObject {
                     self.isPlaybackActive = false
                 }
             }
+        }
+    }
+
+    private func handleTranscriptionOutput(_ text: String, session: RecordingSession) {
+        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+        if let lastUsefulLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            transcriptionStatus = lastUsefulLine
+        }
+
+        for line in lines where line.hasPrefix("TRANSCRIPT_PATH=") {
+            let path = String(line.dropFirst("TRANSCRIPT_PATH=".count))
+            let url = URL(fileURLWithPath: path)
+            transcriptURLsBySessionID[session.id] = url
+            statusMessage = "Transcript saved: \(url.lastPathComponent)"
         }
     }
 

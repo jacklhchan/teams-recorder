@@ -8,6 +8,7 @@ macOS SwiftUI MVP for recording meeting audio locally:
 - Write one combined `recording.m4a` file per session.
 - Run a 10-second test recording and play it back immediately.
 - Review recent recordings from inside the app.
+- Trigger local Qwen ASR transcription from each recording row.
 - Check BlackHole, Multi-Output Device, and save-folder readiness.
 - Let the recorder app own the mic-track mute state.
 - Toggle recorder mic mute with `Option + Shift + M`.
@@ -94,7 +95,22 @@ Use the `Audio MIDI` button to open macOS Audio MIDI Setup.
 
 ## Session List
 
-The Recordings section scans the selected output folder for `meeting-*` and `test-*` folders with a `recording.m4a` file. You can play recent recordings, drag the playback slider to seek, stop playback, or open their folder directly from the app.
+The Recordings section scans the selected output folder for `meeting-*` and `test-*` folders with a `recording.m4a` file. You can play recent recordings, drag the playback slider to seek, stop playback, transcribe with Qwen ASR, or open their folder directly from the app.
+
+## Qwen ASR Transcription
+
+The transcript button opens oMLX and runs the local MLX Qwen ASR pipeline against the selected `recording.m4a`.
+
+Current local defaults:
+
+```text
+ASR workspace: /Users/apple/Documents/AIA ASR
+Model: /Users/apple/Documents/AIA ASR/models/Qwen3-ASR-1.7B-bf16
+Language: yue
+Output: transcript_qwen3_asr_1_7b_bf16_yue_trad.txt
+```
+
+The app packages `scripts/transcribe-qwen-asr.sh` into the app bundle and calls it from the recording row.
 
 ## Mic Mute
 

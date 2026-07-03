@@ -16,6 +16,8 @@ rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BINARY_PATH" "$MACOS_DIR/$APP_NAME"
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
+cp "$ROOT_DIR/scripts/transcribe-qwen-asr.sh" "$RESOURCES_DIR/transcribe-qwen-asr.sh"
+chmod +x "$RESOURCES_DIR/transcribe-qwen-asr.sh"
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

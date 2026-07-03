@@ -43,13 +43,18 @@ struct ContentView: View {
                         playbackProgress: model.playbackProgress,
                         playbackDuration: model.playbackDuration,
                         isPlaybackActive: model.isPlaybackActive,
+                        transcribingSessionID: model.transcribingSessionID,
+                        transcriptionStatus: model.transcriptionStatus,
+                        transcriptURLsBySessionID: model.transcriptURLsBySessionID,
                         refresh: model.refreshSessions,
                         play: model.play,
                         open: model.open,
                         stopPlayback: {
                             model.stopPlayback()
                         },
-                        seekPlayback: model.seekPlayback
+                        seekPlayback: model.seekPlayback,
+                        transcribe: model.transcribe,
+                        openTranscript: model.openTranscript
                     )
                     FooterView(recorder: model.recorder, outputFolder: model.outputFolder)
                 }
@@ -338,11 +343,16 @@ private struct SessionListView: View {
     let playbackProgress: TimeInterval
     let playbackDuration: TimeInterval
     let isPlaybackActive: Bool
+    let transcribingSessionID: RecordingSession.ID?
+    let transcriptionStatus: String
+    let transcriptURLsBySessionID: [RecordingSession.ID: URL]
     let refresh: () -> Void
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
     let stopPlayback: () -> Void
     let seekPlayback: (TimeInterval) -> Void
+    let transcribe: (RecordingSession) -> Void
+    let openTranscript: (RecordingSession) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -387,6 +397,22 @@ private struct SessionListView: View {
                                     Image(systemName: "folder")
                                 }
                                 .buttonStyle(.bordered)
+                                Button {
+                                    transcribe(session)
+                                } label: {
+                                    Image(systemName: transcribingSessionID == session.id ? "waveform" : "text.badge.plus")
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(transcribingSessionID != nil)
+                                .help("Transcribe with local Qwen ASR")
+                                Button {
+                                    openTranscript(session)
+                                } label: {
+                                    Image(systemName: "doc.text")
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(!hasTranscript(for: session))
+                                .help("Open transcript")
                             }
 
                             if playingSessionID == session.id {
@@ -396,6 +422,20 @@ private struct SessionListView: View {
                                     stopPlayback: stopPlayback,
                                     seekPlayback: seekPlayback
                                 )
+                            }
+
+                            if transcribingSessionID == session.id {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text(transcriptionStatus.isEmpty ? "Transcribing..." : transcriptionStatus)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                    Spacer()
+                                }
+                                .padding(10)
+                                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                             }
                         }
                         .padding(.vertical, 8)
@@ -412,6 +452,14 @@ private struct SessionListView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(.separator.opacity(0.55), lineWidth: 1)
         )
+    }
+
+    private func hasTranscript(for session: RecordingSession) -> Bool {
+        if transcriptURLsBySessionID[session.id] != nil {
+            return true
+        }
+        let expected = session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_bf16_yue_trad.txt")
+        return FileManager.default.fileExists(atPath: expected.path)
     }
 }
 

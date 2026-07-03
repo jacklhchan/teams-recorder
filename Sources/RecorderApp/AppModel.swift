@@ -25,6 +25,10 @@ final class AppModel: ObservableObject {
     @Published var lastTranscriptionDidFail = false
     @Published var transcriptURLsBySessionID: [RecordingSession.ID: URL] = [:]
     @Published var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] = [:]
+    @Published var isPreparingASRModel = false
+    @Published var asrModelReady = false
+    @Published var asrModelStatus = "Checking Qwen ASR model..."
+    @Published var asrModelLogURL: URL?
 
     let recorder = RecordingEngine()
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -33,6 +37,8 @@ final class AppModel: ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     private var playbackTimer: Timer?
     private var transcriptionProcess: Process?
+    private var asrPrepareProcess: Process?
+    private let asrModelDirectory = URL(fileURLWithPath: "/Users/apple/Documents/AIA ASR/models/Qwen3-ASR-1.7B-MLX-8bit")
 
     init() {
         refreshDevices()
@@ -43,6 +49,8 @@ final class AppModel: ObservableObject {
         }
         refreshSessions()
         refreshRoutingChecks()
+        refreshASRModelStatus()
+        prepareASRModelIfNeeded()
     }
 
     func refreshDevices() {
@@ -199,6 +207,11 @@ final class AppModel: ObservableObject {
             statusMessage = "A transcription is already running."
             return
         }
+        guard asrModelReady else {
+            prepareASRModelIfNeeded()
+            statusMessage = "Qwen ASR model is still preparing. Wait until the model is ready, then transcribe again."
+            return
+        }
 
         let scriptURL = Bundle.main.resourceURL?.appendingPathComponent("transcribe-qwen-asr.sh")
             ?? URL(fileURLWithPath: "/Users/apple/Documents/recorder/scripts/transcribe-qwen-asr.sh")
@@ -257,6 +270,79 @@ final class AppModel: ObservableObject {
             transcriptionProcess = nil
             transcriptionStatus = "Transcription launch failed"
             statusMessage = "Transcription launch failed: \(error.localizedDescription)"
+        }
+    }
+
+    func prepareASRModelIfNeeded() {
+        refreshASRModelStatus()
+        guard !asrModelReady else { return }
+        guard !isPreparingASRModel else { return }
+
+        let scriptURL = Bundle.main.resourceURL?.appendingPathComponent("prepare-qwen-asr.sh")
+            ?? URL(fileURLWithPath: "/Users/apple/Documents/recorder/scripts/prepare-qwen-asr.sh")
+        guard FileManager.default.isExecutableFile(atPath: scriptURL.path) else {
+            asrModelStatus = "Missing ASR model preparation script: \(scriptURL.path)"
+            return
+        }
+
+        isPreparingASRModel = true
+        asrModelStatus = "Preparing Qwen ASR model in the background..."
+        statusMessage = "Preparing Qwen ASR model"
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptURL.path]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        asrPrepareProcess = process
+
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor in
+                self?.handleASRModelOutput(text)
+            }
+        }
+
+        process.terminationHandler = { [weak self] process in
+            Task { @MainActor in
+                pipe.fileHandleForReading.readabilityHandler = nil
+                self?.asrPrepareProcess = nil
+                self?.isPreparingASRModel = false
+                self?.refreshASRModelStatus()
+                if self?.asrModelReady == true {
+                    self?.asrModelStatus = "Qwen ASR model ready"
+                    self?.statusMessage = "Qwen ASR model ready"
+                } else {
+                    self?.asrModelStatus = "Qwen ASR model preparation failed with exit code \(process.terminationStatus)"
+                    self?.statusMessage = "Qwen ASR model preparation failed. Open the model log for details."
+                }
+            }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            isPreparingASRModel = false
+            asrPrepareProcess = nil
+            asrModelStatus = "ASR model preparation failed: \(error.localizedDescription)"
+        }
+    }
+
+    func openASRModelLog() {
+        if let asrModelLogURL {
+            NSWorkspace.shared.open(asrModelLogURL)
+            return
+        }
+
+        let expected = URL(fileURLWithPath: "/Users/apple/Documents/AIA ASR/qwen_asr_model_prepare.log")
+        if FileManager.default.fileExists(atPath: expected.path) {
+            asrModelLogURL = expected
+            NSWorkspace.shared.open(expected)
+        } else {
+            statusMessage = "No ASR model preparation log found."
         }
     }
 
@@ -400,6 +486,51 @@ final class AppModel: ObservableObject {
             let path = String(line.dropFirst("LOG_PATH=".count))
             transcriptLogURLsBySessionID[session.id] = URL(fileURLWithPath: path)
         }
+    }
+
+    private func refreshASRModelStatus() {
+        let modelFile = asrModelDirectory.appendingPathComponent("model.safetensors")
+        asrModelReady = FileManager.default.fileExists(atPath: modelFile.path)
+        if asrModelReady {
+            asrModelStatus = "Qwen ASR model ready"
+        } else if !isPreparingASRModel {
+            asrModelStatus = "Qwen ASR model not prepared yet"
+        }
+
+        let logURL = URL(fileURLWithPath: "/Users/apple/Documents/AIA ASR/qwen_asr_model_prepare.log")
+        if FileManager.default.fileExists(atPath: logURL.path) {
+            asrModelLogURL = logURL
+        }
+    }
+
+    private func handleASRModelOutput(_ text: String) {
+        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+        if let lastUsefulLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            asrModelStatus = friendlyASRModelStatus(for: lastUsefulLine)
+        }
+
+        for line in lines where line.hasPrefix("LOG_PATH=") {
+            let path = String(line.dropFirst("LOG_PATH=".count))
+            asrModelLogURL = URL(fileURLWithPath: path)
+        }
+
+        for line in lines where line.hasPrefix("MODEL_READY=") {
+            asrModelReady = true
+            asrModelStatus = "Qwen ASR model ready"
+        }
+    }
+
+    private func friendlyASRModelStatus(for line: String) -> String {
+        if line.contains("Warning: You are sending unauthenticated requests") {
+            return "Downloading Qwen ASR model from Hugging Face..."
+        }
+        if line.contains("Fetching") {
+            return "Downloading Qwen ASR model from Hugging Face..."
+        }
+        if line.hasPrefix("LOG_PATH=") {
+            return isPreparingASRModel ? "Preparing Qwen ASR model in the background..." : asrModelStatus
+        }
+        return line
     }
 
     private func requestMicrophonePermission() async {

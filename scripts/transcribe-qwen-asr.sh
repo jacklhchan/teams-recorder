@@ -14,13 +14,7 @@ ASR_WORKSPACE="${ASR_WORKSPACE:-/Users/apple/Documents/AIA ASR}"
 PYTHON="${PYTHON:-${ASR_WORKSPACE}/.venv/bin/python}"
 MODEL_REPO="${MODEL_REPO:-aufklarer/Qwen3-ASR-1.7B-MLX-8bit}"
 MODEL_DIR="${MODEL_DIR:-${ASR_WORKSPACE}/models/Qwen3-ASR-1.7B-MLX-8bit}"
-if [[ -z "${MODEL:-}" ]]; then
-  if [[ -f "${MODEL_DIR}/model.safetensors" ]]; then
-    MODEL="$MODEL_DIR"
-  else
-    MODEL="$MODEL_REPO"
-  fi
-fi
+MODEL="${MODEL:-${MODEL_DIR}}"
 LANGUAGE="${LANGUAGE:-yue}"
 CHUNK_DURATION="${CHUNK_DURATION:-30}"
 MAX_TOKENS="${MAX_TOKENS:-50000}"
@@ -50,8 +44,10 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   exit 69
 fi
 
-if [[ -d "$MODEL" && ! -f "${MODEL}/model.safetensors" ]]; then
-  echo "Missing Qwen ASR model file: ${MODEL}/model.safetensors" >&2
+if [[ ! -f "${MODEL}/model.safetensors" ]]; then
+  echo "Qwen ASR model is not prepared yet." >&2
+  echo "Expected: ${MODEL}/model.safetensors" >&2
+  echo "Use Prepare ASR Model first." >&2
   exit 69
 fi
 
@@ -67,11 +63,7 @@ echo "Opening oMLX..."
 echo "Normalizing audio to 16 kHz mono..."
 ffmpeg -y -hide_banner -loglevel error -i "$AUDIO_FILE" -ac 1 -ar 16000 "$MONO_AUDIO"
 
-if [[ "$MODEL" == "$MODEL_REPO" ]]; then
-  echo "Using Hugging Face model ${MODEL_REPO}. First run downloads the model and can take several minutes."
-else
-  echo "Using local Qwen ASR model: ${MODEL}"
-fi
+echo "Using local Qwen ASR model: ${MODEL}"
 echo "Transcribing with ${MODEL} via direct MLX CLI..."
 "$PYTHON" -m mlx_audio.stt.generate \
   --model "$MODEL" \

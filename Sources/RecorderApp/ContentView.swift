@@ -37,6 +37,14 @@ struct ContentView: View {
                         refresh: model.refreshRoutingChecks,
                         openAudioMIDISetup: model.openAudioMIDISetup
                     )
+                    ASRModelView(
+                        isPreparing: model.isPreparingASRModel,
+                        isReady: model.asrModelReady,
+                        status: model.asrModelStatus,
+                        hasLog: model.asrModelLogURL != nil,
+                        prepare: model.prepareASRModelIfNeeded,
+                        openLog: model.openASRModelLog
+                    )
                     SessionListView(
                         sessions: model.sessions,
                         playingSessionID: model.playingSessionID,
@@ -48,6 +56,7 @@ struct ContentView: View {
                         lastTranscriptionSessionID: model.lastTranscriptionSessionID,
                         lastTranscriptionStatus: model.lastTranscriptionStatus,
                         lastTranscriptionDidFail: model.lastTranscriptionDidFail,
+                        asrModelReady: model.asrModelReady,
                         transcriptURLsBySessionID: model.transcriptURLsBySessionID,
                         transcriptLogURLsBySessionID: model.transcriptLogURLsBySessionID,
                         refresh: model.refreshSessions,
@@ -342,6 +351,63 @@ private struct RoutingAssistantView: View {
     }
 }
 
+private struct ASRModelView: View {
+    let isPreparing: Bool
+    let isReady: Bool
+    let status: String
+    let hasLog: Bool
+    let prepare: () -> Void
+    let openLog: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if isPreparing {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: isReady ? "checkmark.circle.fill" : "arrow.down.circle.fill")
+                    .foregroundStyle(isReady ? .green : .orange)
+                    .frame(width: 18)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Qwen ASR Model")
+                    .font(.callout.weight(.medium))
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            Button {
+                prepare()
+            } label: {
+                Label(isReady ? "Ready" : "Prepare", systemImage: isReady ? "checkmark" : "arrow.down")
+            }
+            .buttonStyle(.bordered)
+            .disabled(isPreparing || isReady)
+
+            Button {
+                openLog()
+            } label: {
+                Image(systemName: "terminal")
+            }
+            .buttonStyle(.bordered)
+            .disabled(!hasLog)
+            .help("Open ASR model log")
+        }
+        .padding(14)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator.opacity(0.55), lineWidth: 1)
+        )
+    }
+}
+
 private struct SessionListView: View {
     let sessions: [RecordingSession]
     let playingSessionID: RecordingSession.ID?
@@ -353,6 +419,7 @@ private struct SessionListView: View {
     let lastTranscriptionSessionID: RecordingSession.ID?
     let lastTranscriptionStatus: String
     let lastTranscriptionDidFail: Bool
+    let asrModelReady: Bool
     let transcriptURLsBySessionID: [RecordingSession.ID: URL]
     let transcriptLogURLsBySessionID: [RecordingSession.ID: URL]
     let refresh: () -> Void
@@ -413,8 +480,8 @@ private struct SessionListView: View {
                                     Image(systemName: transcribingSessionID == session.id ? "waveform" : "text.badge.plus")
                                 }
                                 .buttonStyle(.bordered)
-                                .disabled(transcribingSessionID != nil)
-                                .help("Transcribe with local Qwen ASR")
+                                .disabled(transcribingSessionID != nil || !asrModelReady)
+                                .help(asrModelReady ? "Transcribe with local Qwen ASR" : "Prepare the Qwen ASR model first")
                                 Button {
                                     openTranscript(session)
                                 } label: {

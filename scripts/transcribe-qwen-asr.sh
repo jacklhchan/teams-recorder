@@ -10,15 +10,15 @@ AUDIO_FILE="$1"
 OUTPUT_FOLDER="$2"
 ASR_WORKSPACE="${ASR_WORKSPACE:-/Users/apple/Documents/AIA ASR}"
 PYTHON="${PYTHON:-${ASR_WORKSPACE}/.venv/bin/python}"
-MODEL="${MODEL:-${ASR_WORKSPACE}/models/Qwen3-ASR-1.7B-bf16}"
+MODEL="${MODEL:-aufklarer/Qwen3-ASR-1.7B-MLX-8bit}"
 LANGUAGE="${LANGUAGE:-yue}"
 CHUNK_DURATION="${CHUNK_DURATION:-30}"
 MAX_TOKENS="${MAX_TOKENS:-50000}"
 CONTEXT="${CONTEXT:-Hong Kong Cantonese meeting recording, business discussion, mixed Cantonese and English terms}"
 
-RAW_OUTPUT_BASE="${OUTPUT_FOLDER}/transcript_qwen3_asr_1_7b_bf16_${LANGUAGE}"
+RAW_OUTPUT_BASE="${OUTPUT_FOLDER}/transcript_qwen3_asr_1_7b_8bit_${LANGUAGE}"
 RAW_OUTPUT="${RAW_OUTPUT_BASE}.txt"
-TRAD_OUTPUT="${OUTPUT_FOLDER}/transcript_qwen3_asr_1_7b_bf16_${LANGUAGE}_trad.txt"
+TRAD_OUTPUT="${OUTPUT_FOLDER}/transcript_qwen3_asr_1_7b_8bit_${LANGUAGE}_trad.txt"
 
 open -a "oMLX" >/dev/null 2>&1 || true
 
@@ -30,8 +30,8 @@ if [[ ! -x "$PYTHON" ]]; then
   echo "Missing ASR Python environment: $PYTHON" >&2
   exit 69
 fi
-if [[ ! -f "${MODEL}/model.safetensors" ]]; then
-  echo "Missing Qwen ASR model: ${MODEL}/model.safetensors" >&2
+if [[ -d "$MODEL" && ! -f "${MODEL}/model.safetensors" ]]; then
+  echo "Missing Qwen ASR model file: ${MODEL}/model.safetensors" >&2
   exit 69
 fi
 if ! command -v ffmpeg >/dev/null 2>&1; then
@@ -47,11 +47,11 @@ trap cleanup EXIT
 
 MONO_AUDIO="${WORKDIR}/input_mono16k.wav"
 
-echo "Opening oMLX and loading Qwen ASR model..."
+echo "Opening oMLX..."
 echo "Normalizing audio to 16 kHz mono..."
 ffmpeg -y -hide_banner -loglevel error -i "$AUDIO_FILE" -ac 1 -ar 16000 "$MONO_AUDIO"
 
-echo "Transcribing with Qwen3-ASR-1.7B-bf16..."
+echo "Transcribing with ${MODEL} via direct MLX CLI..."
 "$PYTHON" -m mlx_audio.stt.generate \
   --model "$MODEL" \
   --audio "$MONO_AUDIO" \

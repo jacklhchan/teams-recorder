@@ -105,12 +105,12 @@ Current local defaults:
 
 ```text
 ASR workspace: /Users/apple/Documents/AIA ASR
-Model: /Users/apple/Documents/AIA ASR/models/Qwen3-ASR-1.7B-bf16
+Model: aufklarer/Qwen3-ASR-1.7B-MLX-8bit
 Language: yue
-Output: transcript_qwen3_asr_1_7b_bf16_yue_trad.txt
+Output: transcript_qwen3_asr_1_7b_8bit_yue_trad.txt
 ```
 
-The app packages `scripts/transcribe-qwen-asr.sh` into the app bundle and calls it from the recording row.
+The app packages `scripts/transcribe-qwen-asr.sh` into the app bundle and calls it from the recording row. This currently uses direct `mlx_audio.stt.generate` execution, not an OminiX `/v1/audio/transcriptions` server.
 
 ## Mic Mute
 

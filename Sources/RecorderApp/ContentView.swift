@@ -458,7 +458,7 @@ private struct SessionListView: View {
         if transcriptURLsBySessionID[session.id] != nil {
             return true
         }
-        let expected = session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_bf16_yue_trad.txt")
+        let expected = session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_8bit_yue_trad.txt")
         return FileManager.default.fileExists(atPath: expected.path)
     }
 }

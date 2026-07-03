@@ -3,11 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="LocalMeetingRecorder"
-APP_DIR="$ROOT_DIR/build/$APP_NAME.app"
+APP_DIR="$ROOT_DIR/build/Local Meeting Recorder Staging.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 BINARY_PATH="$ROOT_DIR/.build/arm64-apple-macosx/debug/$APP_NAME"
+BUNDLE_ID="${BUNDLE_ID:-local.meeting.recorder.staging}"
+BUNDLE_NAME="${BUNDLE_NAME:-Local Meeting Recorder Staging}"
 
 cd "$ROOT_DIR"
 swift build
@@ -30,13 +32,13 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleExecutable</key>
   <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
-  <string>local.meeting.recorder</string>
+  <string>$BUNDLE_ID</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Local Meeting Recorder</string>
+  <string>$BUNDLE_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

@@ -371,7 +371,7 @@ private struct ASRModelView: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Qwen ASR Model")
+                Text("oMLX ASR Server")
                     .font(.callout.weight(.medium))
                 Text(status)
                     .font(.caption)
@@ -481,7 +481,7 @@ private struct SessionListView: View {
                                 }
                                 .buttonStyle(.bordered)
                                 .disabled(transcribingSessionID != nil || !asrModelReady)
-                                .help(asrModelReady ? "Transcribe with local Qwen ASR" : "Prepare the Qwen ASR model first")
+                                .help(asrModelReady ? "Transcribe with oMLX Qwen ASR" : "Wait for the oMLX ASR server check")
                                 Button {
                                     openTranscript(session)
                                 } label: {

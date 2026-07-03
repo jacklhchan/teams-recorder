@@ -27,7 +27,7 @@ final class AppModel: ObservableObject {
     @Published var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] = [:]
     @Published var isPreparingASRModel = false
     @Published var asrModelReady = false
-    @Published var asrModelStatus = "Checking Qwen ASR model..."
+    @Published var asrModelStatus = "Checking oMLX ASR server..."
     @Published var asrModelLogURL: URL?
 
     let recorder = RecordingEngine()
@@ -38,7 +38,6 @@ final class AppModel: ObservableObject {
     private var playbackTimer: Timer?
     private var transcriptionProcess: Process?
     private var asrPrepareProcess: Process?
-    private let asrModelDirectory = URL(fileURLWithPath: "/Users/apple/Documents/AIA ASR/models/Qwen3-ASR-1.7B-MLX-8bit")
 
     init() {
         refreshDevices()
@@ -209,7 +208,7 @@ final class AppModel: ObservableObject {
         }
         guard asrModelReady else {
             prepareASRModelIfNeeded()
-            statusMessage = "Qwen ASR model is still preparing. Wait until the model is ready, then transcribe again."
+            statusMessage = "oMLX ASR server is still preparing. Wait until it is ready, then transcribe again."
             return
         }
 
@@ -286,8 +285,8 @@ final class AppModel: ObservableObject {
         }
 
         isPreparingASRModel = true
-        asrModelStatus = "Preparing Qwen ASR model in the background..."
-        statusMessage = "Preparing Qwen ASR model"
+        asrModelStatus = "Checking oMLX ASR server in the background..."
+        statusMessage = "Checking oMLX ASR server"
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -311,13 +310,14 @@ final class AppModel: ObservableObject {
                 pipe.fileHandleForReading.readabilityHandler = nil
                 self?.asrPrepareProcess = nil
                 self?.isPreparingASRModel = false
-                self?.refreshASRModelStatus()
-                if self?.asrModelReady == true {
-                    self?.asrModelStatus = "Qwen ASR model ready"
-                    self?.statusMessage = "Qwen ASR model ready"
+                if process.terminationStatus == 0 {
+                    self?.asrModelReady = true
+                    self?.asrModelStatus = "oMLX ASR server ready"
+                    self?.statusMessage = "oMLX ASR server ready"
                 } else {
-                    self?.asrModelStatus = "Qwen ASR model preparation failed with exit code \(process.terminationStatus)"
-                    self?.statusMessage = "Qwen ASR model preparation failed. Open the model log for details."
+                    self?.asrModelReady = false
+                    self?.asrModelStatus = "oMLX ASR server check failed with exit code \(process.terminationStatus)"
+                    self?.statusMessage = "oMLX ASR server check failed. Open the ASR log for details."
                 }
             }
         }
@@ -327,7 +327,7 @@ final class AppModel: ObservableObject {
         } catch {
             isPreparingASRModel = false
             asrPrepareProcess = nil
-            asrModelStatus = "ASR model preparation failed: \(error.localizedDescription)"
+            asrModelStatus = "oMLX ASR server check failed: \(error.localizedDescription)"
         }
     }
 
@@ -342,7 +342,7 @@ final class AppModel: ObservableObject {
             asrModelLogURL = expected
             NSWorkspace.shared.open(expected)
         } else {
-            statusMessage = "No ASR model preparation log found."
+            statusMessage = "No oMLX ASR server log found."
         }
     }
 
@@ -489,12 +489,8 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshASRModelStatus() {
-        let modelFile = asrModelDirectory.appendingPathComponent("model.safetensors")
-        asrModelReady = FileManager.default.fileExists(atPath: modelFile.path)
-        if asrModelReady {
-            asrModelStatus = "Qwen ASR model ready"
-        } else if !isPreparingASRModel {
-            asrModelStatus = "Qwen ASR model not prepared yet"
+        if !asrModelReady && !isPreparingASRModel {
+            asrModelStatus = "oMLX ASR server not checked yet"
         }
 
         let logURL = URL(fileURLWithPath: "/Users/apple/Documents/AIA ASR/qwen_asr_model_prepare.log")
@@ -516,19 +512,19 @@ final class AppModel: ObservableObject {
 
         for line in lines where line.hasPrefix("MODEL_READY=") {
             asrModelReady = true
-            asrModelStatus = "Qwen ASR model ready"
+            asrModelStatus = "oMLX ASR server ready"
         }
     }
 
     private func friendlyASRModelStatus(for line: String) -> String {
-        if line.contains("Warning: You are sending unauthenticated requests") {
-            return "Downloading Qwen ASR model from Hugging Face..."
+        if line.contains("Checking oMLX ASR server") {
+            return "Checking oMLX ASR server..."
         }
-        if line.contains("Fetching") {
-            return "Downloading Qwen ASR model from Hugging Face..."
+        if line.contains("Waiting for oMLX ASR model") {
+            return "Waiting for oMLX ASR model..."
         }
         if line.hasPrefix("LOG_PATH=") {
-            return isPreparingASRModel ? "Preparing Qwen ASR model in the background..." : asrModelStatus
+            return isPreparingASRModel ? "Checking oMLX ASR server in the background..." : asrModelStatus
         }
         return line
     }

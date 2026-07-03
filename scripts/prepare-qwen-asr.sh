@@ -4,47 +4,49 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 ASR_WORKSPACE="${ASR_WORKSPACE:-/Users/apple/Documents/AIA ASR}"
-PYTHON="${PYTHON:-${ASR_WORKSPACE}/.venv/bin/python}"
-MODEL_REPO="${MODEL_REPO:-aufklarer/Qwen3-ASR-1.7B-MLX-8bit}"
-MODEL_DIR="${MODEL_DIR:-${ASR_WORKSPACE}/models/Qwen3-ASR-1.7B-MLX-8bit}"
+PYTHON="${PYTHON:-/usr/bin/python3}"
+OMLX_SETTINGS="${OMLX_SETTINGS:-${HOME}/.omlx/settings.json}"
+OMLX_URL="${OMLX_URL:-http://127.0.0.1:8000}"
+OMLX_ASR_MODEL="${OMLX_ASR_MODEL:-mlx-community--Qwen3-ASR-1.7B-4bit}"
 LOG_OUTPUT="${ASR_WORKSPACE}/qwen_asr_model_prepare.log"
 
-mkdir -p "$ASR_WORKSPACE" "$MODEL_DIR"
+mkdir -p "$ASR_WORKSPACE"
 : > "$LOG_OUTPUT"
 exec > >(tee -a "$LOG_OUTPUT") 2>&1
 
 echo "LOG_PATH=${LOG_OUTPUT}"
+open -a "oMLX" >/dev/null 2>&1 || true
 
-if [[ ! -x "$PYTHON" ]]; then
-  echo "Missing ASR Python environment: $PYTHON" >&2
+API_KEY="$("$PYTHON" - "$OMLX_SETTINGS" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+settings = Path(sys.argv[1])
+if not settings.exists():
+    raise SystemExit("")
+data = json.loads(settings.read_text())
+print(data.get("auth", {}).get("api_key", ""))
+PY
+)"
+
+if [[ -z "$API_KEY" ]]; then
+  echo "Missing oMLX API key in ${OMLX_SETTINGS}" >&2
   exit 69
 fi
 
-if [[ -f "${MODEL_DIR}/model.safetensors" ]]; then
-  echo "MODEL_READY=${MODEL_DIR}"
-  echo "Qwen ASR model is already prepared."
-  exit 0
-fi
+echo "Checking oMLX ASR server at ${OMLX_URL}..."
+for attempt in {1..30}; do
+  RESPONSE="$(curl -sS --max-time 5 -H "Authorization: Bearer ${API_KEY}" "${OMLX_URL}/v1/models" 2>&1 || true)"
+  if echo "$RESPONSE" | grep -q "\"id\":\"${OMLX_ASR_MODEL}\""; then
+    echo "MODEL_READY=${OMLX_ASR_MODEL}"
+    echo "oMLX ASR server ready"
+    exit 0
+  fi
+  echo "Waiting for oMLX ASR model (${attempt}/30)..."
+  sleep 2
+done
 
-echo "Downloading ${MODEL_REPO} to ${MODEL_DIR}..."
-"$PYTHON" - "$MODEL_REPO" "$MODEL_DIR" <<'PY'
-from pathlib import Path
-import sys
-from huggingface_hub import snapshot_download
-
-repo_id = sys.argv[1]
-local_dir = Path(sys.argv[2])
-local_dir.mkdir(parents=True, exist_ok=True)
-snapshot_download(
-    repo_id=repo_id,
-    local_dir=str(local_dir),
-)
-PY
-
-if [[ ! -f "${MODEL_DIR}/model.safetensors" ]]; then
-  echo "Model download finished but model.safetensors is missing: ${MODEL_DIR}/model.safetensors" >&2
-  exit 70
-fi
-
-echo "MODEL_READY=${MODEL_DIR}"
-echo "Qwen ASR model prepared."
+echo "oMLX ASR model not available: ${OMLX_ASR_MODEL}" >&2
+echo "$RESPONSE" >&2
+exit 70

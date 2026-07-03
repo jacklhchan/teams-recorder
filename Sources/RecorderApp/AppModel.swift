@@ -14,12 +14,17 @@ final class AppModel: ObservableObject {
     @Published var routingChecks: [RoutingCheck] = []
     @Published var lastHealthReport: RecordingHealthReport?
     @Published var isRunningTestRecording = false
+    @Published var playingSessionID: RecordingSession.ID?
+    @Published var playbackProgress: TimeInterval = 0
+    @Published var playbackDuration: TimeInterval = 0
+    @Published var isPlaybackActive = false
 
     let recorder = RecordingEngine()
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
     private var audioPlayer: AVAudioPlayer?
+    private var playbackTimer: Timer?
 
     init() {
         refreshDevices()
@@ -136,11 +141,44 @@ final class AppModel: ObservableObject {
 
     func play(session: RecordingSession) {
         do {
-            audioPlayer = try AVAudioPlayer(contentsOf: session.recordingURL)
+            stopPlayback(resetStatus: false)
+            let player = try AVAudioPlayer(contentsOf: session.recordingURL)
+            audioPlayer = player
+            playingSessionID = session.id
+            playbackProgress = 0
+            playbackDuration = player.duration
+            isPlaybackActive = true
             audioPlayer?.play()
+            startPlaybackTimer()
             statusMessage = "Playing \(session.displayName)"
         } catch {
             statusMessage = "Playback failed: \(error.localizedDescription)"
+        }
+    }
+
+    func stopPlayback(resetStatus: Bool = true) {
+        audioPlayer?.stop()
+        audioPlayer = nil
+        playbackTimer?.invalidate()
+        playbackTimer = nil
+        playingSessionID = nil
+        playbackProgress = 0
+        playbackDuration = 0
+        isPlaybackActive = false
+        if resetStatus {
+            statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
+        }
+    }
+
+    func seekPlayback(to time: TimeInterval) {
+        guard let audioPlayer else { return }
+        let clamped = max(0, min(time, audioPlayer.duration))
+        audioPlayer.currentTime = clamped
+        playbackProgress = clamped
+        if !audioPlayer.isPlaying {
+            audioPlayer.play()
+            isPlaybackActive = true
+            startPlaybackTimer()
         }
     }
 
@@ -211,10 +249,31 @@ final class AppModel: ObservableObject {
             isRunningTestRecording = false
             do {
                 audioPlayer = try AVAudioPlayer(contentsOf: result.recordingURL)
+                playingSessionID = nil
+                playbackProgress = 0
+                playbackDuration = audioPlayer?.duration ?? 0
+                isPlaybackActive = true
                 audioPlayer?.play()
+                startPlaybackTimer()
                 statusMessage = "Test saved and playing: \(result.health.summary)"
             } catch {
                 statusMessage = "Test saved, playback failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func startPlaybackTimer() {
+        playbackTimer?.invalidate()
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let audioPlayer = self.audioPlayer else { return }
+                self.playbackProgress = audioPlayer.currentTime
+                self.playbackDuration = audioPlayer.duration
+                if !audioPlayer.isPlaying {
+                    self.playbackTimer?.invalidate()
+                    self.playbackTimer = nil
+                    self.isPlaybackActive = false
+                }
             }
         }
     }

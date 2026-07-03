@@ -39,9 +39,17 @@ struct ContentView: View {
                     )
                     SessionListView(
                         sessions: model.sessions,
+                        playingSessionID: model.playingSessionID,
+                        playbackProgress: model.playbackProgress,
+                        playbackDuration: model.playbackDuration,
+                        isPlaybackActive: model.isPlaybackActive,
                         refresh: model.refreshSessions,
                         play: model.play,
-                        open: model.open
+                        open: model.open,
+                        stopPlayback: {
+                            model.stopPlayback()
+                        },
+                        seekPlayback: model.seekPlayback
                     )
                     FooterView(recorder: model.recorder, outputFolder: model.outputFolder)
                 }
@@ -326,9 +334,15 @@ private struct RoutingAssistantView: View {
 
 private struct SessionListView: View {
     let sessions: [RecordingSession]
+    let playingSessionID: RecordingSession.ID?
+    let playbackProgress: TimeInterval
+    let playbackDuration: TimeInterval
+    let isPlaybackActive: Bool
     let refresh: () -> Void
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
+    let stopPlayback: () -> Void
+    let seekPlayback: (TimeInterval) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -351,27 +365,38 @@ private struct SessionListView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(sessions.prefix(8)) { session in
-                        HStack(spacing: 12) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(session.displayName)
-                                    .font(.callout.weight(.medium))
-                                Text("\(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(session.durationText) · \(session.fileSizeText)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                        VStack(spacing: 8) {
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(session.displayName)
+                                        .font(.callout.weight(.medium))
+                                    Text("\(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(session.durationText) · \(session.fileSizeText)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    play(session)
+                                } label: {
+                                    Image(systemName: playingSessionID == session.id && isPlaybackActive ? "play.fill" : "play.fill")
+                                }
+                                .buttonStyle(.bordered)
+                                Button {
+                                    open(session)
+                                } label: {
+                                    Image(systemName: "folder")
+                                }
+                                .buttonStyle(.bordered)
                             }
-                            Spacer()
-                            Button {
-                                play(session)
-                            } label: {
-                                Image(systemName: "play.fill")
+
+                            if playingSessionID == session.id {
+                                PlaybackBarView(
+                                    progress: playbackProgress,
+                                    duration: playbackDuration,
+                                    stopPlayback: stopPlayback,
+                                    seekPlayback: seekPlayback
+                                )
                             }
-                            .buttonStyle(.bordered)
-                            Button {
-                                open(session)
-                            } label: {
-                                Image(systemName: "folder")
-                            }
-                            .buttonStyle(.bordered)
                         }
                         .padding(.vertical, 8)
                         if session.id != sessions.prefix(8).last?.id {
@@ -387,6 +412,51 @@ private struct SessionListView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(.separator.opacity(0.55), lineWidth: 1)
         )
+    }
+}
+
+private struct PlaybackBarView: View {
+    let progress: TimeInterval
+    let duration: TimeInterval
+    let stopPlayback: () -> Void
+    let seekPlayback: (TimeInterval) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(Self.timeText(progress))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .trailing)
+
+            Slider(
+                value: Binding(
+                    get: { progress },
+                    set: { seekPlayback($0) }
+                ),
+                in: 0...max(duration, 1)
+            )
+
+            Text(Self.timeText(duration))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .leading)
+
+            Button {
+                stopPlayback()
+            } label: {
+                Image(systemName: "stop.fill")
+            }
+            .buttonStyle(.bordered)
+            .help("Stop playback")
+        }
+        .padding(10)
+        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private static func timeText(_ time: TimeInterval) -> String {
+        guard time.isFinite else { return "00:00" }
+        let seconds = max(0, Int(time.rounded()))
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 }
 

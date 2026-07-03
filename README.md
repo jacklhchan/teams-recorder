@@ -94,7 +94,7 @@ Use the `Audio MIDI` button to open macOS Audio MIDI Setup.
 
 ## Session List
 
-The Recordings section scans the selected output folder for `meeting-*` and `test-*` folders with a `recording.m4a` file. You can play recent recordings or open their folder directly from the app.
+The Recordings section scans the selected output folder for `meeting-*` and `test-*` folders with a `recording.m4a` file. You can play recent recordings, drag the playback slider to seek, stop playback, or open their folder directly from the app.
 
 ## Mic Mute
 

@@ -16,8 +16,8 @@ final class RecordingEngine: ObservableObject {
     private var systemEngine: AVAudioEngine?
     private var micEngine: AVAudioEngine?
     private var mixedFile: AVAudioFile?
-    private var pendingSystemBuffer: AVAudioPCMBuffer?
-    private var pendingMicBuffer: AVAudioPCMBuffer?
+    private var pendingSystemBuffers: [AVAudioPCMBuffer] = []
+    private var pendingMicBuffers: [AVAudioPCMBuffer] = []
     private var latestSystemLevel = LevelSnapshot()
     private var latestMicLevel = LevelSnapshot()
     private var rollingSystemSamples = Array(repeating: Float(0), count: 160)
@@ -75,8 +75,8 @@ final class RecordingEngine: ObservableObject {
         micEngine?.stop()
         systemEngine = nil
         micEngine = nil
-        pendingSystemBuffer = nil
-        pendingMicBuffer = nil
+        pendingSystemBuffers.removeAll()
+        pendingMicBuffers.removeAll()
         rollingSystemSamples = Array(repeating: Float(0), count: 160)
         rollingMicSamples = Array(repeating: Float(0), count: 160)
         isMonitoring = false
@@ -117,8 +117,8 @@ final class RecordingEngine: ObservableObject {
         guard isRecording || systemEngine != nil || micEngine != nil else { return }
 
         mixedFile = nil
-        pendingSystemBuffer = nil
-        pendingMicBuffer = nil
+        pendingSystemBuffers.removeAll()
+        pendingMicBuffers.removeAll()
         startedAt = nil
         isRecording = false
         micMuted = false
@@ -160,14 +160,18 @@ final class RecordingEngine: ObservableObject {
             do {
                 switch kind {
                 case .system:
-                    self.pendingSystemBuffer = Self.copy(converted)
-                    try self.writeMixedFrameIfReady()
+                    if let copied = Self.copy(converted) {
+                        self.pendingSystemBuffers.append(copied)
+                    }
+                    try self.writeMixedFramesIfReady()
                 case .mic:
                     if self.micMuted {
                         Self.silence(converted)
                     }
-                    self.pendingMicBuffer = Self.copy(converted)
-                    try self.writeMixedFrameIfReady()
+                    if let copied = Self.copy(converted) {
+                        self.pendingMicBuffers.append(copied)
+                    }
+                    try self.writeMixedFramesIfReady()
                 }
             } catch {
                 NSLog("Recorder write failed: \(error.localizedDescription)")
@@ -175,22 +179,32 @@ final class RecordingEngine: ObservableObject {
         }
     }
 
-    private func writeMixedFrameIfReady() throws {
-        guard let system = pendingSystemBuffer,
-              let mic = pendingMicBuffer else {
-            return
+    private func writeMixedFramesIfReady() throws {
+        while !pendingSystemBuffers.isEmpty, !pendingMicBuffers.isEmpty {
+            let system = pendingSystemBuffers.removeFirst()
+            let mic = pendingMicBuffers.removeFirst()
+            let frameLength = min(system.frameLength, mic.frameLength)
+            guard let output = AVAudioPCMBuffer(pcmFormat: system.format, frameCapacity: frameLength) else { return }
+            output.frameLength = frameLength
+
+            Self.add(system, into: output, gain: 0.48, frameLimit: frameLength)
+            Self.add(mic, into: output, gain: 0.48, frameLimit: frameLength)
+            Self.softLimit(output, frameLimit: frameLength)
+
+            try mixedFile?.write(from: output)
         }
 
-        let frameLength = min(system.frameLength, mic.frameLength)
-        guard let output = AVAudioPCMBuffer(pcmFormat: system.format, frameCapacity: frameLength) else { return }
-        output.frameLength = frameLength
+        trimPendingBuffers()
+    }
 
-        Self.add(system, into: output, gain: 0.85, frameLimit: frameLength)
-        Self.add(mic, into: output, gain: 0.85, frameLimit: frameLength)
-
-        try mixedFile?.write(from: output)
-        pendingSystemBuffer = nil
-        pendingMicBuffer = nil
+    private func trimPendingBuffers() {
+        let maxPendingBuffers = 20
+        if pendingSystemBuffers.count > maxPendingBuffers {
+            pendingSystemBuffers.removeFirst(pendingSystemBuffers.count - maxPendingBuffers)
+        }
+        if pendingMicBuffers.count > maxPendingBuffers {
+            pendingMicBuffers.removeFirst(pendingMicBuffers.count - maxPendingBuffers)
+        }
     }
 
     private func startMeterTimer() {
@@ -295,6 +309,18 @@ final class RecordingEngine: ObservableObject {
         for channel in 0..<channels {
             for frame in 0..<frames {
                 outputData[channel][frame] += sourceData[channel][frame] * gain
+            }
+        }
+    }
+
+    nonisolated private static func softLimit(_ buffer: AVAudioPCMBuffer, frameLimit: AVAudioFrameCount? = nil) {
+        guard let data = buffer.floatChannelData else { return }
+
+        let frames = Int(min(buffer.frameLength, frameLimit ?? buffer.frameLength))
+        for channel in 0..<Int(buffer.format.channelCount) {
+            for frame in 0..<frames {
+                let sample = data[channel][frame]
+                data[channel][frame] = tanh(sample * 1.15) / tanh(1.15)
             }
         }
     }

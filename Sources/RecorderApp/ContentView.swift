@@ -45,6 +45,9 @@ struct ContentView: View {
                         isPlaybackActive: model.isPlaybackActive,
                         transcribingSessionID: model.transcribingSessionID,
                         transcriptionStatus: model.transcriptionStatus,
+                        lastTranscriptionSessionID: model.lastTranscriptionSessionID,
+                        lastTranscriptionStatus: model.lastTranscriptionStatus,
+                        lastTranscriptionDidFail: model.lastTranscriptionDidFail,
                         transcriptURLsBySessionID: model.transcriptURLsBySessionID,
                         transcriptLogURLsBySessionID: model.transcriptLogURLsBySessionID,
                         refresh: model.refreshSessions,
@@ -347,6 +350,9 @@ private struct SessionListView: View {
     let isPlaybackActive: Bool
     let transcribingSessionID: RecordingSession.ID?
     let transcriptionStatus: String
+    let lastTranscriptionSessionID: RecordingSession.ID?
+    let lastTranscriptionStatus: String
+    let lastTranscriptionDidFail: Bool
     let transcriptURLsBySessionID: [RecordingSession.ID: URL]
     let transcriptLogURLsBySessionID: [RecordingSession.ID: URL]
     let refresh: () -> Void
@@ -436,11 +442,16 @@ private struct SessionListView: View {
                                 )
                             }
 
-                            if transcribingSessionID == session.id {
+                            if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id {
                                 HStack(spacing: 8) {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                    Text(transcriptionStatus.isEmpty ? "Transcribing..." : transcriptionStatus)
+                                    if transcribingSessionID == session.id {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Image(systemName: lastTranscriptionDidFail ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                                            .foregroundStyle(lastTranscriptionDidFail ? .orange : .green)
+                                    }
+                                    Text(statusText(for: session))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(2)
@@ -487,6 +498,13 @@ private struct SessionListView: View {
         }
         let expected = session.folderURL.appendingPathComponent("transcription_qwen_asr.log")
         return FileManager.default.fileExists(atPath: expected.path)
+    }
+
+    private func statusText(for session: RecordingSession) -> String {
+        if transcribingSessionID == session.id {
+            return transcriptionStatus.isEmpty ? "Transcribing..." : transcriptionStatus
+        }
+        return lastTranscriptionStatus.isEmpty ? "Transcription finished" : lastTranscriptionStatus
     }
 }
 

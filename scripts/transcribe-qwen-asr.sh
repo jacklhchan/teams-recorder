@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
 if [[ $# -lt 2 ]]; then
   echo "Usage: transcribe-qwen-asr.sh <audio-file> <output-folder>" >&2
   exit 64

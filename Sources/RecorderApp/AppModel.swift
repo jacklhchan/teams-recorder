@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
     @Published var isPlaybackActive = false
     @Published var transcribingSessionID: RecordingSession.ID?
     @Published var transcriptionStatus: String = ""
+    @Published var lastTranscriptionSessionID: RecordingSession.ID?
+    @Published var lastTranscriptionStatus: String = ""
+    @Published var lastTranscriptionDidFail = false
     @Published var transcriptURLsBySessionID: [RecordingSession.ID: URL] = [:]
     @Published var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] = [:]
 
@@ -205,6 +208,9 @@ final class AppModel: ObservableObject {
         }
 
         transcribingSessionID = session.id
+        lastTranscriptionSessionID = session.id
+        lastTranscriptionStatus = "Starting Qwen ASR. First run may download the 8-bit model."
+        lastTranscriptionDidFail = false
         transcriptionStatus = "Starting Qwen ASR. First run may download the 8-bit model."
         statusMessage = "Opening oMLX and starting transcription"
 
@@ -232,9 +238,13 @@ final class AppModel: ObservableObject {
                 self?.transcribingSessionID = nil
                 if process.terminationStatus == 0 {
                     self?.transcriptionStatus = "Transcription complete"
+                    self?.lastTranscriptionStatus = "Transcription complete"
+                    self?.lastTranscriptionDidFail = false
                     self?.statusMessage = "Transcription complete"
                 } else {
                     self?.transcriptionStatus = "Transcription failed"
+                    self?.lastTranscriptionStatus = "Transcription failed with exit code \(process.terminationStatus). Open the ASR log for details."
+                    self?.lastTranscriptionDidFail = true
                     self?.statusMessage = "Transcription failed with exit code \(process.terminationStatus). Open the ASR log for details."
                 }
             }
@@ -376,6 +386,7 @@ final class AppModel: ObservableObject {
         let lines = text.split(whereSeparator: \.isNewline).map(String.init)
         if let lastUsefulLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
             transcriptionStatus = lastUsefulLine
+            lastTranscriptionStatus = lastUsefulLine
         }
 
         for line in lines where line.hasPrefix("TRANSCRIPT_PATH=") {

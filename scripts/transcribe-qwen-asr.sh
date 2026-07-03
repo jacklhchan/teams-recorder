@@ -10,7 +10,15 @@ AUDIO_FILE="$1"
 OUTPUT_FOLDER="$2"
 ASR_WORKSPACE="${ASR_WORKSPACE:-/Users/apple/Documents/AIA ASR}"
 PYTHON="${PYTHON:-${ASR_WORKSPACE}/.venv/bin/python}"
-MODEL="${MODEL:-aufklarer/Qwen3-ASR-1.7B-MLX-8bit}"
+MODEL_REPO="${MODEL_REPO:-aufklarer/Qwen3-ASR-1.7B-MLX-8bit}"
+MODEL_DIR="${MODEL_DIR:-${ASR_WORKSPACE}/models/Qwen3-ASR-1.7B-MLX-8bit}"
+if [[ -z "${MODEL:-}" ]]; then
+  if [[ -f "${MODEL_DIR}/model.safetensors" ]]; then
+    MODEL="$MODEL_DIR"
+  else
+    MODEL="$MODEL_REPO"
+  fi
+fi
 LANGUAGE="${LANGUAGE:-yue}"
 CHUNK_DURATION="${CHUNK_DURATION:-30}"
 MAX_TOKENS="${MAX_TOKENS:-50000}"
@@ -19,8 +27,13 @@ CONTEXT="${CONTEXT:-Hong Kong Cantonese meeting recording, business discussion, 
 RAW_OUTPUT_BASE="${OUTPUT_FOLDER}/transcript_qwen3_asr_1_7b_8bit_${LANGUAGE}"
 RAW_OUTPUT="${RAW_OUTPUT_BASE}.txt"
 TRAD_OUTPUT="${OUTPUT_FOLDER}/transcript_qwen3_asr_1_7b_8bit_${LANGUAGE}_trad.txt"
+LOG_OUTPUT="${OUTPUT_FOLDER}/transcription_qwen_asr.log"
+
+: > "$LOG_OUTPUT"
+exec > >(tee -a "$LOG_OUTPUT") 2>&1
 
 open -a "oMLX" >/dev/null 2>&1 || true
+echo "LOG_PATH=${LOG_OUTPUT}"
 
 if [[ ! -f "$AUDIO_FILE" ]]; then
   echo "Missing audio file: $AUDIO_FILE" >&2
@@ -30,12 +43,13 @@ if [[ ! -x "$PYTHON" ]]; then
   echo "Missing ASR Python environment: $PYTHON" >&2
   exit 69
 fi
-if [[ -d "$MODEL" && ! -f "${MODEL}/model.safetensors" ]]; then
-  echo "Missing Qwen ASR model file: ${MODEL}/model.safetensors" >&2
-  exit 69
-fi
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "Missing ffmpeg. Install it with Homebrew." >&2
+  exit 69
+fi
+
+if [[ -d "$MODEL" && ! -f "${MODEL}/model.safetensors" ]]; then
+  echo "Missing Qwen ASR model file: ${MODEL}/model.safetensors" >&2
   exit 69
 fi
 
@@ -51,6 +65,11 @@ echo "Opening oMLX..."
 echo "Normalizing audio to 16 kHz mono..."
 ffmpeg -y -hide_banner -loglevel error -i "$AUDIO_FILE" -ac 1 -ar 16000 "$MONO_AUDIO"
 
+if [[ "$MODEL" == "$MODEL_REPO" ]]; then
+  echo "Using Hugging Face model ${MODEL_REPO}. First run downloads the model and can take several minutes."
+else
+  echo "Using local Qwen ASR model: ${MODEL}"
+fi
 echo "Transcribing with ${MODEL} via direct MLX CLI..."
 "$PYTHON" -m mlx_audio.stt.generate \
   --model "$MODEL" \

@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     @Published var transcribingSessionID: RecordingSession.ID?
     @Published var transcriptionStatus: String = ""
     @Published var transcriptURLsBySessionID: [RecordingSession.ID: URL] = [:]
+    @Published var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] = [:]
 
     let recorder = RecordingEngine()
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -204,7 +205,7 @@ final class AppModel: ObservableObject {
         }
 
         transcribingSessionID = session.id
-        transcriptionStatus = "Starting Qwen ASR..."
+        transcriptionStatus = "Starting Qwen ASR. First run may download the 8-bit model."
         statusMessage = "Opening oMLX and starting transcription"
 
         let process = Process()
@@ -234,7 +235,7 @@ final class AppModel: ObservableObject {
                     self?.statusMessage = "Transcription complete"
                 } else {
                     self?.transcriptionStatus = "Transcription failed"
-                    self?.statusMessage = "Transcription failed with exit code \(process.terminationStatus)"
+                    self?.statusMessage = "Transcription failed with exit code \(process.terminationStatus). Open the ASR log for details."
                 }
             }
         }
@@ -261,6 +262,21 @@ final class AppModel: ObservableObject {
             NSWorkspace.shared.open(expected)
         } else {
             statusMessage = "No transcript found for \(session.displayName)"
+        }
+    }
+
+    func openTranscriptLog(for session: RecordingSession) {
+        if let url = transcriptLogURLsBySessionID[session.id] {
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        let expected = session.folderURL.appendingPathComponent("transcription_qwen_asr.log")
+        if FileManager.default.fileExists(atPath: expected.path) {
+            transcriptLogURLsBySessionID[session.id] = expected
+            NSWorkspace.shared.open(expected)
+        } else {
+            statusMessage = "No ASR log found for \(session.displayName)"
         }
     }
 
@@ -367,6 +383,11 @@ final class AppModel: ObservableObject {
             let url = URL(fileURLWithPath: path)
             transcriptURLsBySessionID[session.id] = url
             statusMessage = "Transcript saved: \(url.lastPathComponent)"
+        }
+
+        for line in lines where line.hasPrefix("LOG_PATH=") {
+            let path = String(line.dropFirst("LOG_PATH=".count))
+            transcriptLogURLsBySessionID[session.id] = URL(fileURLWithPath: path)
         }
     }
 

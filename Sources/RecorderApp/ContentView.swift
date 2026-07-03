@@ -46,6 +46,7 @@ struct ContentView: View {
                         transcribingSessionID: model.transcribingSessionID,
                         transcriptionStatus: model.transcriptionStatus,
                         transcriptURLsBySessionID: model.transcriptURLsBySessionID,
+                        transcriptLogURLsBySessionID: model.transcriptLogURLsBySessionID,
                         refresh: model.refreshSessions,
                         play: model.play,
                         open: model.open,
@@ -54,7 +55,8 @@ struct ContentView: View {
                         },
                         seekPlayback: model.seekPlayback,
                         transcribe: model.transcribe,
-                        openTranscript: model.openTranscript
+                        openTranscript: model.openTranscript,
+                        openTranscriptLog: model.openTranscriptLog
                     )
                     FooterView(recorder: model.recorder, outputFolder: model.outputFolder)
                 }
@@ -346,6 +348,7 @@ private struct SessionListView: View {
     let transcribingSessionID: RecordingSession.ID?
     let transcriptionStatus: String
     let transcriptURLsBySessionID: [RecordingSession.ID: URL]
+    let transcriptLogURLsBySessionID: [RecordingSession.ID: URL]
     let refresh: () -> Void
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
@@ -353,6 +356,7 @@ private struct SessionListView: View {
     let seekPlayback: (TimeInterval) -> Void
     let transcribe: (RecordingSession) -> Void
     let openTranscript: (RecordingSession) -> Void
+    let openTranscriptLog: (RecordingSession) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -413,6 +417,14 @@ private struct SessionListView: View {
                                 .buttonStyle(.bordered)
                                 .disabled(!hasTranscript(for: session))
                                 .help("Open transcript")
+                                Button {
+                                    openTranscriptLog(session)
+                                } label: {
+                                    Image(systemName: "terminal")
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(!hasTranscriptLog(for: session))
+                                .help("Open ASR log")
                             }
 
                             if playingSessionID == session.id {
@@ -433,6 +445,13 @@ private struct SessionListView: View {
                                         .foregroundStyle(.secondary)
                                         .lineLimit(2)
                                     Spacer()
+                                    Button {
+                                        openTranscriptLog(session)
+                                    } label: {
+                                        Image(systemName: "terminal")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .help("Open ASR log")
                                 }
                                 .padding(10)
                                 .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
@@ -459,6 +478,14 @@ private struct SessionListView: View {
             return true
         }
         let expected = session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_8bit_yue_trad.txt")
+        return FileManager.default.fileExists(atPath: expected.path)
+    }
+
+    private func hasTranscriptLog(for session: RecordingSession) -> Bool {
+        if transcriptLogURLsBySessionID[session.id] != nil {
+            return true
+        }
+        let expected = session.folderURL.appendingPathComponent("transcription_qwen_asr.log")
         return FileManager.default.fileExists(atPath: expected.path)
     }
 }

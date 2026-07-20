@@ -19,6 +19,10 @@ let package = Package(
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("SwiftUI")
             ]
+        ),
+        .testTarget(
+            name: "RecorderAppTests",
+            dependencies: ["RecorderApp"]
         )
     ]
 )

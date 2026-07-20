@@ -25,9 +25,11 @@ struct ContentView: View {
                         toggleRecorderMicMute: {
                             model.toggleRecorderMicMute()
                         },
+                        chooseAudioFileForTranscription: model.chooseAudioFileForTranscription,
                         chooseOutputFolder: model.chooseOutputFolder,
                         openRecordingFolder: model.openRecordingFolder,
-                        isRunningTestRecording: model.isRunningTestRecording
+                        isRunningTestRecording: model.isRunningTestRecording,
+                        isTranscribing: model.transcribingSessionID != nil
                     )
                     if let report = model.lastHealthReport {
                         HealthSummaryView(report: report)
@@ -207,9 +209,11 @@ private struct ControlsView: View {
     let startOrStop: () -> Void
     let runTestRecording: () -> Void
     let toggleRecorderMicMute: () -> Void
+    let chooseAudioFileForTranscription: () -> Void
     let chooseOutputFolder: () -> Void
     let openRecordingFolder: () -> Void
     let isRunningTestRecording: Bool
+    let isTranscribing: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -231,6 +235,15 @@ private struct ControlsView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
             .disabled(recorder.isRecording || isRunningTestRecording)
+
+            Button {
+                chooseAudioFileForTranscription()
+            } label: {
+                Label("Upload Audio", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(isTranscribing)
 
             Button {
                 toggleRecorderMicMute()

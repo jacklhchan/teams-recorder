@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -139,6 +140,28 @@ final class AppModel: ObservableObject {
             outputFolder = url
             refreshSessions()
             refreshRoutingChecks()
+        }
+    }
+
+    func chooseAudioFileForTranscription() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = ManualTranscriptionImporter.supportedExtensions
+            .sorted()
+            .compactMap { UTType(filenameExtension: $0) }
+        panel.prompt = "Transcribe"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let importedSession = try ManualTranscriptionImporter.importAudioFile(url, into: outputFolder)
+            refreshSessions()
+            statusMessage = "Audio imported for transcription: \(url.lastPathComponent)"
+            transcribe(session: importedSession)
+        } catch {
+            statusMessage = "Audio import failed: \(error.localizedDescription)"
         }
     }
 

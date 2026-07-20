@@ -23,7 +23,57 @@ struct RecordingSession: Identifiable, Hashable {
     }
 }
 
+enum ManualTranscriptionImportError: LocalizedError {
+    case missingSourceFile
+    case unsupportedAudioFile
+
+    var errorDescription: String? {
+        switch self {
+        case .missingSourceFile:
+            return "Selected audio file was not found."
+        case .unsupportedAudioFile:
+            return "Selected file does not have a supported audio extension."
+        }
+    }
+}
+
+enum ManualTranscriptionImporter {
+    static let supportedExtensions: Set<String> = ["m4a", "mp3", "wav", "flac", "aac", "aiff", "aif", "caf"]
+
+    static func importAudioFile(_ sourceURL: URL, into baseFolder: URL, now: Date = Date()) throws -> RecordingSession {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: sourceURL.path) else {
+            throw ManualTranscriptionImportError.missingSourceFile
+        }
+
+        let fileExtension = sourceURL.pathExtension.lowercased()
+        guard supportedExtensions.contains(fileExtension) else {
+            throw ManualTranscriptionImportError.unsupportedAudioFile
+        }
+
+        let folder = baseFolder
+            .appendingPathComponent("manual-\(folderStamp.string(from: now))", isDirectory: true)
+        try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let recordingURL = folder.appendingPathComponent("recording.\(fileExtension)")
+        if fileManager.fileExists(atPath: recordingURL.path) {
+            try fileManager.removeItem(at: recordingURL)
+        }
+        try fileManager.copyItem(at: sourceURL, to: recordingURL)
+
+        return RecordingSessionStore.session(for: folder, recordingURL: recordingURL)
+    }
+
+    private static let folderStamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return formatter
+    }()
+}
+
 enum RecordingSessionStore {
+    private static let supportedFolderPrefixes = ["meeting-", "test-", "manual-"]
+
     static func load(from baseFolder: URL) -> [RecordingSession] {
         let fileManager = FileManager.default
         guard let folders = try? fileManager.contentsOfDirectory(
@@ -35,26 +85,39 @@ enum RecordingSessionStore {
         }
 
         return folders.compactMap { folder in
-            guard folder.lastPathComponent.hasPrefix("meeting-") || folder.lastPathComponent.hasPrefix("test-") else {
+            guard supportedFolderPrefixes.contains(where: { folder.lastPathComponent.hasPrefix($0) }) else {
                 return nil
             }
-            let recordingURL = folder.appendingPathComponent("recording.m4a")
-            guard fileManager.fileExists(atPath: recordingURL.path) else { return nil }
-
-            let folderValues = try? folder.resourceValues(forKeys: [.creationDateKey])
-            let fileValues = try? recordingURL.resourceValues(forKeys: [.fileSizeKey])
-            let duration = Self.duration(for: recordingURL)
-
-            return RecordingSession(
-                id: folder,
-                folderURL: folder,
-                recordingURL: recordingURL,
-                createdAt: folderValues?.creationDate ?? Date.distantPast,
-                duration: duration,
-                fileSize: Int64(fileValues?.fileSize ?? 0)
-            )
+            guard let recordingURL = Self.recordingURL(in: folder) else { return nil }
+            return Self.session(for: folder, recordingURL: recordingURL)
         }
         .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    static func session(for folder: URL, recordingURL: URL) -> RecordingSession {
+        let folderValues = try? folder.resourceValues(forKeys: [.creationDateKey])
+        let fileValues = try? recordingURL.resourceValues(forKeys: [.fileSizeKey])
+        let duration = Self.duration(for: recordingURL)
+
+        return RecordingSession(
+            id: folder,
+            folderURL: folder,
+            recordingURL: recordingURL,
+            createdAt: folderValues?.creationDate ?? Date.distantPast,
+            duration: duration,
+            fileSize: Int64(fileValues?.fileSize ?? 0)
+        )
+    }
+
+    private static func recordingURL(in folder: URL) -> URL? {
+        let fileManager = FileManager.default
+        for fileExtension in ManualTranscriptionImporter.supportedExtensions.sorted() {
+            let candidate = folder.appendingPathComponent("recording.\(fileExtension)")
+            if fileManager.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     private static func duration(for url: URL) -> TimeInterval {

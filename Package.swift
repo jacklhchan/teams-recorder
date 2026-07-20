@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "LocalMeetingRecorder",
     platforms: [
-        .macOS(.v14)
+        .macOS("15.0")
     ],
     products: [
         .executable(name: "LocalMeetingRecorder", targets: ["RecorderApp"])
@@ -13,10 +13,14 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "RecorderApp",
+            resources: [
+                .process("Resources/release-manifest.json")
+            ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("Security"),
                 .linkedFramework("SwiftUI")
             ]
         ),

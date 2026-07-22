@@ -18,6 +18,7 @@ struct ContentView: View {
                         systemDeviceName: model.selectedSystemDevice?.name,
                         micDeviceName: model.selectedMicDevice?.name
                     )
+                    LiveAudioHealthView(recorder: model.recorder)
                     ControlsView(
                         recorder: model.recorder,
                         startOrStop: model.startOrStop,
@@ -61,6 +62,7 @@ struct ContentView: View {
                         asrModelReady: model.asrModelReady,
                         transcriptURLsBySessionID: model.transcriptURLsBySessionID,
                         transcriptLogURLsBySessionID: model.transcriptLogURLsBySessionID,
+                        transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
                         refresh: model.refreshSessions,
                         play: model.play,
                         open: model.open,
@@ -69,8 +71,15 @@ struct ContentView: View {
                         },
                         seekPlayback: model.seekPlayback,
                         transcribe: model.transcribe,
+                        cancelTranscription: model.cancelTranscription,
                         openTranscript: model.openTranscript,
-                        openTranscriptLog: model.openTranscriptLog
+                        openTranscriptLog: model.openTranscriptLog,
+                        transcriptText: model.transcriptText,
+                        saveTranscript: model.saveTranscript,
+                        exportTranscript: model.exportTranscript,
+                        copyTranscript: model.copyTranscript,
+                        saveMetadata: model.saveMetadata,
+                        moveToTrash: model.moveSessionToTrash
                     )
                     FooterView(recorder: model.recorder, outputFolder: model.outputFolder)
                 }
@@ -310,6 +319,42 @@ private struct HealthSummaryView: View {
     }
 }
 
+private struct LiveAudioHealthView: View {
+    @ObservedObject var recorder: RecordingEngine
+
+    var body: some View {
+        let assessment = AudioHealthAdvisor.assessment(
+            systemLevel: recorder.systemLevel,
+            micLevel: recorder.micLevel,
+            isMicMuted: recorder.micMuted,
+            isMonitoring: recorder.isMonitoring,
+            isRecording: recorder.isRecording
+        )
+        return HStack(spacing: 18) {
+            input(assessment.system, icon: "speaker.wave.2")
+            input(assessment.mic, icon: "mic")
+            Spacer()
+        }
+        .padding(12)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator.opacity(0.55), lineWidth: 1))
+    }
+
+    private func input(_ input: AudioHealthAssessment.Input, icon: String) -> some View {
+        Label(input.title, systemImage: icon)
+            .foregroundStyle(color(for: input.status))
+            .help(input.detail)
+    }
+
+    private func color(for status: AudioHealthAssessment.Status) -> Color {
+        switch status {
+        case .ok: .green
+        case .warning: .orange
+        case .neutral: .secondary
+        }
+    }
+}
+
 private struct RoutingAssistantView: View {
     let checks: [RoutingCheck]
     let refresh: () -> Void
@@ -435,14 +480,28 @@ private struct SessionListView: View {
     let asrModelReady: Bool
     let transcriptURLsBySessionID: [RecordingSession.ID: URL]
     let transcriptLogURLsBySessionID: [RecordingSession.ID: URL]
+    let transcriptionStatesBySessionID: [RecordingSession.ID: TranscriptionState]
     let refresh: () -> Void
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
     let stopPlayback: () -> Void
     let seekPlayback: (TimeInterval) -> Void
     let transcribe: (RecordingSession) -> Void
+    let cancelTranscription: () -> Void
     let openTranscript: (RecordingSession) -> Void
     let openTranscriptLog: (RecordingSession) -> Void
+    let transcriptText: (RecordingSession) -> String
+    let saveTranscript: (String, RecordingSession) -> Void
+    let exportTranscript: (RecordingSession) -> Void
+    let copyTranscript: (RecordingSession) -> Void
+    let saveMetadata: (String, String, Bool, RecordingSession) -> Void
+    let moveToTrash: (RecordingSession) -> Void
+
+    @State private var searchText = ""
+    @State private var favoritesOnly = false
+    @State private var transcriptSession: RecordingSession?
+    @State private var metadataSession: RecordingSession?
+    @State private var sessionPendingTrash: RecordingSession?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -456,15 +515,23 @@ private struct SessionListView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
+                Toggle(isOn: $favoritesOnly) {
+                    Image(systemName: "star.fill")
+                }
+                .toggleStyle(.button)
+                .help("Show favorites only")
             }
 
-            if sessions.isEmpty {
+            TextField("Search recordings", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+
+            if filteredSessions.isEmpty {
                 Text("No recordings in the selected folder yet.")
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
             } else {
                 VStack(spacing: 0) {
-                    ForEach(sessions.prefix(8)) { session in
+                    ForEach(filteredSessions.prefix(12)) { session in
                         VStack(spacing: 8) {
                             HStack(spacing: 12) {
                                 VStack(alignment: .leading, spacing: 3) {
@@ -473,6 +540,12 @@ private struct SessionListView: View {
                                     Text("\(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(session.durationText) · \(session.fileSizeText)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    if !session.tags.isEmpty {
+                                        Text(session.tags.map { "#\($0)" }.joined(separator: "  "))
+                                            .font(.caption)
+                                            .foregroundStyle(.tint)
+                                            .lineLimit(1)
+                                    }
                                 }
                                 Spacer()
                                 Button {
@@ -488,6 +561,13 @@ private struct SessionListView: View {
                                 }
                                 .buttonStyle(.bordered)
                                 Button {
+                                    metadataSession = session
+                                } label: {
+                                    Image(systemName: session.isFavorite ? "star.fill" : "slider.horizontal.3")
+                                }
+                                .buttonStyle(.bordered)
+                                .help("Edit recording details")
+                                Button {
                                     transcribe(session)
                                 } label: {
                                     Image(systemName: transcribingSessionID == session.id ? "waveform" : "text.badge.plus")
@@ -496,13 +576,20 @@ private struct SessionListView: View {
                                 .disabled(transcribingSessionID != nil || !asrModelReady)
                                 .help(asrModelReady ? "Transcribe with oMLX Qwen ASR" : "Wait for the oMLX ASR server check")
                                 Button {
-                                    openTranscript(session)
+                                    transcriptSession = session
                                 } label: {
-                                    Image(systemName: "doc.text")
+                                    Image(systemName: "doc.text.fill")
                                 }
                                 .buttonStyle(.bordered)
                                 .disabled(!hasTranscript(for: session))
-                                .help("Open transcript")
+                                .help("View and edit transcript")
+                                Button(role: .destructive) {
+                                    sessionPendingTrash = session
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.bordered)
+                                .help("Move recording to Trash")
                                 Button {
                                     openTranscriptLog(session)
                                 } label: {
@@ -522,20 +609,26 @@ private struct SessionListView: View {
                                 )
                             }
 
-                            if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id {
+                            if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id || transcriptionStatesBySessionID[session.id] != nil {
                                 HStack(spacing: 8) {
                                     if transcribingSessionID == session.id {
                                         ProgressView()
                                             .controlSize(.small)
                                     } else {
-                                        Image(systemName: lastTranscriptionDidFail ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                                            .foregroundStyle(lastTranscriptionDidFail ? .orange : .green)
+                                        Image(systemName: statusIcon(for: session))
+                                            .foregroundStyle(statusColor(for: session))
                                     }
                                     Text(statusText(for: session))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(2)
                                     Spacer()
+                                    if transcribingSessionID == session.id {
+                                        Button("Cancel") {
+                                            cancelTranscription()
+                                        }
+                                        .buttonStyle(.bordered)
+                                    }
                                     Button {
                                         openTranscriptLog(session)
                                     } label: {
@@ -549,7 +642,7 @@ private struct SessionListView: View {
                             }
                         }
                         .padding(.vertical, 8)
-                        if session.id != sessions.prefix(8).last?.id {
+                        if session.id != filteredSessions.prefix(12).last?.id {
                             Divider()
                         }
                     }
@@ -562,14 +655,51 @@ private struct SessionListView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(.separator.opacity(0.55), lineWidth: 1)
         )
+        .sheet(item: $transcriptSession) { session in
+            TranscriptEditorView(
+                session: session,
+                load: { transcriptText(session) },
+                save: { saveTranscript($0, session) },
+                export: { exportTranscript(session) },
+                copy: { copyTranscript(session) }
+            )
+        }
+        .sheet(item: $metadataSession) { session in
+            RecordingMetadataEditorView(
+                session: session,
+                save: { title, tags, favorite in saveMetadata(title, tags, favorite, session) }
+            )
+        }
+        .confirmationDialog(
+            "Move recording to Trash?",
+            isPresented: Binding(get: { sessionPendingTrash != nil }, set: { if !$0 { sessionPendingTrash = nil } }),
+            presenting: sessionPendingTrash
+        ) { session in
+            Button("Move to Trash", role: .destructive) {
+                moveToTrash(session)
+                sessionPendingTrash = nil
+            }
+        } message: { session in
+            Text(session.displayName)
+        }
+    }
+
+    private var filteredSessions: [RecordingSession] {
+        sessions.filter { session in
+            guard !favoritesOnly || session.isFavorite else { return false }
+            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty else { return true }
+            return session.displayName.localizedCaseInsensitiveContains(query)
+                || session.tags.contains { $0.localizedCaseInsensitiveContains(query) }
+        }
     }
 
     private func hasTranscript(for session: RecordingSession) -> Bool {
         if transcriptURLsBySessionID[session.id] != nil {
             return true
         }
-        let expected = session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_8bit_yue_trad.txt")
-        return FileManager.default.fileExists(atPath: expected.path)
+        return FileManager.default.fileExists(atPath: TranscriptDocumentStore.editableURL(in: session.folderURL).path)
+            || FileManager.default.fileExists(atPath: TranscriptDocumentStore.qwenURL(in: session.folderURL).path)
     }
 
     private func hasTranscriptLog(for session: RecordingSession) -> Bool {
@@ -584,7 +714,87 @@ private struct SessionListView: View {
         if transcribingSessionID == session.id {
             return transcriptionStatus.isEmpty ? "Transcribing..." : transcriptionStatus
         }
-        return lastTranscriptionStatus.isEmpty ? "Transcription finished" : lastTranscriptionStatus
+        return transcriptionStatesBySessionID[session.id]?.message ?? (lastTranscriptionStatus.isEmpty ? "Transcription finished" : lastTranscriptionStatus)
+    }
+
+    private func statusIcon(for session: RecordingSession) -> String {
+        switch transcriptionStatesBySessionID[session.id]?.phase {
+        case .failed: "exclamationmark.triangle.fill"
+        case .cancelled, .interrupted: "pause.circle.fill"
+        default: lastTranscriptionDidFail ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+        }
+    }
+
+    private func statusColor(for session: RecordingSession) -> Color {
+        switch transcriptionStatesBySessionID[session.id]?.phase {
+        case .failed: .orange
+        case .cancelled, .interrupted: .secondary
+        default: lastTranscriptionDidFail ? .orange : .green
+        }
+    }
+}
+
+private struct TranscriptEditorView: View {
+    let session: RecordingSession
+    let load: () -> String
+    let save: (String) -> Void
+    let export: () -> Void
+    let copy: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text(session.displayName).font(.headline)
+                Spacer()
+                Button { copy() } label: { Image(systemName: "doc.on.doc") }.help("Copy transcript")
+                Button { export() } label: { Image(systemName: "square.and.arrow.up") }.help("Export transcript")
+            }
+            TextEditor(text: $text)
+                .font(.body)
+                .frame(minHeight: 360)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") { save(text); dismiss() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 660, minHeight: 480)
+        .onAppear { text = load() }
+    }
+}
+
+private struct RecordingMetadataEditorView: View {
+    let session: RecordingSession
+    let save: (String, String, Bool) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var tags = ""
+    @State private var isFavorite = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Recording Details").font(.headline)
+            TextField("Title", text: $title)
+            TextField("Tags, separated by commas", text: $tags)
+            Toggle("Favorite", isOn: $isFavorite)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") { save(title, tags, isFavorite); dismiss() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .onAppear {
+            title = session.metadata.title ?? ""
+            tags = session.tags.joined(separator: ", ")
+            isFavorite = session.isFavorite
+        }
     }
 }
 

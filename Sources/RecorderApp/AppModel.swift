@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
     @Published var lastTranscriptionDidFail = false
     @Published var transcriptURLsBySessionID: [RecordingSession.ID: URL] = [:]
     @Published var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] = [:]
+    @Published var transcriptionStatesBySessionID: [RecordingSession.ID: TranscriptionState] = [:]
     @Published var isPreparingASRModel = false
     @Published var asrModelReady = false
     @Published var asrModelStatus = "Checking oMLX ASR server..."
@@ -38,6 +39,7 @@ final class AppModel: ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     private var playbackTimer: Timer?
     private var transcriptionProcess: Process?
+    private var transcriptionCancellationRequested = false
     private var asrPrepareProcess: Process?
 
     init() {
@@ -175,6 +177,13 @@ final class AppModel: ObservableObject {
 
     func refreshSessions() {
         sessions = RecordingSessionStore.load(from: outputFolder)
+        transcriptionStatesBySessionID = Dictionary(uniqueKeysWithValues: sessions.compactMap { session in
+            guard transcribingSessionID != session.id,
+                  let state = try? TranscriptionStateStore.markInterruptedIfNeeded(in: session.folderURL) else {
+                return nil
+            }
+            return (session.id, state)
+        })
     }
 
     func play(session: RecordingSession) {
@@ -243,11 +252,16 @@ final class AppModel: ObservableObject {
         }
 
         transcribingSessionID = session.id
+        transcriptionCancellationRequested = false
         lastTranscriptionSessionID = session.id
-        lastTranscriptionStatus = "Starting Qwen ASR. First run may download the 8-bit model."
+        lastTranscriptionStatus = "Preparing transcription"
         lastTranscriptionDidFail = false
-        transcriptionStatus = "Starting Qwen ASR. First run may download the 8-bit model."
-        statusMessage = "Opening oMLX and starting transcription"
+        transcriptionStatus = "Preparing transcription"
+        statusMessage = "Preparing transcription"
+        updateTranscriptionState(
+            .init(phase: .queued, message: transcriptionStatus, startedAt: Date()),
+            for: session
+        )
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -271,15 +285,32 @@ final class AppModel: ObservableObject {
                 pipe.fileHandleForReading.readabilityHandler = nil
                 self?.transcriptionProcess = nil
                 self?.transcribingSessionID = nil
-                if process.terminationStatus == 0 {
+                if self?.transcriptionCancellationRequested == true {
+                    self?.transcriptionStatus = "Transcription cancelled"
+                    self?.lastTranscriptionStatus = "Transcription cancelled"
+                    self?.lastTranscriptionDidFail = false
+                    self?.updateTranscriptionState(
+                        .init(phase: .cancelled, message: "Transcription cancelled", startedAt: self?.transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
+                        for: session
+                    )
+                    self?.statusMessage = "Transcription cancelled"
+                } else if process.terminationStatus == 0 {
                     self?.transcriptionStatus = "Transcription complete"
                     self?.lastTranscriptionStatus = "Transcription complete"
                     self?.lastTranscriptionDidFail = false
+                    self?.updateTranscriptionState(
+                        .init(phase: .completed, message: "Transcription complete", startedAt: self?.transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
+                        for: session
+                    )
                     self?.statusMessage = "Transcription complete"
                 } else {
                     self?.transcriptionStatus = "Transcription failed"
                     self?.lastTranscriptionStatus = "Transcription failed with exit code \(process.terminationStatus). Open the ASR log for details."
                     self?.lastTranscriptionDidFail = true
+                    self?.updateTranscriptionState(
+                        .init(phase: .failed, message: self?.lastTranscriptionStatus ?? "Transcription failed", startedAt: self?.transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
+                        for: session
+                    )
                     self?.statusMessage = "Transcription failed with exit code \(process.terminationStatus). Open the ASR log for details."
                 }
             }
@@ -292,7 +323,24 @@ final class AppModel: ObservableObject {
             transcriptionProcess = nil
             transcriptionStatus = "Transcription launch failed"
             statusMessage = "Transcription launch failed: \(error.localizedDescription)"
+            updateTranscriptionState(
+                .init(phase: .failed, message: statusMessage, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
+                for: session
+            )
         }
+    }
+
+    func cancelTranscription() {
+        guard let process = transcriptionProcess, let sessionID = transcribingSessionID,
+              let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        transcriptionCancellationRequested = true
+        process.terminate()
+        transcriptionStatus = "Cancelling transcription..."
+        lastTranscriptionStatus = transcriptionStatus
+        updateTranscriptionState(
+            .init(phase: .cancelled, message: transcriptionStatus, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
+            for: session
+        )
     }
 
     func prepareASRModelIfNeeded() {
@@ -375,12 +423,18 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let expected = session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_8bit_yue_trad.txt")
+        let expected = TranscriptDocumentStore.editableURL(in: session.folderURL)
         if FileManager.default.fileExists(atPath: expected.path) {
             transcriptURLsBySessionID[session.id] = expected
             NSWorkspace.shared.open(expected)
         } else {
-            statusMessage = "No transcript found for \(session.displayName)"
+            let qwenTranscript = TranscriptDocumentStore.qwenURL(in: session.folderURL)
+            if FileManager.default.fileExists(atPath: qwenTranscript.path) {
+                transcriptURLsBySessionID[session.id] = qwenTranscript
+                NSWorkspace.shared.open(qwenTranscript)
+            } else {
+                statusMessage = "No transcript found for \(session.displayName)"
+            }
         }
     }
 
@@ -448,6 +502,70 @@ final class AppModel: ObservableObject {
         statusMessage = "\(source): recorder mic \(recorder.micMuted ? "muted" : "active")"
     }
 
+    func transcriptText(for session: RecordingSession) -> String {
+        do {
+            return try TranscriptDocumentStore.read(in: session.folderURL)
+        } catch {
+            statusMessage = "Cannot read transcript: \(error.localizedDescription)"
+            return ""
+        }
+    }
+
+    func saveTranscript(_ text: String, for session: RecordingSession) {
+        do {
+            try TranscriptDocumentStore.save(text, in: session.folderURL)
+            transcriptURLsBySessionID[session.id] = TranscriptDocumentStore.editableURL(in: session.folderURL)
+            statusMessage = "Transcript saved"
+        } catch {
+            statusMessage = "Cannot save transcript: \(error.localizedDescription)"
+        }
+    }
+
+    func exportTranscript(for session: RecordingSession) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(session.displayName).txt"
+        panel.allowedContentTypes = [.plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try transcriptText(for: session).write(to: url, atomically: true, encoding: .utf8)
+            statusMessage = "Transcript exported: \(url.lastPathComponent)"
+        } catch {
+            statusMessage = "Cannot export transcript: \(error.localizedDescription)"
+        }
+    }
+
+    func copyTranscript(for session: RecordingSession) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(transcriptText(for: session), forType: .string)
+        statusMessage = "Transcript copied"
+    }
+
+    func saveMetadata(title: String, tags: String, isFavorite: Bool, for session: RecordingSession) {
+        do {
+            let metadata = RecordingSessionMetadata(
+                title: title,
+                tags: tags.split(separator: ",").map(String.init),
+                isFavorite: isFavorite
+            )
+            try RecordingSessionMetadataStore.save(metadata, in: session.folderURL)
+            refreshSessions()
+            statusMessage = "Recording details saved"
+        } catch {
+            statusMessage = "Cannot save recording details: \(error.localizedDescription)"
+        }
+    }
+
+    func moveSessionToTrash(_ session: RecordingSession) {
+        do {
+            _ = try RecordingSessionStore.moveToTrash(folder: session.folderURL)
+            if playingSessionID == session.id { stopPlayback() }
+            refreshSessions()
+            statusMessage = "Moved \(session.displayName) to Trash"
+        } catch {
+            statusMessage = "Cannot move recording to Trash: \(error.localizedDescription)"
+        }
+    }
+
     private func finishRecording(playAfterStop: Bool) {
         guard let result = recorder.stop() else {
             statusMessage = "No active recording."
@@ -505,10 +623,26 @@ final class AppModel: ObservableObject {
             statusMessage = "Transcript saved: \(url.lastPathComponent)"
         }
 
+        for line in lines where line.hasPrefix("STATUS=") {
+            let message = String(line.dropFirst("STATUS=".count))
+            transcriptionStatus = message
+            lastTranscriptionStatus = message
+            let phase: TranscriptionState.Phase = message.localizedCaseInsensitiveContains("upload") ? .uploading : .transcribing
+            updateTranscriptionState(
+                .init(phase: phase, message: message, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date()),
+                for: session
+            )
+        }
+
         for line in lines where line.hasPrefix("LOG_PATH=") {
             let path = String(line.dropFirst("LOG_PATH=".count))
             transcriptLogURLsBySessionID[session.id] = URL(fileURLWithPath: path)
         }
+    }
+
+    private func updateTranscriptionState(_ state: TranscriptionState, for session: RecordingSession) {
+        transcriptionStatesBySessionID[session.id] = state
+        try? TranscriptionStateStore.save(state, in: session.folderURL)
     }
 
     private func refreshASRModelStatus() {

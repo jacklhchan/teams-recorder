@@ -8,10 +8,14 @@ struct RecordingSession: Identifiable, Hashable {
     let createdAt: Date
     let duration: TimeInterval
     let fileSize: Int64
+    let metadata: RecordingSessionMetadata
 
     var displayName: String {
-        folderURL.lastPathComponent
+        metadata.title ?? folderURL.lastPathComponent
     }
+
+    var tags: [String] { metadata.tags }
+    var isFavorite: Bool { metadata.isFavorite }
 
     var durationText: String {
         let seconds = max(0, Int(duration.rounded()))
@@ -105,8 +109,16 @@ enum RecordingSessionStore {
             recordingURL: recordingURL,
             createdAt: folderValues?.creationDate ?? Date.distantPast,
             duration: duration,
-            fileSize: Int64(fileValues?.fileSize ?? 0)
+            fileSize: Int64(fileValues?.fileSize ?? 0),
+            metadata: RecordingSessionMetadataStore.load(in: folder)
         )
+    }
+
+    @discardableResult
+    static func moveToTrash(folder: URL) throws -> Bool {
+        var resultingURL: NSURL?
+        try FileManager.default.trashItem(at: folder, resultingItemURL: &resultingURL)
+        return resultingURL != nil
     }
 
     private static func recordingURL(in folder: URL) -> URL? {

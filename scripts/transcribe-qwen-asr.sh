@@ -55,7 +55,7 @@ if [[ -z "$API_KEY" ]]; then
   exit 69
 fi
 
-echo "Checking oMLX ASR model..."
+echo "STATUS=Checking oMLX ASR model"
 MODELS_RESPONSE="$(curl -sS --max-time 10 -H "Authorization: Bearer ${API_KEY}" "${OMLX_URL}/v1/models" 2>&1 || true)"
 if ! echo "$MODELS_RESPONSE" | grep -q "\"id\":\"${OMLX_ASR_MODEL}\""; then
   echo "oMLX ASR model is not ready: ${OMLX_ASR_MODEL}" >&2
@@ -63,7 +63,7 @@ if ! echo "$MODELS_RESPONSE" | grep -q "\"id\":\"${OMLX_ASR_MODEL}\""; then
   exit 69
 fi
 
-echo "Transcribing with oMLX API model ${OMLX_ASR_MODEL}..."
+echo "STATUS=Uploading audio to oMLX"
 HTTP_STATUS="$(
   curl -sS --max-time 7200 \
     -H "Authorization: Bearer ${API_KEY}" \
@@ -81,6 +81,8 @@ if [[ "$HTTP_STATUS" != "200" ]]; then
   cat "$JSON_OUTPUT" >&2 || true
   exit 70
 fi
+
+echo "STATUS=Processing transcript"
 
 "$PYTHON" - "$JSON_OUTPUT" "$RAW_OUTPUT" "$TRAD_OUTPUT" <<'PY'
 from pathlib import Path

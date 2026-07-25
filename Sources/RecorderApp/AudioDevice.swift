@@ -4,6 +4,8 @@ import Foundation
 
 struct AudioDevice: Identifiable, Hashable {
     let id: AudioDeviceID
+    /// Opaque Core Audio identifier. Do not display or log this value.
+    let uid: String
     let name: String
     let manufacturer: String
     let channelCount: Int
@@ -61,6 +63,7 @@ enum AudioDeviceManager {
 
             return AudioDevice(
                 id: id,
+                uid: stringProperty(kAudioDevicePropertyDeviceUID, for: id) ?? "",
                 name: stringProperty(kAudioObjectPropertyName, for: id) ?? "Input \(id)",
                 manufacturer: stringProperty(kAudioObjectPropertyManufacturer, for: id) ?? "",
                 channelCount: channels
@@ -111,9 +114,9 @@ enum AudioDeviceManager {
             mElement: kAudioObjectPropertyElementMain
         )
         var dataSize = UInt32(MemoryLayout<CFString>.size)
-        var value: CFString = "" as CFString
+        var value: Unmanaged<CFString>?
         let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &value)
-        guard status == noErr else { return nil }
-        return value as String
+        guard status == noErr, let value else { return nil }
+        return value.takeUnretainedValue() as String
     }
 }

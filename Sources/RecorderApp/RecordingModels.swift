@@ -5,6 +5,12 @@ struct RecordingHealthReport: Equatable {
     var micSignalSeen = false
     var clippingEvents = 0
     var droppedBuffers = 0
+    var conversionFailures = 0
+    var lateFrames = 0
+    var systemDisconnects = 0
+    var microphoneDisconnects = 0
+    var streamFailures = 0
+    var timelineDiscontinuities = 0
     var startedAt: Date?
     var endedAt: Date?
 
@@ -18,6 +24,24 @@ struct RecordingHealthReport: Equatable {
         if droppedBuffers > 0 {
             parts.append("\(droppedBuffers) dropped buffers")
         }
+        if conversionFailures > 0 {
+            parts.append("\(conversionFailures) conversion failures")
+        }
+        if lateFrames > 0 {
+            parts.append("\(lateFrames) late frames")
+        }
+        if systemDisconnects > 0 {
+            parts.append("\(systemDisconnects) system capture disconnects")
+        }
+        if microphoneDisconnects > 0 {
+            parts.append("\(microphoneDisconnects) microphone disconnects")
+        }
+        if streamFailures > 0 {
+            parts.append("\(streamFailures) stream failures")
+        }
+        if timelineDiscontinuities > 0 {
+            parts.append("\(timelineDiscontinuities) timeline discontinuities")
+        }
         return parts.joined(separator: ", ")
     }
 }
@@ -29,24 +53,21 @@ struct RecordingResult: Equatable {
 }
 
 enum RecordingEngineError: LocalizedError {
-    case noSystemDevice
-    case noMicDevice
     case cannotCreateFolder
     case unsupportedFormat
-    case engineStartFailed(String)
+    case captureStartFailed(String)
+    case writerFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .noSystemDevice:
-            return "請先選擇 system audio input，例如 BlackHole 2ch。"
-        case .noMicDevice:
-            return "請先選擇 microphone input。"
         case .cannotCreateFolder:
             return "無法建立錄音輸出資料夾。"
         case .unsupportedFormat:
-            return "目前輸入裝置格式不支援錄音。"
-        case let .engineStartFailed(message):
-            return "錄音引擎啟動失敗：\(message)"
+            return "目前音訊格式不支援錄音。"
+        case let .captureStartFailed(message):
+            return "原生音訊擷取啟動失敗：\(message)"
+        case let .writerFailed(message):
+            return "錄音檔案無法建立：\(message)"
         }
     }
 }

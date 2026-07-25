@@ -8,6 +8,7 @@ struct TimestampedAudioMixer {
     var isMicrophoneMuted = false
     private(set) var lateFrameCount = 0
     private(set) var isSystemSourceConnected = true
+    private(set) var isMicrophoneSourceConnected = true
     /// Downstream engines must compare block start frames with prior end frames and report gaps.
     /// A discontinuity must not be treated as continuous elapsed recording duration.
     private(set) var timelineDiscontinuityCount = 0
@@ -49,11 +50,22 @@ struct TimestampedAudioMixer {
         pendingSamples[.system] = [:]
     }
 
+    mutating func setMicrophoneSourceConnected(_ isConnected: Bool) {
+        guard isMicrophoneSourceConnected != isConnected else {
+            return
+        }
+
+        isMicrophoneSourceConnected = isConnected
+        highestKnownEnd[.microphone] = nil
+        pendingSamples[.microphone] = [:]
+    }
+
     mutating func push(_ block: AudioFrameBlock) -> [MixedAudioBlock] {
         guard block.frameCount > 0 else {
             return []
         }
-        guard block.source != .system || isSystemSourceConnected else {
+        guard (block.source != .system || isSystemSourceConnected),
+              (block.source != .microphone || isMicrophoneSourceConnected) else {
             return []
         }
 
@@ -91,12 +103,14 @@ struct TimestampedAudioMixer {
 
     private mutating func emitThroughKnownFrames() -> [MixedAudioBlock] {
         let knownEnd: Int64
-        if isSystemSourceConnected {
+        if isSystemSourceConnected && isMicrophoneSourceConnected {
             guard let systemEnd = highestKnownEnd[.system],
                   let microphoneEnd = highestKnownEnd[.microphone] else {
                 return []
             }
             knownEnd = min(systemEnd, microphoneEnd)
+        } else if isSystemSourceConnected, let systemEnd = highestKnownEnd[.system] {
+            knownEnd = systemEnd
         } else if let microphoneEnd = highestKnownEnd[.microphone] {
             knownEnd = microphoneEnd
         } else {
@@ -167,8 +181,10 @@ struct TimestampedAudioMixer {
 
         for index in 0..<blockFrames {
             let frame = startFrame + Int64(index)
-            let system = pendingSamples[.system]?[frame] ?? .silence
-            let microphone = isMicrophoneMuted
+            let system = isSystemSourceConnected
+                ? pendingSamples[.system]?[frame] ?? .silence
+                : .silence
+            let microphone = isMicrophoneMuted || !isMicrophoneSourceConnected
                 ? .silence
                 : pendingSamples[.microphone]?[frame] ?? .silence
             left.append(mix(system.left, microphone.left))

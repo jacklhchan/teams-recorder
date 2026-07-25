@@ -226,6 +226,18 @@ final class TimestampedAudioMixerTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(output.first).left[0], 0.72, accuracy: 0.001)
     }
 
+    func testDisconnectedMicrophoneLetsSystemContinueWithMicrophoneSilence() throws {
+        var mixer = try makeMixer()
+        mixer.setMicrophoneSourceConnected(false)
+
+        let first = try mixer.push(stereo(.system, startFrame: 0, samples: [1, 1, 1, 1]))
+        let second = try mixer.push(stereo(.system, startFrame: 4, samples: [1, 1, 1, 1]))
+        let output = first + second
+
+        XCTAssertEqual(output.map(\.startFrame), [0, 4])
+        XCTAssertEqual(output.map(\.left.first), [0.48, 0.48])
+    }
+
     func testRejectsMismatchedChannelLengths() {
         XCTAssertThrowsError(try AudioFrameBlock.stereo(
             source: .system,

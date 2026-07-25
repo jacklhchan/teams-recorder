@@ -1,7 +1,17 @@
-@preconcurrency import AVFoundation
-import AudioToolbox
-import CoreAudio
 import Foundation
+
+protocol CaptureSourceProtocol: AnyObject {
+    func refreshContent() async throws -> [CaptureApplication]
+    func start(
+        selection: ResolvedCaptureSelection,
+        microphoneUID: String?,
+        onAudio: @escaping (AudioFrameBlock) -> Void,
+        onEvent: @escaping (CaptureEvent) -> Void
+    ) async throws
+    func stop() async
+}
+
+extension ScreenCaptureSource: CaptureSourceProtocol {}
 
 @MainActor
 final class RecordingEngine: ObservableObject {
@@ -12,12 +22,23 @@ final class RecordingEngine: ObservableObject {
     @Published private(set) var systemLevel = LevelSnapshot()
     @Published private(set) var micLevel = LevelSnapshot()
     @Published private(set) var micMuted = false
+    @Published private(set) var isSystemCaptureConnected = true
+    @Published private(set) var isMicrophoneCaptureConnected = true
+    @Published private(set) var captureStatus: CaptureStatus?
 
-    private var systemEngine: AVAudioEngine?
-    private var micEngine: AVAudioEngine?
-    private var mixedFile: AVAudioFile?
-    private var pendingSystemBuffers: [AVAudioPCMBuffer] = []
-    private var pendingMicBuffers: [AVAudioPCMBuffer] = []
+    private let captureSource: CaptureSourceProtocol
+    private let writerFactory: MixedAudioWriterFactory
+    private let mixerBlockFrames: Int
+    private let callbackGate = RecordingCallbackGate()
+
+    private var mixer: TimestampedAudioMixer
+    private var mixedWriter: MixedAudioWriting?
+    private var sourceSessionID: UUID?
+    private var recordingEpoch: UInt64?
+    private var nextRecordingEpoch: UInt64 = 0
+    private var activeSelection: ResolvedCaptureSelection?
+    private var activeMicrophoneUID: String?
+    private var isStopping = false
     private var currentRecordingURL: URL?
     private var currentHealth = RecordingHealthReport()
     private var latestSystemLevel = LevelSnapshot()
@@ -25,117 +46,179 @@ final class RecordingEngine: ObservableObject {
     private var rollingSystemSamples = Array(repeating: Float(0), count: 160)
     private var rollingMicSamples = Array(repeating: Float(0), count: 160)
     private var meterTimer: Timer?
+    private var latestObservedSourceEndFrame: Int64?
+    private var previousMixedSourceEndFrame: Int64?
+    private var writerBoundaryDiscontinuities = 0
+    private var observedMixerLateFrames = 0
 
-    private let processingQueue = DispatchQueue(label: "local-meeting-recorder.audio", qos: .userInitiated)
-    private let sampleRate: Double = 48_000
-
-    func startMonitoring(systemDevice: AudioDevice?, micDevice: AudioDevice?) throws {
-        guard !isRecording else { return }
-        stopMonitoring()
-        guard let systemDevice else { throw RecordingEngineError.noSystemDevice }
-        guard let micDevice else { throw RecordingEngineError.noMicDevice }
-
-        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 2, interleaved: false)
-        guard let format else { throw RecordingEngineError.unsupportedFormat }
-
-        let systemEngine = AVAudioEngine()
-        let micEngine = AVAudioEngine()
-
-        let systemInput = systemEngine.inputNode
-        let micInput = micEngine.inputNode
-        try configure(inputNode: systemInput, deviceID: systemDevice.id)
-        try configure(inputNode: micInput, deviceID: micDevice.id)
-
-        let systemInputFormat = systemInput.inputFormat(forBus: 0)
-        let micInputFormat = micInput.inputFormat(forBus: 0)
-        guard systemInputFormat.sampleRate > 0, micInputFormat.sampleRate > 0 else {
-            throw RecordingEngineError.unsupportedFormat
-        }
-
-        installTap(node: systemInput, sourceFormat: systemInputFormat, writeFormat: format, kind: .system)
-        installTap(node: micInput, sourceFormat: micInputFormat, writeFormat: format, kind: .mic)
-
-        do {
-            try systemEngine.start()
-            try micEngine.start()
-        } catch {
-            stopMonitoring()
-            throw RecordingEngineError.engineStartFailed(error.localizedDescription)
-        }
-
-        self.systemEngine = systemEngine
-        self.micEngine = micEngine
-        isMonitoring = true
-        startMeterTimer()
+    init(
+        captureSource: CaptureSourceProtocol = ScreenCaptureSource(),
+        writerFactory: @escaping MixedAudioWriterFactory = { try AACMixedAudioWriter(url: $0) },
+        mixerBlockFrames: Int = 960
+    ) {
+        self.captureSource = captureSource
+        self.writerFactory = writerFactory
+        self.mixerBlockFrames = mixerBlockFrames
+        self.mixer = try! TimestampedAudioMixer(
+            sampleRate: 48_000,
+            blockFrames: mixerBlockFrames
+        )
     }
 
-    func stopMonitoring() {
+    func startMonitoring(
+        selection: ResolvedCaptureSelection,
+        microphoneUID: String?
+    ) async throws {
+        if isMonitoring,
+           activeSelection == selection,
+           activeMicrophoneUID == microphoneUID {
+            return
+        }
         guard !isRecording else { return }
-        systemEngine?.inputNode.removeTap(onBus: 0)
-        micEngine?.inputNode.removeTap(onBus: 0)
-        systemEngine?.stop()
-        micEngine?.stop()
-        systemEngine = nil
-        micEngine = nil
-        pendingSystemBuffers.removeAll()
-        pendingMicBuffers.removeAll()
-        rollingSystemSamples = Array(repeating: Float(0), count: 160)
-        rollingMicSamples = Array(repeating: Float(0), count: 160)
-        isMonitoring = false
-        stopMeterTimer()
+
+        await stopActiveSourceSession()
+        resetMonitoringState()
+
+        let sessionID = UUID()
+        callbackGate.activate(sessionID: sessionID, recordingEpoch: nil)
+        sourceSessionID = sessionID
+        activeSelection = selection
+        activeMicrophoneUID = microphoneUID
+
+        do {
+            try await captureSource.start(
+                selection: selection,
+                microphoneUID: microphoneUID,
+                onAudio: { [weak self, callbackGate] block in
+                    guard let ticket = callbackGate.begin(sessionID: sessionID) else { return }
+                    Task { @MainActor [weak self, callbackGate] in
+                        defer { callbackGate.finish(ticket) }
+                        self?.receive(block, ticket: ticket)
+                    }
+                },
+                onEvent: { [weak self, callbackGate] event in
+                    guard let ticket = callbackGate.begin(sessionID: sessionID) else { return }
+                    Task { @MainActor [weak self, callbackGate] in
+                        defer { callbackGate.finish(ticket) }
+                        self?.receive(event, ticket: ticket)
+                    }
+                }
+            )
+            isMonitoring = true
+            startMeterTimer()
+        } catch {
+            callbackGate.deactivate(sessionID: sessionID)
+            await callbackGate.waitForIdle(sessionID: sessionID)
+            clearSourceSession(sessionID: sessionID)
+            applyStartFailure(error)
+            throw RecordingEngineError.captureStartFailed(error.localizedDescription)
+        }
+    }
+
+    func stopMonitoring() async {
+        guard !isRecording else { return }
+        await stopActiveSourceSession()
+        resetMonitoringState()
     }
 
     @discardableResult
-    func start(systemDevice: AudioDevice?, micDevice: AudioDevice?, baseFolder: URL, folderPrefix: String = "meeting") throws -> URL {
-        guard !isRecording else { return outputFolder ?? baseFolder }
-        guard let systemDevice else { throw RecordingEngineError.noSystemDevice }
-        guard let micDevice else { throw RecordingEngineError.noMicDevice }
-        if !isMonitoring {
-            try startMonitoring(systemDevice: systemDevice, micDevice: micDevice)
+    func start(
+        selection: ResolvedCaptureSelection,
+        microphoneUID: String?,
+        baseFolder: URL,
+        folderPrefix: String = "meeting"
+    ) async throws -> URL {
+        if isRecording {
+            return outputFolder ?? baseFolder
         }
 
-        let folder = baseFolder
-            .appendingPathComponent("\(folderPrefix)-\(Self.folderStamp.string(from: Date()))", isDirectory: true)
+        try await startMonitoring(selection: selection, microphoneUID: microphoneUID)
+        guard let sourceSessionID else {
+            throw RecordingEngineError.captureStartFailed("Capture session did not start.")
+        }
 
+        let folder = baseFolder.appendingPathComponent(
+            "\(folderPrefix)-\(Self.folderStamp.string(from: Date()))",
+            isDirectory: true
+        )
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         } catch {
             throw RecordingEngineError.cannotCreateFolder
         }
 
-        let fileSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 192_000
-        ]
-
         let recordingURL = folder.appendingPathComponent("recording.m4a")
-        mixedFile = try AVAudioFile(forWriting: recordingURL, settings: fileSettings)
-        currentRecordingURL = recordingURL
+        do {
+            mixedWriter = try writerFactory(recordingURL)
+        } catch {
+            throw RecordingEngineError.writerFailed(error.localizedDescription)
+        }
+
+        nextRecordingEpoch &+= 1
+        recordingEpoch = nextRecordingEpoch
+        callbackGate.setRecordingEpoch(recordingEpoch, for: sourceSessionID)
+        mixer = makeMixer()
         currentHealth = RecordingHealthReport(startedAt: Date())
+        latestObservedSourceEndFrame = nil
+        previousMixedSourceEndFrame = nil
+        writerBoundaryDiscontinuities = 0
+        observedMixerLateFrames = 0
+        currentRecordingURL = recordingURL
         outputFolder = folder
         startedAt = Date()
         isRecording = true
+        isStopping = false
         return folder
     }
 
-    func stop() -> RecordingResult? {
-        guard isRecording || systemEngine != nil || micEngine != nil else { return nil }
-
-        mixedFile = nil
-        currentHealth.endedAt = Date()
-        let result = outputFolder.flatMap { folder in
-            currentRecordingURL.map {
-                RecordingResult(folderURL: folder, recordingURL: $0, health: currentHealth)
-            }
+    func stop() async -> RecordingResult? {
+        guard isRecording, !isStopping,
+              let activeEpoch = recordingEpoch else {
+            return nil
         }
-        pendingSystemBuffers.removeAll()
-        pendingMicBuffers.removeAll()
+        isStopping = true
+        let recordingFolder = outputFolder
+        let recordingURL = currentRecordingURL
+        let sourceSessionID = sourceSessionID
+
+        if let sourceSessionID {
+            await captureSource.stop()
+            callbackGate.deactivate(sessionID: sourceSessionID)
+            await callbackGate.waitForIdle(sessionID: sourceSessionID)
+        }
+
+        guard recordingEpoch == activeEpoch else {
+            return nil
+        }
+
+        if let latestObservedSourceEndFrame {
+            write(mixer.flushThrough(frame: latestObservedSourceEndFrame))
+        }
+        reconcileMixerHealth()
+
+        let writer = mixedWriter
+        mixedWriter = nil
+        do {
+            try writer?.close()
+        } catch {
+            currentHealth.streamFailures += 1
+            captureStatus = .error("Recording file could not be finalized")
+        }
+
+        currentHealth.endedAt = Date()
+        let result = recordingFolder.flatMap { folder in
+            recordingURL.map { RecordingResult(folderURL: folder, recordingURL: $0, health: currentHealth) }
+        }
+        recordingEpoch = nil
         currentRecordingURL = nil
         startedAt = nil
         isRecording = false
+        isStopping = false
         micMuted = false
+        if let sourceSessionID {
+            clearSourceSession(sessionID: sourceSessionID)
+        }
+        resetMonitoringState()
         return result
     }
 
@@ -143,99 +226,154 @@ final class RecordingEngine: ObservableObject {
         micMuted.toggle()
     }
 
-    private func installTap(node: AVAudioInputNode, sourceFormat: AVAudioFormat, writeFormat: AVAudioFormat, kind: SourceKind) {
-        node.installTap(onBus: 0, bufferSize: 512, format: sourceFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            self.processingQueue.async {
-                self.process(buffer: buffer, writeFormat: writeFormat, kind: kind)
-            }
-        }
-    }
+    private func receive(_ block: AudioFrameBlock, ticket: RecordingCallbackTicket) {
+        guard ticket.sourceSessionID == sourceSessionID else { return }
 
-    nonisolated private func process(buffer: AVAudioPCMBuffer, writeFormat: AVAudioFormat, kind: SourceKind) {
-        guard let converted = Self.convert(buffer: buffer, to: writeFormat),
-              let firstChannel = converted.floatChannelData?.pointee else {
+        let snapshot = Self.levelSnapshot(for: block)
+        switch block.source {
+        case .system:
+            latestSystemLevel = snapshot
+        case .microphone:
+            latestMicLevel = snapshot
+        }
+
+        guard let activeEpoch = recordingEpoch,
+              ticket.recordingEpoch == activeEpoch,
+              mixedWriter != nil else {
             return
         }
 
-        let frameCount = Int(converted.frameLength)
-        let snapshot = LevelAnalyzer.snapshot(samples: firstChannel, frameCount: frameCount)
+        updateHealth(with: snapshot, source: block.source)
+        mixer.isMicrophoneMuted = micMuted
+        latestObservedSourceEndFrame = max(
+            latestObservedSourceEndFrame ?? block.startFrame,
+            block.startFrame + Int64(block.frameCount)
+        )
+        write(mixer.push(block))
+        reconcileMixerHealth()
+    }
 
-        Task { @MainActor in
-            switch kind {
-            case .system:
-                self.latestSystemLevel = snapshot
-            case .mic:
-                self.latestMicLevel = snapshot
+    private func receive(_ event: CaptureEvent, ticket: RecordingCallbackTicket) {
+        guard ticket.sourceSessionID == sourceSessionID else { return }
+        captureStatus = CaptureStatusMapper.status(for: event)
+
+        switch event {
+        case .applicationDisconnected, .selectedApplicationRequiresReconnect,
+             .screenRecordingPermissionDenied, .systemAudioCaptureFailed:
+            disconnectSystemCapture()
+        case .microphonePermissionDenied, .microphoneUnavailable,
+             .microphoneDisconnected, .microphoneCaptureFailed:
+            disconnectMicrophoneCapture()
+        case .invalidSampleBuffer, .conversionFailed:
+            if isRecording, ticket.recordingEpoch == recordingEpoch {
+                currentHealth.conversionFailures += 1
+                currentHealth.droppedBuffers += 1
             }
-        }
-
-        Task { @MainActor in
-            guard self.isRecording else { return }
-            self.updateHealth(with: snapshot, kind: kind)
-            do {
-                switch kind {
-                case .system:
-                    if let copied = Self.copy(converted) {
-                        self.pendingSystemBuffers.append(copied)
-                    }
-                    try self.writeMixedFramesIfReady()
-                case .mic:
-                    if self.micMuted {
-                        Self.silence(converted)
-                    }
-                    if let copied = Self.copy(converted) {
-                        self.pendingMicBuffers.append(copied)
-                    }
-                    try self.writeMixedFramesIfReady()
-                }
-            } catch {
-                NSLog("Recorder write failed: \(error.localizedDescription)")
+        case .streamStoppedByUser, .streamStoppedBySystem, .streamFailed,
+             .missingCaptureEntitlements:
+            if isRecording, ticket.recordingEpoch == recordingEpoch {
+                currentHealth.streamFailures += 1
             }
+        case .microphoneSilence:
+            break
         }
     }
 
-    private func writeMixedFramesIfReady() throws {
-        while !pendingSystemBuffers.isEmpty, !pendingMicBuffers.isEmpty {
-            let system = pendingSystemBuffers.removeFirst()
-            let mic = pendingMicBuffers.removeFirst()
-            let frameLength = min(system.frameLength, mic.frameLength)
-            guard let output = AVAudioPCMBuffer(pcmFormat: system.format, frameCapacity: frameLength) else { return }
-            output.frameLength = frameLength
-
-            Self.add(system, into: output, gain: 0.48, frameLimit: frameLength)
-            Self.add(mic, into: output, gain: 0.48, frameLimit: frameLength)
-            Self.softLimit(output, frameLimit: frameLength)
-
-            try mixedFile?.write(from: output)
-        }
-
-        trimPendingBuffers()
+    private func disconnectSystemCapture() {
+        guard isSystemCaptureConnected else { return }
+        isSystemCaptureConnected = false
+        mixer.setSystemSourceConnected(false)
+        if isRecording { currentHealth.systemDisconnects += 1 }
     }
 
-    private func trimPendingBuffers() {
-        let maxPendingBuffers = 20
-        if pendingSystemBuffers.count > maxPendingBuffers {
-            currentHealth.droppedBuffers += pendingSystemBuffers.count - maxPendingBuffers
-            pendingSystemBuffers.removeFirst(pendingSystemBuffers.count - maxPendingBuffers)
-        }
-        if pendingMicBuffers.count > maxPendingBuffers {
-            currentHealth.droppedBuffers += pendingMicBuffers.count - maxPendingBuffers
-            pendingMicBuffers.removeFirst(pendingMicBuffers.count - maxPendingBuffers)
-        }
+    private func disconnectMicrophoneCapture() {
+        guard isMicrophoneCaptureConnected else { return }
+        isMicrophoneCaptureConnected = false
+        mixer.setMicrophoneSourceConnected(false)
+        if isRecording { currentHealth.microphoneDisconnects += 1 }
     }
 
-    private func updateHealth(with snapshot: LevelSnapshot, kind: SourceKind) {
-        switch kind {
+    private func updateHealth(with snapshot: LevelSnapshot, source: AudioSourceKind) {
+        switch source {
         case .system:
             currentHealth.systemSignalSeen = currentHealth.systemSignalSeen || snapshot.rms > -55
-        case .mic:
+        case .microphone:
             currentHealth.micSignalSeen = currentHealth.micSignalSeen || (!micMuted && snapshot.rms > -55)
         }
+        if snapshot.isClipping { currentHealth.clippingEvents += 1 }
+    }
 
-        if snapshot.isClipping {
-            currentHealth.clippingEvents += 1
+    private func write(_ blocks: [MixedAudioBlock]) {
+        for block in blocks {
+            if let previousMixedSourceEndFrame,
+               block.startFrame != previousMixedSourceEndFrame {
+                writerBoundaryDiscontinuities += 1
+            }
+            previousMixedSourceEndFrame = block.startFrame + Int64(block.left.count)
+            do {
+                try mixedWriter?.write(block)
+            } catch {
+                currentHealth.streamFailures += 1
+                captureStatus = .error("Recording file write failed")
+            }
         }
+    }
+
+    private func reconcileMixerHealth() {
+        let newLateFrames = max(0, mixer.lateFrameCount - observedMixerLateFrames)
+        currentHealth.lateFrames += newLateFrames
+        observedMixerLateFrames = mixer.lateFrameCount
+        currentHealth.timelineDiscontinuities = max(
+            writerBoundaryDiscontinuities,
+            mixer.timelineDiscontinuityCount
+        )
+    }
+
+    private func stopActiveSourceSession() async {
+        guard let sourceSessionID else { return }
+        await captureSource.stop()
+        callbackGate.deactivate(sessionID: sourceSessionID)
+        await callbackGate.waitForIdle(sessionID: sourceSessionID)
+        clearSourceSession(sessionID: sourceSessionID)
+    }
+
+    private func clearSourceSession(sessionID: UUID) {
+        guard self.sourceSessionID == sessionID else { return }
+        self.sourceSessionID = nil
+        activeSelection = nil
+        activeMicrophoneUID = nil
+        isMonitoring = false
+        stopMeterTimer()
+    }
+
+    private func resetMonitoringState() {
+        mixer = makeMixer()
+        isSystemCaptureConnected = true
+        isMicrophoneCaptureConnected = true
+        captureStatus = nil
+        latestSystemLevel = LevelSnapshot()
+        latestMicLevel = LevelSnapshot()
+        rollingSystemSamples = Array(repeating: 0, count: 160)
+        rollingMicSamples = Array(repeating: 0, count: 160)
+        systemLevel = LevelSnapshot()
+        micLevel = LevelSnapshot()
+    }
+
+    private func applyStartFailure(_ error: Error) {
+        if let sourceError = error as? CaptureSourceError {
+            switch sourceError {
+            case .microphoneDeviceUnavailable, .microphonePermissionDenied,
+                 .microphoneCaptureFailed:
+                isMicrophoneCaptureConnected = false
+            default:
+                isSystemCaptureConnected = false
+            }
+        }
+        captureStatus = .error(error.localizedDescription)
+    }
+
+    private func makeMixer() -> TimestampedAudioMixer {
+        try! TimestampedAudioMixer(sampleRate: 48_000, blockFrames: mixerBlockFrames)
     }
 
     private func startMeterTimer() {
@@ -243,21 +381,23 @@ final class RecordingEngine: ObservableObject {
         meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.rollingSystemSamples = Self.roll(self.rollingSystemSamples, next: Self.waveformSample(from: self.latestSystemLevel))
+                self.rollingSystemSamples = Self.roll(
+                    self.rollingSystemSamples,
+                    next: Self.waveformSample(from: self.latestSystemLevel)
+                )
                 self.rollingMicSamples = Self.roll(
                     self.rollingMicSamples,
                     next: self.micMuted ? 0 : Self.waveformSample(from: self.latestMicLevel)
                 )
-
-                self.systemLevel = LevelSnapshot(
-                    rms: Self.smoothDecibels(current: self.systemLevel.rms, target: self.latestSystemLevel.rms),
-                    peak: Self.smoothDecibels(current: self.systemLevel.peak, target: self.latestSystemLevel.peak),
+                self.systemLevel = Self.smoothedLevel(
+                    current: self.systemLevel,
+                    target: self.latestSystemLevel,
                     samples: self.rollingSystemSamples
                 )
                 let displayedMicLevel = self.micMuted ? LevelSnapshot() : self.latestMicLevel
-                self.micLevel = LevelSnapshot(
-                    rms: Self.smoothDecibels(current: self.micLevel.rms, target: displayedMicLevel.rms),
-                    peak: Self.smoothDecibels(current: self.micLevel.peak, target: displayedMicLevel.peak),
+                self.micLevel = Self.smoothedLevel(
+                    current: self.micLevel,
+                    target: displayedMicLevel,
                     samples: self.rollingMicSamples
                 )
             }
@@ -269,11 +409,15 @@ final class RecordingEngine: ObservableObject {
         meterTimer = nil
     }
 
-    nonisolated private static func waveformSample(from snapshot: LevelSnapshot) -> Float {
-        if let peak = snapshot.samples.max(), peak > 0 {
-            return min(1, max(0, peak))
+    nonisolated private static func levelSnapshot(for block: AudioFrameBlock) -> LevelSnapshot {
+        guard !block.left.isEmpty else { return LevelSnapshot() }
+        return block.left.withUnsafeBufferPointer {
+            LevelAnalyzer.snapshot(samples: $0.baseAddress!, frameCount: block.left.count)
         }
+    }
 
+    nonisolated private static func waveformSample(from snapshot: LevelSnapshot) -> Float {
+        if let peak = snapshot.samples.max(), peak > 0 { return min(1, max(0, peak)) }
         guard snapshot.rms > -90 else { return 0 }
         return min(1, max(0, pow(10, snapshot.rms / 20)))
     }
@@ -283,98 +427,20 @@ final class RecordingEngine: ObservableObject {
         return Array(samples.dropFirst()) + [sample]
     }
 
-    nonisolated private static func smoothDecibels(current: Float, target: Float) -> Float {
-        let coefficient: Float = target > current ? 0.42 : 0.16
-        return current + (target - current) * coefficient
-    }
-
-    private func configure(inputNode: AVAudioInputNode, deviceID: AudioDeviceID) throws {
-        var deviceID = deviceID
-        let status = AudioUnitSetProperty(
-            inputNode.audioUnit!,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
+    nonisolated private static func smoothedLevel(
+        current: LevelSnapshot,
+        target: LevelSnapshot,
+        samples: [Float]
+    ) -> LevelSnapshot {
+        func smooth(_ current: Float, _ target: Float) -> Float {
+            let coefficient: Float = target > current ? 0.42 : 0.16
+            return current + (target - current) * coefficient
+        }
+        return LevelSnapshot(
+            rms: smooth(current.rms, target.rms),
+            peak: smooth(current.peak, target.peak),
+            samples: samples
         )
-        if status != noErr {
-            throw RecordingEngineError.engineStartFailed("Cannot bind input device \(deviceID), OSStatus \(status)")
-        }
-    }
-
-    nonisolated private static func convert(buffer: AVAudioPCMBuffer, to format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        if buffer.format == format {
-            return buffer
-        }
-
-        guard let converter = AVAudioConverter(from: buffer.format, to: format),
-              let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * format.sampleRate / buffer.format.sampleRate) + 1) else {
-            return nil
-        }
-
-        var error: NSError?
-        var consumed = false
-        converter.convert(to: output, error: &error) { _, status in
-            if consumed {
-                status.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            status.pointee = .haveData
-            return buffer
-        }
-
-        return error == nil ? output : nil
-    }
-
-    nonisolated private static func add(_ source: AVAudioPCMBuffer, into output: AVAudioPCMBuffer, gain: Float, frameLimit: AVAudioFrameCount? = nil) {
-        guard let sourceData = source.floatChannelData,
-              let outputData = output.floatChannelData else {
-            return
-        }
-
-        let channels = min(Int(source.format.channelCount), Int(output.format.channelCount))
-        let availableFrames = min(source.frameLength, output.frameLength)
-        let frames = Int(min(availableFrames, frameLimit ?? availableFrames))
-        for channel in 0..<channels {
-            for frame in 0..<frames {
-                outputData[channel][frame] += sourceData[channel][frame] * gain
-            }
-        }
-    }
-
-    nonisolated private static func softLimit(_ buffer: AVAudioPCMBuffer, frameLimit: AVAudioFrameCount? = nil) {
-        guard let data = buffer.floatChannelData else { return }
-
-        let frames = Int(min(buffer.frameLength, frameLimit ?? buffer.frameLength))
-        for channel in 0..<Int(buffer.format.channelCount) {
-            for frame in 0..<frames {
-                let sample = data[channel][frame]
-                data[channel][frame] = tanh(sample * 1.15) / tanh(1.15)
-            }
-        }
-    }
-
-    nonisolated private static func copy(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard let copy = AVAudioPCMBuffer(pcmFormat: source.format, frameCapacity: source.frameLength) else {
-            return nil
-        }
-        copy.frameLength = source.frameLength
-        add(source, into: copy, gain: 1)
-        return copy
-    }
-
-    nonisolated private static func silence(_ buffer: AVAudioPCMBuffer) {
-        guard let data = buffer.floatChannelData else { return }
-        for channel in 0..<Int(buffer.format.channelCount) {
-            memset(data[channel], 0, Int(buffer.frameLength) * MemoryLayout<Float>.size)
-        }
-    }
-
-    private enum SourceKind {
-        case system
-        case mic
     }
 
     private static let folderStamp: DateFormatter = {
@@ -382,4 +448,74 @@ final class RecordingEngine: ObservableObject {
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         return formatter
     }()
+}
+
+private struct RecordingCallbackTicket {
+    let sourceSessionID: UUID
+    let recordingEpoch: UInt64?
+}
+
+private final class RecordingCallbackGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeSourceSessionID: UUID?
+    private var activeRecordingEpoch: UInt64?
+    private var inFlight: [UUID: Int] = [:]
+    private var waiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+
+    func activate(sessionID: UUID, recordingEpoch: UInt64?) {
+        lock.lock()
+        activeSourceSessionID = sessionID
+        activeRecordingEpoch = recordingEpoch
+        lock.unlock()
+    }
+
+    func setRecordingEpoch(_ recordingEpoch: UInt64?, for sessionID: UUID) {
+        lock.lock()
+        if activeSourceSessionID == sessionID {
+            activeRecordingEpoch = recordingEpoch
+        }
+        lock.unlock()
+    }
+
+    func begin(sessionID: UUID) -> RecordingCallbackTicket? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeSourceSessionID == sessionID else { return nil }
+        inFlight[sessionID, default: 0] += 1
+        return RecordingCallbackTicket(
+            sourceSessionID: sessionID,
+            recordingEpoch: activeRecordingEpoch
+        )
+    }
+
+    func finish(_ ticket: RecordingCallbackTicket) {
+        lock.lock()
+        let remaining = max(0, (inFlight[ticket.sourceSessionID] ?? 1) - 1)
+        inFlight[ticket.sourceSessionID] = remaining
+        let continuations = remaining == 0 ? waiters.removeValue(forKey: ticket.sourceSessionID) ?? [] : []
+        lock.unlock()
+        continuations.forEach { $0.resume() }
+    }
+
+    func deactivate(sessionID: UUID) {
+        lock.lock()
+        if activeSourceSessionID == sessionID {
+            activeSourceSessionID = nil
+            activeRecordingEpoch = nil
+        }
+        lock.unlock()
+    }
+
+    func waitForIdle(sessionID: UUID) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if inFlight[sessionID, default: 0] == 0 {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters[sessionID, default: []].append(continuation)
+                lock.unlock()
+            }
+        }
+    }
 }

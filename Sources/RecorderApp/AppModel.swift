@@ -72,30 +72,39 @@ final class AppModel: ObservableObject {
     }
 
     func refreshMonitoring() {
-        do {
-            try recorder.startMonitoring(systemDevice: selectedSystemDevice, micDevice: selectedMicDevice)
-            statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
-        } catch {
-            statusMessage = error.localizedDescription
+        let microphoneUID = selectedMicDevice?.uid
+        Task {
+            do {
+                try await recorder.startMonitoring(
+                    selection: .allSystemAudio,
+                    microphoneUID: microphoneUID
+                )
+                statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
+            } catch {
+                statusMessage = error.localizedDescription
+            }
         }
     }
 
     func startOrStop() {
         if recorder.isRecording {
-            finishRecording(playAfterStop: false)
+            Task { await finishRecording(playAfterStop: false) }
             return
         }
 
-        do {
-            try recorder.start(
-                systemDevice: selectedSystemDevice,
-                micDevice: selectedMicDevice,
-                baseFolder: outputFolder
-            )
-            statusMessage = "Recording"
-            lastHealthReport = nil
-        } catch {
-            statusMessage = error.localizedDescription
+        let microphoneUID = selectedMicDevice?.uid
+        Task {
+            do {
+                try await recorder.start(
+                    selection: .allSystemAudio,
+                    microphoneUID: microphoneUID,
+                    baseFolder: outputFolder
+                )
+                statusMessage = "Recording"
+                lastHealthReport = nil
+            } catch {
+                statusMessage = error.localizedDescription
+            }
         }
     }
 
@@ -108,25 +117,25 @@ final class AppModel: ObservableObject {
 
         isRunningTestRecording = true
         lastHealthReport = nil
-        do {
-            try recorder.start(
-                systemDevice: selectedSystemDevice,
-                micDevice: selectedMicDevice,
-                baseFolder: outputFolder,
-                folderPrefix: "test"
-            )
-            statusMessage = "Test recording: 10 seconds"
-        } catch {
-            isRunningTestRecording = false
-            statusMessage = error.localizedDescription
-            return
-        }
-
         Task {
+            let microphoneUID = selectedMicDevice?.uid
+            do {
+                try await recorder.start(
+                    selection: .allSystemAudio,
+                    microphoneUID: microphoneUID,
+                    baseFolder: outputFolder,
+                    folderPrefix: "test"
+                )
+                statusMessage = "Test recording: 10 seconds"
+            } catch {
+                isRunningTestRecording = false
+                statusMessage = error.localizedDescription
+                return
+            }
             try? await Task.sleep(for: .seconds(10))
             guard self.isRunningTestRecording else { return }
             self.isRunningTestRecording = false
-            self.finishRecording(playAfterStop: true)
+            await self.finishRecording(playAfterStop: true)
         }
     }
 
@@ -566,8 +575,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func finishRecording(playAfterStop: Bool) {
-        guard let result = recorder.stop() else {
+    private func finishRecording(playAfterStop: Bool) async {
+        guard let result = await recorder.stop() else {
             statusMessage = "No active recording."
             return
         }

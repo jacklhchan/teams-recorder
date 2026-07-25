@@ -50,6 +50,8 @@ final class RecordingEngine: ObservableObject {
     private var previousMixedSourceEndFrame: Int64?
     private var writerBoundaryDiscontinuities = 0
     private var observedMixerLateFrames = 0
+    private var monitoringTransition: MonitoringTransition?
+    private var recordingStartTransition: RecordingStartTransition?
 
     init(
         captureSource: CaptureSourceProtocol = ScreenCaptureSource(),
@@ -69,9 +71,57 @@ final class RecordingEngine: ObservableObject {
         selection: ResolvedCaptureSelection,
         microphoneUID: String?
     ) async throws {
+        let request = MonitoringRequest(
+            selection: selection,
+            microphoneUID: microphoneUID
+        )
+
+        while true {
+            if isMonitoring,
+               activeSelection == selection,
+               activeMicrophoneUID == microphoneUID,
+               monitoringTransition == nil {
+                return
+            }
+            guard !isRecording else { return }
+
+            if let transition = monitoringTransition {
+                let isSameRequest = transition.request == request
+                do {
+                    try await transition.task.value
+                    clearMonitoringTransition(id: transition.id)
+                    if isSameRequest { return }
+                } catch {
+                    clearMonitoringTransition(id: transition.id)
+                    if isSameRequest { throw error }
+                }
+                continue
+            }
+
+            let transitionID = UUID()
+            let task = Task { @MainActor in
+                try await self.performStartMonitoring(request)
+            }
+            monitoringTransition = MonitoringTransition(
+                id: transitionID,
+                request: request,
+                task: task
+            )
+            do {
+                try await task.value
+                clearMonitoringTransition(id: transitionID)
+                return
+            } catch {
+                clearMonitoringTransition(id: transitionID)
+                throw error
+            }
+        }
+    }
+
+    private func performStartMonitoring(_ request: MonitoringRequest) async throws {
         if isMonitoring,
-           activeSelection == selection,
-           activeMicrophoneUID == microphoneUID {
+           activeSelection == request.selection,
+           activeMicrophoneUID == request.microphoneUID {
             return
         }
         guard !isRecording else { return }
@@ -82,13 +132,13 @@ final class RecordingEngine: ObservableObject {
         let sessionID = UUID()
         callbackGate.activate(sessionID: sessionID, recordingEpoch: nil)
         sourceSessionID = sessionID
-        activeSelection = selection
-        activeMicrophoneUID = microphoneUID
+        activeSelection = request.selection
+        activeMicrophoneUID = request.microphoneUID
 
         do {
             try await captureSource.start(
-                selection: selection,
-                microphoneUID: microphoneUID,
+                selection: request.selection,
+                microphoneUID: request.microphoneUID,
                 onAudio: { [weak self, callbackGate] block in
                     guard let ticket = callbackGate.begin(sessionID: sessionID) else { return }
                     Task { @MainActor [weak self, callbackGate] in
@@ -104,13 +154,27 @@ final class RecordingEngine: ObservableObject {
                     }
                 }
             )
+            guard sourceSessionID == sessionID,
+                  callbackGate.isActive(sessionID: sessionID) else {
+                throw RecordingEngineError.captureStartFailed(
+                    "Capture session stopped during startup."
+                )
+            }
             isMonitoring = true
             startMeterTimer()
         } catch {
+            let shouldApplyFailure = sourceSessionID == sessionID
+                && callbackGate.isActive(sessionID: sessionID)
+            await captureSource.stop()
             callbackGate.deactivate(sessionID: sessionID)
             await callbackGate.waitForIdle(sessionID: sessionID)
             clearSourceSession(sessionID: sessionID)
-            applyStartFailure(error)
+            if shouldApplyFailure {
+                applyStartFailure(error)
+            }
+            if let engineError = error as? RecordingEngineError {
+                throw engineError
+            }
             throw RecordingEngineError.captureStartFailed(error.localizedDescription)
         }
     }
@@ -132,7 +196,47 @@ final class RecordingEngine: ObservableObject {
             return outputFolder ?? baseFolder
         }
 
+        if let transition = recordingStartTransition {
+            return try await transition.task.value
+        }
+
+        let transitionID = UUID()
+        let task = Task { @MainActor in
+            try await self.performRecordingStart(
+                selection: selection,
+                microphoneUID: microphoneUID,
+                baseFolder: baseFolder,
+                folderPrefix: folderPrefix
+            )
+        }
+        recordingStartTransition = RecordingStartTransition(
+            id: transitionID,
+            task: task
+        )
+        do {
+            let folder = try await task.value
+            clearRecordingStartTransition(id: transitionID)
+            return folder
+        } catch {
+            clearRecordingStartTransition(id: transitionID)
+            throw error
+        }
+    }
+
+    private func performRecordingStart(
+        selection: ResolvedCaptureSelection,
+        microphoneUID: String?,
+        baseFolder: URL,
+        folderPrefix: String
+    ) async throws -> URL {
+        if isRecording {
+            return outputFolder ?? baseFolder
+        }
+
         try await startMonitoring(selection: selection, microphoneUID: microphoneUID)
+        if isRecording {
+            return outputFolder ?? baseFolder
+        }
         guard let sourceSessionID else {
             throw RecordingEngineError.captureStartFailed("Capture session did not start.")
         }
@@ -141,16 +245,28 @@ final class RecordingEngine: ObservableObject {
             "\(folderPrefix)-\(Self.folderStamp.string(from: Date()))",
             isDirectory: true
         )
+        let folderExistedBeforeStart = FileManager.default.fileExists(
+            atPath: folder.path
+        )
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         } catch {
+            await rollbackFailedStart(
+                folder: folder,
+                removeFolderIfEmpty: false
+            )
             throw RecordingEngineError.cannotCreateFolder
         }
+        let createdFolder = !folderExistedBeforeStart
 
         let recordingURL = folder.appendingPathComponent("recording.m4a")
         do {
             mixedWriter = try writerFactory(recordingURL)
         } catch {
+            await rollbackFailedStart(
+                folder: folder,
+                removeFolderIfEmpty: createdFolder
+            )
             throw RecordingEngineError.writerFailed(error.localizedDescription)
         }
 
@@ -274,6 +390,7 @@ final class RecordingEngine: ObservableObject {
             if isRecording, ticket.recordingEpoch == recordingEpoch {
                 currentHealth.streamFailures += 1
             }
+            terminateSourceSession(sessionID: ticket.sourceSessionID)
         case .microphoneSilence:
             break
         }
@@ -337,6 +454,17 @@ final class RecordingEngine: ObservableObject {
         clearSourceSession(sessionID: sourceSessionID)
     }
 
+    private func terminateSourceSession(sessionID: UUID) {
+        guard sourceSessionID == sessionID else { return }
+        disconnectSystemCapture()
+        disconnectMicrophoneCapture()
+        callbackGate.deactivate(sessionID: sessionID)
+        activeSelection = nil
+        activeMicrophoneUID = nil
+        isMonitoring = false
+        stopMeterTimer()
+    }
+
     private func clearSourceSession(sessionID: UUID) {
         guard self.sourceSessionID == sessionID else { return }
         self.sourceSessionID = nil
@@ -357,6 +485,47 @@ final class RecordingEngine: ObservableObject {
         rollingMicSamples = Array(repeating: 0, count: 160)
         systemLevel = LevelSnapshot()
         micLevel = LevelSnapshot()
+    }
+
+    private func rollbackFailedStart(
+        folder: URL,
+        removeFolderIfEmpty: Bool
+    ) async {
+        mixedWriter = nil
+        recordingEpoch = nil
+        currentRecordingURL = nil
+        outputFolder = nil
+        startedAt = nil
+        isRecording = false
+        isStopping = false
+        micMuted = false
+        latestObservedSourceEndFrame = nil
+        previousMixedSourceEndFrame = nil
+        writerBoundaryDiscontinuities = 0
+        observedMixerLateFrames = 0
+
+        await stopActiveSourceSession()
+        resetMonitoringState()
+
+        guard removeFolderIfEmpty,
+              let contents = try? FileManager.default.contentsOfDirectory(
+                  at: folder,
+                  includingPropertiesForKeys: nil
+              ),
+              contents.isEmpty else {
+            return
+        }
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    private func clearMonitoringTransition(id: UUID) {
+        guard monitoringTransition?.id == id else { return }
+        monitoringTransition = nil
+    }
+
+    private func clearRecordingStartTransition(id: UUID) {
+        guard recordingStartTransition?.id == id else { return }
+        recordingStartTransition = nil
     }
 
     private func applyStartFailure(_ error: Error) {
@@ -450,6 +619,22 @@ final class RecordingEngine: ObservableObject {
     }()
 }
 
+private struct MonitoringRequest: Equatable {
+    let selection: ResolvedCaptureSelection
+    let microphoneUID: String?
+}
+
+private struct MonitoringTransition {
+    let id: UUID
+    let request: MonitoringRequest
+    let task: Task<Void, Error>
+}
+
+private struct RecordingStartTransition {
+    let id: UUID
+    let task: Task<URL, Error>
+}
+
 private struct RecordingCallbackTicket {
     let sourceSessionID: UUID
     let recordingEpoch: UInt64?
@@ -504,6 +689,12 @@ private final class RecordingCallbackGate: @unchecked Sendable {
             activeRecordingEpoch = nil
         }
         lock.unlock()
+    }
+
+    func isActive(sessionID: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeSourceSessionID == sessionID
     }
 
     func waitForIdle(sessionID: UUID) async {

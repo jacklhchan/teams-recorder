@@ -8,6 +8,13 @@ protocol MixedAudioWriting: AnyObject {
 
 typealias MixedAudioWriterFactory = (URL) throws -> MixedAudioWriting
 
+enum AACMixedAudioWriterError: Error, Equatable {
+    case closed
+    case emptyBlock
+    case mismatchedChannelFrameCounts(left: Int, right: Int)
+    case bufferAllocationFailed
+}
+
 final class AACMixedAudioWriter: MixedAudioWriting {
     private let format: AVAudioFormat
     private var file: AVAudioFile?
@@ -32,14 +39,24 @@ final class AACMixedAudioWriter: MixedAudioWriting {
     }
 
     func write(_ block: MixedAudioBlock) throws {
-        guard !block.left.isEmpty, block.left.count == block.right.count,
-              let file,
-              let buffer = AVAudioPCMBuffer(
+        guard let file else {
+            throw AACMixedAudioWriterError.closed
+        }
+        guard !block.left.isEmpty else {
+            throw AACMixedAudioWriterError.emptyBlock
+        }
+        guard block.left.count == block.right.count else {
+            throw AACMixedAudioWriterError.mismatchedChannelFrameCounts(
+                left: block.left.count,
+                right: block.right.count
+            )
+        }
+        guard let buffer = AVAudioPCMBuffer(
                   pcmFormat: format,
                   frameCapacity: AVAudioFrameCount(block.left.count)
               ),
               let channels = buffer.floatChannelData else {
-            return
+            throw AACMixedAudioWriterError.bufferAllocationFailed
         }
         buffer.frameLength = AVAudioFrameCount(block.left.count)
         for index in block.left.indices {

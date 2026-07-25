@@ -19,12 +19,12 @@ final class TimestampedAudioMixerTests: XCTestCase {
         XCTAssertGreaterThan(block.left[2], 0.48)
     }
 
-    func testMissingSourceProducesSilenceWithoutBlockingTimeline() throws {
+    func testFinalFlushWithoutPendingSamplesDoesNotCreateSilence() throws {
         var mixer = try makeMixer()
 
         let output = mixer.flushThrough(frame: 4)
 
-        XCTAssertEqual(output, [.silence(startFrame: 0, frameCount: 4)])
+        XCTAssertTrue(output.isEmpty)
     }
 
     func testMutedMicrophoneDoesNotEnterMix() throws {
@@ -76,11 +76,62 @@ final class TimestampedAudioMixerTests: XCTestCase {
 
     func testFlushAdvancesAcrossMultipleBlocks() throws {
         var mixer = try makeMixer()
+        _ = try mixer.push(stereo(
+            .system,
+            startFrame: 0,
+            samples: Array(repeating: 1, count: 12)
+        ))
 
         let output = mixer.flushThrough(frame: 12)
 
         XCTAssertEqual(output.map(\.startFrame), [0, 4, 8])
         XCTAssertEqual(output.map(\.left.count), [4, 4, 4])
+    }
+
+    func testFinalFlushReanchorsAcrossOneHourGapWithoutPadding() throws {
+        let futureFrame: Int64 = 48_000 * 3_600
+        var mixer = try makeMixer()
+        _ = try mixer.push(stereo(.system, startFrame: 0, samples: [1, 1, 1, 1]))
+        _ = try mixer.push(stereo(.microphone, startFrame: 0, samples: [0, 0, 0, 0]))
+        _ = try mixer.push(stereo(
+            .system,
+            startFrame: futureFrame,
+            samples: Array(repeating: 1, count: 8)
+        ))
+
+        let output = mixer.flushThrough(frame: futureFrame + 8)
+
+        XCTAssertEqual(output.map(\.startFrame), [futureFrame, futureFrame + 4])
+        XCTAssertEqual(output.map(\.left.count), [4, 4])
+        XCTAssertEqual(output.reduce(0) { $0 + $1.left.count }, 8)
+        XCTAssertEqual(mixer.timelineDiscontinuityCount, 1)
+        XCTAssertEqual(mixer.pendingFrameCount, 0)
+    }
+
+    func testFinalFlushEmitsExactPartialPendingFrameCount() throws {
+        var mixer = try makeMixer()
+        _ = try mixer.push(stereo(.system, startFrame: 0, samples: [1, 1, 1]))
+
+        let output = mixer.flushThrough(frame: 3)
+
+        XCTAssertEqual(output.map(\.startFrame), [0])
+        XCTAssertEqual(output.map(\.left.count), [3])
+        XCTAssertEqual(output.map(\.right.count), [3])
+    }
+
+    func testFinalFlushPreservesNineHundredFiftyNineFrameTail() throws {
+        var mixer = try TimestampedAudioMixer(sampleRate: 48_000, blockFrames: 960)
+        _ = try mixer.push(stereo(
+            .microphone,
+            startFrame: 0,
+            samples: Array(repeating: 0.25, count: 959)
+        ))
+
+        let output = mixer.flushThrough(frame: 959)
+
+        XCTAssertEqual(output.count, 1)
+        XCTAssertEqual(output.first?.left.count, 959)
+        XCTAssertEqual(output.first?.right.count, 959)
     }
 
     func testPendingStateIsBoundedWhenOneSourceRunsAhead() throws {

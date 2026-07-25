@@ -138,6 +138,26 @@ final class TimestampedAudioMixerTests: XCTestCase {
         XCTAssertTrue(isStrictlyMonotonic(initial.map(\.startFrame) + output.map(\.startFrame)))
     }
 
+    func testSparseFutureSourceReanchorsUnderPendingPressureAndSignalsDiscontinuity() throws {
+        let futureFrame: Int64 = 48_000 * 3_600
+        var mixer = try makeMixer(maximumPendingFrames: 4)
+        _ = try mixer.push(stereo(.system, startFrame: 0, samples: [1, 1, 1, 1]))
+        let initial = try mixer.push(stereo(.microphone, startFrame: 0, samples: [0, 0, 0, 0]))
+
+        let output = try mixer.push(stereo(
+            .system,
+            startFrame: futureFrame,
+            samples: [1, 1, 1, 1, 1, 1, 1, 1]
+        ))
+
+        XCTAssertEqual(initial.map(\.startFrame), [0])
+        XCTAssertLessThanOrEqual(output.count, 1)
+        XCTAssertEqual(output.map(\.startFrame), [futureFrame])
+        XCTAssertTrue(isStrictlyMonotonic(initial.map(\.startFrame) + output.map(\.startFrame)))
+        XCTAssertEqual(mixer.timelineDiscontinuityCount, 1)
+        XCTAssertLessThanOrEqual(mixer.pendingFrameCount, 4)
+    }
+
     func testRejectsUnsupportedSampleRate() {
         XCTAssertThrowsError(try TimestampedAudioMixer(sampleRate: 44_100, blockFrames: 4)) { error in
             XCTAssertEqual(error as? TimestampedAudioMixerError, .unsupportedSampleRate(44_100))
@@ -154,6 +174,19 @@ final class TimestampedAudioMixerTests: XCTestCase {
 
         XCTAssertEqual(output.map(\.startFrame), [0, 4])
         XCTAssertEqual(output.map(\.left.first), [0.48, 0.48])
+    }
+
+    func testSystemDisconnectDropsAlreadyPendingSystemSamples() throws {
+        var mixer = try makeMixer()
+        _ = try mixer.push(stereo(.system, startFrame: 0, samples: [1, 1, 1, 1]))
+        _ = try mixer.push(stereo(.microphone, startFrame: 0, samples: [0, 0, 0, 0]))
+        _ = try mixer.push(stereo(.system, startFrame: 4, samples: [1, 1, 1, 1]))
+
+        mixer.setSystemSourceConnected(false)
+        let output = try mixer.push(stereo(.microphone, startFrame: 4, samples: [1, 1, 1, 1]))
+
+        XCTAssertEqual(try XCTUnwrap(output.first).startFrame, 4)
+        XCTAssertEqual(try XCTUnwrap(output.first).left[0], 0.48, accuracy: 0.001)
     }
 
     func testSystemReconnectWaitsForNewSystemFramesThenMixesAgain() throws {

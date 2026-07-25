@@ -8,6 +8,9 @@ struct TimestampedAudioMixer {
     var isMicrophoneMuted = false
     private(set) var lateFrameCount = 0
     private(set) var isSystemSourceConnected = true
+    /// Downstream engines must compare block start frames with prior end frames and report gaps.
+    /// A discontinuity must not be treated as continuous elapsed recording duration.
+    private(set) var timelineDiscontinuityCount = 0
 
     private let blockFrames: Int
     private let maximumPendingFrames: Int
@@ -100,7 +103,7 @@ struct TimestampedAudioMixer {
             return []
         }
 
-        skipUnobservedGap(through: knownEnd)
+        reanchorToEarliestPendingFrame(before: knownEnd)
         return emit(through: knownEnd)
     }
 
@@ -122,6 +125,7 @@ struct TimestampedAudioMixer {
         var output: [MixedAudioBlock] = []
         let blockFrameCount = Int64(blockFrames)
 
+        reanchorToEarliestPendingFrame()
         while pendingFrameCount > maximumPendingFrames,
               let outputFrame = nextOutputFrame {
             output.append(makeMixedBlock(startFrame: outputFrame))
@@ -132,17 +136,21 @@ struct TimestampedAudioMixer {
         return output
     }
 
-    private mutating func skipUnobservedGap(through frame: Int64) {
+    private mutating func reanchorToEarliestPendingFrame(before frame: Int64? = nil) {
         guard let outputFrame = nextOutputFrame,
               let earliestPendingFrame = pendingSamples.values
                 .flatMap({ $0.keys })
-                .filter({ $0 >= outputFrame && $0 < frame })
+                .filter({ pendingFrame in
+                    pendingFrame >= outputFrame && (frame.map { pendingFrame < $0 } ?? true)
+                })
                 .min(),
               earliestPendingFrame > outputFrame else {
             return
         }
 
+        // Never materialize unbounded silence for a timestamp interval with no samples.
         nextOutputFrame = earliestPendingFrame
+        timelineDiscontinuityCount += 1
     }
 
     private func makeMixedBlock(startFrame: Int64) -> MixedAudioBlock {

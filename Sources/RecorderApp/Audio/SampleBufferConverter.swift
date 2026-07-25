@@ -1,3 +1,4 @@
+@preconcurrency import AVFoundation
 import AudioToolbox
 import CoreMedia
 import Foundation
@@ -7,11 +8,18 @@ enum SampleBufferConverterError: Error, Equatable {
     case missingFormatDescription
     case unsupportedFormat
     case unsupportedByteOrder
+    case unsupportedAlignedHighPCM
+    case unsupportedChannelCount(Int)
+    case unsupportedPCMLayout
+    case invalidPCMFrameStride
     case invalidPCMLayout
     case invalidPresentationTime
     case audioBufferListUnavailable
     case audioBufferListReadFailed
     case mismatchedChannelFrames
+    case nonFiniteSample
+    case converterCreationFailed
+    case converterFailed
 }
 
 struct OwnedPCMBuffer: Equatable {
@@ -20,6 +28,140 @@ struct OwnedPCMBuffer: Equatable {
 
     var frameCount: Int {
         channels.first?.count ?? 0
+    }
+}
+
+struct OwnedAudioPacket: Equatable {
+    let pcm: OwnedPCMBuffer
+    let presentationTime: CMTime
+}
+
+enum PCMEncoding: Equatable {
+    case float32
+    case signedInt16
+    case signedInt24Packed
+    case signedInt32
+
+    var storageByteCount: Int {
+        switch self {
+        case .signedInt16:
+            return 2
+        case .signedInt24Packed:
+            return 3
+        case .float32, .signedInt32:
+            return 4
+        }
+    }
+}
+
+struct PCMLayout: Equatable {
+    let sampleRate: Double
+    let channelCount: Int
+    let isInterleaved: Bool
+    let bytesPerFrame: Int
+    let encoding: PCMEncoding
+}
+
+enum PCMLayoutValidator {
+    static func validate(_ format: AudioStreamBasicDescription) throws -> PCMLayout {
+        guard format.mFormatID == kAudioFormatLinearPCM else {
+            throw SampleBufferConverterError.unsupportedFormat
+        }
+        guard format.mSampleRate.isFinite, format.mSampleRate > 0 else {
+            throw SampleBufferConverterError.invalidPCMLayout
+        }
+
+        let flags = format.mFormatFlags
+        guard flags & UInt32(kAudioFormatFlagIsBigEndian) == 0 else {
+            throw SampleBufferConverterError.unsupportedByteOrder
+        }
+        guard flags & UInt32(kAudioFormatFlagIsAlignedHigh) == 0 else {
+            throw SampleBufferConverterError.unsupportedAlignedHighPCM
+        }
+        guard flags & UInt32(kAudioFormatFlagIsPacked) != 0 else {
+            throw SampleBufferConverterError.unsupportedPCMLayout
+        }
+
+        let channelCount = Int(format.mChannelsPerFrame)
+        guard (1...2).contains(channelCount) else {
+            throw SampleBufferConverterError.unsupportedChannelCount(channelCount)
+        }
+        guard format.mFramesPerPacket == 1 else {
+            throw SampleBufferConverterError.unsupportedPCMLayout
+        }
+
+        let isFloat = flags & UInt32(kAudioFormatFlagIsFloat) != 0
+        let isSignedInteger = flags & UInt32(kAudioFormatFlagIsSignedInteger) != 0
+        let encoding: PCMEncoding
+        switch (isFloat, isSignedInteger, format.mBitsPerChannel) {
+        case (true, false, 32):
+            encoding = .float32
+        case (false, true, 16):
+            encoding = .signedInt16
+        case (false, true, 24):
+            encoding = .signedInt24Packed
+        case (false, true, 32):
+            encoding = .signedInt32
+        default:
+            throw SampleBufferConverterError.unsupportedPCMLayout
+        }
+
+        let isNonInterleaved = flags & UInt32(kAudioFormatFlagIsNonInterleaved) != 0
+        let expectedBytesPerFrame = encoding.storageByteCount * (isNonInterleaved ? 1 : channelCount)
+        guard Int(format.mBytesPerFrame) == expectedBytesPerFrame else {
+            throw SampleBufferConverterError.invalidPCMFrameStride
+        }
+        guard format.mBytesPerPacket == format.mBytesPerFrame else {
+            throw SampleBufferConverterError.unsupportedPCMLayout
+        }
+
+        return PCMLayout(
+            sampleRate: format.mSampleRate,
+            channelCount: channelCount,
+            isInterleaved: !isNonInterleaved,
+            bytesPerFrame: expectedBytesPerFrame,
+            encoding: encoding
+        )
+    }
+}
+
+enum PCMByteDecoder {
+    static func decode(_ bytes: [UInt8], encoding: PCMEncoding) throws -> Float {
+        guard bytes.count == encoding.storageByteCount else {
+            throw SampleBufferConverterError.invalidPCMLayout
+        }
+        return try bytes.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else {
+                throw SampleBufferConverterError.invalidPCMLayout
+            }
+            return try decode(baseAddress, encoding: encoding)
+        }
+    }
+
+    static func decode(
+        _ pointer: UnsafeRawPointer,
+        encoding: PCMEncoding
+    ) throws -> Float {
+        let value: Float
+        switch encoding {
+        case .float32:
+            value = Float(bitPattern: UInt32(littleEndian: pointer.loadUnaligned(as: UInt32.self)))
+        case .signedInt16:
+            let integer = Int16(littleEndian: pointer.loadUnaligned(as: Int16.self))
+            value = Float(Double(integer) / 32_768.0)
+        case .signedInt24Packed:
+            let bytes = pointer.assumingMemoryBound(to: UInt8.self)
+            let unsigned = Int32(bytes[0]) | (Int32(bytes[1]) << 8) | (Int32(bytes[2]) << 16)
+            let integer = unsigned & 0x80_0000 == 0 ? unsigned : unsigned | ~0xFF_FFFF
+            value = Float(Double(integer) / 8_388_608.0)
+        case .signedInt32:
+            let integer = Int32(littleEndian: pointer.loadUnaligned(as: Int32.self))
+            value = Float(Double(integer) / 2_147_483_648.0)
+        }
+        guard value.isFinite else {
+            throw SampleBufferConverterError.nonFiniteSample
+        }
+        return value
     }
 }
 
@@ -35,10 +177,7 @@ enum SampleBufferConverter {
         ).value
     }
 
-    static func convert(
-        _ sampleBuffer: CMSampleBuffer,
-        source: AudioSourceKind
-    ) throws -> AudioFrameBlock {
+    static func copy(_ sampleBuffer: CMSampleBuffer) throws -> OwnedAudioPacket {
         guard CMSampleBufferDataIsReady(sampleBuffer),
               CMSampleBufferGetNumSamples(sampleBuffer) > 0 else {
             throw SampleBufferConverterError.invalidSampleBuffer
@@ -48,86 +187,25 @@ enum SampleBufferConverter {
         guard presentationTime.isValid, presentationTime.isNumeric, presentationTime >= .zero else {
             throw SampleBufferConverterError.invalidPresentationTime
         }
-
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
             throw SampleBufferConverterError.missingFormatDescription
         }
 
-        let format = streamDescription.pointee
-        guard format.mFormatID == kAudioFormatLinearPCM else {
-            throw SampleBufferConverterError.unsupportedFormat
-        }
-
-        let flags = format.mFormatFlags
-        guard flags & UInt32(kAudioFormatFlagIsBigEndian) == 0 else {
-            throw SampleBufferConverterError.unsupportedByteOrder
-        }
-
+        let layout = try PCMLayoutValidator.validate(streamDescription.pointee)
         let pcm = try copyPCM(
             sampleBuffer,
-            format: format,
+            layout: layout,
             frameCount: CMSampleBufferGetNumSamples(sampleBuffer)
         )
-        return try normalize(pcm, source: source, presentationTime: presentationTime)
-    }
-
-    static func normalize(
-        _ pcm: OwnedPCMBuffer,
-        source: AudioSourceKind,
-        presentationTime: CMTime
-    ) throws -> AudioFrameBlock {
-        guard presentationTime.isValid, presentationTime.isNumeric, presentationTime >= .zero else {
-            throw SampleBufferConverterError.invalidPresentationTime
-        }
-        guard pcm.sampleRate > 0, !pcm.channels.isEmpty, pcm.frameCount > 0,
-              pcm.channels.allSatisfy({ $0.count == pcm.frameCount }) else {
-            throw SampleBufferConverterError.mismatchedChannelFrames
-        }
-
-        let outputFrameCount = max(
-            1,
-            Int((Double(pcm.frameCount) * outputSampleRate / pcm.sampleRate).rounded(.towardZero))
-        )
-        var left: [Float] = []
-        var right: [Float] = []
-        left.reserveCapacity(outputFrameCount)
-        right.reserveCapacity(outputFrameCount)
-
-        let rightChannel = pcm.channels.count > 1 ? pcm.channels[1] : pcm.channels[0]
-        for outputIndex in 0..<outputFrameCount {
-            let inputPosition = Double(outputIndex) * pcm.sampleRate / outputSampleRate
-            let inputIndex = min(pcm.frameCount - 1, Int(inputPosition.rounded(.down)))
-            left.append(pcm.channels[0][inputIndex])
-            right.append(rightChannel[inputIndex])
-        }
-
-        return try AudioFrameBlock.stereo(
-            source: source,
-            startFrame: startFrame(for: presentationTime),
-            left: left,
-            right: right
-        )
+        return OwnedAudioPacket(pcm: pcm, presentationTime: presentationTime)
     }
 
     private static func copyPCM(
         _ sampleBuffer: CMSampleBuffer,
-        format: AudioStreamBasicDescription,
+        layout: PCMLayout,
         frameCount: Int
     ) throws -> OwnedPCMBuffer {
-        let bitsPerChannel = Int(format.mBitsPerChannel)
-        let bytesPerSample = (bitsPerChannel + 7) / 8
-        let bytesPerFrame = Int(format.mBytesPerFrame)
-        let channelCount = Int(format.mChannelsPerFrame)
-        let isFloat = format.mFormatFlags & UInt32(kAudioFormatFlagIsFloat) != 0
-        let isSignedInteger = format.mFormatFlags & UInt32(kAudioFormatFlagIsSignedInteger) != 0
-        let isNonInterleaved = format.mFormatFlags & UInt32(kAudioFormatFlagIsNonInterleaved) != 0
-
-        guard channelCount > 0, bytesPerSample > 0, bytesPerFrame >= bytesPerSample,
-              isFloat || isSignedInteger else {
-            throw SampleBufferConverterError.invalidPCMLayout
-        }
-
         var requiredSize = 0
         var retainedBlockBuffer: CMBlockBuffer?
         let sizeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
@@ -167,63 +245,284 @@ enum SampleBufferConverter {
         }
 
         let audioBuffers = UnsafeMutableAudioBufferListPointer(bufferList)
-        var channels: [[Float]] = []
-        channels.reserveCapacity(channelCount)
-
-        for audioBuffer in audioBuffers {
-            guard let data = audioBuffer.mData else {
-                throw SampleBufferConverterError.invalidPCMLayout
-            }
-            let channelsInBuffer = max(1, Int(audioBuffer.mNumberChannels))
-            let interleavedBuffer = !isNonInterleaved && channelsInBuffer > 1
-            for channelIndex in 0..<channelsInBuffer {
-                guard channels.count < channelCount else { break }
-                var samples: [Float] = []
-                samples.reserveCapacity(frameCount)
-                for frameIndex in 0..<frameCount {
-                    let offset = frameIndex * bytesPerFrame + (interleavedBuffer ? channelIndex * bytesPerSample : 0)
-                    guard offset + bytesPerSample <= Int(audioBuffer.mDataByteSize) else {
-                        throw SampleBufferConverterError.invalidPCMLayout
-                    }
-                    samples.append(
-                        try sample(
-                            at: data.advanced(by: offset),
-                            bitsPerChannel: bitsPerChannel,
-                            isFloat: isFloat
-                        )
-                    )
-                }
-                channels.append(samples)
-            }
-        }
-
-        guard channels.count == channelCount else {
+        let expectedBufferCount = layout.isInterleaved ? 1 : layout.channelCount
+        guard audioBuffers.count == expectedBufferCount else {
             throw SampleBufferConverterError.invalidPCMLayout
         }
-        return OwnedPCMBuffer(sampleRate: format.mSampleRate, channels: channels)
+
+        var channels = Array(
+            repeating: [Float](),
+            count: layout.channelCount
+        )
+        for channelIndex in channels.indices {
+            channels[channelIndex].reserveCapacity(frameCount)
+        }
+
+        if layout.isInterleaved {
+            let buffer = audioBuffers[0]
+            guard Int(buffer.mNumberChannels) == layout.channelCount else {
+                throw SampleBufferConverterError.invalidPCMLayout
+            }
+            try decodeInterleaved(
+                buffer,
+                layout: layout,
+                frameCount: frameCount,
+                into: &channels
+            )
+        } else {
+            for channelIndex in 0..<layout.channelCount {
+                let buffer = audioBuffers[channelIndex]
+                guard buffer.mNumberChannels == 1 else {
+                    throw SampleBufferConverterError.invalidPCMLayout
+                }
+                try decodePlanar(
+                    buffer,
+                    layout: layout,
+                    frameCount: frameCount,
+                    into: &channels[channelIndex]
+                )
+            }
+        }
+
+        return OwnedPCMBuffer(sampleRate: layout.sampleRate, channels: channels)
     }
 
-    private static func sample(
-        at pointer: UnsafeMutableRawPointer,
-        bitsPerChannel: Int,
-        isFloat: Bool
-    ) throws -> Float {
-        switch (isFloat, bitsPerChannel) {
-        case (true, 32):
-            return Float(bitPattern: UInt32(littleEndian: pointer.loadUnaligned(as: UInt32.self)))
-        case (false, 16):
-            let value = Int16(littleEndian: pointer.loadUnaligned(as: Int16.self))
-            return Float(value) / Float(Int16.max)
-        case (false, 24):
-            let bytes = pointer.assumingMemoryBound(to: UInt8.self)
-            let unsigned = Int32(bytes[0]) | (Int32(bytes[1]) << 8) | (Int32(bytes[2]) << 16)
-            let value = unsigned & 0x80_0000 == 0 ? unsigned : unsigned | ~0xFF_FFFF
-            return Float(value) / 8_388_607
-        case (false, 32):
-            let value = Int32(littleEndian: pointer.loadUnaligned(as: Int32.self))
-            return Float(value) / Float(Int32.max)
-        default:
-            throw SampleBufferConverterError.unsupportedFormat
+    private static func decodeInterleaved(
+        _ buffer: AudioBuffer,
+        layout: PCMLayout,
+        frameCount: Int,
+        into channels: inout [[Float]]
+    ) throws {
+        guard let data = buffer.mData,
+              Int(buffer.mDataByteSize) >= frameCount * layout.bytesPerFrame else {
+            throw SampleBufferConverterError.invalidPCMLayout
         }
+        let sampleBytes = layout.encoding.storageByteCount
+        for frameIndex in 0..<frameCount {
+            for channelIndex in 0..<layout.channelCount {
+                let offset = frameIndex * layout.bytesPerFrame + channelIndex * sampleBytes
+                channels[channelIndex].append(
+                    try PCMByteDecoder.decode(
+                        UnsafeRawPointer(data).advanced(by: offset),
+                        encoding: layout.encoding
+                    )
+                )
+            }
+        }
+    }
+
+    private static func decodePlanar(
+        _ buffer: AudioBuffer,
+        layout: PCMLayout,
+        frameCount: Int,
+        into samples: inout [Float]
+    ) throws {
+        guard let data = buffer.mData,
+              Int(buffer.mDataByteSize) >= frameCount * layout.bytesPerFrame else {
+            throw SampleBufferConverterError.invalidPCMLayout
+        }
+        for frameIndex in 0..<frameCount {
+            samples.append(
+                try PCMByteDecoder.decode(
+                    UnsafeRawPointer(data).advanced(by: frameIndex * layout.bytesPerFrame),
+                    encoding: layout.encoding
+                )
+            )
+        }
+    }
+}
+
+final class PersistentAudioResampler {
+    private let source: AudioSourceKind
+    private var converter: AVAudioConverter?
+    private var inputFormat: AVAudioFormat?
+    private var inputSampleRate: Double?
+    private var inputChannelCount: Int?
+    private var expectedInputPresentationTime: CMTime?
+    private var outputCursor: Int64?
+
+    init(source: AudioSourceKind) {
+        self.source = source
+    }
+
+    func process(_ packet: OwnedAudioPacket) throws -> AudioFrameBlock? {
+        try validate(packet)
+
+        let channelCount = packet.pcm.channels.count
+        let mustReset = inputSampleRate != packet.pcm.sampleRate ||
+            inputChannelCount != channelCount ||
+            !isContinuous(packet.presentationTime, sampleRate: packet.pcm.sampleRate)
+        if mustReset {
+            try reset(
+                sampleRate: packet.pcm.sampleRate,
+                channelCount: channelCount,
+                presentationTime: packet.presentationTime
+            )
+        }
+
+        let normalized: OwnedPCMBuffer
+        if packet.pcm.sampleRate == SampleBufferConverter.outputSampleRate {
+            normalized = stereoPCM(from: packet.pcm)
+        } else {
+            normalized = try convert(packet.pcm)
+        }
+        expectedInputPresentationTime = CMTimeAdd(
+            packet.presentationTime,
+            CMTime(
+                value: CMTimeValue(packet.pcm.frameCount),
+                timescale: CMTimeScale(packet.pcm.sampleRate.rounded())
+            )
+        )
+
+        guard normalized.frameCount > 0 else { return nil }
+        let startFrame = outputCursor ?? SampleBufferConverter.startFrame(for: packet.presentationTime)
+        let block = try AudioFrameBlock.stereo(
+            source: source,
+            startFrame: startFrame,
+            left: normalized.channels[0],
+            right: normalized.channels[1]
+        )
+        outputCursor = startFrame + Int64(block.frameCount)
+        return block
+    }
+
+    private func validate(_ packet: OwnedAudioPacket) throws {
+        guard packet.presentationTime.isValid,
+              packet.presentationTime.isNumeric,
+              packet.presentationTime >= .zero else {
+            throw SampleBufferConverterError.invalidPresentationTime
+        }
+        guard packet.pcm.sampleRate.isFinite,
+              packet.pcm.sampleRate > 0,
+              (1...2).contains(packet.pcm.channels.count),
+              packet.pcm.frameCount > 0,
+              packet.pcm.channels.allSatisfy({ $0.count == packet.pcm.frameCount }) else {
+            throw SampleBufferConverterError.mismatchedChannelFrames
+        }
+    }
+
+    private func isContinuous(_ presentationTime: CMTime, sampleRate: Double) -> Bool {
+        guard let expectedInputPresentationTime,
+              inputSampleRate == sampleRate else {
+            return false
+        }
+        let delta = abs(CMTimeGetSeconds(CMTimeSubtract(
+            presentationTime,
+            expectedInputPresentationTime
+        )))
+        return delta <= 0.5 / sampleRate
+    }
+
+    private func reset(
+        sampleRate: Double,
+        channelCount: Int,
+        presentationTime: CMTime
+    ) throws {
+        guard let inputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 2,
+            interleaved: false
+        ) else {
+            throw SampleBufferConverterError.converterCreationFailed
+        }
+        self.inputFormat = inputFormat
+        inputSampleRate = sampleRate
+        inputChannelCount = channelCount
+        expectedInputPresentationTime = nil
+        outputCursor = SampleBufferConverter.startFrame(for: presentationTime)
+
+        if sampleRate == SampleBufferConverter.outputSampleRate {
+            converter = nil
+            return
+        }
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: SampleBufferConverter.outputSampleRate,
+            channels: 2,
+            interleaved: false
+        ), let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            throw SampleBufferConverterError.converterCreationFailed
+        }
+        converter.primeMethod = .none
+        converter.sampleRateConverterQuality = .max
+        converter.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Normal
+        self.converter = converter
+    }
+
+    private func stereoPCM(from pcm: OwnedPCMBuffer) -> OwnedPCMBuffer {
+        let right = pcm.channels.count == 2 ? pcm.channels[1] : pcm.channels[0]
+        return OwnedPCMBuffer(
+            sampleRate: SampleBufferConverter.outputSampleRate,
+            channels: [pcm.channels[0], right]
+        )
+    }
+
+    private func convert(_ pcm: OwnedPCMBuffer) throws -> OwnedPCMBuffer {
+        guard let converter, let inputFormat,
+              let inputBuffer = AVAudioPCMBuffer(
+                pcmFormat: inputFormat,
+                frameCapacity: AVAudioFrameCount(pcm.frameCount)
+              ) else {
+            throw SampleBufferConverterError.converterCreationFailed
+        }
+        inputBuffer.frameLength = AVAudioFrameCount(pcm.frameCount)
+        let stereo = stereoPCM(from: pcm)
+        guard let inputChannels = inputBuffer.floatChannelData else {
+            throw SampleBufferConverterError.converterCreationFailed
+        }
+        for channelIndex in 0..<2 {
+            stereo.channels[channelIndex].withUnsafeBufferPointer { samples in
+                inputChannels[channelIndex].update(
+                    from: samples.baseAddress!,
+                    count: samples.count
+                )
+            }
+        }
+
+        let outputCapacity = AVAudioFrameCount(
+            ceil(Double(pcm.frameCount) *
+                SampleBufferConverter.outputSampleRate / pcm.sampleRate) + 64
+        )
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: converter.outputFormat,
+            frameCapacity: outputCapacity
+        ) else {
+            throw SampleBufferConverterError.converterCreationFailed
+        }
+
+        var suppliedInput = false
+        var conversionError: NSError?
+        let status = converter.convert(
+            to: outputBuffer,
+            error: &conversionError
+        ) { _, inputStatus in
+            guard !suppliedInput else {
+                inputStatus.pointee = .noDataNow
+                return nil
+            }
+            suppliedInput = true
+            inputStatus.pointee = .haveData
+            return inputBuffer
+        }
+        guard status != .error, conversionError == nil else {
+            throw SampleBufferConverterError.converterFailed
+        }
+        guard outputBuffer.frameLength > 0,
+              let outputChannels = outputBuffer.floatChannelData else {
+            return OwnedPCMBuffer(
+                sampleRate: SampleBufferConverter.outputSampleRate,
+                channels: [[], []]
+            )
+        }
+
+        let frameCount = Int(outputBuffer.frameLength)
+        return OwnedPCMBuffer(
+            sampleRate: SampleBufferConverter.outputSampleRate,
+            channels: [
+                Array(UnsafeBufferPointer(start: outputChannels[0], count: frameCount)),
+                Array(UnsafeBufferPointer(start: outputChannels[1], count: frameCount))
+            ]
+        )
     }
 }

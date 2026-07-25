@@ -28,14 +28,14 @@ final class CaptureStatusTests: XCTestCase {
         XCTAssertEqual(SampleBufferConverter.startFrame(for: pts), 48_048)
     }
 
-    func testNonInterleavedMonoPCMNormalizesToStereoAtFortyEightK() throws {
-        let pcm = OwnedPCMBuffer(sampleRate: 48_000, channels: [[0.25, -0.5]])
-
-        let block = try SampleBufferConverter.normalize(
-            pcm,
-            source: .microphone,
+    func testPersistentConverterNormalizesMonoPCMToStereoAtFortyEightK() throws {
+        let packet = OwnedAudioPacket(
+            pcm: OwnedPCMBuffer(sampleRate: 48_000, channels: [[0.25, -0.5]]),
             presentationTime: CMTime(value: 2, timescale: 1)
         )
+        let converter = PersistentAudioResampler(source: .microphone)
+
+        let block = try XCTUnwrap(converter.process(packet))
 
         XCTAssertEqual(block.startFrame, 96_000)
         XCTAssertEqual(block.left, [0.25, -0.5])
@@ -43,13 +43,14 @@ final class CaptureStatusTests: XCTestCase {
     }
 
     func testLateBufferFromStoppedGenerationIsDiscarded() {
-        let gate = CaptureCallbackGate()
-        let generation = gate.activate()
+        let gate = CaptureSessionGate()
+        let stream = NSObject()
+        let token = gate.activate(streamIdentity: ObjectIdentifier(stream))
 
-        XCTAssertTrue(gate.accepts(generation))
-        gate.deactivate()
+        XCTAssertTrue(gate.accepts(token, streamIdentity: ObjectIdentifier(stream)))
+        gate.deactivate(token)
 
-        XCTAssertFalse(gate.accepts(generation))
+        XCTAssertFalse(gate.accepts(token, streamIdentity: ObjectIdentifier(stream)))
     }
 
     func testSelectedAppResolutionRequiresCurrentPID() {

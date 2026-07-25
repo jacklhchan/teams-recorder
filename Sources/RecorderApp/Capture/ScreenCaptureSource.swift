@@ -5,11 +5,19 @@ import Foundation
 
 enum CaptureEvent: Error, Equatable {
     case applicationDisconnected(String)
+    case selectedApplicationRequiresReconnect
+    case screenRecordingPermissionDenied
+    case microphonePermissionDenied
+    case microphoneUnavailable
     case microphoneDisconnected
     case microphoneSilence
+    case systemAudioCaptureFailed
+    case microphoneCaptureFailed
     case invalidSampleBuffer(AudioSourceKind)
     case conversionFailed(AudioSourceKind)
-    case streamStopped
+    case missingCaptureEntitlements
+    case streamStoppedByUser
+    case streamStoppedBySystem
     case streamFailed
 }
 
@@ -22,16 +30,32 @@ enum CaptureStatus: Equatable {
 enum CaptureStatusMapper {
     static func status(for event: CaptureEvent) -> CaptureStatus {
         switch event {
-        case .applicationDisconnected:
+        case .applicationDisconnected, .selectedApplicationRequiresReconnect:
             return .warning("App audio disconnected")
+        case .screenRecordingPermissionDenied:
+            return .error("Screen & System Audio Recording permission denied")
+        case .microphonePermissionDenied:
+            return .error("Microphone permission denied")
+        case .microphoneUnavailable:
+            return .error("Microphone unavailable")
         case .microphoneDisconnected:
             return .warning("Microphone disconnected")
         case .microphoneSilence:
             return .warning("No microphone signal")
+        case .systemAudioCaptureFailed:
+            return .error("System audio capture failed")
+        case .microphoneCaptureFailed:
+            return .error("Microphone capture failed")
         case .invalidSampleBuffer, .conversionFailed:
             return .warning("Audio buffer skipped")
-        case .streamStopped, .streamFailed:
-            return .error("Audio capture stopped")
+        case .missingCaptureEntitlements:
+            return .error("Audio capture is missing required entitlements")
+        case .streamStoppedByUser:
+            return .warning("Audio capture stopped by user")
+        case .streamStoppedBySystem:
+            return .error("Audio capture stopped by macOS")
+        case .streamFailed:
+            return .error("Audio capture failed")
         }
     }
 }
@@ -40,9 +64,16 @@ enum CaptureSourceError: LocalizedError, Equatable {
     case noDisplay
     case selectedApplicationUnavailable
     case microphoneDeviceUnavailable
+    case screenRecordingPermissionDenied
+    case microphonePermissionDenied
+    case systemAudioCaptureFailed
+    case microphoneCaptureFailed
+    case missingCaptureEntitlements
     case streamAlreadyRunning
     case streamStartCancelled
-    case streamStartFailed
+    case streamStoppedByUser
+    case streamStoppedBySystem
+    case streamFailure
 
     var errorDescription: String? {
         switch self {
@@ -52,12 +83,117 @@ enum CaptureSourceError: LocalizedError, Equatable {
             return "The selected application is no longer running."
         case .microphoneDeviceUnavailable:
             return "The selected microphone is unavailable."
+        case .screenRecordingPermissionDenied:
+            return "Screen & System Audio Recording permission is denied."
+        case .microphonePermissionDenied:
+            return "Microphone permission is denied."
+        case .systemAudioCaptureFailed:
+            return "System audio capture failed."
+        case .microphoneCaptureFailed:
+            return "Microphone capture failed."
+        case .missingCaptureEntitlements:
+            return "Audio capture is missing required entitlements."
         case .streamAlreadyRunning:
             return "Audio capture is already running."
         case .streamStartCancelled:
             return "Audio capture start was cancelled."
-        case .streamStartFailed:
-            return "Audio capture could not start."
+        case .streamStoppedByUser:
+            return "Audio capture was stopped by the user."
+        case .streamStoppedBySystem:
+            return "Audio capture was stopped by macOS."
+        case .streamFailure:
+            return "Audio capture failed."
+        }
+    }
+}
+
+enum CaptureErrorMapper {
+    static func event(for error: NSError) -> CaptureEvent {
+        guard error.domain == SCStreamErrorDomain,
+              let code = SCStreamError.Code(rawValue: error.code) else {
+            return .streamFailed
+        }
+        switch code {
+        case .userDeclined:
+            return .screenRecordingPermissionDenied
+        case .failedNoMatchingApplicationContext:
+            return .selectedApplicationRequiresReconnect
+        case .missingEntitlements:
+            return .missingCaptureEntitlements
+        case .userStopped:
+            return .streamStoppedByUser
+        case .failedToStartAudioCapture, .failedToStopAudioCapture:
+            return .systemAudioCaptureFailed
+        case .failedToStartMicrophoneCapture:
+            return .microphoneCaptureFailed
+        case .systemStoppedStream:
+            return .streamStoppedBySystem
+        default:
+            return .streamFailed
+        }
+    }
+
+    static func sourceError(for event: CaptureEvent) -> CaptureSourceError {
+        switch event {
+        case .screenRecordingPermissionDenied:
+            return .screenRecordingPermissionDenied
+        case .microphonePermissionDenied:
+            return .microphonePermissionDenied
+        case .microphoneUnavailable, .microphoneDisconnected:
+            return .microphoneDeviceUnavailable
+        case .systemAudioCaptureFailed:
+            return .systemAudioCaptureFailed
+        case .microphoneCaptureFailed:
+            return .microphoneCaptureFailed
+        case .selectedApplicationRequiresReconnect, .applicationDisconnected:
+            return .selectedApplicationUnavailable
+        case .missingCaptureEntitlements:
+            return .missingCaptureEntitlements
+        case .streamStoppedByUser:
+            return .streamStoppedByUser
+        case .streamStoppedBySystem:
+            return .streamStoppedBySystem
+        default:
+            return .streamFailure
+        }
+    }
+}
+
+enum CaptureMicrophoneAuthorization {
+    case authorized
+    case denied
+    case restricted
+    case notDetermined
+
+    init(_ status: AVAuthorizationStatus) {
+        switch status {
+        case .authorized:
+            self = .authorized
+        case .denied:
+            self = .denied
+        case .restricted:
+            self = .restricted
+        case .notDetermined:
+            self = .notDetermined
+        @unknown default:
+            self = .denied
+        }
+    }
+}
+
+enum CapturePermissionPreflight {
+    static func error(
+        screenCaptureAllowed: Bool,
+        microphoneAuthorization: CaptureMicrophoneAuthorization
+    ) -> CaptureEvent? {
+        guard screenCaptureAllowed else {
+            return .screenRecordingPermissionDenied
+        }
+        switch microphoneAuthorization {
+        case .authorized:
+            return nil
+        case .denied, .restricted, .notDetermined:
+            return .microphonePermissionDenied
         }
     }
 }
@@ -107,36 +243,79 @@ enum MicrophoneDeviceResolver {
     }
 }
 
-/// Serializes callback acceptance across asynchronous stream starts, stops, and reconnects.
-final class CaptureCallbackGate {
+struct CaptureSessionToken: Equatable {
+    let generation: UInt64
+    let streamIdentity: ObjectIdentifier
+}
+
+final class CaptureSessionGate {
     private let lock = NSLock()
     private var nextGeneration: UInt64 = 0
-    private var activeGeneration: UInt64?
+    private var activeToken: CaptureSessionToken?
 
-    func activate() -> UInt64 {
+    func activate(streamIdentity: ObjectIdentifier) -> CaptureSessionToken {
         lock.lock()
         defer { lock.unlock() }
         nextGeneration &+= 1
-        activeGeneration = nextGeneration
-        return nextGeneration
+        let token = CaptureSessionToken(
+            generation: nextGeneration,
+            streamIdentity: streamIdentity
+        )
+        activeToken = token
+        return token
     }
 
-    func deactivate() {
+    func deactivate(_ token: CaptureSessionToken) {
         lock.lock()
-        activeGeneration = nil
+        if activeToken == token {
+            activeToken = nil
+        }
         lock.unlock()
     }
 
-    func accepts(_ generation: UInt64) -> Bool {
+    func accepts(
+        _ token: CaptureSessionToken,
+        streamIdentity: ObjectIdentifier
+    ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return activeGeneration == generation
+        return activeToken == token && token.streamIdentity == streamIdentity
+    }
+}
+
+final class SerialCaptureDelivery {
+    private let token: CaptureSessionToken
+    private let gate: CaptureSessionGate
+    private let queue: DispatchQueue
+
+    init(
+        token: CaptureSessionToken,
+        gate: CaptureSessionGate,
+        label: String
+    ) {
+        self.token = token
+        self.gate = gate
+        self.queue = DispatchQueue(label: label, qos: .userInitiated)
     }
 
-    var currentGeneration: UInt64? {
-        lock.lock()
-        defer { lock.unlock() }
-        return activeGeneration
+    func enqueue(
+        streamIdentity: ObjectIdentifier,
+        _ work: @escaping () -> Void
+    ) {
+        queue.async { [gate, token] in
+            guard gate.accepts(token, streamIdentity: streamIdentity) else {
+                return
+            }
+            work()
+        }
+    }
+
+    func isActive(streamIdentity: ObjectIdentifier) -> Bool {
+        gate.accepts(token, streamIdentity: streamIdentity)
+    }
+
+    func drain() {
+        queue.sync {}
     }
 }
 
@@ -144,25 +323,47 @@ final class ScreenCaptureSource: NSObject {
     typealias AudioHandler = (AudioFrameBlock) -> Void
     typealias EventHandler = (CaptureEvent) -> Void
 
+    private final class ActiveSession {
+        let stream: SCStream
+        let output: ScreenCaptureStreamOutput
+        let token: CaptureSessionToken
+        let eventHandler: EventHandler
+        let selectedApplication: CaptureApplication?
+        let selectedMicrophoneUID: String?
+
+        init(
+            stream: SCStream,
+            output: ScreenCaptureStreamOutput,
+            token: CaptureSessionToken,
+            eventHandler: @escaping EventHandler,
+            selectedApplication: CaptureApplication?,
+            selectedMicrophoneUID: String?
+        ) {
+            self.stream = stream
+            self.output = output
+            self.token = token
+            self.eventHandler = eventHandler
+            self.selectedApplication = selectedApplication
+            self.selectedMicrophoneUID = selectedMicrophoneUID
+        }
+    }
+
     private let stateLock = NSLock()
-    private let callbackGate = CaptureCallbackGate()
-    private let systemAudioQueue = DispatchQueue(label: "local-meeting-recorder.capture.system", qos: .userInitiated)
-    private let microphoneQueue = DispatchQueue(label: "local-meeting-recorder.capture.microphone", qos: .userInitiated)
-    private var stream: SCStream?
-    private var audioHandler: AudioHandler?
-    private var eventHandler: EventHandler?
-    private var selectedApplication: CaptureApplication?
-    private var selectedMicrophoneUID: String?
+    private let sessionGate = CaptureSessionGate()
+    private let systemAudioQueue = DispatchQueue(
+        label: "local-meeting-recorder.capture.system",
+        qos: .userInitiated
+    )
+    private let microphoneQueue = DispatchQueue(
+        label: "local-meeting-recorder.capture.microphone",
+        qos: .userInitiated
+    )
+    private var activeSession: ActiveSession?
+    private var isStarting = false
+    private var lifecycleEpoch: UInt64 = 0
     private var lastMicrophoneAudioAt: Date?
     private var hasReportedMicrophoneSilence = false
     private var hasReportedMicrophoneDisconnect = false
-    private var isStarting = false
-    private var lifecycleEpoch: UInt64 = 0
-    private lazy var streamOutput = ScreenCaptureStreamOutput(
-        callbackGate: callbackGate
-    ) { [weak self] result, generation in
-        self?.handleCallback(result, generation: generation)
-    }
 
     func refreshContent() async throws -> [CaptureApplication] {
         let content = try await SCShareableContent.excludingDesktopWindows(
@@ -179,7 +380,18 @@ final class ScreenCaptureSource: NSObject {
         onEvent: @escaping EventHandler
     ) async throws {
         let reservation = try reserveStart()
+        var pendingSession: ActiveSession?
+        var didInstallSession = false
         do {
+            if let permissionError = CapturePermissionPreflight.error(
+                screenCaptureAllowed: CGPreflightScreenCaptureAccess(),
+                microphoneAuthorization: CaptureMicrophoneAuthorization(
+                    AVCaptureDevice.authorizationStatus(for: .audio)
+                )
+            ) {
+                throw CaptureErrorMapper.sourceError(for: permissionError)
+            }
+
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false,
                 onScreenWindowsOnly: false
@@ -187,7 +399,11 @@ final class ScreenCaptureSource: NSObject {
             guard let display = Self.mainDisplay(in: content) else {
                 throw CaptureSourceError.noDisplay
             }
-            let filter = try Self.makeFilter(selection: selection, content: content, display: display)
+            let filter = try Self.makeFilter(
+                selection: selection,
+                content: content,
+                display: display
+            )
             let captureDeviceUID = try MicrophoneDeviceResolver.resolveCurrentCaptureDeviceUID(
                 coreAudioUID: microphoneUID
             )
@@ -200,59 +416,103 @@ final class ScreenCaptureSource: NSObject {
             configuration.excludesCurrentProcessAudio = true
             configuration.microphoneCaptureDeviceID = captureDeviceUID
 
-            let generation = callbackGate.activate()
-            let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
-            try newStream.addStreamOutput(
-                streamOutput,
+            let stream = SCStream(
+                filter: filter,
+                configuration: configuration,
+                delegate: self
+            )
+            let token = sessionGate.activate(
+                streamIdentity: ObjectIdentifier(stream)
+            )
+            let output = ScreenCaptureStreamOutput(
+                token: token,
+                gate: sessionGate,
+                onAudio: { [weak self] block in
+                    if block.source == .microphone {
+                        self?.recordMicrophoneAudio()
+                    }
+                    onAudio(block)
+                },
+                onEvent: onEvent
+            )
+            let session = ActiveSession(
+                stream: stream,
+                output: output,
+                token: token,
+                eventHandler: onEvent,
+                selectedApplication: Self.selectedApplication(in: selection),
+                selectedMicrophoneUID: captureDeviceUID
+            )
+            pendingSession = session
+            try stream.addStreamOutput(
+                output,
                 type: .audio,
                 sampleHandlerQueue: systemAudioQueue
             )
-            try newStream.addStreamOutput(
-                streamOutput,
+            try stream.addStreamOutput(
+                output,
                 type: .microphone,
                 sampleHandlerQueue: microphoneQueue
             )
 
-            guard install(
-                reservation: reservation,
-                stream: newStream,
-                selectedApplication: Self.selectedApplication(in: selection),
-                selectedMicrophoneUID: captureDeviceUID,
-                onAudio: onAudio,
-                onEvent: onEvent
-            ) else {
-                callbackGate.deactivate()
-                try? newStream.removeStreamOutput(streamOutput, type: .audio)
-                try? newStream.removeStreamOutput(streamOutput, type: .microphone)
-                try? await newStream.stopCapture()
+            guard install(reservation: reservation, session: session) else {
                 throw CaptureSourceError.streamStartCancelled
             }
+            didInstallSession = true
 
-            try await newStream.startCapture()
-            if !callbackGate.accepts(generation) {
+            try await stream.startCapture()
+            guard sessionGate.accepts(
+                token,
+                streamIdentity: ObjectIdentifier(stream)
+            ) else {
                 await stop()
+                throw CaptureSourceError.streamStartCancelled
             }
         } catch {
-            await stop()
-            if error is CaptureSourceError {
-                throw error
+            if didInstallSession {
+                await stop()
+            } else if let pendingSession {
+                await discardPendingSession(pendingSession)
+                cancelStartReservation(reservation)
+            } else {
+                cancelStartReservation(reservation)
             }
-            throw CaptureSourceError.streamStartFailed
+            if let sourceError = error as? CaptureSourceError {
+                throw sourceError
+            }
+            throw CaptureErrorMapper.sourceError(
+                for: CaptureErrorMapper.event(for: error as NSError)
+            )
         }
     }
 
     func stop() async {
-        callbackGate.deactivate()
+        guard let session = takeActiveSession() else { return }
+        session.output.drain()
 
-        guard let activeStream = takeActiveStream() else { return }
-        try? activeStream.removeStreamOutput(streamOutput, type: .audio)
-        try? activeStream.removeStreamOutput(streamOutput, type: .microphone)
-        try? await activeStream.stopCapture()
+        do {
+            try session.stream.removeStreamOutput(session.output, type: .audio)
+        } catch {
+            session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
+        }
+        do {
+            try session.stream.removeStreamOutput(session.output, type: .microphone)
+        } catch {
+            session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
+        }
+        do {
+            try await session.stream.stopCapture()
+        } catch {
+            session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
+        }
     }
 
     /// Checks the original process identity. A restarted app requires an explicit caller-led reconnect.
     func refreshSelectedApplicationLiveness() async {
-        guard let selectedApplication = currentSelectedApplication() else { return }
+        guard let session = currentSession(),
+              let selectedApplication = session.selectedApplication else {
+            return
+        }
         guard let content = try? await SCShareableContent.excludingDesktopWindows(
             false,
             onScreenWindowsOnly: false
@@ -263,10 +523,11 @@ final class ScreenCaptureSource: NSObject {
             $0.processID == selectedApplication.processID &&
                 $0.bundleIdentifier == selectedApplication.bundleIdentifier
         }
-        guard !isCurrentProcessPresent else { return }
-        guard markSelectedApplicationDisconnected(selectedApplication) else { return }
-        let (_, eventHandler) = currentHandlers()
-        eventHandler?(.applicationDisconnected(selectedApplication.name))
+        guard !isCurrentProcessPresent,
+              markSelectedApplicationDisconnected(session) else {
+            return
+        }
+        session.eventHandler(.applicationDisconnected(selectedApplication.name))
     }
 
     /// The caller controls refresh cadence; this method never changes the selected microphone.
@@ -274,47 +535,29 @@ final class ScreenCaptureSource: NSObject {
         now: Date = Date(),
         silenceThreshold: TimeInterval = 2
     ) {
-        let healthState = microphoneHealthState(now: now, silenceThreshold: silenceThreshold)
-        switch healthState {
-        case .healthy:
+        guard let event = microphoneHealthEvent(
+            now: now,
+            silenceThreshold: silenceThreshold
+        ), let session = currentSession() else {
             return
-        case .disconnected:
-            let (_, eventHandler) = currentHandlers()
-            eventHandler?(.microphoneDisconnected)
-        case .silent:
-            let (_, eventHandler) = currentHandlers()
-            eventHandler?(.microphoneSilence)
         }
+        session.eventHandler(event)
     }
 
-    private func handleCallback(
-        _ result: Result<AudioFrameBlock, CaptureEvent>,
-        generation: UInt64
+    private func handleStreamStopped(
+        _ stoppedStream: SCStream,
+        error: Error
     ) {
-        guard callbackGate.accepts(generation) else { return }
-
-        let (audioHandler, eventHandler) = currentHandlers()
-
-        switch result {
-        case let .success(block):
-            if block.source == .microphone {
-                recordMicrophoneAudio()
-            }
-            audioHandler?(block)
-        case let .failure(event):
-            eventHandler?(event)
+        guard let session = clearStoppedSessionIfCurrent(stoppedStream) else {
+            return
         }
+        session.output.drain()
+        session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
     }
 
-    private func handleStreamStopped(_ stoppedStream: SCStream) {
-        let (shouldEmit, eventHandler) = clearStoppedStreamIfCurrent(stoppedStream)
-
-        guard shouldEmit else { return }
-        callbackGate.deactivate()
-        eventHandler?(.streamFailed)
-    }
-
-    private static func captureApplications(from content: SCShareableContent) -> [CaptureApplication] {
+    private static func captureApplications(
+        from content: SCShareableContent
+    ) -> [CaptureApplication] {
         content.applications.compactMap { application in
             let bundleIdentifier = application.bundleIdentifier
             guard !bundleIdentifier.isEmpty else {
@@ -335,7 +578,9 @@ final class ScreenCaptureSource: NSObject {
     }
 
     private static func mainDisplay(in content: SCShareableContent) -> SCDisplay? {
-        content.displays.first { $0.displayID == CGMainDisplayID() } ?? content.displays.first
+        content.displays.first {
+            $0.displayID == CGMainDisplayID()
+        } ?? content.displays.first
     }
 
     private static func makeFilter(
@@ -345,7 +590,9 @@ final class ScreenCaptureSource: NSObject {
     ) throws -> SCContentFilter {
         switch selection {
         case .allSystemAudio:
-            let recorderApplication = content.applications.filter { $0.processID == getpid() }
+            let recorderApplication = content.applications.filter {
+                $0.processID == getpid()
+            }
             return SCContentFilter(
                 display: display,
                 excludingApplications: recorderApplication,
@@ -368,15 +615,19 @@ final class ScreenCaptureSource: NSObject {
         }
     }
 
-    private static func selectedApplication(in selection: ResolvedCaptureSelection) -> CaptureApplication? {
-        guard case let .application(application) = selection else { return nil }
+    private static func selectedApplication(
+        in selection: ResolvedCaptureSelection
+    ) -> CaptureApplication? {
+        guard case let .application(application) = selection else {
+            return nil
+        }
         return application
     }
 
     private func reserveStart() throws -> UInt64 {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard stream == nil, !isStarting else {
+        guard activeSession == nil, !isStarting else {
             throw CaptureSourceError.streamAlreadyRunning
         }
         lifecycleEpoch &+= 1
@@ -386,62 +637,66 @@ final class ScreenCaptureSource: NSObject {
 
     private func install(
         reservation: UInt64,
-        stream: SCStream,
-        selectedApplication: CaptureApplication?,
-        selectedMicrophoneUID: String?,
-        onAudio: @escaping AudioHandler,
-        onEvent: @escaping EventHandler
+        session: ActiveSession
     ) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard isStarting, lifecycleEpoch == reservation, self.stream == nil else {
+        guard isStarting,
+              lifecycleEpoch == reservation,
+              activeSession == nil else {
             return false
         }
-        self.stream = stream
-        self.selectedApplication = selectedApplication
-        self.selectedMicrophoneUID = selectedMicrophoneUID
+        activeSession = session
+        isStarting = false
         lastMicrophoneAudioAt = nil
         hasReportedMicrophoneSilence = false
         hasReportedMicrophoneDisconnect = false
-        audioHandler = onAudio
-        eventHandler = onEvent
-        isStarting = false
         return true
     }
 
-    private func takeActiveStream() -> SCStream? {
+    private func cancelStartReservation(_ reservation: UInt64) {
+        stateLock.lock()
+        if isStarting, lifecycleEpoch == reservation {
+            isStarting = false
+            lifecycleEpoch &+= 1
+        }
+        stateLock.unlock()
+    }
+
+    private func discardPendingSession(_ session: ActiveSession) async {
+        sessionGate.deactivate(session.token)
+        session.output.drain()
+        try? session.stream.removeStreamOutput(session.output, type: .audio)
+        try? session.stream.removeStreamOutput(session.output, type: .microphone)
+        try? await session.stream.stopCapture()
+    }
+
+    private func takeActiveSession() -> ActiveSession? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        let activeStream = stream
-        stream = nil
-        selectedApplication = nil
-        selectedMicrophoneUID = nil
-        lastMicrophoneAudioAt = nil
+        let session = activeSession
+        if let session {
+            sessionGate.deactivate(session.token)
+        }
+        activeSession = nil
         isStarting = false
         lifecycleEpoch &+= 1
-        audioHandler = nil
-        eventHandler = nil
-        return activeStream
+        lastMicrophoneAudioAt = nil
+        return session
     }
 
-    private func currentHandlers() -> (AudioHandler?, EventHandler?) {
+    private func currentSession() -> ActiveSession? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return (audioHandler, eventHandler)
+        return activeSession
     }
 
-    private func currentSelectedApplication() -> CaptureApplication? {
+    private func markSelectedApplicationDisconnected(
+        _ session: ActiveSession
+    ) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return selectedApplication
-    }
-
-    private func markSelectedApplicationDisconnected(_ application: CaptureApplication) -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        guard selectedApplication == application else { return false }
-        selectedApplication = nil
-        return true
+        return activeSession === session
     }
 
     private func recordMicrophoneAudio() {
@@ -451,76 +706,86 @@ final class ScreenCaptureSource: NSObject {
         stateLock.unlock()
     }
 
-    private enum MicrophoneHealthState {
-        case healthy
-        case disconnected
-        case silent
-    }
-
-    private func microphoneHealthState(
+    private func microphoneHealthEvent(
         now: Date,
         silenceThreshold: TimeInterval
-    ) -> MicrophoneHealthState {
+    ) -> CaptureEvent? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard stream != nil else { return .healthy }
+        guard let session = activeSession else { return nil }
 
-        if let selectedMicrophoneUID {
-            let captureDeviceUIDs = AVCaptureDevice.DiscoverySession(
+        if let selectedMicrophoneUID = session.selectedMicrophoneUID {
+            let availableUIDs = AVCaptureDevice.DiscoverySession(
                 deviceTypes: [.microphone],
                 mediaType: .audio,
                 position: .unspecified
             ).devices.map(\.uniqueID)
-            if !captureDeviceUIDs.contains(selectedMicrophoneUID) {
-                guard !hasReportedMicrophoneDisconnect else { return .healthy }
+            if !availableUIDs.contains(selectedMicrophoneUID) {
+                guard !hasReportedMicrophoneDisconnect else { return nil }
                 hasReportedMicrophoneDisconnect = true
-                return .disconnected
+                return .microphoneUnavailable
             }
         }
 
         guard let lastMicrophoneAudioAt,
               now.timeIntervalSince(lastMicrophoneAudioAt) >= silenceThreshold,
               !hasReportedMicrophoneSilence else {
-            return .healthy
+            return nil
         }
         hasReportedMicrophoneSilence = true
-        return .silent
+        return .microphoneSilence
     }
 
-    private func clearStoppedStreamIfCurrent(_ stoppedStream: SCStream) -> (Bool, EventHandler?) {
+    private func clearStoppedSessionIfCurrent(
+        _ stoppedStream: SCStream
+    ) -> ActiveSession? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard stream === stoppedStream else {
-            return (false, nil)
+        guard let session = activeSession,
+              session.stream === stoppedStream else {
+            return nil
         }
-        stream = nil
-        selectedApplication = nil
-        selectedMicrophoneUID = nil
-        lastMicrophoneAudioAt = nil
+
+        // Capture the whole session, including its event handler, before clearing state.
+        sessionGate.deactivate(session.token)
+        activeSession = nil
         isStarting = false
         lifecycleEpoch &+= 1
-        audioHandler = nil
-        self.eventHandler = nil
-        return (true, eventHandler)
+        lastMicrophoneAudioAt = nil
+        return session
     }
 }
 
 extension ScreenCaptureSource: SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        handleStreamStopped(stream)
+        handleStreamStopped(stream, error: error)
     }
 }
 
 private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
-    private let callbackGate: CaptureCallbackGate
-    private let handler: (Result<AudioFrameBlock, CaptureEvent>, UInt64) -> Void
+    private let token: CaptureSessionToken
+    private let gate: CaptureSessionGate
+    private let delivery: SerialCaptureDelivery
+    private let onAudio: (AudioFrameBlock) -> Void
+    private let onEvent: (CaptureEvent) -> Void
+    private let systemResampler = PersistentAudioResampler(source: .system)
+    private let microphoneResampler = PersistentAudioResampler(source: .microphone)
 
     init(
-        callbackGate: CaptureCallbackGate,
-        handler: @escaping (Result<AudioFrameBlock, CaptureEvent>, UInt64) -> Void
+        token: CaptureSessionToken,
+        gate: CaptureSessionGate,
+        onAudio: @escaping (AudioFrameBlock) -> Void,
+        onEvent: @escaping (CaptureEvent) -> Void
     ) {
-        self.callbackGate = callbackGate
-        self.handler = handler
+        self.token = token
+        self.gate = gate
+        self.delivery = SerialCaptureDelivery(
+            token: token,
+            gate: gate,
+            label: "local-meeting-recorder.capture.session.\(token.generation)"
+        )
+        self.onAudio = onAudio
+        self.onEvent = onEvent
     }
 
     func stream(
@@ -537,14 +802,47 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         default:
             return
         }
-        guard let generation = callbackGate.currentGeneration else { return }
 
-        do {
-            handler(.success(try SampleBufferConverter.convert(sampleBuffer, source: source)), generation)
-        } catch SampleBufferConverterError.invalidSampleBuffer {
-            handler(.failure(.invalidSampleBuffer(source)), generation)
-        } catch {
-            handler(.failure(.conversionFailed(source)), generation)
+        let streamIdentity = ObjectIdentifier(stream)
+        guard gate.accepts(token, streamIdentity: streamIdentity) else {
+            return
         }
+
+        let copiedResult: Result<OwnedAudioPacket, CaptureEvent>
+        do {
+            copiedResult = .success(try SampleBufferConverter.copy(sampleBuffer))
+        } catch SampleBufferConverterError.invalidSampleBuffer {
+            copiedResult = .failure(.invalidSampleBuffer(source))
+        } catch {
+            copiedResult = .failure(.conversionFailed(source))
+        }
+
+        delivery.enqueue(streamIdentity: streamIdentity) { [weak self] in
+            guard let self else { return }
+            switch copiedResult {
+            case let .failure(event):
+                if delivery.isActive(streamIdentity: streamIdentity) {
+                    onEvent(event)
+                }
+            case let .success(packet):
+                do {
+                    let resampler = source == .system
+                        ? systemResampler
+                        : microphoneResampler
+                    if let block = try resampler.process(packet),
+                       delivery.isActive(streamIdentity: streamIdentity) {
+                        onAudio(block)
+                    }
+                } catch {
+                    if delivery.isActive(streamIdentity: streamIdentity) {
+                        onEvent(.conversionFailed(source))
+                    }
+                }
+            }
+        }
+    }
+
+    func drain() {
+        delivery.drain()
     }
 }

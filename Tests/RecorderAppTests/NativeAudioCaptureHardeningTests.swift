@@ -126,6 +126,15 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
         XCTAssertFalse(events.markSelectedApplicationDisconnected())
     }
 
+    func testSuccessfulFilterUpdateMayResetSelectedApplicationDisconnectLatch() {
+        var events = CaptureSessionEventState()
+        XCTAssertTrue(events.markSelectedApplicationDisconnected())
+
+        events.clearSelectedApplicationDisconnect()
+
+        XCTAssertTrue(events.markSelectedApplicationDisconnected())
+    }
+
     func testStaleMicrophoneHealthEventCannotReachReplacementSession() {
         let gate = CaptureSessionGate()
         let streamA = NSObject()

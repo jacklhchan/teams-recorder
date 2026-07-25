@@ -41,6 +41,142 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(writer.blocks.first?.left.first), 0.48, accuracy: 0.001)
     }
 
+    func testReconnectUpdatesActiveSourceWithoutRecreatingWriterOrMicrophone() async throws {
+        let source = FakeCaptureSource()
+        let writer = FakeWriter()
+        let engine = makeEngine(source: source, writer: writer)
+        let original = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let restarted = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: original.bundleIdentifier,
+            name: original.name
+        )
+        let folder = try await engine.start(
+            selection: .application(original),
+            microphoneUID: "BuiltInMicrophone",
+            baseFolder: temporaryFolder()
+        )
+        source.emit(event: .applicationDisconnected(original.name))
+        await settle()
+
+        try await engine.reconnect(selection: .application(restarted))
+
+        XCTAssertEqual(source.reconnectedSelection, .application(restarted))
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(source.stopCount, 0)
+        XCTAssertTrue(engine.isRecording)
+        XCTAssertTrue(engine.isMonitoring)
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+        XCTAssertTrue(engine.isMicrophoneCaptureConnected)
+        XCTAssertEqual(engine.outputFolder, folder)
+        XCTAssertEqual(writer.closeCount, 0)
+    }
+
+    func testFailedReconnectKeepsRecordingMicrophoneAndDisconnectedSystemAudio() async throws {
+        let source = FakeCaptureSource()
+        let writer = FakeWriter()
+        let engine = makeEngine(source: source, writer: writer)
+        let application = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        _ = try await engine.start(
+            selection: .application(application),
+            microphoneUID: "BuiltInMicrophone",
+            baseFolder: temporaryFolder()
+        )
+        source.emit(event: .applicationDisconnected(application.name))
+        await settle()
+        source.reconnectError = CaptureSourceError.selectedApplicationUnavailable
+
+        do {
+            try await engine.reconnect(selection: .application(application))
+            XCTFail("Expected reconnect failure")
+        } catch {
+            XCTAssertEqual(error as? CaptureSourceError, .selectedApplicationUnavailable)
+        }
+
+        XCTAssertTrue(engine.isRecording)
+        XCTAssertTrue(engine.isMonitoring)
+        XCTAssertFalse(engine.isSystemCaptureConnected)
+        XCTAssertTrue(engine.isMicrophoneCaptureConnected)
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(source.stopCount, 0)
+        XCTAssertEqual(writer.closeCount, 0)
+    }
+
+    func testConcurrentReconnectRequestsCoalesceToOneSourceOperation() async throws {
+        let source = FakeCaptureSource()
+        source.pauseReconnect = true
+        let engine = makeEngine(source: source, writer: FakeWriter())
+        let application = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        _ = try await engine.start(
+            selection: .application(application),
+            microphoneUID: "BuiltInMicrophone",
+            baseFolder: temporaryFolder()
+        )
+        source.emit(event: .applicationDisconnected(application.name))
+        await settle()
+
+        async let first: Void = engine.reconnect(selection: .application(application))
+        await waitUntil { source.reconnectCount == 1 }
+        async let second: Void = engine.reconnect(selection: .application(application))
+        await settle()
+
+        XCTAssertEqual(source.reconnectCount, 1)
+        source.resumeAllReconnects()
+        try await first
+        try await second
+        XCTAssertEqual(source.reconnectCount, 1)
+    }
+
+    func testStopWinsOverLateSuccessfulReconnect() async throws {
+        let source = FakeCaptureSource()
+        source.pauseReconnect = true
+        let writer = FakeWriter()
+        let engine = makeEngine(source: source, writer: writer)
+        let application = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        _ = try await engine.start(
+            selection: .application(application),
+            microphoneUID: "BuiltInMicrophone",
+            baseFolder: temporaryFolder()
+        )
+        source.emit(event: .applicationDisconnected(application.name))
+        await settle()
+
+        let reconnect = Task { @MainActor in
+            try await engine.reconnect(selection: .application(application))
+        }
+        await waitUntil { source.reconnectCount == 1 }
+        let stop = Task { @MainActor in await engine.stop() }
+        await waitUntil { source.stopCount == 1 }
+        source.resumeReconnect()
+        _ = await stop.value
+
+        do {
+            try await reconnect.value
+            XCTFail("Stopped recording must reject a late reconnect completion")
+        } catch {
+            XCTAssertEqual(error as? CaptureSourceError, .streamStartCancelled)
+        }
+        XCTAssertFalse(engine.isRecording)
+        XCTAssertFalse(engine.isMonitoring)
+        XCTAssertEqual(writer.closeCount, 1)
+    }
+
     func testMicrophoneDisconnectKeepsSystemRecordingActive() async throws {
         let source = FakeCaptureSource()
         let writer = FakeWriter()
@@ -505,13 +641,29 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
     private(set) var activeStarts = 0
     private(set) var maximumConcurrentStarts = 0
     private(set) var startedSelections: [ResolvedCaptureSelection] = []
+    private(set) var reconnectedSelection: ResolvedCaptureSelection?
+    private(set) var reconnectCount = 0
     var pauseStarts = false
+    var pauseReconnect = false
     var startErrors: [Int: Error] = [:]
+    var reconnectError: Error?
     var pauseStop = false
     private var startContinuations: [CheckedContinuation<Void, Never>] = []
+    private var reconnectContinuations: [CheckedContinuation<Void, Never>] = []
     private var stopContinuation: CheckedContinuation<Void, Never>?
 
     func refreshContent() async throws -> [CaptureApplication] { [] }
+
+    func reconnect(selection: ResolvedCaptureSelection) async throws {
+        reconnectCount += 1
+        if pauseReconnect {
+            await withCheckedContinuation { continuation in
+                reconnectContinuations.append(continuation)
+            }
+        }
+        if let reconnectError { throw reconnectError }
+        reconnectedSelection = selection
+    }
 
     func start(
         selection: ResolvedCaptureSelection,
@@ -575,6 +727,17 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
         pauseStarts = false
         let continuations = startContinuations
         startContinuations.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+
+    func resumeReconnect() {
+        guard !reconnectContinuations.isEmpty else { return }
+        reconnectContinuations.removeFirst().resume()
+    }
+
+    func resumeAllReconnects() {
+        let continuations = reconnectContinuations
+        reconnectContinuations.removeAll()
         continuations.forEach { $0.resume() }
     }
 }

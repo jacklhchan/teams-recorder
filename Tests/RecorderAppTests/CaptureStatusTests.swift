@@ -3,6 +3,98 @@ import XCTest
 @testable import RecorderApp
 
 final class CaptureStatusTests: XCTestCase {
+    func testDeniedSystemAudioPermissionBlocksStart() {
+        let state = CaptureReadiness.evaluate(
+            permission: .denied,
+            selection: .init(mode: .allSystemAudio),
+            resolvedSelection: .allSystemAudio,
+            microphoneAvailable: true
+        )
+
+        XCTAssertEqual(
+            state,
+            .blocked("Screen & System Audio Recording permission is required.")
+        )
+    }
+
+    func testDisconnectedSelectedAppShowsReconnectWithoutChangingMode() {
+        let selection = CaptureSelection(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: "com.microsoft.teams2"
+        )
+        let state = CaptureReadiness.evaluate(
+            permission: .granted,
+            selection: selection,
+            resolvedSelection: .disconnected("com.microsoft.teams2"),
+            microphoneAvailable: true
+        )
+
+        XCTAssertEqual(state, .reconnectRequired)
+        XCTAssertEqual(selection.mode, .selectedApplication)
+        XCTAssertEqual(selection.selectedBundleIdentifier, "com.microsoft.teams2")
+    }
+
+    func testSelectedAppWithoutBundleIDIsBlockedInsteadOfCapturingAllAudio() {
+        XCTAssertEqual(
+            CaptureReadiness.evaluate(
+                permission: .granted,
+                selection: .init(mode: .selectedApplication),
+                resolvedSelection: .disconnected(""),
+                microphoneAvailable: true
+            ),
+            .blocked("Choose an application to capture.")
+        )
+    }
+
+    func testMissingMicrophoneBlocksStart() {
+        XCTAssertEqual(
+            CaptureReadiness.evaluate(
+                permission: .granted,
+                selection: .init(mode: .allSystemAudio),
+                resolvedSelection: .allSystemAudio,
+                microphoneAvailable: false
+            ),
+            .blocked("Microphone permission and an available microphone are required.")
+        )
+    }
+
+    func testPermissionAndDisconnectedStatesExposeActions() {
+        XCTAssertEqual(
+            CaptureStatusRowMapper.row(for: .denied),
+            .init(
+                title: "Screen & System Audio Recording",
+                message: "Permission denied. Open System Settings, then retry.",
+                action: .openSettings
+            )
+        )
+        XCTAssertEqual(
+            CaptureStatusRowMapper.row(for: .reconnectRequired),
+            .init(
+                title: "System Audio",
+                message: "App audio disconnected",
+                action: .reconnect
+            )
+        )
+    }
+
+    func testCaptureSelectionPersistenceRoundTripUsesOnlyApprovedKeys() {
+        let defaults = UserDefaults(suiteName: "CaptureStatusTests.\(UUID().uuidString)")!
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName(defaults)) }
+        let persistence = CaptureSelectionPersistence(defaults: defaults)
+        let selection = CaptureSelection(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: "com.microsoft.teams2"
+        )
+
+        persistence.save(selection: selection, microphoneUID: "BuiltInMicrophoneDevice")
+
+        XCTAssertEqual(persistence.loadSelection(), selection)
+        XCTAssertEqual(persistence.loadMicrophoneUID(), "BuiltInMicrophoneDevice")
+        XCTAssertEqual(
+            Set(defaults.dictionaryRepresentation().keys).intersection(CaptureSelectionPersistence.keys),
+            Set(CaptureSelectionPersistence.keys)
+        )
+    }
     func testDisconnectedCaptureMapsToWarning() {
         XCTAssertEqual(
             CaptureStatusMapper.status(for: .applicationDisconnected("Teams")),
@@ -94,5 +186,10 @@ final class CaptureStatusTests: XCTestCase {
         XCTAssertThrowsError(
             try MicrophoneDeviceResolver.resolveCurrentCaptureDeviceUID(coreAudioUID: "")
         )
+    }
+
+    private func defaultsSuiteName(_ defaults: UserDefaults) -> String {
+        defaults.volatileDomainNames.first(where: { $0.hasPrefix("CaptureStatusTests.") })
+            ?? "CaptureStatusTests"
     }
 }

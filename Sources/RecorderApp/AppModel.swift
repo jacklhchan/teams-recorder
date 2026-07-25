@@ -6,13 +6,16 @@ import UniformTypeIdentifiers
 @MainActor
 final class AppModel: ObservableObject {
     @Published var devices: [AudioDevice] = []
-    @Published var selectedSystemDevice: AudioDevice?
     @Published var selectedMicDevice: AudioDevice?
+    @Published var availableCaptureApplications: [CaptureApplication] = []
+    @Published var captureSelection = CaptureSelection()
+    @Published var resolvedCaptureSelection: ResolvedCaptureSelection = .allSystemAudio
+    @Published var systemAudioPermission: CapturePermissionState = .notDetermined
+    @Published var microphonePermission: CapturePermissionState = .notDetermined
+    @Published var isCaptureLifecycleWorking = false
     @Published var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published var statusMessage = "Ready"
-    @Published var permissionMessage = ""
     @Published var sessions: [RecordingSession] = []
-    @Published var routingChecks: [RoutingCheck] = []
     @Published var lastHealthReport: RecordingHealthReport?
     @Published var isRunningTestRecording = false
     @Published var playingSessionID: RecordingSession.ID?
@@ -41,46 +44,134 @@ final class AppModel: ObservableObject {
     private var transcriptionProcess: Process?
     private var transcriptionCancellationRequested = false
     private var asrPrepareProcess: Process?
+    private let capturePersistence: CaptureSelectionPersistence
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        capturePersistence = CaptureSelectionPersistence(defaults: defaults)
+        captureSelection = capturePersistence.loadSelection()
         refreshDevices()
         hotKeyManager.register()
-        Task {
-            await requestMicrophonePermission()
-            refreshMonitoring()
-        }
+        refreshPermissionPreflight()
+        refreshCaptureApplications()
         refreshSessions()
-        refreshRoutingChecks()
         refreshASRModelStatus()
         prepareASRModelIfNeeded()
     }
 
     func refreshDevices() {
         devices = AudioDeviceManager.inputDevices()
-
-        if selectedSystemDevice == nil {
-            selectedSystemDevice = devices.first { $0.name.localizedCaseInsensitiveContains("BlackHole") } ?? devices.first
-        }
-
-        if selectedMicDevice == nil {
+        let persistedUID = capturePersistence.loadMicrophoneUID()
+        if let persistedUID {
+            selectedMicDevice = devices.first { $0.uid == persistedUID }
+        } else if selectedMicDevice == nil {
             let defaultID = AudioDeviceManager.defaultInputDeviceID()
-            selectedMicDevice = devices.first { $0.id == defaultID } ?? devices.first
+            selectedMicDevice = devices.first { $0.id == defaultID }
         }
-
-        refreshMonitoring()
-        refreshRoutingChecks()
+        persistCaptureSelection()
     }
 
-    func refreshMonitoring() {
-        let microphoneUID = selectedMicDevice?.uid
+    func refreshAllCaptureState() {
+        refreshDevices()
+        refreshPermissionPreflight()
+        refreshCaptureApplications()
+    }
+
+    func refreshCaptureApplications() {
         Task {
+            guard systemAudioPermission == .granted else { return }
+            isCaptureLifecycleWorking = true
+            defer { isCaptureLifecycleWorking = false }
             do {
-                try await recorder.startMonitoring(
-                    selection: .allSystemAudio,
-                    microphoneUID: microphoneUID
+                availableCaptureApplications = try await recorder.refreshCaptureApplications()
+                resolvedCaptureSelection = CaptureSelectionResolver.resolve(
+                    selection: captureSelection,
+                    availableApplications: availableCaptureApplications,
+                    previousResolution: resolvedCaptureSelection
                 )
+                if !recorder.isRecording {
+                    await startMonitoringIfReady()
+                }
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func selectCaptureMode(_ mode: CaptureMode) {
+        guard sourceControlsEnabled else { return }
+        captureSelection.mode = mode
+        resolvedCaptureSelection = CaptureSelectionResolver.resolve(
+            selection: captureSelection,
+            availableApplications: availableCaptureApplications
+        )
+        persistCaptureSelection()
+        refreshCaptureApplications()
+    }
+
+    func selectCaptureApplication(bundleIdentifier: String) {
+        guard sourceControlsEnabled else { return }
+        captureSelection.selectedBundleIdentifier = bundleIdentifier
+        resolvedCaptureSelection = CaptureSelectionResolver.resolve(
+            selection: captureSelection,
+            availableApplications: availableCaptureApplications,
+            reconnect: true
+        )
+        persistCaptureSelection()
+        refreshCaptureApplications()
+    }
+
+    func selectMicrophone(_ device: AudioDevice?) {
+        guard sourceControlsEnabled else { return }
+        selectedMicDevice = device
+        persistCaptureSelection()
+        refreshCaptureApplications()
+    }
+
+    var sourceControlsEnabled: Bool {
+        !recorder.isRecording && !isCaptureLifecycleWorking
+    }
+
+    var captureReadiness: CaptureReadiness {
+        CaptureReadiness.evaluate(
+            permission: systemAudioPermission,
+            selection: captureSelection,
+            resolvedSelection: resolvedCaptureSelection,
+            microphoneAvailable: microphonePermission == .granted && selectedMicDevice != nil
+        )
+    }
+
+    var systemAudioSubtitle: String {
+        switch resolvedCaptureSelection {
+        case .allSystemAudio: "All System Audio"
+        case .application(let app): app.name
+        case .disconnected: "App audio disconnected"
+        }
+    }
+
+    func reconnectSelectedApplication() {
+        guard !isCaptureLifecycleWorking,
+              captureSelection.mode == .selectedApplication else { return }
+        Task {
+            isCaptureLifecycleWorking = true
+            defer { isCaptureLifecycleWorking = false }
+            do {
+                availableCaptureApplications = try await recorder.refreshCaptureApplications()
+                let resolved = CaptureSelectionResolver.resolve(
+                    selection: captureSelection,
+                    availableApplications: availableCaptureApplications,
+                    previousResolution: resolvedCaptureSelection,
+                    reconnect: true
+                )
+                guard case .application = resolved else {
+                    resolvedCaptureSelection = .disconnected(captureSelection.selectedBundleIdentifier ?? "")
+                    statusMessage = "Selected app unavailable"
+                    return
+                }
+                try await recorder.reconnect(selection: resolved)
+                resolvedCaptureSelection = resolved
                 statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
             } catch {
+                resolvedCaptureSelection = .disconnected(captureSelection.selectedBundleIdentifier ?? "")
                 statusMessage = error.localizedDescription
             }
         }
@@ -92,12 +183,16 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let microphoneUID = selectedMicDevice?.uid
         Task {
+            await requestPermissionsFromExplicitAction()
+            guard captureReadiness == .ready else {
+                statusMessage = readinessMessage
+                return
+            }
             do {
                 try await recorder.start(
-                    selection: .allSystemAudio,
-                    microphoneUID: microphoneUID,
+                    selection: resolvedCaptureSelection,
+                    microphoneUID: selectedMicDevice?.uid,
                     baseFolder: outputFolder
                 )
                 statusMessage = "Recording"
@@ -118,11 +213,16 @@ final class AppModel: ObservableObject {
         isRunningTestRecording = true
         lastHealthReport = nil
         Task {
-            let microphoneUID = selectedMicDevice?.uid
+            await requestPermissionsFromExplicitAction()
+            guard captureReadiness == .ready else {
+                isRunningTestRecording = false
+                statusMessage = readinessMessage
+                return
+            }
             do {
                 try await recorder.start(
-                    selection: .allSystemAudio,
-                    microphoneUID: microphoneUID,
+                    selection: resolvedCaptureSelection,
+                    microphoneUID: selectedMicDevice?.uid,
                     baseFolder: outputFolder,
                     folderPrefix: "test"
                 )
@@ -150,7 +250,6 @@ final class AppModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url {
             outputFolder = url
             refreshSessions()
-            refreshRoutingChecks()
         }
     }
 
@@ -462,50 +561,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func openAudioMIDISetup() {
-        NSWorkspace.shared.openApplication(
-            at: URL(fileURLWithPath: "/System/Applications/Utilities/Audio MIDI Setup.app"),
-            configuration: NSWorkspace.OpenConfiguration()
-        )
-    }
-
-    func refreshRoutingChecks() {
-        let outputDevices = AudioDeviceManager.outputDevices()
-        let blackHoleAvailable = devices.contains { $0.name.localizedCaseInsensitiveContains("BlackHole") }
-        let selectedSystemIsBlackHole = selectedSystemDevice?.name.localizedCaseInsensitiveContains("BlackHole") == true
-        let defaultOutput = outputDevices.first { $0.id == AudioDeviceManager.defaultOutputDeviceID() }
-        let defaultSystemOutput = outputDevices.first { $0.id == AudioDeviceManager.defaultSystemOutputDeviceID() }
-        let outputFolderWritable = FileManager.default.isWritableFile(atPath: outputFolder.path)
-
-        routingChecks = [
-            RoutingCheck(
-                title: "BlackHole device",
-                detail: blackHoleAvailable ? "BlackHole is installed and visible." : "Install or reload BlackHole 2ch.",
-                status: blackHoleAvailable ? .ok : .error
-            ),
-            RoutingCheck(
-                title: "System audio source",
-                detail: selectedSystemIsBlackHole ? "Recorder is listening to BlackHole." : "Select BlackHole 2ch as System audio.",
-                status: selectedSystemIsBlackHole ? .ok : .warning
-            ),
-            RoutingCheck(
-                title: "macOS output",
-                detail: defaultOutput?.name ?? "No default output device detected.",
-                status: (defaultOutput?.name.localizedCaseInsensitiveContains("Multi-Output") == true) ? .ok : .warning
-            ),
-            RoutingCheck(
-                title: "System alerts output",
-                detail: defaultSystemOutput?.name ?? "No system output device detected.",
-                status: (defaultSystemOutput?.name.localizedCaseInsensitiveContains("Multi-Output") == true) ? .ok : .warning
-            ),
-            RoutingCheck(
-                title: "Save folder",
-                detail: outputFolder.path,
-                status: outputFolderWritable ? .ok : .error
-            )
-        ]
-    }
-
     func toggleRecorderMicMute(source: String = "Button") {
         recorder.toggleMicMute()
         statusMessage = "\(source): recorder mic \(recorder.micMuted ? "muted" : "active")"
@@ -695,9 +750,95 @@ final class AppModel: ObservableObject {
         return line
     }
 
-    private func requestMicrophonePermission() async {
-        let granted = await AVCaptureDevice.requestAccess(for: .audio)
-        permissionMessage = granted ? "" : "Microphone permission is required in System Settings."
-        refreshRoutingChecks()
+    func requestSystemAudioPermission() {
+        Task { await requestPermissionsFromExplicitAction(requestSystemOnly: true) }
+    }
+
+    func requestMicrophonePermission() {
+        Task { await requestPermissionsFromExplicitAction(requestMicrophoneOnly: true) }
+    }
+
+    func openScreenCaptureSettings() {
+        CapturePermission.openScreenCaptureSettings()
+    }
+
+    func openMicrophoneSettings() {
+        CapturePermission.openMicrophoneSettings()
+    }
+
+    private func refreshPermissionPreflight() {
+        let screen = CapturePermission.screenCapturePreflight()
+        if screen == .granted || systemAudioPermission == .notDetermined {
+            systemAudioPermission = screen
+        }
+        microphonePermission = CapturePermission.microphonePreflight()
+    }
+
+    private func requestPermissionsFromExplicitAction(
+        requestSystemOnly: Bool = false,
+        requestMicrophoneOnly: Bool = false
+    ) async {
+        guard !isCaptureLifecycleWorking else { return }
+        isCaptureLifecycleWorking = true
+        defer { isCaptureLifecycleWorking = false }
+        refreshPermissionPreflight()
+        if !requestMicrophoneOnly {
+            switch systemAudioPermission {
+            case .notDetermined:
+                systemAudioPermission = CapturePermission.requestScreenCaptureAccess()
+            case .denied, .restricted:
+                CapturePermission.openScreenCaptureSettings()
+            case .granted:
+                break
+            }
+        }
+        if !requestSystemOnly {
+            switch microphonePermission {
+            case .notDetermined:
+                microphonePermission = await CapturePermission.requestMicrophoneAccess()
+            case .denied, .restricted:
+                CapturePermission.openMicrophoneSettings()
+            case .granted:
+                break
+            }
+        }
+        refreshPermissionPreflight()
+        if systemAudioPermission == .granted {
+            availableCaptureApplications = (try? await recorder.refreshCaptureApplications()) ?? availableCaptureApplications
+            resolvedCaptureSelection = CaptureSelectionResolver.resolve(
+                selection: captureSelection,
+                availableApplications: availableCaptureApplications,
+                previousResolution: resolvedCaptureSelection
+            )
+        }
+    }
+
+    private func startMonitoringIfReady() async {
+        guard !recorder.isRecording,
+              captureReadiness == .ready else { return }
+        do {
+            try await recorder.startMonitoring(
+                selection: resolvedCaptureSelection,
+                microphoneUID: selectedMicDevice?.uid
+            )
+            statusMessage = "Monitoring"
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private var readinessMessage: String {
+        switch captureReadiness {
+        case .ready: "Ready"
+        case .reconnectRequired: "Selected app unavailable"
+        case .blocked(let message): message
+        }
+    }
+
+    private func persistCaptureSelection() {
+        capturePersistence.save(
+            selection: captureSelection,
+            microphoneUID: selectedMicDevice?.uid
+        )
     }
 }

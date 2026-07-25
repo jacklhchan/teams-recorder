@@ -337,6 +337,10 @@ struct CaptureSessionEventState {
         return true
     }
 
+    mutating func clearSelectedApplicationDisconnect() {
+        hasReportedSelectedApplicationDisconnect = false
+    }
+
     mutating func recordMicrophoneAudio(at date: Date = Date()) {
         lastMicrophoneAudioAt = date
         hasReportedMicrophoneSilence = false
@@ -453,7 +457,7 @@ final class ScreenCaptureSource: NSObject {
         let output: ScreenCaptureStreamOutput
         let token: CaptureSessionToken
         let eventHandler: EventHandler
-        let selectedApplication: CaptureApplication?
+        var selectedApplication: CaptureApplication?
         let selectedMicrophoneUID: String?
         var eventState = CaptureSessionEventState()
 
@@ -493,6 +497,40 @@ final class ScreenCaptureSource: NSObject {
             onScreenWindowsOnly: false
         )
         return Self.captureApplications(from: content)
+    }
+
+    func reconnect(selection: ResolvedCaptureSelection) async throws {
+        guard case .application = selection,
+              let session = currentSession() else {
+            throw CaptureSourceError.selectedApplicationUnavailable
+        }
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: false
+            )
+            guard let display = Self.mainDisplay(in: content) else {
+                throw CaptureSourceError.noDisplay
+            }
+            let filter = try Self.makeFilter(
+                selection: selection,
+                content: content,
+                display: display
+            )
+            try await session.stream.updateContentFilter(filter)
+            guard isSessionActive(session) else {
+                throw CaptureSourceError.streamStartCancelled
+            }
+            session.selectedApplication = Self.selectedApplication(in: selection)
+            session.eventState.clearSelectedApplicationDisconnect()
+        } catch let error as CaptureSourceError {
+            throw error
+        } catch {
+            throw CaptureErrorMapper.sourceError(
+                for: CaptureErrorMapper.event(for: error as NSError)
+            )
+        }
     }
 
     func start(
@@ -664,9 +702,12 @@ final class ScreenCaptureSource: NSObject {
     private static func captureApplications(
         from content: SCShareableContent
     ) -> [CaptureApplication] {
-        content.applications.compactMap { application in
+        var seenBundleIdentifiers = Set<String>()
+        return content.applications.compactMap { application in
             let bundleIdentifier = application.bundleIdentifier
-            guard !bundleIdentifier.isEmpty else {
+            guard !bundleIdentifier.isEmpty,
+                  application.processID != getpid(),
+                  seenBundleIdentifiers.insert(bundleIdentifier).inserted else {
                 return nil
             }
             return CaptureApplication(

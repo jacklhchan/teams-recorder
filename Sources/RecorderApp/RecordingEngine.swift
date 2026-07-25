@@ -2,6 +2,7 @@ import Foundation
 
 protocol CaptureSourceProtocol: AnyObject {
     func refreshContent() async throws -> [CaptureApplication]
+    func reconnect(selection: ResolvedCaptureSelection) async throws
     func start(
         selection: ResolvedCaptureSelection,
         microphoneUID: String?,
@@ -52,6 +53,7 @@ final class RecordingEngine: ObservableObject {
     private var observedMixerLateFrames = 0
     private var monitoringTransition: MonitoringTransition?
     private var recordingStartTransition: RecordingStartTransition?
+    private var reconnectTransition: ReconnectTransition?
 
     init(
         captureSource: CaptureSourceProtocol = ScreenCaptureSource(),
@@ -183,6 +185,55 @@ final class RecordingEngine: ObservableObject {
         guard !isRecording else { return }
         await stopActiveSourceSession()
         resetMonitoringState()
+    }
+
+    func refreshCaptureApplications() async throws -> [CaptureApplication] {
+        try await captureSource.refreshContent()
+    }
+
+    func reconnect(selection: ResolvedCaptureSelection) async throws {
+        guard isMonitoring,
+              let sourceSessionID,
+              case .application = selection else {
+            throw CaptureSourceError.selectedApplicationUnavailable
+        }
+
+        if let transition = reconnectTransition,
+           transition.sourceSessionID == sourceSessionID {
+            return try await transition.task.value
+        }
+
+        let transitionID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw CaptureSourceError.streamStartCancelled }
+            try await self.captureSource.reconnect(selection: selection)
+            guard self.sourceSessionID == sourceSessionID,
+                  self.callbackGate.isActive(sessionID: sourceSessionID),
+                  self.isMonitoring,
+                  !self.isStopping else {
+                throw CaptureSourceError.streamStartCancelled
+            }
+            self.activeSelection = selection
+            self.isSystemCaptureConnected = true
+            self.mixer.setSystemSourceConnected(true)
+            self.captureStatus = nil
+        }
+        reconnectTransition = ReconnectTransition(
+            id: transitionID,
+            sourceSessionID: sourceSessionID,
+            task: task
+        )
+
+        do {
+            try await task.value
+            clearReconnectTransition(id: transitionID)
+        } catch {
+            clearReconnectTransition(id: transitionID)
+            if self.sourceSessionID == sourceSessionID {
+                disconnectSystemCapture()
+            }
+            throw error
+        }
     }
 
     @discardableResult
@@ -528,6 +579,11 @@ final class RecordingEngine: ObservableObject {
         recordingStartTransition = nil
     }
 
+    private func clearReconnectTransition(id: UUID) {
+        guard reconnectTransition?.id == id else { return }
+        reconnectTransition = nil
+    }
+
     private func applyStartFailure(_ error: Error) {
         if let sourceError = error as? CaptureSourceError {
             switch sourceError {
@@ -633,6 +689,12 @@ private struct MonitoringTransition {
 private struct RecordingStartTransition {
     let id: UUID
     let task: Task<URL, Error>
+}
+
+private struct ReconnectTransition {
+    let id: UUID
+    let sourceSessionID: UUID
+    let task: Task<Void, Error>
 }
 
 private struct RecordingCallbackTicket {

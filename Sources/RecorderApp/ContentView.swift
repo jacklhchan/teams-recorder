@@ -6,7 +6,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             HeaderView(recorder: model.recorder, statusMessage: model.statusMessage) {
-                model.refreshDevices()
+                model.refreshAllCaptureState()
             }
             Divider()
             ScrollView {
@@ -15,7 +15,7 @@ struct ContentView: View {
                     deviceSection
                     MeterSectionView(
                         recorder: model.recorder,
-                        systemDeviceName: model.selectedSystemDevice?.name,
+                        systemDeviceName: model.systemAudioSubtitle,
                         micDeviceName: model.selectedMicDevice?.name
                     )
                     LiveAudioHealthView(recorder: model.recorder)
@@ -35,11 +35,6 @@ struct ContentView: View {
                     if let report = model.lastHealthReport {
                         HealthSummaryView(report: report)
                     }
-                    RoutingAssistantView(
-                        checks: model.routingChecks,
-                        refresh: model.refreshRoutingChecks,
-                        openAudioMIDISetup: model.openAudioMIDISetup
-                    )
                     ASRModelView(
                         isPreparing: model.isPreparingASRModel,
                         isReady: model.asrModelReady,
@@ -91,58 +86,151 @@ struct ContentView: View {
     }
 
     private var permissionRow: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !model.permissionMessage.isEmpty {
-                Label(model.permissionMessage, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-            } else {
-                Label("Microphone permission ready", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            }
-        }
+        PermissionStatusView(
+            systemPermission: model.systemAudioPermission,
+            microphonePermission: model.microphonePermission,
+            requestSystem: model.requestSystemAudioPermission,
+            requestMicrophone: model.requestMicrophonePermission,
+            openSystemSettings: model.openScreenCaptureSettings,
+            openMicrophoneSettings: model.openMicrophoneSettings
+        )
         .padding(14)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var deviceSection: some View {
-        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
-            GridRow {
-                Label("System audio", systemImage: "waveform")
-                    .font(.headline)
-                Picker("System audio", selection: $model.selectedSystemDevice) {
-                    ForEach(model.devices) { device in
-                        Text(device.displayName).tag(Optional(device))
-                    }
-                }
-                .onChange(of: model.selectedSystemDevice) { _, _ in
-                    model.refreshMonitoring()
-                }
-                .labelsHidden()
-                .frame(minWidth: 380)
-                Text(model.selectedSystemDevice?.channelText ?? "No input")
-                    .foregroundStyle(.secondary)
-            }
-
-            GridRow {
-                Label("Microphone", systemImage: "mic")
-                    .font(.headline)
-                Picker("Microphone", selection: $model.selectedMicDevice) {
-                    ForEach(model.devices) { device in
-                        Text(device.displayName).tag(Optional(device))
-                    }
-                }
-                .onChange(of: model.selectedMicDevice) { _, _ in
-                    model.refreshMonitoring()
-                }
-                .labelsHidden()
-                .frame(minWidth: 380)
-                Text(model.selectedMicDevice?.channelText ?? "No input")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .disabled(model.recorder.isRecording)
+        CaptureControlsView(model: model)
     }
 
+}
+
+private struct PermissionStatusView: View {
+    let systemPermission: CapturePermissionState
+    let microphonePermission: CapturePermissionState
+    let requestSystem: () -> Void
+    let requestMicrophone: () -> Void
+    let openSystemSettings: () -> Void
+    let openMicrophoneSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            row(
+                CaptureStatusRowMapper.row(for: systemPermission),
+                icon: "rectangle.inset.filled.badge.record",
+                action: systemPermission == .denied || systemPermission == .restricted ? openSystemSettings : requestSystem
+            )
+            row(
+                microphoneRow,
+                icon: "mic",
+                action: microphonePermission == .denied || microphonePermission == .restricted ? openMicrophoneSettings : requestMicrophone
+            )
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var microphoneRow: CaptureStatusRow {
+        switch microphonePermission {
+        case .granted: .init(title: "Microphone", message: "Permission ready", action: .none)
+        case .notDetermined: .init(title: "Microphone", message: "Permission is required to record microphone audio.", action: .grant)
+        case .denied, .restricted: .init(title: "Microphone", message: "Permission denied. Open System Settings, then retry.", action: .openSettings)
+        }
+    }
+
+    private func row(_ row: CaptureStatusRow, icon: String, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(row.title).font(.callout.weight(.medium))
+                Text(row.message).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if row.action != .none {
+                Button(row.action == .openSettings ? "Open System Settings" : "Grant Access", action: action)
+                    .buttonStyle(.bordered)
+            }
+        }
+    }
+}
+
+private struct CaptureControlsView: View {
+    @ObservedObject var model: AppModel
+    @State private var applicationSearch = ""
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
+            GridRow {
+                Label("Capture", systemImage: "waveform")
+                    .font(.headline)
+                Picker("Capture", selection: Binding(
+                    get: { model.captureSelection.mode },
+                    set: { model.selectCaptureMode($0) }
+                )) {
+                    Text("All System Audio").tag(CaptureMode.allSystemAudio)
+                    Text("Selected App").tag(CaptureMode.selectedApplication)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("capture-mode-picker")
+                .frame(minWidth: 380)
+                .disabled(!model.sourceControlsEnabled)
+            }
+
+            if model.captureSelection.mode == .selectedApplication {
+                GridRow {
+                    Label("Application", systemImage: "app")
+                        .font(.headline)
+                    Menu {
+                        TextField("Search applications", text: $applicationSearch)
+                        Divider()
+                        ForEach(filteredApplications) { application in
+                            Button(application.name) {
+                                model.selectCaptureApplication(bundleIdentifier: application.bundleIdentifier)
+                            }
+                        }
+                    } label: {
+                        Text(selectedApplicationName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .frame(minWidth: 330, alignment: .leading)
+                    .disabled(!model.sourceControlsEnabled)
+                    Button { model.refreshCaptureApplications() } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.bordered).help("Refresh applications")
+                    if model.captureReadiness == .reconnectRequired {
+                        Button { model.reconnectSelectedApplication() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
+                            .buttonStyle(.bordered).help("Reconnect selected application")
+                            .disabled(model.isCaptureLifecycleWorking)
+                    }
+                }
+            }
+
+            GridRow {
+                Label("Microphone", systemImage: "mic").font(.headline)
+                Picker("Microphone", selection: Binding(
+                    get: { model.selectedMicDevice },
+                    set: { model.selectMicrophone($0) }
+                )) {
+                    Text("Choose microphone").tag(Optional<AudioDevice>.none)
+                    ForEach(model.devices) { device in Text(device.displayName).tag(Optional(device)) }
+                }
+                .labelsHidden().frame(minWidth: 380)
+                .disabled(!model.sourceControlsEnabled)
+                Text(model.selectedMicDevice?.channelText ?? "Unavailable").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var filteredApplications: [CaptureApplication] {
+        let query = applicationSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? model.availableCaptureApplications : model.availableCaptureApplications.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var selectedApplicationName: String {
+        if case .application(let application) = model.resolvedCaptureSelection { return application.name }
+        return "Choose an application"
+    }
 }
 
 private struct HeaderView: View {
@@ -199,7 +287,7 @@ private struct MeterSectionView: View {
         VStack(spacing: 14) {
             AudioMeterView(
                 title: "System Audio",
-                subtitle: systemDeviceName ?? "Select BlackHole 2ch",
+                subtitle: systemDeviceName ?? "All System Audio",
                 level: recorder.systemLevel,
                 tint: .cyan
             )
@@ -352,60 +440,6 @@ private struct LiveAudioHealthView: View {
         case .warning: .orange
         case .neutral: .secondary
         }
-    }
-}
-
-private struct RoutingAssistantView: View {
-    let checks: [RoutingCheck]
-    let refresh: () -> Void
-    let openAudioMIDISetup: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("Routing Assistant", systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    refresh()
-                } label: {
-                    Label("Check", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                Button {
-                    openAudioMIDISetup()
-                } label: {
-                    Label("Audio MIDI", systemImage: "slider.horizontal.3")
-                }
-                .buttonStyle(.bordered)
-            }
-
-            VStack(spacing: 8) {
-                ForEach(checks) { check in
-                    HStack(spacing: 10) {
-                        Image(systemName: check.status.iconName)
-                            .foregroundStyle(check.status.color)
-                            .frame(width: 18)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(check.title)
-                                .font(.callout.weight(.medium))
-                            Text(check.detail)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .truncationMode(.middle)
-                        }
-                        Spacer()
-                    }
-                }
-            }
-        }
-        .padding(14)
-        .background(.background, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.separator.opacity(0.55), lineWidth: 1)
-        )
     }
 }
 
@@ -856,7 +890,7 @@ private struct FooterView: View {
             HStack {
                 Label("Writes one combined recording.m4a file", systemImage: "doc.badge.gearshape")
                 Spacer()
-                Label("BlackHole Multi-Output Device recommended", systemImage: "speaker.wave.2")
+                Label("Captures without changing Mac output", systemImage: "speaker.wave.2")
             }
             .foregroundStyle(.secondary)
         }

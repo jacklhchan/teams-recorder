@@ -243,48 +243,56 @@ enum SampleBufferConverter {
         guard readStatus == noErr else {
             throw SampleBufferConverterError.audioBufferListReadFailed
         }
-
-        let audioBuffers = UnsafeMutableAudioBufferListPointer(bufferList)
-        let expectedBufferCount = layout.isInterleaved ? 1 : layout.channelCount
-        guard audioBuffers.count == expectedBufferCount else {
-            throw SampleBufferConverterError.invalidPCMLayout
+        guard let retainedBlockBuffer else {
+            throw SampleBufferConverterError.audioBufferListUnavailable
         }
 
-        var channels = Array(
-            repeating: [Float](),
-            count: layout.channelCount
-        )
-        for channelIndex in channels.indices {
-            channels[channelIndex].reserveCapacity(frameCount)
-        }
-
-        if layout.isInterleaved {
-            let buffer = audioBuffers[0]
-            guard Int(buffer.mNumberChannels) == layout.channelCount else {
+        return try withExtendedLifetime(retainedBlockBuffer) {
+            let audioBuffers = UnsafeMutableAudioBufferListPointer(bufferList)
+            let expectedBufferCount = layout.isInterleaved ? 1 : layout.channelCount
+            guard audioBuffers.count == expectedBufferCount else {
                 throw SampleBufferConverterError.invalidPCMLayout
             }
-            try decodeInterleaved(
-                buffer,
-                layout: layout,
-                frameCount: frameCount,
-                into: &channels
+
+            var channels = Array(
+                repeating: [Float](),
+                count: layout.channelCount
             )
-        } else {
-            for channelIndex in 0..<layout.channelCount {
-                let buffer = audioBuffers[channelIndex]
-                guard buffer.mNumberChannels == 1 else {
+            for channelIndex in channels.indices {
+                channels[channelIndex].reserveCapacity(frameCount)
+            }
+
+            if layout.isInterleaved {
+                let buffer = audioBuffers[0]
+                guard Int(buffer.mNumberChannels) == layout.channelCount else {
                     throw SampleBufferConverterError.invalidPCMLayout
                 }
-                try decodePlanar(
+                try decodeInterleaved(
                     buffer,
                     layout: layout,
                     frameCount: frameCount,
-                    into: &channels[channelIndex]
+                    into: &channels
                 )
+            } else {
+                for channelIndex in 0..<layout.channelCount {
+                    let buffer = audioBuffers[channelIndex]
+                    guard buffer.mNumberChannels == 1 else {
+                        throw SampleBufferConverterError.invalidPCMLayout
+                    }
+                    try decodePlanar(
+                        buffer,
+                        layout: layout,
+                        frameCount: frameCount,
+                        into: &channels[channelIndex]
+                    )
+                }
             }
-        }
 
-        return OwnedPCMBuffer(sampleRate: layout.sampleRate, channels: channels)
+            return OwnedPCMBuffer(
+                sampleRate: layout.sampleRate,
+                channels: channels
+            )
+        }
     }
 
     private static func decodeInterleaved(

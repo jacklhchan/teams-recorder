@@ -1,10 +1,164 @@
 import AVFoundation
 import CoreMedia
+import Foundation
 import ScreenCaptureKit
 import XCTest
 @testable import RecorderApp
 
 final class NativeAudioCaptureHardeningTests: XCTestCase {
+    func testStoppingSessionRejectsReplacementUntilCleanupFinishes() throws {
+        var lifecycle = CaptureLifecycleCoordinator()
+        let streamA = NSObject()
+        let tokenA = CaptureSessionToken(
+            generation: 1,
+            streamIdentity: ObjectIdentifier(streamA)
+        )
+        let reservationA = try lifecycle.reserveStart()
+
+        XCTAssertTrue(lifecycle.activate(reservation: reservationA, token: tokenA))
+        XCTAssertEqual(lifecycle.beginStop(expected: tokenA), tokenA)
+        XCTAssertThrowsError(try lifecycle.reserveStart()) { error in
+            XCTAssertEqual(error as? CaptureSourceError, .streamAlreadyRunning)
+        }
+
+        lifecycle.finishStop(tokenA)
+
+        let reservationB = try lifecycle.reserveStart()
+        XCTAssertNotEqual(reservationA, reservationB)
+    }
+
+    func testReplacementWaitsForInFlightCallbackDrain() throws {
+        var lifecycle = CaptureLifecycleCoordinator()
+        let gate = CaptureSessionGate()
+        let streamA = NSObject()
+        let tokenA = gate.activate(streamIdentity: ObjectIdentifier(streamA))
+        let reservationA = try lifecycle.reserveStart()
+        XCTAssertTrue(lifecycle.activate(reservation: reservationA, token: tokenA))
+
+        let delivery = SerialCaptureDelivery(
+            token: tokenA,
+            gate: gate,
+            label: "test.lifecycle.drain"
+        )
+        let callbackStarted = DispatchSemaphore(value: 0)
+        let releaseCallback = DispatchSemaphore(value: 0)
+        delivery.enqueue(streamIdentity: ObjectIdentifier(streamA)) {
+            callbackStarted.signal()
+            _ = releaseCallback.wait(timeout: .now() + 2)
+        }
+        XCTAssertEqual(callbackStarted.wait(timeout: .now() + 2), .success)
+
+        XCTAssertEqual(lifecycle.beginStop(expected: tokenA), tokenA)
+        gate.deactivate(tokenA)
+        XCTAssertThrowsError(try lifecycle.reserveStart()) { error in
+            XCTAssertEqual(error as? CaptureSourceError, .streamAlreadyRunning)
+        }
+
+        releaseCallback.signal()
+        delivery.drain()
+        lifecycle.finishStop(tokenA)
+        _ = try lifecycle.reserveStart()
+    }
+
+    func testSuspendedStartContinuationCannotStopReplacementSession() throws {
+        var lifecycle = CaptureLifecycleCoordinator()
+        let streamA = NSObject()
+        let streamB = NSObject()
+        let tokenA = CaptureSessionToken(
+            generation: 1,
+            streamIdentity: ObjectIdentifier(streamA)
+        )
+        let tokenB = CaptureSessionToken(
+            generation: 2,
+            streamIdentity: ObjectIdentifier(streamB)
+        )
+        let reservationA = try lifecycle.reserveStart()
+        XCTAssertTrue(lifecycle.activate(reservation: reservationA, token: tokenA))
+
+        XCTAssertEqual(lifecycle.beginStop(expected: tokenA), tokenA)
+        lifecycle.finishStop(tokenA)
+        let reservationB = try lifecycle.reserveStart()
+        XCTAssertTrue(lifecycle.activate(reservation: reservationB, token: tokenB))
+
+        XCTAssertNil(lifecycle.beginStop(expected: tokenA))
+        XCTAssertTrue(lifecycle.isActive(tokenB))
+    }
+
+    func testCancelledStartingReservationCannotReplaceNewActiveSession() throws {
+        var lifecycle = CaptureLifecycleCoordinator()
+        let streamA = NSObject()
+        let streamB = NSObject()
+        let tokenA = CaptureSessionToken(
+            generation: 1,
+            streamIdentity: ObjectIdentifier(streamA)
+        )
+        let tokenB = CaptureSessionToken(
+            generation: 2,
+            streamIdentity: ObjectIdentifier(streamB)
+        )
+        let reservationA = try lifecycle.reserveStart()
+        lifecycle.cancelStart(reservationA)
+
+        let reservationB = try lifecycle.reserveStart()
+        XCTAssertTrue(lifecycle.activate(reservation: reservationB, token: tokenB))
+        XCTAssertFalse(lifecycle.activate(reservation: reservationA, token: tokenA))
+        XCTAssertTrue(lifecycle.isActive(tokenB))
+    }
+
+    func testCancelledStartBlocksReplacementUntilItsCleanupFinishes() throws {
+        var lifecycle = CaptureLifecycleCoordinator()
+        let reservationA = try lifecycle.reserveStart()
+
+        lifecycle.cancelCurrentStart()
+
+        XCTAssertThrowsError(try lifecycle.reserveStart()) { error in
+            XCTAssertEqual(error as? CaptureSourceError, .streamAlreadyRunning)
+        }
+
+        lifecycle.cancelStart(reservationA)
+        _ = try lifecycle.reserveStart()
+    }
+
+    func testSelectedApplicationDisconnectIsLatchedPerSession() {
+        var events = CaptureSessionEventState()
+
+        XCTAssertTrue(events.markSelectedApplicationDisconnected())
+        XCTAssertFalse(events.markSelectedApplicationDisconnected())
+    }
+
+    func testStaleMicrophoneHealthEventCannotReachReplacementSession() {
+        let gate = CaptureSessionGate()
+        let streamA = NSObject()
+        let streamB = NSObject()
+        let tokenA = gate.activate(streamIdentity: ObjectIdentifier(streamA))
+        let deliveryA = SerialCaptureDelivery(
+            token: tokenA,
+            gate: gate,
+            label: "test.stale.health"
+        )
+        let state = LockedDeliveryState()
+        var eventState = CaptureSessionEventState()
+        let audioTime = Date(timeIntervalSince1970: 10)
+        eventState.recordMicrophoneAudio(at: audioTime)
+        let pendingEvent = eventState.microphoneHealthEvent(
+            now: audioTime.addingTimeInterval(3),
+            silenceThreshold: 2,
+            isDeviceAvailable: true
+        )
+
+        gate.deactivate(tokenA)
+        let tokenB = gate.activate(streamIdentity: ObjectIdentifier(streamB))
+        deliveryA.enqueue(streamIdentity: ObjectIdentifier(streamA)) {
+            if pendingEvent == .microphoneSilence {
+                state.completeOnly()
+            }
+        }
+        deliveryA.drain()
+
+        XCTAssertEqual(state.completed, 0)
+        XCTAssertTrue(gate.accepts(tokenB, streamIdentity: ObjectIdentifier(streamB)))
+    }
+
     func testOldGenerationIsRejectedAfterNewStreamActivation() {
         let gate = CaptureSessionGate()
         let streamA = NSObject()
@@ -117,6 +271,78 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
         XCTAssertLessThanOrEqual(abs(Int64(totalFrames) - timestampDuration), 1)
     }
 
+    func testFortyFourPointOneKChunkedAndSingleToneShareOutputPrefix() throws {
+        let sampleRate = 44_100.0
+        let sampleCount = 4_410
+        let samples = (0..<sampleCount).map { index in
+            Float(sin(2 * Double.pi * 440 * Double(index) / sampleRate) * 0.5)
+        }
+        let singleResampler = PersistentAudioResampler(source: .microphone)
+        let single = try XCTUnwrap(singleResampler.process(OwnedAudioPacket(
+            pcm: OwnedPCMBuffer(sampleRate: sampleRate, channels: [samples]),
+            presentationTime: .zero
+        )))
+
+        let chunkedResampler = PersistentAudioResampler(source: .microphone)
+        var chunkedSamples: [Float] = []
+        var previousEnd: Int64?
+        for start in stride(from: 0, to: sampleCount, by: 441) {
+            let end = min(start + 441, sampleCount)
+            let block = try XCTUnwrap(chunkedResampler.process(OwnedAudioPacket(
+                pcm: OwnedPCMBuffer(
+                    sampleRate: sampleRate,
+                    channels: [Array(samples[start..<end])]
+                ),
+                presentationTime: CMTime(
+                    value: CMTimeValue(start),
+                    timescale: CMTimeScale(sampleRate)
+                )
+            )))
+            if let previousEnd {
+                XCTAssertEqual(block.startFrame, previousEnd)
+            }
+            previousEnd = block.startFrame + Int64(block.frameCount)
+            chunkedSamples.append(contentsOf: block.left)
+        }
+
+        let commonCount = min(single.left.count, chunkedSamples.count)
+        // AVAudioConverter retains an unflushed, chunk-size-dependent tail.
+        // The emitted common prefix must still be independent of chunking.
+        XCTAssertGreaterThan(commonCount, 4_000)
+        for index in 0..<commonCount {
+            XCTAssertEqual(single.left[index], chunkedSamples[index], accuracy: 0.000_1)
+        }
+    }
+
+    func testForwardPTSDiscontinuityReanchorsOutputCursor() throws {
+        let resampler = PersistentAudioResampler(source: .system)
+        let first = try XCTUnwrap(resampler.process(OwnedAudioPacket(
+            pcm: OwnedPCMBuffer(sampleRate: 48_000, channels: [[0, 0, 0, 0]]),
+            presentationTime: .zero
+        )))
+        let second = try XCTUnwrap(resampler.process(OwnedAudioPacket(
+            pcm: OwnedPCMBuffer(sampleRate: 48_000, channels: [[1, 1]]),
+            presentationTime: CMTime(value: 48_000, timescale: 48_000)
+        )))
+
+        XCTAssertEqual(first.startFrame, 0)
+        XCTAssertEqual(second.startFrame, 48_000)
+    }
+
+    func testBackwardPTSDiscontinuityReanchorsOutputCursor() throws {
+        let resampler = PersistentAudioResampler(source: .system)
+        _ = try XCTUnwrap(resampler.process(OwnedAudioPacket(
+            pcm: OwnedPCMBuffer(sampleRate: 48_000, channels: [[0, 0, 0, 0]]),
+            presentationTime: CMTime(value: 48_000, timescale: 48_000)
+        )))
+        let rewound = try XCTUnwrap(resampler.process(OwnedAudioPacket(
+            pcm: OwnedPCMBuffer(sampleRate: 48_000, channels: [[1, 1]]),
+            presentationTime: CMTime(value: 24_000, timescale: 48_000)
+        )))
+
+        XCTAssertEqual(rewound.startFrame, 24_000)
+    }
+
     func testFortyEightKFastPathPreservesSamplesAndFrameCount() throws {
         let resampler = PersistentAudioResampler(source: .system)
         let packet = OwnedAudioPacket(
@@ -132,6 +358,37 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
         XCTAssertEqual(block.startFrame, 48_000)
         XCTAssertEqual(block.left, packet.pcm.channels[0])
         XCTAssertEqual(block.right, packet.pcm.channels[1])
+    }
+
+    func testCopyDecodesSyntheticInterleavedInt16SampleBuffer() throws {
+        let presentationTime = CMTime(value: 96_000, timescale: 48_000)
+        let sampleBuffer = try makeInterleavedInt16SampleBuffer(
+            samples: [
+                -32_768, 32_767,
+                16_384, -16_384,
+                0, 8_192
+            ],
+            channelCount: 2,
+            sampleRate: 48_000,
+            presentationTime: presentationTime
+        )
+
+        let packet = try SampleBufferConverter.copy(sampleBuffer)
+
+        XCTAssertEqual(packet.presentationTime, presentationTime)
+        XCTAssertEqual(packet.pcm.sampleRate, 48_000)
+        XCTAssertEqual(packet.pcm.channels.count, 2)
+        XCTAssertEqual(packet.pcm.channels[0].count, 3)
+        XCTAssertEqual(packet.pcm.channels[0][0], -1, accuracy: 0.000_001)
+        XCTAssertEqual(packet.pcm.channels[0][1], 0.5, accuracy: 0.000_001)
+        XCTAssertEqual(packet.pcm.channels[0][2], 0, accuracy: 0.000_001)
+        XCTAssertEqual(
+            packet.pcm.channels[1][0],
+            Float(32_767.0 / 32_768.0),
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(packet.pcm.channels[1][1], -0.5, accuracy: 0.000_001)
+        XCTAssertEqual(packet.pcm.channels[1][2], 0.25, accuracy: 0.000_001)
     }
 
     func testAlignedHighTwentyFourInThirtyTwoIsRejected() {
@@ -432,6 +689,98 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
             mReserved: 0
         )
     }
+
+    private func makeInterleavedInt16SampleBuffer(
+        samples: [Int16],
+        channelCount: UInt32,
+        sampleRate: Double,
+        presentationTime: CMTime
+    ) throws -> CMSampleBuffer {
+        XCTAssertEqual(samples.count % Int(channelCount), 0)
+        var format = makePCMFormat(
+            sampleRate: sampleRate,
+            channels: channelCount,
+            bitsPerChannel: 16,
+            bytesPerFrame: channelCount * 2,
+            flags: UInt32(kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked)
+        )
+        var formatDescription: CMAudioFormatDescription?
+        let formatStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &format,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &formatDescription
+        )
+        guard formatStatus == noErr, let formatDescription else {
+            throw SyntheticSampleBufferError.creationFailed(formatStatus)
+        }
+
+        let bytes = samples.flatMap { sample -> [UInt8] in
+            let littleEndian = UInt16(bitPattern: sample).littleEndian
+            return [
+                UInt8(truncatingIfNeeded: littleEndian),
+                UInt8(truncatingIfNeeded: littleEndian >> 8)
+            ]
+        }
+        var blockBuffer: CMBlockBuffer?
+        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: bytes.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: bytes.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard blockStatus == kCMBlockBufferNoErr, let blockBuffer else {
+            throw SyntheticSampleBufferError.creationFailed(blockStatus)
+        }
+        let replaceStatus = bytes.withUnsafeBytes { rawBuffer in
+            CMBlockBufferReplaceDataBytes(
+                with: rawBuffer.baseAddress!,
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: bytes.count
+            )
+        }
+        guard replaceStatus == kCMBlockBufferNoErr else {
+            throw SyntheticSampleBufferError.creationFailed(replaceStatus)
+        }
+
+        let frameCount = samples.count / Int(channelCount)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
+            presentationTimeStamp: presentationTime,
+            decodeTimeStamp: .invalid
+        )
+        var sampleSize = Int(format.mBytesPerFrame)
+        var sampleBuffer: CMSampleBuffer?
+        let sampleStatus = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: formatDescription,
+            sampleCount: frameCount,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &sampleSize,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sampleStatus == noErr, let sampleBuffer else {
+            throw SyntheticSampleBufferError.creationFailed(sampleStatus)
+        }
+        return sampleBuffer
+    }
+}
+
+private enum SyntheticSampleBufferError: Error {
+    case creationFailed(OSStatus)
 }
 
 private final class LockedDeliveryState {

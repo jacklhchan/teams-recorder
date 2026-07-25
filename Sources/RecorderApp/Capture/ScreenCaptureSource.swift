@@ -248,20 +248,145 @@ struct CaptureSessionToken: Equatable {
     let streamIdentity: ObjectIdentifier
 }
 
+struct CaptureStartReservation: Equatable {
+    fileprivate let generation: UInt64
+}
+
+struct CaptureLifecycleCoordinator {
+    private enum State: Equatable {
+        case idle
+        case starting(CaptureStartReservation)
+        case cancellingStart(CaptureStartReservation)
+        case active(CaptureSessionToken)
+        case stopping(CaptureSessionToken)
+    }
+
+    private var state: State = .idle
+    private var nextReservationGeneration: UInt64 = 0
+
+    mutating func reserveStart() throws -> CaptureStartReservation {
+        guard state == .idle else {
+            throw CaptureSourceError.streamAlreadyRunning
+        }
+        nextReservationGeneration &+= 1
+        let reservation = CaptureStartReservation(
+            generation: nextReservationGeneration
+        )
+        state = .starting(reservation)
+        return reservation
+    }
+
+    mutating func activate(
+        reservation: CaptureStartReservation,
+        token: CaptureSessionToken
+    ) -> Bool {
+        guard state == .starting(reservation) else {
+            return false
+        }
+        state = .active(token)
+        return true
+    }
+
+    mutating func cancelStart(_ reservation: CaptureStartReservation) {
+        guard state == .starting(reservation) ||
+                state == .cancellingStart(reservation) else {
+            return
+        }
+        state = .idle
+    }
+
+    mutating func cancelCurrentStart() {
+        guard case let .starting(reservation) = state else { return }
+        state = .cancellingStart(reservation)
+    }
+
+    mutating func beginStop(
+        expected token: CaptureSessionToken?
+    ) -> CaptureSessionToken? {
+        guard case let .active(activeToken) = state,
+              token == nil || token == activeToken else {
+            return nil
+        }
+        state = .stopping(activeToken)
+        return activeToken
+    }
+
+    @discardableResult
+    mutating func finishStop(_ token: CaptureSessionToken) -> Bool {
+        guard state == .stopping(token) else { return false }
+        state = .idle
+        return true
+    }
+
+    func isActive(_ token: CaptureSessionToken) -> Bool {
+        state == .active(token)
+    }
+}
+
+struct CaptureSessionEventState {
+    private var lastMicrophoneAudioAt: Date?
+    private var hasReportedMicrophoneSilence = false
+    private var hasReportedMicrophoneDisconnect = false
+    private var hasReportedSelectedApplicationDisconnect = false
+
+    mutating func markSelectedApplicationDisconnected() -> Bool {
+        guard !hasReportedSelectedApplicationDisconnect else {
+            return false
+        }
+        hasReportedSelectedApplicationDisconnect = true
+        return true
+    }
+
+    mutating func recordMicrophoneAudio(at date: Date = Date()) {
+        lastMicrophoneAudioAt = date
+        hasReportedMicrophoneSilence = false
+    }
+
+    mutating func microphoneHealthEvent(
+        now: Date,
+        silenceThreshold: TimeInterval,
+        isDeviceAvailable: Bool
+    ) -> CaptureEvent? {
+        guard isDeviceAvailable else {
+            guard !hasReportedMicrophoneDisconnect else { return nil }
+            hasReportedMicrophoneDisconnect = true
+            return .microphoneUnavailable
+        }
+
+        guard let lastMicrophoneAudioAt,
+              now.timeIntervalSince(lastMicrophoneAudioAt) >= silenceThreshold,
+              !hasReportedMicrophoneSilence else {
+            return nil
+        }
+        hasReportedMicrophoneSilence = true
+        return .microphoneSilence
+    }
+}
+
 final class CaptureSessionGate {
     private let lock = NSLock()
     private var nextGeneration: UInt64 = 0
     private var activeToken: CaptureSessionToken?
 
-    func activate(streamIdentity: ObjectIdentifier) -> CaptureSessionToken {
+    func issueToken(streamIdentity: ObjectIdentifier) -> CaptureSessionToken {
         lock.lock()
         defer { lock.unlock() }
         nextGeneration &+= 1
-        let token = CaptureSessionToken(
+        return CaptureSessionToken(
             generation: nextGeneration,
             streamIdentity: streamIdentity
         )
+    }
+
+    func activate(_ token: CaptureSessionToken) {
+        lock.lock()
         activeToken = token
+        lock.unlock()
+    }
+
+    func activate(streamIdentity: ObjectIdentifier) -> CaptureSessionToken {
+        let token = issueToken(streamIdentity: streamIdentity)
+        activate(token)
         return token
     }
 
@@ -330,6 +455,7 @@ final class ScreenCaptureSource: NSObject {
         let eventHandler: EventHandler
         let selectedApplication: CaptureApplication?
         let selectedMicrophoneUID: String?
+        var eventState = CaptureSessionEventState()
 
         init(
             stream: SCStream,
@@ -359,11 +485,7 @@ final class ScreenCaptureSource: NSObject {
         qos: .userInitiated
     )
     private var activeSession: ActiveSession?
-    private var isStarting = false
-    private var lifecycleEpoch: UInt64 = 0
-    private var lastMicrophoneAudioAt: Date?
-    private var hasReportedMicrophoneSilence = false
-    private var hasReportedMicrophoneDisconnect = false
+    private var lifecycle = CaptureLifecycleCoordinator()
 
     func refreshContent() async throws -> [CaptureApplication] {
         let content = try await SCShareableContent.excludingDesktopWindows(
@@ -421,7 +543,7 @@ final class ScreenCaptureSource: NSObject {
                 configuration: configuration,
                 delegate: self
             )
-            let token = sessionGate.activate(
+            let token = sessionGate.issueToken(
                 streamIdentity: ObjectIdentifier(stream)
             )
             let output = ScreenCaptureStreamOutput(
@@ -429,7 +551,7 @@ final class ScreenCaptureSource: NSObject {
                 gate: sessionGate,
                 onAudio: { [weak self] block in
                     if block.source == .microphone {
-                        self?.recordMicrophoneAudio()
+                        self?.recordMicrophoneAudio(for: token)
                     }
                     onAudio(block)
                 },
@@ -461,16 +583,13 @@ final class ScreenCaptureSource: NSObject {
             didInstallSession = true
 
             try await stream.startCapture()
-            guard sessionGate.accepts(
-                token,
-                streamIdentity: ObjectIdentifier(stream)
-            ) else {
-                await stop()
+            guard isSessionActive(session) else {
+                await stop(expected: session)
                 throw CaptureSourceError.streamStartCancelled
             }
         } catch {
-            if didInstallSession {
-                await stop()
+            if didInstallSession, let pendingSession {
+                await stop(expected: pendingSession)
             } else if let pendingSession {
                 await discardPendingSession(pendingSession)
                 cancelStartReservation(reservation)
@@ -487,24 +606,7 @@ final class ScreenCaptureSource: NSObject {
     }
 
     func stop() async {
-        guard let session = takeActiveSession() else { return }
-        session.output.drain()
-
-        do {
-            try session.stream.removeStreamOutput(session.output, type: .audio)
-        } catch {
-            session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
-        }
-        do {
-            try session.stream.removeStreamOutput(session.output, type: .microphone)
-        } catch {
-            session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
-        }
-        do {
-            try await session.stream.stopCapture()
-        } catch {
-            session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
-        }
+        await stop(expected: nil)
     }
 
     /// Checks the original process identity. A restarted app requires an explicit caller-led reconnect.
@@ -527,7 +629,9 @@ final class ScreenCaptureSource: NSObject {
               markSelectedApplicationDisconnected(session) else {
             return
         }
-        session.eventHandler(.applicationDisconnected(selectedApplication.name))
+        session.output.enqueue(
+            event: .applicationDisconnected(selectedApplication.name)
+        )
     }
 
     /// The caller controls refresh cadence; this method never changes the selected microphone.
@@ -535,24 +639,26 @@ final class ScreenCaptureSource: NSObject {
         now: Date = Date(),
         silenceThreshold: TimeInterval = 2
     ) {
-        guard let event = microphoneHealthEvent(
+        guard let (session, event) = microphoneHealthEvent(
             now: now,
             silenceThreshold: silenceThreshold
-        ), let session = currentSession() else {
+        ) else {
             return
         }
-        session.eventHandler(event)
+        session.output.enqueue(event: event)
     }
 
     private func handleStreamStopped(
         _ stoppedStream: SCStream,
         error: Error
     ) {
-        guard let session = clearStoppedSessionIfCurrent(stoppedStream) else {
+        guard let session = beginStop(for: stoppedStream) else {
             return
         }
         session.output.drain()
+        removeOutputs(for: session, reportErrors: false)
         session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
+        finishStop(session)
     }
 
     private static func captureApplications(
@@ -624,71 +730,142 @@ final class ScreenCaptureSource: NSObject {
         return application
     }
 
-    private func reserveStart() throws -> UInt64 {
+    private func reserveStart() throws -> CaptureStartReservation {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard activeSession == nil, !isStarting else {
-            throw CaptureSourceError.streamAlreadyRunning
-        }
-        lifecycleEpoch &+= 1
-        isStarting = true
-        return lifecycleEpoch
+        return try lifecycle.reserveStart()
     }
 
     private func install(
-        reservation: UInt64,
+        reservation: CaptureStartReservation,
         session: ActiveSession
     ) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard isStarting,
-              lifecycleEpoch == reservation,
-              activeSession == nil else {
+        guard activeSession == nil,
+              lifecycle.activate(
+                  reservation: reservation,
+                  token: session.token
+              ) else {
             return false
         }
         activeSession = session
-        isStarting = false
-        lastMicrophoneAudioAt = nil
-        hasReportedMicrophoneSilence = false
-        hasReportedMicrophoneDisconnect = false
+        sessionGate.activate(session.token)
         return true
     }
 
-    private func cancelStartReservation(_ reservation: UInt64) {
+    private func cancelStartReservation(
+        _ reservation: CaptureStartReservation
+    ) {
         stateLock.lock()
-        if isStarting, lifecycleEpoch == reservation {
-            isStarting = false
-            lifecycleEpoch &+= 1
-        }
+        lifecycle.cancelStart(reservation)
         stateLock.unlock()
     }
 
     private func discardPendingSession(_ session: ActiveSession) async {
         sessionGate.deactivate(session.token)
         session.output.drain()
-        try? session.stream.removeStreamOutput(session.output, type: .audio)
-        try? session.stream.removeStreamOutput(session.output, type: .microphone)
+        removeOutputs(for: session, reportErrors: false)
         try? await session.stream.stopCapture()
     }
 
-    private func takeActiveSession() -> ActiveSession? {
+    private func stop(expected expectedSession: ActiveSession?) async {
+        guard let session = beginStop(expected: expectedSession) else {
+            return
+        }
+        session.output.drain()
+        removeOutputs(for: session, reportErrors: true)
+        do {
+            try await session.stream.stopCapture()
+        } catch {
+            session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
+        }
+        finishStop(session)
+    }
+
+    private func beginStop(
+        expected expectedSession: ActiveSession?
+    ) -> ActiveSession? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        let session = activeSession
-        if let session {
-            sessionGate.deactivate(session.token)
+
+        guard let session = activeSession else {
+            if expectedSession == nil {
+                lifecycle.cancelCurrentStart()
+            }
+            return nil
+        }
+        if let expectedSession, session !== expectedSession {
+            return nil
+        }
+        guard lifecycle.beginStop(expected: expectedSession?.token) == session.token else {
+            return nil
+        }
+        sessionGate.deactivate(session.token)
+        return session
+    }
+
+    private func beginStop(for stoppedStream: SCStream) -> ActiveSession? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let session = activeSession,
+              session.stream === stoppedStream,
+              lifecycle.beginStop(expected: session.token) == session.token else {
+            return nil
+        }
+        sessionGate.deactivate(session.token)
+        return session
+    }
+
+    private func finishStop(_ session: ActiveSession) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session,
+              lifecycle.finishStop(session.token) else {
+            return
         }
         activeSession = nil
-        isStarting = false
-        lifecycleEpoch &+= 1
-        lastMicrophoneAudioAt = nil
-        return session
+    }
+
+    private func removeOutputs(
+        for session: ActiveSession,
+        reportErrors: Bool
+    ) {
+        do {
+            try session.stream.removeStreamOutput(session.output, type: .audio)
+        } catch {
+            if reportErrors {
+                session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
+            }
+        }
+        do {
+            try session.stream.removeStreamOutput(session.output, type: .microphone)
+        } catch {
+            if reportErrors {
+                session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
+            }
+        }
+    }
+
+    private func isSessionActive(_ session: ActiveSession) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return activeSession === session &&
+            lifecycle.isActive(session.token) &&
+            sessionGate.accepts(
+                session.token,
+                streamIdentity: session.token.streamIdentity
+            )
     }
 
     private func currentSession() -> ActiveSession? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return activeSession
+        guard let session = activeSession,
+              lifecycle.isActive(session.token) else {
+            return nil
+        }
+        return session
     }
 
     private func markSelectedApplicationDisconnected(
@@ -696,63 +873,63 @@ final class ScreenCaptureSource: NSObject {
     ) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return activeSession === session
+        guard activeSession === session,
+              lifecycle.isActive(session.token) else {
+            return false
+        }
+        return session.eventState.markSelectedApplicationDisconnected()
     }
 
-    private func recordMicrophoneAudio() {
+    private func recordMicrophoneAudio(
+        for token: CaptureSessionToken
+    ) {
         stateLock.lock()
-        lastMicrophoneAudioAt = Date()
-        hasReportedMicrophoneSilence = false
-        stateLock.unlock()
+        defer { stateLock.unlock() }
+        guard let session = activeSession,
+              session.token == token,
+              lifecycle.isActive(token) else {
+            return
+        }
+        session.eventState.recordMicrophoneAudio()
     }
 
     private func microphoneHealthEvent(
         now: Date,
         silenceThreshold: TimeInterval
-    ) -> CaptureEvent? {
+    ) -> (ActiveSession, CaptureEvent)? {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        guard let session = activeSession else { return nil }
+        guard let session = activeSession,
+              lifecycle.isActive(session.token) else {
+            stateLock.unlock()
+            return nil
+        }
+        let selectedMicrophoneUID = session.selectedMicrophoneUID
+        stateLock.unlock()
 
-        if let selectedMicrophoneUID = session.selectedMicrophoneUID {
+        let isDeviceAvailable: Bool
+        if let selectedMicrophoneUID {
             let availableUIDs = AVCaptureDevice.DiscoverySession(
                 deviceTypes: [.microphone],
                 mediaType: .audio,
                 position: .unspecified
             ).devices.map(\.uniqueID)
-            if !availableUIDs.contains(selectedMicrophoneUID) {
-                guard !hasReportedMicrophoneDisconnect else { return nil }
-                hasReportedMicrophoneDisconnect = true
-                return .microphoneUnavailable
-            }
+            isDeviceAvailable = availableUIDs.contains(selectedMicrophoneUID)
+        } else {
+            isDeviceAvailable = true
         }
 
-        guard let lastMicrophoneAudioAt,
-              now.timeIntervalSince(lastMicrophoneAudioAt) >= silenceThreshold,
-              !hasReportedMicrophoneSilence else {
-            return nil
-        }
-        hasReportedMicrophoneSilence = true
-        return .microphoneSilence
-    }
-
-    private func clearStoppedSessionIfCurrent(
-        _ stoppedStream: SCStream
-    ) -> ActiveSession? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard let session = activeSession,
-              session.stream === stoppedStream else {
+        guard activeSession === session,
+              lifecycle.isActive(session.token),
+              let event = session.eventState.microphoneHealthEvent(
+                  now: now,
+                  silenceThreshold: silenceThreshold,
+                  isDeviceAvailable: isDeviceAvailable
+              ) else {
             return nil
         }
-
-        // Capture the whole session, including its event handler, before clearing state.
-        sessionGate.deactivate(session.token)
-        activeSession = nil
-        isStarting = false
-        lifecycleEpoch &+= 1
-        lastMicrophoneAudioAt = nil
-        return session
+        return (session, event)
     }
 }
 
@@ -839,6 +1016,17 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
                     }
                 }
             }
+        }
+    }
+
+    func enqueue(event: CaptureEvent) {
+        let streamIdentity = token.streamIdentity
+        delivery.enqueue(streamIdentity: streamIdentity) { [weak self] in
+            guard let self,
+                  delivery.isActive(streamIdentity: streamIdentity) else {
+                return
+            }
+            onEvent(event)
         }
     }
 

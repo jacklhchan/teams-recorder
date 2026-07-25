@@ -23,6 +23,20 @@ struct RecordingContinuitySnapshot: Equatable {
     let microphoneUID: String?
 }
 
+struct CaptureConnectionSnapshot: Equatable {
+    let sourceSessionID: UUID?
+    let activeSelection: ResolvedCaptureSelection?
+    let isMonitoring: Bool
+    let isSystemCaptureConnected: Bool
+
+    static let idle = CaptureConnectionSnapshot(
+        sourceSessionID: nil,
+        activeSelection: nil,
+        isMonitoring: false,
+        isSystemCaptureConnected: true
+    )
+}
+
 @MainActor
 final class RecordingEngine: ObservableObject {
     @Published private(set) var isRecording = false
@@ -35,6 +49,7 @@ final class RecordingEngine: ObservableObject {
     @Published private(set) var isSystemCaptureConnected = true
     @Published private(set) var isMicrophoneCaptureConnected = true
     @Published private(set) var captureStatus: CaptureStatus?
+    @Published private(set) var captureConnectionSnapshot: CaptureConnectionSnapshot = .idle
 
     private let captureSource: CaptureSourceProtocol
     private let writerFactory: MixedAudioWriterFactory
@@ -183,6 +198,7 @@ final class RecordingEngine: ObservableObject {
                 )
             }
             isMonitoring = true
+            publishConnectionSnapshot()
             startMeterTimer()
         } catch {
             let shouldApplyFailure = sourceSessionID == sessionID
@@ -246,6 +262,7 @@ final class RecordingEngine: ObservableObject {
             self.isSystemCaptureConnected = true
             self.mixer.setSystemSourceConnected(true)
             self.captureStatus = nil
+            self.publishConnectionSnapshot()
         }
         reconnectTransition = ReconnectTransition(
             id: transitionID,
@@ -476,11 +493,14 @@ final class RecordingEngine: ObservableObject {
         }
     }
 
-    private func disconnectSystemCapture() {
+    private func disconnectSystemCapture(publishSnapshot: Bool = true) {
         guard isSystemCaptureConnected else { return }
         isSystemCaptureConnected = false
         mixer.setSystemSourceConnected(false)
         if isRecording { currentHealth.systemDisconnects += 1 }
+        if publishSnapshot {
+            publishConnectionSnapshot()
+        }
     }
 
     private func disconnectMicrophoneCapture() {
@@ -536,12 +556,20 @@ final class RecordingEngine: ObservableObject {
 
     private func terminateSourceSession(sessionID: UUID) {
         guard sourceSessionID == sessionID else { return }
-        disconnectSystemCapture()
+        let terminalSelection = activeSelection
+        disconnectSystemCapture(publishSnapshot: false)
         disconnectMicrophoneCapture()
         callbackGate.deactivate(sessionID: sessionID)
+        isMonitoring = false
+        captureConnectionSnapshot = CaptureConnectionSnapshot(
+            sourceSessionID: sessionID,
+            activeSelection: terminalSelection,
+            isMonitoring: false,
+            isSystemCaptureConnected: false
+        )
+        sourceSessionID = nil
         activeSelection = nil
         activeMicrophoneUID = nil
-        isMonitoring = false
         stopMeterTimer()
     }
 
@@ -565,6 +593,7 @@ final class RecordingEngine: ObservableObject {
         rollingMicSamples = Array(repeating: 0, count: 160)
         systemLevel = LevelSnapshot()
         micLevel = LevelSnapshot()
+        publishConnectionSnapshot()
     }
 
     private func rollbackFailedStart(
@@ -624,6 +653,16 @@ final class RecordingEngine: ObservableObject {
             }
         }
         captureStatus = .error(error.localizedDescription)
+        publishConnectionSnapshot()
+    }
+
+    private func publishConnectionSnapshot() {
+        captureConnectionSnapshot = CaptureConnectionSnapshot(
+            sourceSessionID: sourceSessionID,
+            activeSelection: activeSelection,
+            isMonitoring: isMonitoring,
+            isSystemCaptureConnected: isSystemCaptureConnected
+        )
     }
 
     private func makeMixer() -> TimestampedAudioMixer {

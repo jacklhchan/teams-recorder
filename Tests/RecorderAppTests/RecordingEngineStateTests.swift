@@ -651,6 +651,45 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertTrue(engine.isMonitoring)
     }
 
+    func testConnectionSnapshotCarriesSourceIdentityAndClearsAfterStop() async throws {
+        let source = FakeCaptureSource()
+        let engine = makeEngine(source: source, writer: FakeWriter())
+        let application = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let selection = ResolvedCaptureSelection.application(application)
+
+        try await engine.startMonitoring(
+            selection: selection,
+            microphoneUID: "BuiltInMicrophone"
+        )
+        let activeSnapshot = engine.captureConnectionSnapshot
+        let sourceSessionID = try XCTUnwrap(activeSnapshot.sourceSessionID)
+
+        XCTAssertEqual(activeSnapshot.activeSelection, selection)
+        XCTAssertTrue(activeSnapshot.isMonitoring)
+        XCTAssertTrue(activeSnapshot.isSystemCaptureConnected)
+
+        source.emit(event: .applicationDisconnected(application.name))
+        await settle()
+
+        XCTAssertEqual(
+            engine.captureConnectionSnapshot,
+            CaptureConnectionSnapshot(
+                sourceSessionID: sourceSessionID,
+                activeSelection: selection,
+                isMonitoring: true,
+                isSystemCaptureConnected: false
+            )
+        )
+
+        await engine.stopMonitoring()
+
+        XCTAssertEqual(engine.captureConnectionSnapshot, .idle)
+    }
+
     func testNoAudioStopDoesNotWritePhantomBlock() async throws {
         let source = FakeCaptureSource()
         let writer = FakeWriter()

@@ -106,10 +106,6 @@ final class AppModel: ObservableObject {
                     applications: applications,
                     connectionState: captureConnectionState
                 )
-                if case let .disconnected(bundleIdentifier) = resolvedCaptureSelection,
-                   !bundleIdentifier.isEmpty {
-                    captureConnectionState = .selectedApplicationDisconnected(bundleIdentifier)
-                }
                 if !recorder.isRecording {
                     await startMonitoringIfReady()
                 }
@@ -171,7 +167,7 @@ final class AppModel: ObservableObject {
             systemPermission: systemAudioPermission,
             selection: captureSelection,
             connectionState: captureConnectionState,
-            isMonitoring: recorder.isMonitoring,
+            connectionSnapshot: recorder.captureConnectionSnapshot,
             isLifecycleWorking: isCaptureLifecycleWorking
         )
     }
@@ -181,7 +177,7 @@ final class AppModel: ObservableObject {
             systemPermission: systemAudioPermission,
             selection: captureSelection,
             connectionState: captureConnectionState,
-            isMonitoring: recorder.isMonitoring,
+            connectionSnapshot: recorder.captureConnectionSnapshot,
             isLifecycleWorking: false
         )
     }
@@ -914,7 +910,9 @@ final class AppModel: ObservableObject {
     }
 
     private func stopCaptureLifecycle(playAfterStop: Bool) {
-        let token = captureLifecycleGate.cancelAndBeginStop()
+        guard let token = captureLifecycleGate.cancelAndBeginStop() else {
+            return
+        }
         captureLifecycleTask?.cancel()
         isCaptureLifecycleWorking = true
         let task = Task { @MainActor [weak self] in
@@ -932,19 +930,25 @@ final class AppModel: ObservableObject {
     }
 
     private func observeRecorderConnection() {
-        recorder.$isSystemCaptureConnected
-            .combineLatest(recorder.$isMonitoring)
-            .sink { [weak self] isSystemConnected, isMonitoring in
+        recorder.$captureConnectionSnapshot
+            .sink { [weak self] snapshot in
                 guard let self else { return }
                 let state = CaptureConnectionProjection.observeSystemConnection(
                     current: self.captureConnectionState,
-                    isSystemConnected: isSystemConnected,
-                    isMonitoring: isMonitoring,
+                    snapshot: snapshot,
                     selection: self.captureSelection
                 )
                 self.captureConnectionState = state
-                if case let .selectedApplicationDisconnected(bundleIdentifier) = state {
+                if case let .selectedApplicationDisconnected(
+                    _,
+                    bundleIdentifier
+                ) = state {
                     self.resolvedCaptureSelection = .disconnected(bundleIdentifier)
+                } else if state == .connected {
+                    self.resolvedCaptureSelection = CaptureSelectionResolver.resolve(
+                        selection: self.captureSelection,
+                        availableApplications: self.availableCaptureApplications
+                    )
                 }
             }
             .store(in: &cancellables)

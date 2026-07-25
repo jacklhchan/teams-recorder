@@ -107,16 +107,24 @@ final class CaptureStatusTests: XCTestCase {
             bundleIdentifier: "com.microsoft.teams2",
             name: "Microsoft Teams"
         )
+        let sourceSessionID = UUID()
         let disconnected = CaptureConnectionProjection.observeSystemConnection(
             current: .connected,
-            isSystemConnected: false,
-            isMonitoring: true,
+            snapshot: CaptureConnectionSnapshot(
+                sourceSessionID: sourceSessionID,
+                activeSelection: .application(restarted),
+                isMonitoring: true,
+                isSystemCaptureConnected: false
+            ),
             selection: selection
         )
 
         XCTAssertEqual(
             disconnected,
-            .selectedApplicationDisconnected("com.microsoft.teams2")
+            .selectedApplicationDisconnected(
+                sourceSessionID: sourceSessionID,
+                bundleIdentifier: "com.microsoft.teams2"
+            )
         )
         XCTAssertEqual(
             CaptureConnectionProjection.resolveAfterRefresh(
@@ -131,8 +139,171 @@ final class CaptureStatusTests: XCTestCase {
                 systemPermission: .granted,
                 selection: selection,
                 connectionState: disconnected,
-                isMonitoring: true,
+                connectionSnapshot: CaptureConnectionSnapshot(
+                    sourceSessionID: sourceSessionID,
+                    activeSelection: .application(restarted),
+                    isMonitoring: true,
+                    isSystemCaptureConnected: false
+                ),
                 isLifecycleWorking: false
+            )
+        )
+    }
+
+    func testTerminalOrDisconnectedProjectionRecoversForHealthyMatchingMonitoringSession() {
+        let application = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let selection = CaptureSelection(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: application.bundleIdentifier
+        )
+        let healthySessionID = UUID()
+        let healthySnapshot = CaptureConnectionSnapshot(
+            sourceSessionID: healthySessionID,
+            activeSelection: .application(application),
+            isMonitoring: true,
+            isSystemCaptureConnected: true
+        )
+
+        XCTAssertEqual(
+            CaptureConnectionProjection.observeSystemConnection(
+                current: .terminal,
+                snapshot: healthySnapshot,
+                selection: selection
+            ),
+            .connected
+        )
+        XCTAssertEqual(
+            CaptureConnectionProjection.observeSystemConnection(
+                current: .selectedApplicationDisconnected(
+                    sourceSessionID: UUID(),
+                    bundleIdentifier: application.bundleIdentifier
+                ),
+                snapshot: healthySnapshot,
+                selection: selection
+            ),
+            .connected
+        )
+    }
+
+    func testStoppedDisconnectLatchAllowsIdleRefreshRecoveryWhenAppReappears() {
+        let application = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let restarted = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: application.bundleIdentifier,
+            name: application.name
+        )
+        let selection = CaptureSelection(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: application.bundleIdentifier
+        )
+        let disconnected = CaptureConnectionProjection.observeSystemConnection(
+            current: .connected,
+            snapshot: CaptureConnectionSnapshot(
+                sourceSessionID: UUID(),
+                activeSelection: .application(application),
+                isMonitoring: true,
+                isSystemCaptureConnected: false
+            ),
+            selection: selection
+        )
+        let idle = CaptureConnectionProjection.observeSystemConnection(
+            current: disconnected,
+            snapshot: .idle,
+            selection: selection
+        )
+
+        XCTAssertEqual(idle, .connected)
+        XCTAssertEqual(
+            CaptureConnectionProjection.resolveAfterRefresh(
+                selection: selection,
+                applications: [],
+                connectionState: idle
+            ),
+            .disconnected(application.bundleIdentifier)
+        )
+        let recovered = CaptureConnectionProjection.resolveAfterRefresh(
+            selection: selection,
+            applications: [restarted],
+            connectionState: idle
+        )
+        XCTAssertEqual(recovered, .application(restarted))
+        XCTAssertEqual(
+            CaptureReadiness.evaluate(
+                permission: .granted,
+                selection: selection,
+                resolvedSelection: recovered,
+                microphoneAvailable: true
+            ),
+            .ready
+        )
+    }
+
+    func testConnectionProjectionAttributesDisconnectToActiveSourceNotUIIntent() {
+        let applicationA = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.example.A",
+            name: "Application A"
+        )
+        let applicationB = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: "com.example.B",
+            name: "Application B"
+        )
+        let intentB = CaptureSelection(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: applicationB.bundleIdentifier
+        )
+        let sessionA = UUID()
+        let sessionB = UUID()
+
+        XCTAssertEqual(
+            CaptureConnectionProjection.observeSystemConnection(
+                current: .connected,
+                snapshot: CaptureConnectionSnapshot(
+                    sourceSessionID: sessionA,
+                    activeSelection: .application(applicationA),
+                    isMonitoring: true,
+                    isSystemCaptureConnected: false
+                ),
+                selection: intentB
+            ),
+            .connected
+        )
+        XCTAssertEqual(
+            CaptureConnectionProjection.observeSystemConnection(
+                current: .terminal,
+                snapshot: CaptureConnectionSnapshot(
+                    sourceSessionID: sessionB,
+                    activeSelection: .application(applicationB),
+                    isMonitoring: true,
+                    isSystemCaptureConnected: true
+                ),
+                selection: intentB
+            ),
+            .connected
+        )
+        XCTAssertEqual(
+            CaptureConnectionProjection.observeSystemConnection(
+                current: .connected,
+                snapshot: CaptureConnectionSnapshot(
+                    sourceSessionID: sessionB,
+                    activeSelection: .application(applicationB),
+                    isMonitoring: true,
+                    isSystemCaptureConnected: false
+                ),
+                selection: intentB
+            ),
+            .selectedApplicationDisconnected(
+                sourceSessionID: sessionB,
+                bundleIdentifier: applicationB.bundleIdentifier
             )
         )
     }
@@ -185,13 +356,57 @@ final class CaptureStatusTests: XCTestCase {
         let refresh = try XCTUnwrap(gate.begin(.refresh))
 
         XCTAssertNil(gate.begin(.start))
-        let stop = gate.cancelAndBeginStop()
+        let stop = try XCTUnwrap(gate.cancelAndBeginStop())
+        XCTAssertNil(gate.cancelAndBeginStop())
         XCTAssertFalse(gate.finish(refresh))
         XCTAssertTrue(gate.isWorking)
         XCTAssertTrue(gate.accepts(stop))
 
         XCTAssertTrue(gate.finish(stop))
         XCTAssertFalse(gate.isWorking)
+    }
+
+    @MainActor
+    func testDoubleStopCoalescesUntilRealFinalizationAndKeepsSavedStatus() async throws {
+        let source = PausedStopCaptureSource()
+        let writer = AppModelStopWriter()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in writer },
+            mixerBlockFrames: 4
+        )
+        let suiteName = "CaptureStatusTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(
+            defaults: defaults,
+            recorder: engine,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false
+        )
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+
+        model.startOrStop()
+        await waitUntil { source.stopCount == 1 }
+        model.startOrStop()
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(source.stopCount, 1)
+        XCTAssertTrue(model.isCaptureLifecycleWorking)
+        XCTAssertNotEqual(model.statusMessage, "No active recording.")
+
+        source.resumeStop()
+        await waitUntil { !model.isCaptureLifecycleWorking }
+
+        XCTAssertEqual(source.stopCount, 1)
+        XCTAssertEqual(writer.closeCount, 1)
+        XCTAssertTrue(model.statusMessage.hasPrefix("Recording saved:"))
     }
 
     func testDisconnectedCaptureMapsToWarning() {
@@ -290,5 +505,62 @@ final class CaptureStatusTests: XCTestCase {
     private func defaultsSuiteName(_ defaults: UserDefaults) -> String {
         defaults.volatileDomainNames.first(where: { $0.hasPrefix("CaptureStatusTests.") })
             ?? "CaptureStatusTests"
+    }
+
+    private func temporaryFolder() -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
+    @MainActor
+    private func waitUntil(
+        _ condition: @MainActor () -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            await Task.yield()
+        }
+        XCTFail("Condition was not reached", file: file, line: line)
+    }
+}
+
+private final class PausedStopCaptureSource: CaptureSourceProtocol {
+    private(set) var stopCount = 0
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+
+    func refreshContent() async throws -> [CaptureApplication] { [] }
+
+    func reconnect(selection: ResolvedCaptureSelection) async throws {}
+
+    func start(
+        selection: ResolvedCaptureSelection,
+        microphoneUID: String?,
+        onAudio: @escaping (AudioFrameBlock) -> Void,
+        onEvent: @escaping (CaptureEvent) -> Void
+    ) async throws {}
+
+    func stop() async {
+        stopCount += 1
+        await withCheckedContinuation { continuation in
+            stopContinuation = continuation
+        }
+    }
+
+    func resumeStop() {
+        let continuation = stopContinuation
+        stopContinuation = nil
+        continuation?.resume()
+    }
+}
+
+private final class AppModelStopWriter: MixedAudioWriting {
+    private(set) var closeCount = 0
+
+    func write(_ block: MixedAudioBlock) throws {}
+
+    func close() throws {
+        closeCount += 1
     }
 }

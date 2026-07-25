@@ -12,27 +12,41 @@ enum CapturePermissionState: Equatable {
 
 enum CaptureConnectionState: Equatable {
     case connected
-    case selectedApplicationDisconnected(String)
+    case selectedApplicationDisconnected(
+        sourceSessionID: UUID,
+        bundleIdentifier: String
+    )
     case terminal
 }
 
 enum CaptureConnectionProjection {
     static func observeSystemConnection(
         current: CaptureConnectionState,
-        isSystemConnected: Bool,
-        isMonitoring: Bool,
+        snapshot: CaptureConnectionSnapshot,
         selection: CaptureSelection
     ) -> CaptureConnectionState {
-        guard isMonitoring else {
-            return isSystemConnected ? current : .terminal
+        guard let sourceSessionID = snapshot.sourceSessionID else {
+            return .connected
         }
-        guard !isSystemConnected,
-              selection.mode == .selectedApplication,
-              let bundleIdentifier = selection.selectedBundleIdentifier,
-              !bundleIdentifier.isEmpty else {
+        guard activeSelectionMatchesIntent(
+            snapshot.activeSelection,
+            intent: selection
+        ) else {
             return current
         }
-        return .selectedApplicationDisconnected(bundleIdentifier)
+        guard snapshot.isMonitoring else {
+            return snapshot.isSystemCaptureConnected ? .connected : .terminal
+        }
+        guard !snapshot.isSystemCaptureConnected else {
+            return .connected
+        }
+        guard case let .application(application) = snapshot.activeSelection else {
+            return current
+        }
+        return .selectedApplicationDisconnected(
+            sourceSessionID: sourceSessionID,
+            bundleIdentifier: application.bundleIdentifier
+        )
     }
 
     static func resolveAfterRefresh(
@@ -40,7 +54,7 @@ enum CaptureConnectionProjection {
         applications: [CaptureApplication],
         connectionState: CaptureConnectionState
     ) -> ResolvedCaptureSelection {
-        if case let .selectedApplicationDisconnected(bundleIdentifier) = connectionState,
+        if case let .selectedApplicationDisconnected(_, bundleIdentifier) = connectionState,
            selection.mode == .selectedApplication,
            selection.selectedBundleIdentifier == bundleIdentifier {
             return .disconnected(bundleIdentifier)
@@ -55,19 +69,41 @@ enum CaptureConnectionProjection {
         systemPermission: CapturePermissionState,
         selection: CaptureSelection,
         connectionState: CaptureConnectionState,
-        isMonitoring: Bool,
+        connectionSnapshot: CaptureConnectionSnapshot,
         isLifecycleWorking: Bool
     ) -> Bool {
         guard systemPermission == .granted,
               selection.mode == .selectedApplication,
-              isMonitoring,
               !isLifecycleWorking,
               let bundleIdentifier = selection.selectedBundleIdentifier,
               !bundleIdentifier.isEmpty,
-              case .selectedApplicationDisconnected(bundleIdentifier) = connectionState else {
+              case let .selectedApplicationDisconnected(
+                  disconnectedSessionID,
+                  disconnectedBundleIdentifier
+              ) = connectionState,
+              disconnectedBundleIdentifier == bundleIdentifier,
+              connectionSnapshot.sourceSessionID == disconnectedSessionID,
+              connectionSnapshot.isMonitoring,
+              !connectionSnapshot.isSystemCaptureConnected,
+              case let .application(activeApplication) = connectionSnapshot.activeSelection,
+              activeApplication.bundleIdentifier == bundleIdentifier else {
             return false
         }
         return true
+    }
+
+    private static func activeSelectionMatchesIntent(
+        _ activeSelection: ResolvedCaptureSelection?,
+        intent: CaptureSelection
+    ) -> Bool {
+        switch (activeSelection, intent.mode) {
+        case (.allSystemAudio?, .allSystemAudio):
+            return true
+        case let (.application(application)?, .selectedApplication):
+            return application.bundleIdentifier == intent.selectedBundleIdentifier
+        default:
+            return false
+        }
     }
 }
 
@@ -98,8 +134,11 @@ struct CaptureLifecycleGate {
         return install(operation)
     }
 
-    mutating func cancelAndBeginStop() -> CaptureLifecycleToken {
-        install(.stop)
+    mutating func cancelAndBeginStop() -> CaptureLifecycleToken? {
+        if activeToken?.operation == .stop {
+            return nil
+        }
+        return install(.stop)
     }
 
     func accepts(_ token: CaptureLifecycleToken) -> Bool {

@@ -189,6 +189,69 @@ final class TimestampedAudioMixerTests: XCTestCase {
         XCTAssertTrue(isStrictlyMonotonic(initial.map(\.startFrame) + output.map(\.startFrame)))
     }
 
+    func testLiveKnownGapEmitsShortPrefixThenReanchorsWithoutPadding() throws {
+        let futureFrame: Int64 = 48_000 * 3_600
+        var mixer = try makeMixer()
+        _ = try mixer.push(stereo(.system, startFrame: 0, samples: [1, 1, 1, 1]))
+        let initial = try mixer.push(stereo(
+            .microphone,
+            startFrame: 0,
+            samples: [0, 0, 0, 0]
+        ))
+        _ = try mixer.push(stereo(.system, startFrame: 4, samples: [1]))
+        _ = try mixer.push(stereo(
+            .system,
+            startFrame: futureFrame,
+            samples: [1, 1, 1, 1]
+        ))
+
+        let output = try mixer.push(stereo(
+            .microphone,
+            startFrame: futureFrame,
+            samples: [0, 0, 0, 0]
+        ))
+
+        XCTAssertEqual(initial.map(\.startFrame), [0])
+        XCTAssertEqual(output.map(\.startFrame), [4, futureFrame])
+        XCTAssertEqual(output.map(\.left.count), [1, 4])
+        XCTAssertEqual(output.reduce(0) { $0 + $1.left.count }, 5)
+        XCTAssertEqual(mixer.timelineDiscontinuityCount, 1)
+        XCTAssertEqual(mixer.pendingFrameCount, 0)
+    }
+
+    func testPendingPressureReanchorsAfterShortPrefixWithoutPadding() throws {
+        let futureFrame: Int64 = 48_000 * 3_600
+        var mixer = try makeMixer(maximumPendingFrames: 4)
+        _ = try mixer.push(stereo(.system, startFrame: 0, samples: [1, 1, 1, 1]))
+        let initial = try mixer.push(stereo(
+            .microphone,
+            startFrame: 0,
+            samples: [0, 0, 0, 0]
+        ))
+        _ = try mixer.push(stereo(.system, startFrame: 4, samples: [1]))
+        let pressured = try mixer.push(stereo(
+            .system,
+            startFrame: futureFrame,
+            samples: Array(repeating: 1, count: 8)
+        ))
+        let live = try mixer.push(stereo(
+            .microphone,
+            startFrame: futureFrame,
+            samples: Array(repeating: 0, count: 8)
+        ))
+        let output = pressured + live
+
+        XCTAssertEqual(initial.map(\.startFrame), [0])
+        XCTAssertEqual(
+            output.map(\.startFrame),
+            [4, futureFrame, futureFrame + 4]
+        )
+        XCTAssertEqual(output.map(\.left.count), [1, 4, 4])
+        XCTAssertEqual(output.reduce(0) { $0 + $1.left.count }, 9)
+        XCTAssertEqual(mixer.timelineDiscontinuityCount, 1)
+        XCTAssertLessThanOrEqual(mixer.pendingFrameCount, 4)
+    }
+
     func testSparseFutureSourceReanchorsUnderPendingPressureAndSignalsDiscontinuity() throws {
         let futureFrame: Int64 = 48_000 * 3_600
         var mixer = try makeMixer(maximumPendingFrames: 4)

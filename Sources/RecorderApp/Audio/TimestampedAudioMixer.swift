@@ -95,44 +95,7 @@ struct TimestampedAudioMixer {
     }
 
     mutating func flushThrough(frame: Int64) -> [MixedAudioBlock] {
-        var output: [MixedAudioBlock] = []
-
-        while let outputFrame = nextOutputFrame,
-              let earliestPendingFrame = earliestPendingFrame(
-                  atOrAfter: outputFrame,
-                  before: frame
-              ) {
-            if earliestPendingFrame > outputFrame {
-                nextOutputFrame = earliestPendingFrame
-                timelineDiscontinuityCount += 1
-            }
-            guard let startFrame = nextOutputFrame else {
-                break
-            }
-
-            let maximumEndFrame = min(
-                frame,
-                startFrame + Int64(blockFrames)
-            )
-            var contiguousEndFrame = startFrame
-            while contiguousEndFrame < maximumEndFrame,
-                  hasPendingSample(at: contiguousEndFrame) {
-                contiguousEndFrame += 1
-            }
-            let frameCount = Int(contiguousEndFrame - startFrame)
-            guard frameCount > 0 else {
-                break
-            }
-
-            output.append(makeMixedBlock(
-                startFrame: startFrame,
-                frameCount: frameCount
-            ))
-            consumePendingSamples(through: contiguousEndFrame)
-            nextOutputFrame = contiguousEndFrame
-        }
-
-        return output
+        emitContiguousSegments(through: frame, policy: .final)
     }
 
     private mutating func emitThroughKnownFrames() -> [MixedAudioBlock] {
@@ -151,64 +114,83 @@ struct TimestampedAudioMixer {
             return []
         }
 
-        reanchorToEarliestPendingFrame(before: knownEnd)
-        return emit(through: knownEnd)
-    }
-
-    private mutating func emit(through frame: Int64) -> [MixedAudioBlock] {
-        var output: [MixedAudioBlock] = []
-        let blockFrameCount = Int64(blockFrames)
-
-        while let outputFrame = nextOutputFrame,
-              outputFrame + blockFrameCount <= frame {
-            output.append(makeMixedBlock(
-                startFrame: outputFrame,
-                frameCount: blockFrames
-            ))
-            consumePendingSamples(through: outputFrame + blockFrameCount)
-            nextOutputFrame = outputFrame + blockFrameCount
-        }
-
-        return output
+        return emitContiguousSegments(through: knownEnd, policy: .live)
     }
 
     private mutating func emitToMaintainPendingLimit() -> [MixedAudioBlock] {
-        guard pendingFrameCount > maximumPendingFrames else {
-            return []
-        }
+        emitContiguousSegments(through: nil, policy: .pressure)
+    }
 
+    private mutating func emitContiguousSegments(
+        through frame: Int64?,
+        policy: EmissionPolicy
+    ) -> [MixedAudioBlock] {
         var output: [MixedAudioBlock] = []
-        let blockFrameCount = Int64(blockFrames)
 
-        reanchorToEarliestPendingFrame()
-        while pendingFrameCount > maximumPendingFrames {
-            guard let outputFrame = nextOutputFrame else {
+        while true {
+            if policy == .pressure,
+               pendingFrameCount <= maximumPendingFrames {
                 break
             }
+            guard let segment = nextContiguousSegment(before: frame) else {
+                break
+            }
+
+            if policy == .live,
+               segment.frameCount < blockFrames,
+               earliestPendingFrame(
+                   atOrAfter: segment.endFrame,
+                   before: frame
+               ) == nil {
+                break
+            }
+
             output.append(makeMixedBlock(
-                startFrame: outputFrame,
-                frameCount: blockFrames
+                startFrame: segment.startFrame,
+                frameCount: segment.frameCount
             ))
-            consumePendingSamples(through: outputFrame + blockFrameCount)
-            nextOutputFrame = outputFrame + blockFrameCount
+            consumePendingSamples(through: segment.endFrame)
+            nextOutputFrame = segment.endFrame
         }
 
         return output
     }
 
-    private mutating func reanchorToEarliestPendingFrame(before frame: Int64? = nil) {
+    private mutating func nextContiguousSegment(
+        before frame: Int64?
+    ) -> PendingSegment? {
         guard let outputFrame = nextOutputFrame,
               let earliestPendingFrame = earliestPendingFrame(
                   atOrAfter: outputFrame,
                   before: frame
-              ),
-              earliestPendingFrame > outputFrame else {
-            return
+              ) else {
+            return nil
+        }
+        if earliestPendingFrame > outputFrame {
+            nextOutputFrame = earliestPendingFrame
+            timelineDiscontinuityCount += 1
+        }
+        guard let startFrame = nextOutputFrame else {
+            return nil
         }
 
-        // Never materialize unbounded silence for a timestamp interval with no samples.
-        nextOutputFrame = earliestPendingFrame
-        timelineDiscontinuityCount += 1
+        let maximumEndFrame = min(
+            frame ?? startFrame + Int64(blockFrames),
+            startFrame + Int64(blockFrames)
+        )
+        var contiguousEndFrame = startFrame
+        while contiguousEndFrame < maximumEndFrame,
+              hasPendingSample(at: contiguousEndFrame) {
+            contiguousEndFrame += 1
+        }
+        guard contiguousEndFrame > startFrame else {
+            return nil
+        }
+
+        return PendingSegment(
+            startFrame: startFrame,
+            frameCount: Int(contiguousEndFrame - startFrame)
+        )
     }
 
     private func earliestPendingFrame(
@@ -270,6 +252,21 @@ struct TimestampedAudioMixer {
 
         let normalized = Float(tanh(Double(mixed) * 1.15) / tanh(1.15))
         return min(max(normalized, -1), 1)
+    }
+}
+
+private enum EmissionPolicy {
+    case live
+    case pressure
+    case final
+}
+
+private struct PendingSegment {
+    let startFrame: Int64
+    let frameCount: Int
+
+    var endFrame: Int64 {
+        startFrame + Int64(frameCount)
     }
 }
 

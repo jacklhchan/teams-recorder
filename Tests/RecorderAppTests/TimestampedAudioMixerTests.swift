@@ -158,6 +158,29 @@ final class TimestampedAudioMixerTests: XCTestCase {
         XCTAssertLessThanOrEqual(mixer.pendingFrameCount, 4)
     }
 
+    func testDelayedMicrophoneBeforePressurePreservesCursorAndFutureSystemFrames() throws {
+        var mixer = try makeMixer(maximumPendingFrames: 4)
+        _ = try mixer.push(stereo(.system, startFrame: 0, samples: [1, 1, 1, 1]))
+        _ = try mixer.push(stereo(.microphone, startFrame: 0, samples: [0, 0, 0, 0]))
+
+        let earlySystemOutput = try mixer.push(stereo(
+            .system,
+            startFrame: 8,
+            samples: [1, 1, 1, 1]
+        ))
+        let delayedMicrophoneOutput = try mixer.push(stereo(
+            .microphone,
+            startFrame: 4,
+            samples: [1, 1, 1, 1]
+        ))
+
+        XCTAssertTrue(earlySystemOutput.isEmpty)
+        XCTAssertEqual(delayedMicrophoneOutput.map(\.startFrame), [4])
+        XCTAssertEqual(try XCTUnwrap(delayedMicrophoneOutput.first).left[0], 0.48, accuracy: 0.001)
+        XCTAssertEqual(mixer.timelineDiscontinuityCount, 0)
+        XCTAssertEqual(mixer.pendingFrameCount, 4)
+    }
+
     func testRejectsUnsupportedSampleRate() {
         XCTAssertThrowsError(try TimestampedAudioMixer(sampleRate: 44_100, blockFrames: 4)) { error in
             XCTAssertEqual(error as? TimestampedAudioMixerError, .unsupportedSampleRate(44_100))

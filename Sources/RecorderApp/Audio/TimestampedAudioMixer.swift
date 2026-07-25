@@ -122,12 +122,18 @@ struct TimestampedAudioMixer {
     }
 
     private mutating func emitToMaintainPendingLimit() -> [MixedAudioBlock] {
+        guard pendingFrameCount > maximumPendingFrames else {
+            return []
+        }
+
         var output: [MixedAudioBlock] = []
         let blockFrameCount = Int64(blockFrames)
 
         reanchorToEarliestPendingFrame()
-        while pendingFrameCount > maximumPendingFrames,
-              let outputFrame = nextOutputFrame {
+        while pendingFrameCount > maximumPendingFrames {
+            guard let outputFrame = nextOutputFrame else {
+                break
+            }
             output.append(makeMixedBlock(startFrame: outputFrame))
             consumePendingSamples(through: outputFrame + blockFrameCount)
             nextOutputFrame = outputFrame + blockFrameCount

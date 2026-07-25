@@ -15,6 +15,14 @@ struct CaptureApplication: Identifiable, Codable, Hashable {
 struct CaptureSelection: Codable, Equatable {
     var mode: CaptureMode
     var selectedBundleIdentifier: String?
+
+    init(
+        mode: CaptureMode = .allSystemAudio,
+        selectedBundleIdentifier: String? = nil
+    ) {
+        self.mode = mode
+        self.selectedBundleIdentifier = selectedBundleIdentifier
+    }
 }
 
 enum ResolvedCaptureSelection: Equatable {

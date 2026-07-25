@@ -2,6 +2,10 @@ import XCTest
 @testable import RecorderApp
 
 final class CaptureSelectionResolverTests: XCTestCase {
+    func testSelectionDefaultsToAllSystemAudio() {
+        XCTAssertEqual(CaptureSelection().mode, .allSystemAudio)
+    }
+
     func testAllSystemAudioDoesNotRequireAnApplication() {
         let result = CaptureSelectionResolver.resolve(
             selection: .init(mode: .allSystemAudio),
@@ -31,5 +35,54 @@ final class CaptureSelectionResolverTests: XCTestCase {
             availableApplications: []
         )
         XCTAssertEqual(result, .disconnected("com.microsoft.teams2"))
+    }
+
+    func testDisconnectedSelectionDoesNotAutoReconnectWhenApplicationReappears() {
+        let selection = CaptureSelection(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: "com.microsoft.teams2"
+        )
+        let teams = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let disconnected = CaptureSelectionResolver.resolve(
+            selection: selection,
+            availableApplications: []
+        )
+
+        let result = CaptureSelectionResolver.resolve(
+            selection: selection,
+            availableApplications: [teams],
+            previousResolution: disconnected
+        )
+
+        XCTAssertEqual(result, .disconnected("com.microsoft.teams2"))
+    }
+
+    func testDisconnectedSelectionReconnectsOnlyWhenExplicitlyRequested() {
+        let selection = CaptureSelection(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: "com.microsoft.teams2"
+        )
+        let teams = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let disconnected = CaptureSelectionResolver.resolve(
+            selection: selection,
+            availableApplications: []
+        )
+
+        let result = CaptureSelectionResolver.resolve(
+            selection: selection,
+            availableApplications: [teams],
+            previousResolution: disconnected,
+            reconnect: true
+        )
+
+        XCTAssertEqual(result, .application(teams))
     }
 }

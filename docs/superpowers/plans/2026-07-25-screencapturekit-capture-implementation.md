@@ -441,6 +441,7 @@ func testSelectedAppDisconnectKeepsRecordingActive()
 func testMicrophoneDisconnectKeepsSystemRecordingActive()
 func testStopFlushesMixerAndClosesWriter()
 func testCaptureFailureAppearsInHealthReport()
+func testTimelineDiscontinuityDoesNotPadOutputDuration()
 ```
 
 - [ ] **Step 2: Run tests and verify RED**
@@ -458,7 +459,13 @@ Remove `systemEngine`, `micEngine`, Core Audio input-node binding, pending
 arrival-order buffers, and `writeMixedFramesIfReady()`. Retain file settings,
 meter smoothing, health summary, and mute state. Feed normalized blocks into
 `TimestampedAudioMixer`, write every returned mixed block through an
-`AVAudioFile` adapter, and update each source level before mixing.
+`AVAudioFile` adapter, and update each source level before mixing. Track the
+previous mixed source end frame independently from the AAC file's physical
+append cursor. When a block's `startFrame` does not equal that prior end,
+increment one timeline-discontinuity health count, then append the finite block
+directly after the previous AAC frames. Do not seek, do not synthesize silence
+proportional to the PTS gap, and do not include that skipped source-time gap in
+the recording's media duration.
 
 - [ ] **Step 4: Make lifecycle async and idempotent**
 
@@ -476,10 +483,14 @@ var lateFrames = 0
 var systemDisconnects = 0
 var microphoneDisconnects = 0
 var streamFailures = 0
+var timelineDiscontinuities = 0
 ```
 
 Include non-zero values in `summary`, and update `AudioHealthAdvisor` wording
 from device/BlackHole language to system/application capture language.
+Reconcile the writer-observed gap count with
+`TimestampedAudioMixer.timelineDiscontinuityCount` so each re-anchor is
+reported once.
 
 - [ ] **Step 6: Run targeted and full tests**
 

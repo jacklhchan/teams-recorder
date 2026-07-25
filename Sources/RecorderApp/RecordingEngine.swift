@@ -14,6 +14,15 @@ protocol CaptureSourceProtocol: AnyObject {
 
 extension ScreenCaptureSource: CaptureSourceProtocol {}
 
+struct RecordingContinuitySnapshot: Equatable {
+    let sourceSessionID: UUID?
+    let recordingEpoch: UInt64?
+    let recordingURL: URL?
+    let outputFolder: URL?
+    let startedAt: Date?
+    let microphoneUID: String?
+}
+
 @MainActor
 final class RecordingEngine: ObservableObject {
     @Published private(set) var isRecording = false
@@ -66,6 +75,17 @@ final class RecordingEngine: ObservableObject {
         self.mixer = try! TimestampedAudioMixer(
             sampleRate: 48_000,
             blockFrames: mixerBlockFrames
+        )
+    }
+
+    var continuitySnapshot: RecordingContinuitySnapshot {
+        RecordingContinuitySnapshot(
+            sourceSessionID: sourceSessionID,
+            recordingEpoch: recordingEpoch,
+            recordingURL: currentRecordingURL,
+            outputFolder: outputFolder,
+            startedAt: startedAt,
+            microphoneUID: activeMicrophoneUID
         )
     }
 
@@ -194,12 +214,21 @@ final class RecordingEngine: ObservableObject {
     func reconnect(selection: ResolvedCaptureSelection) async throws {
         guard isMonitoring,
               let sourceSessionID,
-              case .application = selection else {
+              !isSystemCaptureConnected,
+              case let .application(targetApplication) = selection,
+              case let .application(activeApplication) = activeSelection,
+              targetApplication.bundleIdentifier == activeApplication.bundleIdentifier else {
             throw CaptureSourceError.selectedApplicationUnavailable
         }
+        let request = ReconnectRequest(
+            sourceSessionID: sourceSessionID,
+            application: targetApplication
+        )
 
-        if let transition = reconnectTransition,
-           transition.sourceSessionID == sourceSessionID {
+        if let transition = reconnectTransition {
+            guard transition.request == request else {
+                throw CaptureSourceError.selectedApplicationUnavailable
+            }
             return try await transition.task.value
         }
 
@@ -220,7 +249,7 @@ final class RecordingEngine: ObservableObject {
         }
         reconnectTransition = ReconnectTransition(
             id: transitionID,
-            sourceSessionID: sourceSessionID,
+            request: request,
             task: task
         )
 
@@ -693,8 +722,13 @@ private struct RecordingStartTransition {
 
 private struct ReconnectTransition {
     let id: UUID
-    let sourceSessionID: UUID
+    let request: ReconnectRequest
     let task: Task<Void, Error>
+}
+
+private struct ReconnectRequest: Equatable {
+    let sourceSessionID: UUID
+    let application: CaptureApplication
 }
 
 private struct RecordingCallbackTicket {

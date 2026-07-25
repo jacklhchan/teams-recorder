@@ -10,6 +10,121 @@ enum CapturePermissionState: Equatable {
     case restricted
 }
 
+enum CaptureConnectionState: Equatable {
+    case connected
+    case selectedApplicationDisconnected(String)
+    case terminal
+}
+
+enum CaptureConnectionProjection {
+    static func observeSystemConnection(
+        current: CaptureConnectionState,
+        isSystemConnected: Bool,
+        isMonitoring: Bool,
+        selection: CaptureSelection
+    ) -> CaptureConnectionState {
+        guard isMonitoring else {
+            return isSystemConnected ? current : .terminal
+        }
+        guard !isSystemConnected,
+              selection.mode == .selectedApplication,
+              let bundleIdentifier = selection.selectedBundleIdentifier,
+              !bundleIdentifier.isEmpty else {
+            return current
+        }
+        return .selectedApplicationDisconnected(bundleIdentifier)
+    }
+
+    static func resolveAfterRefresh(
+        selection: CaptureSelection,
+        applications: [CaptureApplication],
+        connectionState: CaptureConnectionState
+    ) -> ResolvedCaptureSelection {
+        if case let .selectedApplicationDisconnected(bundleIdentifier) = connectionState,
+           selection.mode == .selectedApplication,
+           selection.selectedBundleIdentifier == bundleIdentifier {
+            return .disconnected(bundleIdentifier)
+        }
+        return CaptureSelectionResolver.resolve(
+            selection: selection,
+            availableApplications: applications
+        )
+    }
+
+    static func canReconnect(
+        systemPermission: CapturePermissionState,
+        selection: CaptureSelection,
+        connectionState: CaptureConnectionState,
+        isMonitoring: Bool,
+        isLifecycleWorking: Bool
+    ) -> Bool {
+        guard systemPermission == .granted,
+              selection.mode == .selectedApplication,
+              isMonitoring,
+              !isLifecycleWorking,
+              let bundleIdentifier = selection.selectedBundleIdentifier,
+              !bundleIdentifier.isEmpty,
+              case .selectedApplicationDisconnected(bundleIdentifier) = connectionState else {
+            return false
+        }
+        return true
+    }
+}
+
+enum CaptureLifecycleOperation: Equatable {
+    case refresh
+    case permission
+    case start
+    case test
+    case reconnect
+    case stop
+}
+
+struct CaptureLifecycleToken: Equatable {
+    let generation: UInt64
+    let operation: CaptureLifecycleOperation
+}
+
+struct CaptureLifecycleGate {
+    private var generation: UInt64 = 0
+    private var activeToken: CaptureLifecycleToken?
+
+    var isWorking: Bool { activeToken != nil }
+
+    mutating func begin(
+        _ operation: CaptureLifecycleOperation
+    ) -> CaptureLifecycleToken? {
+        guard activeToken == nil else { return nil }
+        return install(operation)
+    }
+
+    mutating func cancelAndBeginStop() -> CaptureLifecycleToken {
+        install(.stop)
+    }
+
+    func accepts(_ token: CaptureLifecycleToken) -> Bool {
+        activeToken == token
+    }
+
+    mutating func finish(_ token: CaptureLifecycleToken) -> Bool {
+        guard activeToken == token else { return false }
+        activeToken = nil
+        return true
+    }
+
+    private mutating func install(
+        _ operation: CaptureLifecycleOperation
+    ) -> CaptureLifecycleToken {
+        generation &+= 1
+        let token = CaptureLifecycleToken(
+            generation: generation,
+            operation: operation
+        )
+        activeToken = token
+        return token
+    }
+}
+
 enum CaptureReadiness: Equatable {
     case ready
     case reconnectRequired
@@ -58,7 +173,7 @@ enum CaptureStatusRowMapper {
         case .notDetermined:
             return .init(title: "Screen & System Audio Recording", message: "Permission is required to capture audio.", action: .grant)
         case .denied, .restricted:
-            return .init(title: "Screen & System Audio Recording", message: "Permission denied. Open System Settings, then retry.", action: .openSettings)
+            return .init(title: "Screen & System Audio Recording", message: "Permission denied. Open System Settings, then restart or retry.", action: .openSettings)
         }
     }
 
@@ -96,8 +211,16 @@ struct CaptureSelectionPersistence {
     }
 
     func save(selection: CaptureSelection, microphoneUID: String?) {
+        saveSelection(selection)
+        saveMicrophoneUID(microphoneUID)
+    }
+
+    func saveSelection(_ selection: CaptureSelection) {
         defaults.set(selection.mode.rawValue, forKey: Self.modeKey)
         defaults.set(selection.selectedBundleIdentifier, forKey: Self.selectedBundleIdentifierKey)
+    }
+
+    func saveMicrophoneUID(_ microphoneUID: String?) {
         defaults.set(microphoneUID, forKey: Self.microphoneUIDKey)
     }
 }

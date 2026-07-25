@@ -159,6 +159,14 @@ enum CaptureErrorMapper {
     }
 }
 
+enum CaptureStreamStopClassifier {
+    static func event(for error: NSError) -> CaptureEvent {
+        let event = CaptureErrorMapper.event(for: error)
+        // A delegate stop is terminal: the stream and microphone output are already gone.
+        return event == .selectedApplicationRequiresReconnect ? .streamFailed : event
+    }
+}
+
 enum CaptureMicrophoneAuthorization {
     case authorized
     case denied
@@ -367,6 +375,105 @@ struct CaptureSessionEventState {
     }
 }
 
+struct SelectedApplicationLivenessSnapshot: Equatable {
+    let filterGeneration: UInt64
+    let application: CaptureApplication
+}
+
+struct SelectedApplicationReconnectUpdate: Equatable {
+    let filterGeneration: UInt64
+    let application: CaptureApplication
+}
+
+struct SelectedApplicationSessionState {
+    private(set) var application: CaptureApplication
+    private(set) var isDisconnected = false
+    private var filterGeneration: UInt64 = 1
+    private var reconnectUpdate: SelectedApplicationReconnectUpdate?
+
+    init(application: CaptureApplication) {
+        self.application = application
+    }
+
+    var livenessSnapshot: SelectedApplicationLivenessSnapshot? {
+        SelectedApplicationLivenessSnapshot(
+            filterGeneration: filterGeneration,
+            application: application
+        )
+    }
+
+    mutating func markDisconnected(
+        for snapshot: SelectedApplicationLivenessSnapshot
+    ) -> CaptureEvent? {
+        guard snapshot.filterGeneration == filterGeneration,
+              snapshot.application == application,
+              !isDisconnected else {
+            return nil
+        }
+        isDisconnected = true
+        return .applicationDisconnected(application.name)
+    }
+
+    mutating func beginReconnect(
+        to application: CaptureApplication
+    ) -> SelectedApplicationReconnectUpdate? {
+        guard isDisconnected,
+              reconnectUpdate == nil,
+              application.bundleIdentifier == self.application.bundleIdentifier else {
+            return nil
+        }
+        let update = SelectedApplicationReconnectUpdate(
+            filterGeneration: filterGeneration,
+            application: application
+        )
+        reconnectUpdate = update
+        return update
+    }
+
+    mutating func completeReconnect(
+        _ update: SelectedApplicationReconnectUpdate
+    ) -> Bool {
+        guard reconnectUpdate == update,
+              update.filterGeneration == filterGeneration else {
+            return false
+        }
+        application = update.application
+        filterGeneration &+= 1
+        isDisconnected = false
+        reconnectUpdate = nil
+        return true
+    }
+
+    mutating func failReconnect(_ update: SelectedApplicationReconnectUpdate) {
+        guard reconnectUpdate == update else { return }
+        reconnectUpdate = nil
+    }
+
+    func accepts(_ snapshot: SelectedApplicationLivenessSnapshot) -> Bool {
+        snapshot.filterGeneration == filterGeneration &&
+            snapshot.application == application &&
+            isDisconnected
+    }
+}
+
+enum SelectedApplicationFilterPlan {
+    static func includedProcessIDs(
+        selected: CaptureApplication,
+        applications: [CaptureApplication],
+        recorderProcessID: pid_t
+    ) throws -> [pid_t] {
+        guard applications.contains(where: {
+            $0.processID == selected.processID &&
+                $0.bundleIdentifier == selected.bundleIdentifier
+        }), applications.contains(where: {
+            $0.processID == recorderProcessID
+        }) else {
+            throw CaptureSourceError.selectedApplicationUnavailable
+        }
+        return [selected.processID, recorderProcessID]
+    }
+}
+
 final class CaptureSessionGate {
     private let lock = NSLock()
     private var nextGeneration: UInt64 = 0
@@ -457,9 +564,10 @@ final class ScreenCaptureSource: NSObject {
         let output: ScreenCaptureStreamOutput
         let token: CaptureSessionToken
         let eventHandler: EventHandler
-        var selectedApplication: CaptureApplication?
+        var selectedApplicationState: SelectedApplicationSessionState?
         let selectedMicrophoneUID: String?
         var eventState = CaptureSessionEventState()
+        var livenessTask: Task<Void, Never>?
 
         init(
             stream: SCStream,
@@ -473,7 +581,9 @@ final class ScreenCaptureSource: NSObject {
             self.output = output
             self.token = token
             self.eventHandler = eventHandler
-            self.selectedApplication = selectedApplication
+            self.selectedApplicationState = selectedApplication.map(
+                SelectedApplicationSessionState.init(application:)
+            )
             self.selectedMicrophoneUID = selectedMicrophoneUID
         }
     }
@@ -500,8 +610,9 @@ final class ScreenCaptureSource: NSObject {
     }
 
     func reconnect(selection: ResolvedCaptureSelection) async throws {
-        guard case .application = selection,
-              let session = currentSession() else {
+        guard case let .application(application) = selection,
+              let session = currentSession(),
+              let update = beginReconnect(session, to: application) else {
             throw CaptureSourceError.selectedApplicationUnavailable
         }
 
@@ -519,14 +630,14 @@ final class ScreenCaptureSource: NSObject {
                 display: display
             )
             try await session.stream.updateContentFilter(filter)
-            guard isSessionActive(session) else {
+            guard completeReconnect(session, update: update) else {
                 throw CaptureSourceError.streamStartCancelled
             }
-            session.selectedApplication = Self.selectedApplication(in: selection)
-            session.eventState.clearSelectedApplicationDisconnect()
         } catch let error as CaptureSourceError {
+            failReconnect(session, update: update)
             throw error
         } catch {
+            failReconnect(session, update: update)
             throw CaptureErrorMapper.sourceError(
                 for: CaptureErrorMapper.event(for: error as NSError)
             )
@@ -625,6 +736,7 @@ final class ScreenCaptureSource: NSObject {
                 await stop(expected: session)
                 throw CaptureSourceError.streamStartCancelled
             }
+            startSelectedApplicationLiveness(for: session)
         } catch {
             if didInstallSession, let pendingSession {
                 await stop(expected: pendingSession)
@@ -649,10 +761,14 @@ final class ScreenCaptureSource: NSObject {
 
     /// Checks the original process identity. A restarted app requires an explicit caller-led reconnect.
     func refreshSelectedApplicationLiveness() async {
-        guard let session = currentSession(),
-              let selectedApplication = session.selectedApplication else {
-            return
-        }
+        guard let session = currentSession() else { return }
+        await refreshSelectedApplicationLiveness(for: session)
+    }
+
+    private func refreshSelectedApplicationLiveness(
+        for session: ActiveSession
+    ) async {
+        guard let snapshot = livenessSnapshot(for: session) else { return }
         guard let content = try? await SCShareableContent.excludingDesktopWindows(
             false,
             onScreenWindowsOnly: false
@@ -660,16 +776,20 @@ final class ScreenCaptureSource: NSObject {
             return
         }
         let isCurrentProcessPresent = content.applications.contains {
-            $0.processID == selectedApplication.processID &&
-                $0.bundleIdentifier == selectedApplication.bundleIdentifier
+            $0.processID == snapshot.application.processID &&
+                $0.bundleIdentifier == snapshot.application.bundleIdentifier
         }
         guard !isCurrentProcessPresent,
-              markSelectedApplicationDisconnected(session) else {
+              let event = markSelectedApplicationDisconnected(
+                session,
+                snapshot: snapshot
+              ) else {
             return
         }
-        session.output.enqueue(
-            event: .applicationDisconnected(selectedApplication.name)
-        )
+        session.output.enqueue(event: event) { [weak self, weak session] in
+            guard let self, let session else { return false }
+            return self.acceptsDisconnectedSnapshot(session, snapshot: snapshot)
+        }
     }
 
     /// The caller controls refresh cadence; this method never changes the selected microphone.
@@ -695,7 +815,7 @@ final class ScreenCaptureSource: NSObject {
         }
         session.output.drain()
         removeOutputs(for: session, reportErrors: false)
-        session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
+        session.eventHandler(CaptureStreamStopClassifier.event(for: error as NSError))
         finishStop(session)
     }
 
@@ -749,12 +869,28 @@ final class ScreenCaptureSource: NSObject {
             guard let currentApplication = content.applications.first(where: {
                 $0.processID == selected.processID &&
                     $0.bundleIdentifier == selected.bundleIdentifier
+            }), let recorderApplication = content.applications.first(where: {
+                $0.processID == getpid()
             }) else {
                 throw CaptureSourceError.selectedApplicationUnavailable
             }
+            let availableApplications = content.applications.map {
+                CaptureApplication(
+                    processID: $0.processID,
+                    bundleIdentifier: $0.bundleIdentifier,
+                    name: $0.applicationName
+                )
+            }
+            _ = try SelectedApplicationFilterPlan.includedProcessIDs(
+                selected: selected,
+                applications: availableApplications,
+                recorderProcessID: getpid()
+            )
+            // The recorder keeps the filter context alive after the target exits.
+            // excludesCurrentProcessAudio prevents recorder audio from entering the stream.
             return SCContentFilter(
                 display: display,
-                including: [currentApplication],
+                including: [currentApplication, recorderApplication],
                 exceptingWindows: []
             )
         case .disconnected:
@@ -793,6 +929,26 @@ final class ScreenCaptureSource: NSObject {
         activeSession = session
         sessionGate.activate(session.token)
         return true
+    }
+
+    private func startSelectedApplicationLiveness(for session: ActiveSession) {
+        stateLock.lock()
+        guard activeSession === session,
+              lifecycle.isActive(session.token),
+              session.selectedApplicationState != nil,
+              session.livenessTask == nil else {
+            stateLock.unlock()
+            return
+        }
+        let task = Task { [weak self, weak session] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self, let session else { return }
+                await self.refreshSelectedApplicationLiveness(for: session)
+            }
+        }
+        session.livenessTask = task
+        stateLock.unlock()
     }
 
     private func cancelStartReservation(
@@ -842,6 +998,8 @@ final class ScreenCaptureSource: NSObject {
         guard lifecycle.beginStop(expected: expectedSession?.token) == session.token else {
             return nil
         }
+        session.livenessTask?.cancel()
+        session.livenessTask = nil
         sessionGate.deactivate(session.token)
         return session
     }
@@ -854,6 +1012,8 @@ final class ScreenCaptureSource: NSObject {
               lifecycle.beginStop(expected: session.token) == session.token else {
             return nil
         }
+        session.livenessTask?.cancel()
+        session.livenessTask = nil
         sessionGate.deactivate(session.token)
         return session
     }
@@ -909,8 +1069,58 @@ final class ScreenCaptureSource: NSObject {
         return session
     }
 
+    private func livenessSnapshot(
+        for session: ActiveSession
+    ) -> SelectedApplicationLivenessSnapshot? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session,
+              lifecycle.isActive(session.token) else {
+            return nil
+        }
+        return session.selectedApplicationState?.livenessSnapshot
+    }
+
     private func markSelectedApplicationDisconnected(
-        _ session: ActiveSession
+        _ session: ActiveSession,
+        snapshot: SelectedApplicationLivenessSnapshot
+    ) -> CaptureEvent? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session,
+              lifecycle.isActive(session.token) else {
+            return nil
+        }
+        return session.selectedApplicationState?.markDisconnected(for: snapshot)
+    }
+
+    private func acceptsDisconnectedSnapshot(
+        _ session: ActiveSession,
+        snapshot: SelectedApplicationLivenessSnapshot
+    ) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return activeSession === session &&
+            lifecycle.isActive(session.token) &&
+            session.selectedApplicationState?.accepts(snapshot) == true
+    }
+
+    private func beginReconnect(
+        _ session: ActiveSession,
+        to application: CaptureApplication
+    ) -> SelectedApplicationReconnectUpdate? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session,
+              lifecycle.isActive(session.token) else {
+            return nil
+        }
+        return session.selectedApplicationState?.beginReconnect(to: application)
+    }
+
+    private func completeReconnect(
+        _ session: ActiveSession,
+        update: SelectedApplicationReconnectUpdate
     ) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -918,7 +1128,18 @@ final class ScreenCaptureSource: NSObject {
               lifecycle.isActive(session.token) else {
             return false
         }
-        return session.eventState.markSelectedApplicationDisconnected()
+        return session.selectedApplicationState?.completeReconnect(update) == true
+    }
+
+    private func failReconnect(
+        _ session: ActiveSession,
+        update: SelectedApplicationReconnectUpdate
+    ) {
+        stateLock.lock()
+        if activeSession === session {
+            session.selectedApplicationState?.failReconnect(update)
+        }
+        stateLock.unlock()
     }
 
     private func recordMicrophoneAudio(
@@ -1060,11 +1281,15 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         }
     }
 
-    func enqueue(event: CaptureEvent) {
+    func enqueue(
+        event: CaptureEvent,
+        ifCurrent: @escaping () -> Bool = { true }
+    ) {
         let streamIdentity = token.streamIdentity
         delivery.enqueue(streamIdentity: streamIdentity) { [weak self] in
             guard let self,
-                  delivery.isActive(streamIdentity: streamIdentity) else {
+                  delivery.isActive(streamIdentity: streamIdentity),
+                  ifCurrent() else {
                 return
             }
             onEvent(event)

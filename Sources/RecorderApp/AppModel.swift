@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
@@ -7,11 +8,13 @@ import UniformTypeIdentifiers
 final class AppModel: ObservableObject {
     @Published var devices: [AudioDevice] = []
     @Published var selectedMicDevice: AudioDevice?
+    @Published private(set) var selectedMicrophoneUID: String?
     @Published var availableCaptureApplications: [CaptureApplication] = []
     @Published var captureSelection = CaptureSelection()
     @Published var resolvedCaptureSelection: ResolvedCaptureSelection = .allSystemAudio
     @Published var systemAudioPermission: CapturePermissionState = .notDetermined
     @Published var microphonePermission: CapturePermissionState = .notDetermined
+    @Published private(set) var captureConnectionState: CaptureConnectionState = .connected
     @Published var isCaptureLifecycleWorking = false
     @Published var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published var statusMessage = "Ready"
@@ -35,7 +38,7 @@ final class AppModel: ObservableObject {
     @Published var asrModelStatus = "Checking oMLX ASR server..."
     @Published var asrModelLogURL: URL?
 
-    let recorder = RecordingEngine()
+    let recorder: RecordingEngine
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
@@ -45,11 +48,28 @@ final class AppModel: ObservableObject {
     private var transcriptionCancellationRequested = false
     private var asrPrepareProcess: Process?
     private let capturePersistence: CaptureSelectionPersistence
+    private let inputDevices: () -> [AudioDevice]
+    private let defaultInputDeviceID: () -> AudioDeviceID?
+    private var cancellables: Set<AnyCancellable> = []
+    private var captureLifecycleGate = CaptureLifecycleGate()
+    private var captureLifecycleTask: Task<Void, Never>?
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        recorder: RecordingEngine? = nil,
+        inputDevices: @escaping () -> [AudioDevice] = AudioDeviceManager.inputDevices,
+        defaultInputDeviceID: @escaping () -> AudioDeviceID? = AudioDeviceManager.defaultInputDeviceID,
+        performStartupWork: Bool = true
+    ) {
+        self.recorder = recorder ?? RecordingEngine()
+        self.inputDevices = inputDevices
+        self.defaultInputDeviceID = defaultInputDeviceID
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()
+        selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
+        observeRecorderConnection()
         refreshDevices()
+        guard performStartupWork else { return }
         hotKeyManager.register()
         refreshPermissionPreflight()
         refreshCaptureApplications()
@@ -59,15 +79,13 @@ final class AppModel: ObservableObject {
     }
 
     func refreshDevices() {
-        devices = AudioDeviceManager.inputDevices()
-        let persistedUID = capturePersistence.loadMicrophoneUID()
-        if let persistedUID {
-            selectedMicDevice = devices.first { $0.uid == persistedUID }
+        devices = inputDevices()
+        if let selectedMicrophoneUID {
+            selectedMicDevice = devices.first { $0.uid == selectedMicrophoneUID }
         } else if selectedMicDevice == nil {
-            let defaultID = AudioDeviceManager.defaultInputDeviceID()
+            let defaultID = defaultInputDeviceID()
             selectedMicDevice = devices.first { $0.id == defaultID }
         }
-        persistCaptureSelection()
     }
 
     func refreshAllCaptureState() {
@@ -77,21 +95,26 @@ final class AppModel: ObservableObject {
     }
 
     func refreshCaptureApplications() {
-        Task {
+        beginCaptureLifecycle(.refresh) { [self] token in
             guard systemAudioPermission == .granted else { return }
-            isCaptureLifecycleWorking = true
-            defer { isCaptureLifecycleWorking = false }
             do {
-                availableCaptureApplications = try await recorder.refreshCaptureApplications()
-                resolvedCaptureSelection = CaptureSelectionResolver.resolve(
+                let applications = try await recorder.refreshCaptureApplications()
+                guard captureLifecycleGate.accepts(token) else { return }
+                availableCaptureApplications = applications
+                resolvedCaptureSelection = CaptureConnectionProjection.resolveAfterRefresh(
                     selection: captureSelection,
-                    availableApplications: availableCaptureApplications,
-                    previousResolution: resolvedCaptureSelection
+                    applications: applications,
+                    connectionState: captureConnectionState
                 )
+                if case let .disconnected(bundleIdentifier) = resolvedCaptureSelection,
+                   !bundleIdentifier.isEmpty {
+                    captureConnectionState = .selectedApplicationDisconnected(bundleIdentifier)
+                }
                 if !recorder.isRecording {
                     await startMonitoringIfReady()
                 }
             } catch {
+                guard captureLifecycleGate.accepts(token) else { return }
                 statusMessage = error.localizedDescription
             }
         }
@@ -100,6 +123,7 @@ final class AppModel: ObservableObject {
     func selectCaptureMode(_ mode: CaptureMode) {
         guard sourceControlsEnabled else { return }
         captureSelection.mode = mode
+        captureConnectionState = .connected
         resolvedCaptureSelection = CaptureSelectionResolver.resolve(
             selection: captureSelection,
             availableApplications: availableCaptureApplications
@@ -111,6 +135,7 @@ final class AppModel: ObservableObject {
     func selectCaptureApplication(bundleIdentifier: String) {
         guard sourceControlsEnabled else { return }
         captureSelection.selectedBundleIdentifier = bundleIdentifier
+        captureConnectionState = .connected
         resolvedCaptureSelection = CaptureSelectionResolver.resolve(
             selection: captureSelection,
             availableApplications: availableCaptureApplications,
@@ -123,7 +148,8 @@ final class AppModel: ObservableObject {
     func selectMicrophone(_ device: AudioDevice?) {
         guard sourceControlsEnabled else { return }
         selectedMicDevice = device
-        persistCaptureSelection()
+        selectedMicrophoneUID = device?.uid
+        capturePersistence.saveMicrophoneUID(selectedMicrophoneUID)
         refreshCaptureApplications()
     }
 
@@ -140,6 +166,26 @@ final class AppModel: ObservableObject {
         )
     }
 
+    var canReconnect: Bool {
+        CaptureConnectionProjection.canReconnect(
+            systemPermission: systemAudioPermission,
+            selection: captureSelection,
+            connectionState: captureConnectionState,
+            isMonitoring: recorder.isMonitoring,
+            isLifecycleWorking: isCaptureLifecycleWorking
+        )
+    }
+
+    var showsReconnect: Bool {
+        CaptureConnectionProjection.canReconnect(
+            systemPermission: systemAudioPermission,
+            selection: captureSelection,
+            connectionState: captureConnectionState,
+            isMonitoring: recorder.isMonitoring,
+            isLifecycleWorking: false
+        )
+    }
+
     var systemAudioSubtitle: String {
         switch resolvedCaptureSelection {
         case .allSystemAudio: "All System Audio"
@@ -149,16 +195,15 @@ final class AppModel: ObservableObject {
     }
 
     func reconnectSelectedApplication() {
-        guard !isCaptureLifecycleWorking,
-              captureSelection.mode == .selectedApplication else { return }
-        Task {
-            isCaptureLifecycleWorking = true
-            defer { isCaptureLifecycleWorking = false }
+        guard canReconnect else { return }
+        beginCaptureLifecycle(.reconnect, allowedWhileRecording: true) { [self] token in
             do {
-                availableCaptureApplications = try await recorder.refreshCaptureApplications()
+                let applications = try await recorder.refreshCaptureApplications()
+                guard captureLifecycleGate.accepts(token) else { return }
+                availableCaptureApplications = applications
                 let resolved = CaptureSelectionResolver.resolve(
                     selection: captureSelection,
-                    availableApplications: availableCaptureApplications,
+                    availableApplications: applications,
                     previousResolution: resolvedCaptureSelection,
                     reconnect: true
                 )
@@ -168,9 +213,12 @@ final class AppModel: ObservableObject {
                     return
                 }
                 try await recorder.reconnect(selection: resolved)
+                guard captureLifecycleGate.accepts(token) else { return }
                 resolvedCaptureSelection = resolved
+                captureConnectionState = .connected
                 statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
             } catch {
+                guard captureLifecycleGate.accepts(token) else { return }
                 resolvedCaptureSelection = .disconnected(captureSelection.selectedBundleIdentifier ?? "")
                 statusMessage = error.localizedDescription
             }
@@ -179,12 +227,13 @@ final class AppModel: ObservableObject {
 
     func startOrStop() {
         if recorder.isRecording {
-            Task { await finishRecording(playAfterStop: false) }
+            stopCaptureLifecycle(playAfterStop: false)
             return
         }
 
-        Task {
+        beginCaptureLifecycle(.start) { [self] token in
             await requestPermissionsFromExplicitAction()
+            guard captureLifecycleGate.accepts(token) else { return }
             guard captureReadiness == .ready else {
                 statusMessage = readinessMessage
                 return
@@ -195,9 +244,11 @@ final class AppModel: ObservableObject {
                     microphoneUID: selectedMicDevice?.uid,
                     baseFolder: outputFolder
                 )
+                guard captureLifecycleGate.accepts(token) else { return }
                 statusMessage = "Recording"
                 lastHealthReport = nil
             } catch {
+                guard captureLifecycleGate.accepts(token) else { return }
                 statusMessage = error.localizedDescription
             }
         }
@@ -210,10 +261,11 @@ final class AppModel: ObservableObject {
             return
         }
 
-        isRunningTestRecording = true
-        lastHealthReport = nil
-        Task {
+        beginCaptureLifecycle(.test) { [self] token in
+            isRunningTestRecording = true
+            lastHealthReport = nil
             await requestPermissionsFromExplicitAction()
+            guard captureLifecycleGate.accepts(token) else { return }
             guard captureReadiness == .ready else {
                 isRunningTestRecording = false
                 statusMessage = readinessMessage
@@ -226,16 +278,19 @@ final class AppModel: ObservableObject {
                     baseFolder: outputFolder,
                     folderPrefix: "test"
                 )
+                guard captureLifecycleGate.accepts(token) else { return }
                 statusMessage = "Test recording: 10 seconds"
             } catch {
+                guard captureLifecycleGate.accepts(token) else { return }
                 isRunningTestRecording = false
                 statusMessage = error.localizedDescription
                 return
             }
-            try? await Task.sleep(for: .seconds(10))
-            guard self.isRunningTestRecording else { return }
-            self.isRunningTestRecording = false
-            await self.finishRecording(playAfterStop: true)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(10))
+                guard let self, self.isRunningTestRecording else { return }
+                self.stopCaptureLifecycle(playAfterStop: true)
+            }
         }
     }
 
@@ -751,11 +806,15 @@ final class AppModel: ObservableObject {
     }
 
     func requestSystemAudioPermission() {
-        Task { await requestPermissionsFromExplicitAction(requestSystemOnly: true) }
+        beginCaptureLifecycle(.permission) { [self] _ in
+            await requestPermissionsFromExplicitAction(requestSystemOnly: true)
+        }
     }
 
     func requestMicrophonePermission() {
-        Task { await requestPermissionsFromExplicitAction(requestMicrophoneOnly: true) }
+        beginCaptureLifecycle(.permission) { [self] _ in
+            await requestPermissionsFromExplicitAction(requestMicrophoneOnly: true)
+        }
     }
 
     func openScreenCaptureSettings() {
@@ -778,9 +837,6 @@ final class AppModel: ObservableObject {
         requestSystemOnly: Bool = false,
         requestMicrophoneOnly: Bool = false
     ) async {
-        guard !isCaptureLifecycleWorking else { return }
-        isCaptureLifecycleWorking = true
-        defer { isCaptureLifecycleWorking = false }
         refreshPermissionPreflight()
         if !requestMicrophoneOnly {
             switch systemAudioPermission {
@@ -836,9 +892,61 @@ final class AppModel: ObservableObject {
     }
 
     private func persistCaptureSelection() {
-        capturePersistence.save(
-            selection: captureSelection,
-            microphoneUID: selectedMicDevice?.uid
-        )
+        capturePersistence.saveSelection(captureSelection)
+    }
+
+    private func beginCaptureLifecycle(
+        _ operation: CaptureLifecycleOperation,
+        allowedWhileRecording: Bool = false,
+        _ work: @escaping (CaptureLifecycleToken) async -> Void
+    ) {
+        guard allowedWhileRecording || !recorder.isRecording,
+              let token = captureLifecycleGate.begin(operation) else {
+            return
+        }
+        isCaptureLifecycleWorking = true
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await work(token)
+            self.finishCaptureLifecycle(token)
+        }
+        captureLifecycleTask = task
+    }
+
+    private func stopCaptureLifecycle(playAfterStop: Bool) {
+        let token = captureLifecycleGate.cancelAndBeginStop()
+        captureLifecycleTask?.cancel()
+        isCaptureLifecycleWorking = true
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.finishRecording(playAfterStop: playAfterStop)
+            self.finishCaptureLifecycle(token)
+        }
+        captureLifecycleTask = task
+    }
+
+    private func finishCaptureLifecycle(_ token: CaptureLifecycleToken) {
+        guard captureLifecycleGate.finish(token) else { return }
+        captureLifecycleTask = nil
+        isCaptureLifecycleWorking = false
+    }
+
+    private func observeRecorderConnection() {
+        recorder.$isSystemCaptureConnected
+            .combineLatest(recorder.$isMonitoring)
+            .sink { [weak self] isSystemConnected, isMonitoring in
+                guard let self else { return }
+                let state = CaptureConnectionProjection.observeSystemConnection(
+                    current: self.captureConnectionState,
+                    isSystemConnected: isSystemConnected,
+                    isMonitoring: isMonitoring,
+                    selection: self.captureSelection
+                )
+                self.captureConnectionState = state
+                if case let .selectedApplicationDisconnected(bundleIdentifier) = state {
+                    self.resolvedCaptureSelection = .disconnected(bundleIdentifier)
+                }
+            }
+            .store(in: &cancellables)
     }
 }

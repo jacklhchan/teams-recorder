@@ -8,6 +8,7 @@ struct ContentView: View {
             HeaderView(recorder: model.recorder, statusMessage: model.statusMessage) {
                 model.refreshAllCaptureState()
             }
+            .environment(\.isEnabled, model.sourceControlsEnabled)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -30,7 +31,8 @@ struct ContentView: View {
                         chooseOutputFolder: model.chooseOutputFolder,
                         openRecordingFolder: model.openRecordingFolder,
                         isRunningTestRecording: model.isRunningTestRecording,
-                        isTranscribing: model.transcribingSessionID != nil
+                        isTranscribing: model.transcribingSessionID != nil,
+                        isCaptureLifecycleWorking: model.isCaptureLifecycleWorking
                     )
                     if let report = model.lastHealthReport {
                         HealthSummaryView(report: report)
@@ -196,10 +198,14 @@ private struct CaptureControlsView: View {
                     .disabled(!model.sourceControlsEnabled)
                     Button { model.refreshCaptureApplications() } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.bordered).help("Refresh applications")
-                    if model.captureReadiness == .reconnectRequired {
+                        .disabled(!model.sourceControlsEnabled)
+                        .accessibilityLabel("Refresh capture applications")
+                    if model.showsReconnect {
                         Button { model.reconnectSelectedApplication() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
                             .buttonStyle(.bordered).help("Reconnect selected application")
-                            .disabled(model.isCaptureLifecycleWorking)
+                            .disabled(!model.canReconnect)
+                            .accessibilityLabel("Reconnect selected application audio")
+                            .accessibilityIdentifier("reconnect-selected-application")
                     }
                 }
             }
@@ -311,6 +317,7 @@ private struct ControlsView: View {
     let openRecordingFolder: () -> Void
     let isRunningTestRecording: Bool
     let isTranscribing: Bool
+    let isCaptureLifecycleWorking: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -323,6 +330,7 @@ private struct ControlsView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .tint(recorder.isRecording ? .red : .accentColor)
+            .disabled(!recorder.isRecording && isCaptureLifecycleWorking)
 
             Button {
                 runTestRecording()
@@ -331,7 +339,7 @@ private struct ControlsView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
-            .disabled(recorder.isRecording || isRunningTestRecording)
+            .disabled(recorder.isRecording || isRunningTestRecording || isCaptureLifecycleWorking)
 
             Button {
                 chooseAudioFileForTranscription()

@@ -135,6 +135,89 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
         XCTAssertTrue(events.markSelectedApplicationDisconnected())
     }
 
+    func testSelectedApplicationFilterKeepsOnlyTargetAndRecorderProcesses() throws {
+        let selected = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let recorder = CaptureApplication(
+            processID: 7,
+            bundleIdentifier: "com.example.recorder",
+            name: "Local Meeting Recorder"
+        )
+        let unrelated = CaptureApplication(
+            processID: 88,
+            bundleIdentifier: "com.apple.Music",
+            name: "Music"
+        )
+
+        XCTAssertEqual(
+            try SelectedApplicationFilterPlan.includedProcessIDs(
+                selected: selected,
+                applications: [selected, recorder, unrelated],
+                recorderProcessID: recorder.processID
+            ),
+            [selected.processID, recorder.processID]
+        )
+    }
+
+    func testStaleLivenessSnapshotCannotDisconnectSuccessfulReconnect() throws {
+        let original = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let restarted = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: original.bundleIdentifier,
+            name: original.name
+        )
+        var state = SelectedApplicationSessionState(application: original)
+        let staleSnapshot = try XCTUnwrap(state.livenessSnapshot)
+        XCTAssertNotNil(state.markDisconnected(for: staleSnapshot))
+        let update = try XCTUnwrap(state.beginReconnect(to: restarted))
+
+        XCTAssertTrue(state.completeReconnect(update))
+        XCTAssertNil(state.markDisconnected(for: staleSnapshot))
+        XCTAssertEqual(state.application, restarted)
+        XCTAssertFalse(state.isDisconnected)
+    }
+
+    func testFailedReconnectKeepsDisconnectLatchAndOriginalTarget() throws {
+        let original = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let restarted = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: original.bundleIdentifier,
+            name: original.name
+        )
+        var state = SelectedApplicationSessionState(application: original)
+        let snapshot = try XCTUnwrap(state.livenessSnapshot)
+        XCTAssertNotNil(state.markDisconnected(for: snapshot))
+        let update = try XCTUnwrap(state.beginReconnect(to: restarted))
+
+        state.failReconnect(update)
+
+        XCTAssertEqual(state.application, original)
+        XCTAssertTrue(state.isDisconnected)
+    }
+
+    func testSelectedApplicationContextDelegateStopIsTerminal() {
+        let error = NSError(
+            domain: SCStreamErrorDomain,
+            code: SCStreamError.Code.failedNoMatchingApplicationContext.rawValue
+        )
+
+        XCTAssertEqual(
+            CaptureStreamStopClassifier.event(for: error),
+            .streamFailed
+        )
+    }
+
     func testStaleMicrophoneHealthEventCannotReachReplacementSession() {
         let gate = CaptureSessionGate()
         let streamA = NSObject()

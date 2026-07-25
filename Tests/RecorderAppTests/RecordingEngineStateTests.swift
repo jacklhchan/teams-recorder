@@ -76,6 +76,103 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertEqual(writer.closeCount, 0)
     }
 
+    func testReconnectPreservesCompleteRecordingContinuityContract() async throws {
+        let source = FakeCaptureSource()
+        let factory = FakeWriterFactory()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: factory.makeWriter,
+            mixerBlockFrames: 4
+        )
+        let original = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let restarted = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: original.bundleIdentifier,
+            name: original.name
+        )
+        let baseFolder = temporaryFolder()
+        let folder = try await engine.start(
+            selection: .application(original),
+            microphoneUID: "AirPods-UID",
+            baseFolder: baseFolder
+        )
+        engine.toggleMicMute()
+        source.emit(event: .applicationDisconnected(original.name))
+        await settle()
+        let before = engine.continuitySnapshot
+
+        try await engine.reconnect(selection: .application(restarted))
+        let after = engine.continuitySnapshot
+        source.emit(try block(.microphone, frame: 0, samples: [1, 1, 1, 1]))
+        await settle()
+
+        XCTAssertEqual(factory.createCount, 1)
+        XCTAssertEqual(factory.requestedURLs, [folder.appendingPathComponent("recording.m4a")])
+        XCTAssertEqual(before, after)
+        XCTAssertEqual(source.streamIdentityAtStart, source.streamIdentityAtReconnect)
+        XCTAssertEqual(source.filterUpdateCount, 1)
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(source.stopCount, 0)
+        XCTAssertTrue(engine.isRecording)
+        XCTAssertTrue(engine.micMuted)
+        XCTAssertTrue(factory.writers[0].blocks.allSatisfy { $0.left.allSatisfy { $0 == 0 } })
+    }
+
+    func testReconnectRejectsCrossBundleTarget() async throws {
+        let source = FakeCaptureSource()
+        let engine = makeEngine(source: source, writer: FakeWriter())
+        let original = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let other = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: "com.apple.Music",
+            name: "Music"
+        )
+        _ = try await engine.start(
+            selection: .application(original),
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        source.emit(event: .applicationDisconnected(original.name))
+        await settle()
+
+        await XCTAssertThrowsErrorAsync(
+            try await engine.reconnect(selection: .application(other))
+        )
+
+        XCTAssertEqual(source.reconnectCount, 0)
+        XCTAssertFalse(engine.isSystemCaptureConnected)
+    }
+
+    func testReconnectRequiresDisconnectedSelectedApplicationSession() async throws {
+        let source = FakeCaptureSource()
+        let engine = makeEngine(source: source, writer: FakeWriter())
+        let application = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        _ = try await engine.start(
+            selection: .application(application),
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await engine.reconnect(selection: .application(application))
+        )
+
+        XCTAssertEqual(source.reconnectCount, 0)
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+    }
+
     func testFailedReconnectKeepsRecordingMicrophoneAndDisconnectedSystemAudio() async throws {
         let source = FakeCaptureSource()
         let writer = FakeWriter()
@@ -100,6 +197,8 @@ final class RecordingEngineStateTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? CaptureSourceError, .selectedApplicationUnavailable)
         }
+        source.emit(try block(.microphone, frame: 0, samples: [1, 1, 1, 1]))
+        await settle()
 
         XCTAssertTrue(engine.isRecording)
         XCTAssertTrue(engine.isMonitoring)
@@ -108,6 +207,7 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertEqual(source.startCount, 1)
         XCTAssertEqual(source.stopCount, 0)
         XCTAssertEqual(writer.closeCount, 0)
+        XCTAssertEqual(writer.blocks.count, 1)
     }
 
     func testConcurrentReconnectRequestsCoalesceToOneSourceOperation() async throws {
@@ -137,6 +237,46 @@ final class RecordingEngineStateTests: XCTestCase {
         try await first
         try await second
         XCTAssertEqual(source.reconnectCount, 1)
+    }
+
+    func testDifferentReconnectTargetsDoNotCoalesce() async throws {
+        let source = FakeCaptureSource()
+        source.pauseReconnect = true
+        let engine = makeEngine(source: source, writer: FakeWriter())
+        let original = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let firstTarget = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: original.bundleIdentifier,
+            name: original.name
+        )
+        let secondTarget = CaptureApplication(
+            processID: 100,
+            bundleIdentifier: original.bundleIdentifier,
+            name: original.name
+        )
+        _ = try await engine.start(
+            selection: .application(original),
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        source.emit(event: .applicationDisconnected(original.name))
+        await settle()
+
+        let first = Task { @MainActor in
+            try await engine.reconnect(selection: .application(firstTarget))
+        }
+        await waitUntil { source.reconnectCount == 1 }
+        await XCTAssertThrowsErrorAsync(
+            try await engine.reconnect(selection: .application(secondTarget))
+        )
+
+        XCTAssertEqual(source.reconnectCount, 1)
+        source.resumeReconnect()
+        try await first.value
     }
 
     func testStopWinsOverLateSuccessfulReconnect() async throws {
@@ -631,6 +771,7 @@ final class RecordingEngineStateTests: XCTestCase {
 }
 
 private final class FakeCaptureSource: CaptureSourceProtocol {
+    private let streamIdentity = UUID()
     private var onAudio: ((AudioFrameBlock) -> Void)?
     private var onEvent: ((CaptureEvent) -> Void)?
     private var audioHandlers: [(AudioFrameBlock) -> Void] = []
@@ -643,6 +784,9 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
     private(set) var startedSelections: [ResolvedCaptureSelection] = []
     private(set) var reconnectedSelection: ResolvedCaptureSelection?
     private(set) var reconnectCount = 0
+    private(set) var filterUpdateCount = 0
+    private(set) var streamIdentityAtStart: UUID?
+    private(set) var streamIdentityAtReconnect: UUID?
     var pauseStarts = false
     var pauseReconnect = false
     var startErrors: [Int: Error] = [:]
@@ -662,6 +806,8 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
             }
         }
         if let reconnectError { throw reconnectError }
+        filterUpdateCount += 1
+        streamIdentityAtReconnect = streamIdentity
         reconnectedSelection = selection
     }
 
@@ -687,6 +833,7 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
         }
         startedSelection = selection
         startedMicrophoneUID = microphoneUID
+        streamIdentityAtStart = streamIdentity
         self.onAudio = onAudio
         self.onEvent = onEvent
         audioHandlers.append(onAudio)
@@ -769,9 +916,11 @@ private final class FakeWriter: MixedAudioWriting {
 private final class FakeWriterFactory {
     private(set) var createCount = 0
     private(set) var writers: [FakeWriter] = []
+    private(set) var requestedURLs: [URL] = []
 
     func makeWriter(url: URL) throws -> MixedAudioWriting {
         createCount += 1
+        requestedURLs.append(url)
         let writer = FakeWriter()
         writers.append(writer)
         return writer
@@ -784,4 +933,15 @@ private final class URLBox {
 
 private enum FakeFailure: Error {
     case writerOpen
+}
+
+private func XCTAssertThrowsErrorAsync(
+    _ expression: @autoclosure () async throws -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await expression()
+        XCTFail("Expected error", file: file, line: line)
+    } catch {}
 }

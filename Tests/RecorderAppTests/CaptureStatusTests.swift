@@ -63,7 +63,7 @@ final class CaptureStatusTests: XCTestCase {
             CaptureStatusRowMapper.row(for: .denied),
             .init(
                 title: "Screen & System Audio Recording",
-                message: "Permission denied. Open System Settings, then retry.",
+                message: "Permission denied. Open System Settings, then restart or retry.",
                 action: .openSettings
             )
         )
@@ -95,6 +95,105 @@ final class CaptureStatusTests: XCTestCase {
             Set(CaptureSelectionPersistence.keys)
         )
     }
+
+    @MainActor
+    func testRuntimeDisconnectLatchesReconnectAcrossRefreshWithoutMicrophoneReadiness() {
+        let selection = CaptureSelection(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: "com.microsoft.teams2"
+        )
+        let restarted = CaptureApplication(
+            processID: 99,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let disconnected = CaptureConnectionProjection.observeSystemConnection(
+            current: .connected,
+            isSystemConnected: false,
+            isMonitoring: true,
+            selection: selection
+        )
+
+        XCTAssertEqual(
+            disconnected,
+            .selectedApplicationDisconnected("com.microsoft.teams2")
+        )
+        XCTAssertEqual(
+            CaptureConnectionProjection.resolveAfterRefresh(
+                selection: selection,
+                applications: [restarted],
+                connectionState: disconnected
+            ),
+            .disconnected("com.microsoft.teams2")
+        )
+        XCTAssertTrue(
+            CaptureConnectionProjection.canReconnect(
+                systemPermission: .granted,
+                selection: selection,
+                connectionState: disconnected,
+                isMonitoring: true,
+                isLifecycleWorking: false
+            )
+        )
+    }
+
+    @MainActor
+    func testUnavailableMicrophoneIntentSurvivesRefreshAndRestoresWhenDeviceReturns() {
+        let suiteName = "CaptureStatusTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let persistence = CaptureSelectionPersistence(defaults: defaults)
+        persistence.saveMicrophoneUID("AirPods-UID")
+        var availableDevices: [AudioDevice] = []
+        let model = AppModel(
+            defaults: defaults,
+            inputDevices: { availableDevices },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false
+        )
+
+        model.refreshDevices()
+
+        XCTAssertEqual(model.selectedMicrophoneUID, "AirPods-UID")
+        XCTAssertNil(model.selectedMicDevice)
+        XCTAssertEqual(persistence.loadMicrophoneUID(), "AirPods-UID")
+
+        availableDevices = [
+            AudioDevice(
+                id: 7,
+                uid: "AirPods-UID",
+                name: "AirPods",
+                manufacturer: "Apple",
+                channelCount: 1
+            )
+        ]
+        model.refreshDevices()
+
+        XCTAssertEqual(model.selectedMicDevice?.uid, "AirPods-UID")
+        XCTAssertEqual(persistence.loadMicrophoneUID(), "AirPods-UID")
+    }
+
+    func testScreenPermissionStatusIncludesRestartAndRetryGuidance() {
+        XCTAssertEqual(
+            CaptureStatusRowMapper.row(for: .denied).message,
+            "Permission denied. Open System Settings, then restart or retry."
+        )
+    }
+
+    func testLifecycleGateRejectsOverlapAndStaleCompletionCannotClearStop() throws {
+        var gate = CaptureLifecycleGate()
+        let refresh = try XCTUnwrap(gate.begin(.refresh))
+
+        XCTAssertNil(gate.begin(.start))
+        let stop = gate.cancelAndBeginStop()
+        XCTAssertFalse(gate.finish(refresh))
+        XCTAssertTrue(gate.isWorking)
+        XCTAssertTrue(gate.accepts(stop))
+
+        XCTAssertTrue(gate.finish(stop))
+        XCTAssertFalse(gate.isWorking)
+    }
+
     func testDisconnectedCaptureMapsToWarning() {
         XCTAssertEqual(
             CaptureStatusMapper.status(for: .applicationDisconnected("Teams")),

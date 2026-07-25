@@ -5,14 +5,30 @@ enum AudioSourceKind: Hashable {
     case microphone
 }
 
+enum AudioFrameBlockError: Error, Equatable {
+    case mismatchedChannelFrameCounts(left: Int, right: Int)
+}
+
 struct AudioFrameBlock: Equatable {
     let source: AudioSourceKind
     let startFrame: Int64
     let left: [Float]
     let right: [Float]
 
+    private init(
+        source: AudioSourceKind,
+        startFrame: Int64,
+        left: [Float],
+        right: [Float]
+    ) {
+        self.source = source
+        self.startFrame = startFrame
+        self.left = left
+        self.right = right
+    }
+
     var frameCount: Int {
-        min(left.count, right.count)
+        left.count
     }
 
     static func stereo(
@@ -20,8 +36,15 @@ struct AudioFrameBlock: Equatable {
         startFrame: Int64,
         left: [Float],
         right: [Float]
-    ) -> AudioFrameBlock {
-        AudioFrameBlock(
+    ) throws -> AudioFrameBlock {
+        guard left.count == right.count else {
+            throw AudioFrameBlockError.mismatchedChannelFrameCounts(
+                left: left.count,
+                right: right.count
+            )
+        }
+
+        return AudioFrameBlock(
             source: source,
             startFrame: startFrame,
             left: left,

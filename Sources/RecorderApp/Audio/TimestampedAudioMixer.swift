@@ -1,12 +1,17 @@
 import Foundation
 
+enum TimestampedAudioMixerError: Error, Equatable {
+    case unsupportedSampleRate(Int)
+}
+
 struct TimestampedAudioMixer {
     var isMicrophoneMuted = false
     private(set) var lateFrameCount = 0
+    private(set) var isSystemSourceConnected = true
 
     private let blockFrames: Int
     private let maximumPendingFrames: Int
-    private var nextOutputFrame: Int64 = 0
+    private var nextOutputFrame: Int64?
     private var highestKnownEnd: [AudioSourceKind: Int64] = [:]
     private var pendingSamples: [AudioSourceKind: [Int64: StereoSample]] = [:]
 
@@ -18,8 +23,10 @@ struct TimestampedAudioMixer {
         sampleRate: Int,
         blockFrames: Int,
         maximumPendingFrames: Int? = nil
-    ) {
-        precondition(sampleRate > 0)
+    ) throws {
+        guard sampleRate == 48_000 else {
+            throw TimestampedAudioMixerError.unsupportedSampleRate(sampleRate)
+        }
         precondition(blockFrames > 0)
 
         self.blockFrames = blockFrames
@@ -29,8 +36,28 @@ struct TimestampedAudioMixer {
         )
     }
 
+    mutating func setSystemSourceConnected(_ isConnected: Bool) {
+        guard isSystemSourceConnected != isConnected else {
+            return
+        }
+
+        isSystemSourceConnected = isConnected
+        highestKnownEnd[.system] = nil
+        pendingSamples[.system] = [:]
+    }
+
     mutating func push(_ block: AudioFrameBlock) -> [MixedAudioBlock] {
         guard block.frameCount > 0 else {
+            return []
+        }
+        guard block.source != .system || isSystemSourceConnected else {
+            return []
+        }
+
+        if nextOutputFrame == nil {
+            nextOutputFrame = block.startFrame
+        }
+        guard let outputFrame = nextOutputFrame else {
             return []
         }
 
@@ -39,7 +66,7 @@ struct TimestampedAudioMixer {
 
         for index in 0..<block.frameCount {
             let frame = block.startFrame + Int64(index)
-            if frame < nextOutputFrame {
+            if frame < outputFrame {
                 lateFrameCount += 1
             } else {
                 pendingSamples[block.source, default: [:]][frame] = StereoSample(
@@ -53,26 +80,39 @@ struct TimestampedAudioMixer {
     }
 
     mutating func flushThrough(frame: Int64) -> [MixedAudioBlock] {
-        emit(through: frame)
+        if nextOutputFrame == nil {
+            nextOutputFrame = 0
+        }
+        return emit(through: frame)
     }
 
     private mutating func emitThroughKnownFrames() -> [MixedAudioBlock] {
-        guard let systemEnd = highestKnownEnd[.system],
-              let microphoneEnd = highestKnownEnd[.microphone] else {
+        let knownEnd: Int64
+        if isSystemSourceConnected {
+            guard let systemEnd = highestKnownEnd[.system],
+                  let microphoneEnd = highestKnownEnd[.microphone] else {
+                return []
+            }
+            knownEnd = min(systemEnd, microphoneEnd)
+        } else if let microphoneEnd = highestKnownEnd[.microphone] {
+            knownEnd = microphoneEnd
+        } else {
             return []
         }
 
-        return emit(through: min(systemEnd, microphoneEnd))
+        skipUnobservedGap(through: knownEnd)
+        return emit(through: knownEnd)
     }
 
     private mutating func emit(through frame: Int64) -> [MixedAudioBlock] {
         var output: [MixedAudioBlock] = []
         let blockFrameCount = Int64(blockFrames)
 
-        while nextOutputFrame + blockFrameCount <= frame {
-            output.append(makeMixedBlock(startFrame: nextOutputFrame))
-            consumePendingSamples(through: nextOutputFrame + blockFrameCount)
-            nextOutputFrame += blockFrameCount
+        while let outputFrame = nextOutputFrame,
+              outputFrame + blockFrameCount <= frame {
+            output.append(makeMixedBlock(startFrame: outputFrame))
+            consumePendingSamples(through: outputFrame + blockFrameCount)
+            nextOutputFrame = outputFrame + blockFrameCount
         }
 
         return output
@@ -82,13 +122,27 @@ struct TimestampedAudioMixer {
         var output: [MixedAudioBlock] = []
         let blockFrameCount = Int64(blockFrames)
 
-        while pendingFrameCount > maximumPendingFrames {
-            output.append(makeMixedBlock(startFrame: nextOutputFrame))
-            consumePendingSamples(through: nextOutputFrame + blockFrameCount)
-            nextOutputFrame += blockFrameCount
+        while pendingFrameCount > maximumPendingFrames,
+              let outputFrame = nextOutputFrame {
+            output.append(makeMixedBlock(startFrame: outputFrame))
+            consumePendingSamples(through: outputFrame + blockFrameCount)
+            nextOutputFrame = outputFrame + blockFrameCount
         }
 
         return output
+    }
+
+    private mutating func skipUnobservedGap(through frame: Int64) {
+        guard let outputFrame = nextOutputFrame,
+              let earliestPendingFrame = pendingSamples.values
+                .flatMap({ $0.keys })
+                .filter({ $0 >= outputFrame && $0 < frame })
+                .min(),
+              earliestPendingFrame > outputFrame else {
+            return
+        }
+
+        nextOutputFrame = earliestPendingFrame
     }
 
     private func makeMixedBlock(startFrame: Int64) -> MixedAudioBlock {

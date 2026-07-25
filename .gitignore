@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 build/
+.worktrees/
 DerivedData/
 *.xcuserdata/
 *.xcuserstate

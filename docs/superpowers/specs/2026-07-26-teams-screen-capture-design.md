@@ -1,7 +1,7 @@
 # Teams Meeting Window Capture Design
 
 **Date:** 2026-07-26
-**Status:** Awaiting written-spec review
+**Status:** Approved
 **Target branch:** `codex/native-audio-capture`
 
 ## Context

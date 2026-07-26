@@ -6,7 +6,7 @@ struct LocalMeetingRecorderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
+        Window("Local Meeting Recorder", id: "main") {
             ContentView()
         }
         .windowStyle(.titleBar)

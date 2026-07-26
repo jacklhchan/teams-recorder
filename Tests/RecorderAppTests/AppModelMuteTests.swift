@@ -224,7 +224,7 @@ final class AppModelMuteTests: XCTestCase {
         XCTAssertEqual(controller.installCount, 1)
     }
 
-    func testButtonAppliesAudioGateBeforeNotificationUpdatesDisplay() async {
+    func testButtonImmediatelyAppliesAudioGateAndDisplayWithoutWaitingForNotification() {
         let publisher = AppModelMuteFakePublisher()
         let recorder = RecordingEngine(virtualMicPublisher: publisher)
         var controller: AppModelMuteFakeController!
@@ -239,16 +239,10 @@ final class AppModelMuteTests: XCTestCase {
 
         model.toggleRecorderMicMute(source: "Button")
 
-        XCTAssertEqual(controller.setMutedCalls, [true])
+        XCTAssertEqual(controller.setMutedCalls, [])
         XCTAssertEqual(publisher.muteCalls, [false, true])
-        XCTAssertFalse(recorder.micMuted)
-        XCTAssertEqual(model.statusMessage, "Button: recorder mic mute requested")
-
-        controller.deliverNotification(muted: true)
-        await settle()
-
         XCTAssertTrue(recorder.micMuted)
-        XCTAssertEqual(model.statusMessage, "AirPods / input: recorder mic muted")
+        XCTAssertEqual(model.statusMessage, "Button: recorder mic muted")
     }
 
     func testAccessoryGestureUsesSameAudioGateAndDisplayPath() async {
@@ -270,6 +264,54 @@ final class AppModelMuteTests: XCTestCase {
         XCTAssertEqual(publisher.muteCalls, [false, true])
         XCTAssertTrue(recorder.micMuted)
         XCTAssertEqual(model.statusMessage, "AirPods / input: recorder mic muted")
+    }
+
+    func testNativeUnmuteCannotClearIndependentManualMute() async {
+        let publisher = AppModelMuteFakePublisher()
+        let recorder = RecordingEngine(virtualMicPublisher: publisher)
+        var controller: AppModelMuteFakeController!
+        let model = makeModel(recorder: recorder) { applyMute in
+            controller = AppModelMuteFakeController(
+                initiallyMuted: false,
+                applyMuteToAudioPaths: applyMute
+            )
+            return controller
+        }
+        model.installInputMuteHandling()
+        model.toggleRecorderMicMute(source: "Button")
+
+        controller.simulateAccessoryGesture(muted: false)
+        await settle()
+
+        XCTAssertTrue(model.localMicMuted)
+        XCTAssertTrue(recorder.micMuted)
+        XCTAssertEqual(publisher.muteCalls, [false, true])
+    }
+
+    func testClearingManualMuteNamesRemainingNativeInputMute() async {
+        let publisher = AppModelMuteFakePublisher()
+        let recorder = RecordingEngine(virtualMicPublisher: publisher)
+        var controller: AppModelMuteFakeController!
+        let model = makeModel(recorder: recorder) { applyMute in
+            controller = AppModelMuteFakeController(
+                initiallyMuted: false,
+                applyMuteToAudioPaths: applyMute
+            )
+            return controller
+        }
+        model.installInputMuteHandling()
+        model.toggleRecorderMicMute(source: "Button")
+        controller.simulateAccessoryGesture(muted: true)
+        await settle()
+
+        model.toggleRecorderMicMute(source: "Button")
+
+        XCTAssertFalse(model.localMicMuted)
+        XCTAssertTrue(model.nativeInputMicMuted)
+        XCTAssertEqual(
+            model.statusMessage,
+            "Button: recorder mic remains muted by the input device"
+        )
     }
 
     private func makeModel(

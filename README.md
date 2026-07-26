@@ -2,15 +2,16 @@
 
 macOS SwiftUI MVP for recording meeting audio locally:
 
-- Capture system audio routed through BlackHole or another loopback input.
-- Capture a physical microphone at the same time.
+- Capture all system audio or one selected app with ScreenCaptureKit.
+- Capture a selected physical microphone in the same native capture session.
 - Show live RMS/peak meters, rolling waveform, silence warnings, and clipping warnings.
 - Write one combined `recording.m4a` file per session.
 - Run a 10-second test recording and play it back immediately.
 - Review recent recordings from inside the app.
 - Trigger local Qwen ASR transcription from each recording row.
-- Check BlackHole, Multi-Output Device, and save-folder readiness.
-- Let the recorder app own the mic-track mute state.
+- Publish microphone PCM to `Local Recorder Virtual Mic` for Teams.
+- Follow Microsoft Teams' absolute mute state after local API pairing.
+- Let the recorder app keep an independent local mic mute when needed.
 - Toggle recorder mic mute with `Option + Shift + M`.
 
 ## Run
@@ -53,15 +54,11 @@ If your global `xcode-select` points to Command Line Tools but Xcode is installe
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./scripts/run-app.sh
 ```
 
-## BlackHole Setup
+## Native Audio Capture
 
-1. Install BlackHole 2ch.
-2. Open macOS Audio MIDI Setup.
-3. Create a Multi-Output Device.
-4. Add your real output device and BlackHole 2ch.
-5. Route macOS or Teams speaker output to that Multi-Output Device.
-6. In this app, select BlackHole 2ch as System audio.
-7. Select your physical microphone as Microphone.
+The default capture path does not require BlackHole or a system-output change.
+Choose `All System Audio` or `Selected App`, then choose the microphone that
+should feed both the recording and `Local Recorder Virtual Mic`.
 
 ## Recording Output
 
@@ -80,18 +77,6 @@ Use `Test 10s` before joining or recording an important meeting. The app records
 - mic detected / missing
 - clipping events
 - dropped buffers
-
-## Routing Assistant
-
-The Routing Assistant checks:
-
-- BlackHole is installed and visible
-- System audio source is BlackHole
-- macOS default output is a Multi-Output Device
-- system alerts output is a Multi-Output Device
-- save folder is writable
-
-Use the `Audio MIDI` button to open macOS Audio MIDI Setup.
 
 ## Session List
 
@@ -114,7 +99,8 @@ The app packages `scripts/transcribe-qwen-asr.sh` into the app bundle and calls 
 
 ## Mic Mute
 
-Teams mute state is not treated as a reliable local API. The recorder app uses its own mic-track mute as source of truth.
+The recorder always applies mute to both its local microphone track and
+`Local Recorder Virtual Mic`.
 
 Use either:
 
@@ -124,11 +110,28 @@ Option + Shift + M
 
 or the `Mute Recorder Mic` button.
 
-This mutes the mic track in the local recording. It does not control Microsoft Teams' own mute button.
+To make an AirPods mute press affect both Teams and the recorder:
+
+1. Select `Local Recorder Virtual Mic` as the Teams microphone.
+2. Enable `Settings > Privacy > Third-party app API` in Teams.
+3. Join a Teams call and allow the `Local Meeting Recorder` pairing request.
+4. Keep `Teams Mute Sync` enabled in the recorder.
+
+The integration reads Teams' absolute mute state and never sends
+`toggle-mute`, so duplicate updates cannot flip the state twice.
+While a call is active, a lost or half-open Teams API connection fails closed:
+the recorder microphone track and virtual microphone stay muted until a fresh
+absolute Teams state arrives.
+
+If Teams reports that the recorder is already paired but the local token is
+missing, open `Manage API`, block and forget the old Local Meeting Recorder
+entry, then use the retry button in the recorder.
 
 ## Current MVP Limits
 
-- Combined audio pairs recent system and mic buffers. Long-session drift correction is not implemented yet.
-- There is no virtual microphone proxy.
-- There is no transcription, diarization, cloud upload, or meeting summary.
-- Recorder mic mute does not mute your microphone inside Teams.
+- Teams mute sync depends on the desktop Third-party app API being present and
+  allowed by the signed-in tenant policy.
+- The current Teams pairing token is stored in the app's local user defaults;
+  Keychain migration is intentionally deferred.
+- Transcription is post-call and file based, not streaming.
+- Speaker diarization is not yet included.

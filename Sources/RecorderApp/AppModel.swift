@@ -39,6 +39,11 @@ final class AppModel: ObservableObject {
     @Published var asrModelLogURL: URL?
     @Published private(set) var inputMuteControlAvailable = false
     @Published private(set) var virtualMicInstallationState: VirtualMicInstallationState = .absent
+    @Published private(set) var teamsMuteSyncStatus: TeamsMuteSyncStatus = .disabled
+    @Published private(set) var teamsMuteSyncEnabled: Bool
+    @Published private(set) var localMicMuted = false
+    @Published private(set) var nativeInputMicMuted = false
+    @Published private(set) var teamsMicMuted = false
 
     let recorder: RecordingEngine
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -53,8 +58,12 @@ final class AppModel: ObservableObject {
     private let inputDevices: () -> [AudioDevice]
     private let defaultInputDeviceID: () -> AudioDeviceID?
     private let inputMuteController: InputMuteControlling
+    private let teamsMuteSyncClient: TeamsMuteSyncing
+    private let microphoneMuteGate: MicrophoneMuteGate
+    private let teamsMuteRelay: TeamsMuteRelay
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
     private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
+    private let defaults: UserDefaults
     private let recordingSessionLoadingQueue = DispatchQueue(
         label: "local.meeting.recorder.recording-library",
         qos: .userInitiated
@@ -63,8 +72,10 @@ final class AppModel: ObservableObject {
     private var captureLifecycleGate = CaptureLifecycleGate()
     private var captureLifecycleTask: Task<Void, Never>?
     private var inputMuteHandlingInstalled = false
-    private var pendingInputMuteRequest: Bool?
+    private var teamsMuteSyncInstalled = false
     private var recordingSessionRefreshGeneration: UInt = 0
+
+    private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
 
     init(
         defaults: UserDefaults = .standard,
@@ -75,6 +86,7 @@ final class AppModel: ObservableObject {
         inputMuteControllerFactory: (
             (@escaping (Bool) -> Void) -> InputMuteControlling
         )? = nil,
+        teamsMuteSyncClient: TeamsMuteSyncing? = nil,
         virtualMicStateProvider: @escaping () -> VirtualMicInstallationState = {
             VirtualMicInstallation.currentState()
         },
@@ -86,10 +98,24 @@ final class AppModel: ObservableObject {
         self.recorder = activeRecorder
         self.inputDevices = inputDevices
         self.defaultInputDeviceID = defaultInputDeviceID
+        self.defaults = defaults
+        teamsMuteSyncEnabled = defaults.object(
+            forKey: Self.teamsMuteSyncEnabledKey
+        ) as? Bool ?? true
         self.virtualMicStateProvider = virtualMicStateProvider
         self.recordingSessionLoader = recordingSessionLoader
-        let applyMuteToAudioPaths: (Bool) -> Void = { [weak activeRecorder] muted in
+        let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
+        }
+        self.microphoneMuteGate = microphoneMuteGate
+        teamsMuteRelay = TeamsMuteRelay(
+            microphoneMuteGate: microphoneMuteGate
+        )
+        let applyMuteToAudioPaths: (Bool) -> Void = { muted in
+            microphoneMuteGate.setNativeInputMuted(
+                muted,
+                ensureAudioGateIsApplied: true
+            )
         }
         if let inputMuteControllerFactory {
             inputMuteController = inputMuteControllerFactory(applyMuteToAudioPaths)
@@ -98,6 +124,9 @@ final class AppModel: ObservableObject {
                 applyMuteToAudioPaths: applyMuteToAudioPaths
             )
         }
+        self.teamsMuteSyncClient = teamsMuteSyncClient ?? TeamsMuteSyncClient(
+            tokenStore: UserDefaultsTeamsPairingTokenStore(defaults: defaults)
+        )
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
@@ -105,12 +134,21 @@ final class AppModel: ObservableObject {
         refreshDevices()
         guard performStartupWork else { return }
         installInputMuteHandling()
+        if teamsMuteSyncEnabled {
+            installTeamsMuteSync()
+        }
         hotKeyManager.register()
         refreshPermissionPreflight()
         refreshCaptureApplications()
         refreshSessions()
         refreshASRModelStatus()
         prepareASRModelIfNeeded()
+    }
+
+    deinit {
+        teamsMuteRelay.invalidate()
+        teamsMuteSyncClient.stop()
+        inputMuteController.uninstall()
     }
 
     func refreshDevices() {
@@ -703,24 +741,26 @@ final class AppModel: ObservableObject {
     }
 
     func toggleRecorderMicMute(source: String = "Button") {
-        guard inputMuteHandlingInstalled else {
-            recorder.toggleMicMute()
-            statusMessage = "\(source): recorder mic \(recorder.micMuted ? "muted" : "active")"
+        let current = microphoneMuteGate.snapshot
+        if current.teamsInMeeting, current.teamsMuted, !current.localMuted {
+            statusMessage = "\(source): recorder mic is muted by Teams"
+            return
+        }
+        if current.nativeInputMuted, !current.localMuted {
+            statusMessage = "\(source): recorder mic is muted by the input device"
             return
         }
 
-        let requestedMute = !(pendingInputMuteRequest ?? recorder.micMuted)
-        do {
-            try inputMuteController.setMuted(requestedMute)
-            pendingInputMuteRequest = requestedMute
-            statusMessage = requestedMute
-                ? "\(source): recorder mic mute requested"
-                : "\(source): recorder mic unmute requested"
-        } catch {
-            pendingInputMuteRequest = nil
-            recorder.toggleMicMute()
-            inputMuteControlAvailable = false
-            statusMessage = "\(source): recorder mic \(recorder.micMuted ? "muted" : "active")"
+        let requestedMute = !current.localMuted
+        let snapshot = microphoneMuteGate.setLocalMuted(requestedMute)
+        publishMicrophoneMuteSnapshot(snapshot)
+        if !requestedMute, snapshot.effectiveMuted {
+            let owner = snapshot.teamsInMeeting && snapshot.teamsMuted
+                ? "Teams"
+                : "the input device"
+            statusMessage = "\(source): recorder mic remains muted by \(owner)"
+        } else {
+            statusMessage = "\(source): recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
         }
     }
 
@@ -731,18 +771,105 @@ final class AppModel: ObservableObject {
             try inputMuteController.install { [weak self] muted in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.pendingInputMuteRequest = nil
-                    self.recorder.updateMicMuteDisplay(muted)
-                    self.statusMessage = "AirPods / input: recorder mic \(muted ? "muted" : "active")"
+                    let snapshot = self.microphoneMuteGate.setNativeInputMuted(muted)
+                    self.publishMicrophoneMuteSnapshot(snapshot)
+                    self.statusMessage = "AirPods / input: recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
                 }
             }
             inputMuteHandlingInstalled = true
             inputMuteControlAvailable = true
-            recorder.updateMicMuteDisplay(inputMuteController.isMuted)
+            let snapshot = microphoneMuteGate.setNativeInputMuted(
+                inputMuteController.isMuted,
+                ensureAudioGateIsApplied: true
+            )
+            publishMicrophoneMuteSnapshot(snapshot)
         } catch {
             inputMuteControlAvailable = false
             statusMessage = "AirPods mute control unavailable: \(error.localizedDescription)"
         }
+    }
+
+    func installTeamsMuteSync() {
+        guard teamsMuteSyncEnabled, !teamsMuteSyncInstalled else { return }
+
+        teamsMuteSyncInstalled = true
+        let generation = teamsMuteRelay.enable()
+        let relay = teamsMuteRelay
+        teamsMuteSyncClient.start { [weak self, relay] event in
+            guard let relayResult = relay.apply(
+                event,
+                generation: generation
+            ) else {
+                return
+            }
+            Task { @MainActor [weak self] in
+                self?.handleTeamsMuteSync(
+                    event,
+                    relayResult: relayResult,
+                    generation: generation
+                )
+            }
+        }
+    }
+
+    func setTeamsMuteSyncEnabled(_ enabled: Bool) {
+        guard teamsMuteSyncEnabled != enabled else { return }
+
+        teamsMuteSyncEnabled = enabled
+        defaults.set(enabled, forKey: Self.teamsMuteSyncEnabledKey)
+        if enabled {
+            installTeamsMuteSync()
+            return
+        }
+
+        let snapshot = teamsMuteRelay.disable()
+        teamsMuteSyncClient.stop()
+        teamsMuteSyncInstalled = false
+        teamsMuteSyncStatus = .disabled
+        publishMicrophoneMuteSnapshot(snapshot)
+    }
+
+    func retryTeamsMuteSync() {
+        guard teamsMuteSyncEnabled else { return }
+        teamsMuteSyncClient.reconnect()
+    }
+
+    func requestTeamsPairing() {
+        guard teamsMuteSyncEnabled else { return }
+        teamsMuteSyncClient.requestPairing()
+    }
+
+    private func handleTeamsMuteSync(
+        _ event: TeamsMuteSyncEvent,
+        relayResult: TeamsMuteRelayResult,
+        generation: UInt64
+    ) {
+        guard teamsMuteSyncEnabled, teamsMuteRelay.isCurrent(generation) else {
+            return
+        }
+
+        switch event {
+        case .status(let status):
+            teamsMuteSyncStatus = status
+            if relayResult.didFailClosed {
+                publishMicrophoneMuteSnapshot(microphoneMuteGate.snapshot)
+                statusMessage = "Teams sync lost: recorder mic muted"
+            }
+
+        case .meetingState:
+            let snapshot = microphoneMuteGate.snapshot
+            publishMicrophoneMuteSnapshot(snapshot)
+            statusMessage = "Teams / AirPods: recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
+        }
+    }
+
+    private func publishMicrophoneMuteSnapshot(
+        _ snapshot: MicrophoneMuteSnapshot
+    ) {
+        localMicMuted = snapshot.localMuted
+        nativeInputMicMuted = snapshot.nativeInputMuted
+        teamsMicMuted = snapshot.teamsInMeeting && snapshot.teamsMuted
+        recorder.updateMicMuteDisplay(snapshot.effectiveMuted)
     }
 
     func transcriptText(for session: RecordingSession) -> String {

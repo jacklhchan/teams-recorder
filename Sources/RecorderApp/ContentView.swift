@@ -32,7 +32,10 @@ struct ContentView: View {
                         openRecordingFolder: model.openRecordingFolder,
                         isRunningTestRecording: model.isRunningTestRecording,
                         isTranscribing: model.transcribingSessionID != nil,
-                        isCaptureLifecycleWorking: model.isCaptureLifecycleWorking
+                        isCaptureLifecycleWorking: model.isCaptureLifecycleWorking,
+                        localMicMuted: model.localMicMuted,
+                        nativeInputMicMuted: model.nativeInputMicMuted,
+                        teamsMicMuted: model.teamsMicMuted
                     )
                     if let report = model.lastHealthReport {
                         HealthSummaryView(report: report)
@@ -237,6 +240,23 @@ private struct CaptureControlsView: View {
                     inputMuteControlAvailable: model.inputMuteControlAvailable
                 )
             }
+
+            GridRow {
+                Label("Teams Mute Sync", systemImage: "person.2.wave.2")
+                    .font(.headline)
+                TeamsMuteSyncDetailView(
+                    status: model.teamsMuteSyncStatus,
+                    isEnabled: Binding(
+                        get: { model.teamsMuteSyncEnabled },
+                        set: { model.setTeamsMuteSyncEnabled($0) }
+                    )
+                )
+                TeamsMuteSyncStateView(
+                    status: model.teamsMuteSyncStatus,
+                    retry: model.retryTeamsMuteSync,
+                    requestPairing: model.requestTeamsPairing
+                )
+            }
         }
     }
 
@@ -250,6 +270,141 @@ private struct CaptureControlsView: View {
     private var selectedApplicationName: String {
         if case .application(let application) = model.resolvedCaptureSelection { return application.name }
         return "Choose an application"
+    }
+}
+
+private struct TeamsMuteSyncDetailView: View {
+    let status: TeamsMuteSyncStatus
+    @Binding var isEnabled: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Toggle("Teams mute sync", isOn: $isEnabled)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .help("Follow Microsoft Teams microphone mute state")
+        }
+        .frame(minWidth: 380, alignment: .leading)
+    }
+
+    private var detail: String {
+        switch status {
+        case .disabled:
+            "Recorder mute is local only"
+        case .connecting:
+            "Connecting to Microsoft Teams"
+        case .waitingForTeamsAPI:
+            "Enable Third-party app API in Teams"
+        case .waitingForMeeting:
+            "Join a Teams call to complete pairing"
+        case .waitingForPairingApproval:
+            "Approve Local Meeting Recorder in Teams"
+        case .ready:
+            "Paired with Microsoft Teams"
+        case .inMeeting:
+            "AirPods mute sync is active"
+        case .failed(let message):
+            message
+        }
+    }
+}
+
+private struct TeamsMuteSyncStateView: View {
+    let status: TeamsMuteSyncStatus
+    let retry: () -> Void
+    let requestPairing: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Label(title, systemImage: iconName)
+                .foregroundStyle(statusColor)
+                .lineLimit(1)
+
+            if status == .waitingForPairingApproval {
+                Button(action: requestPairing) {
+                    Image(systemName: "link.badge.plus")
+                }
+                .buttonStyle(.bordered)
+                .help("Request Teams pairing again")
+                .accessibilityLabel("Request Teams pairing again")
+            } else if needsRetry {
+                Button(action: retry) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .help("Retry Teams mute sync")
+                .accessibilityLabel("Retry Teams mute sync")
+            }
+        }
+    }
+
+    private var title: String {
+        if status == .pairingResetRequired {
+            return "Reset pairing"
+        }
+        return switch status {
+        case .disabled:
+            "Off"
+        case .connecting:
+            "Connecting"
+        case .waitingForTeamsAPI:
+            "Teams API unavailable"
+        case .waitingForMeeting:
+            "Ready to pair"
+        case .waitingForPairingApproval:
+            "Waiting for Allow"
+        case .ready:
+            "Connected"
+        case .inMeeting(let muted):
+            muted ? "Teams muted" : "Teams active"
+        case .failed:
+            "Sync error"
+        }
+    }
+
+    private var iconName: String {
+        switch status {
+        case .ready, .inMeeting(muted: false):
+            "checkmark.circle.fill"
+        case .inMeeting(muted: true):
+            "mic.slash.circle.fill"
+        case .waitingForTeamsAPI, .waitingForPairingApproval, .failed:
+            "exclamationmark.triangle.fill"
+        case .connecting:
+            "arrow.triangle.2.circlepath"
+        case .disabled, .waitingForMeeting:
+            "circle.dashed"
+        }
+    }
+
+    private var statusColor: Color {
+        if status == .pairingResetRequired {
+            return .orange
+        }
+        return switch status {
+        case .ready, .inMeeting(muted: false):
+            .green
+        case .waitingForTeamsAPI, .waitingForPairingApproval, .inMeeting(muted: true):
+            .orange
+        case .failed:
+            .red
+        case .disabled, .connecting, .waitingForMeeting:
+            .secondary
+        }
+    }
+
+    private var needsRetry: Bool {
+        switch status {
+        case .waitingForTeamsAPI, .failed:
+            true
+        default:
+            false
+        }
     }
 }
 
@@ -394,6 +549,9 @@ private struct ControlsView: View {
     let isRunningTestRecording: Bool
     let isTranscribing: Bool
     let isCaptureLifecycleWorking: Bool
+    let localMicMuted: Bool
+    let nativeInputMicMuted: Bool
+    let teamsMicMuted: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -429,10 +587,11 @@ private struct ControlsView: View {
             Button {
                 toggleRecorderMicMute()
             } label: {
-                Label(recorder.micMuted ? "Unmute Recorder Mic" : "Mute Recorder Mic", systemImage: recorder.micMuted ? "mic.fill" : "mic.slash.fill")
+                Label(micMuteButtonTitle, systemImage: micMuteButtonIcon)
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
+            .disabled((teamsMicMuted || nativeInputMicMuted) && !localMicMuted)
 
             Button {
                 toggleRecorderMicMute()
@@ -460,6 +619,23 @@ private struct ControlsView: View {
             }
             .buttonStyle(.bordered)
         }
+    }
+
+    private var micMuteButtonTitle: String {
+        if localMicMuted {
+            return "Unmute Recorder Mic"
+        }
+        if teamsMicMuted {
+            return "Muted by Teams"
+        }
+        if nativeInputMicMuted {
+            return "Muted by Input"
+        }
+        return "Mute Recorder Mic"
+    }
+
+    private var micMuteButtonIcon: String {
+        localMicMuted ? "mic.fill" : "mic.slash.fill"
     }
 }
 

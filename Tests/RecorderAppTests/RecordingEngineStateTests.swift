@@ -3,6 +3,66 @@ import XCTest
 
 @MainActor
 final class RecordingEngineStateTests: XCTestCase {
+    func testMonitoringPublishesOnlyMicrophoneBeforeRecordingStarts() async throws {
+        let source = FakeCaptureSource()
+        let publisher = FakeVirtualMicPublisher()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in FakeWriter() },
+            mixerBlockFrames: 4,
+            virtualMicPublisher: publisher
+        )
+
+        try await engine.startMonitoring(
+            selection: .allSystemAudio,
+            microphoneUID: "AirPods-UID"
+        )
+        source.emit(try block(.system, frame: 0, samples: [0.9, 0.8]))
+        source.emit(try block(.microphone, frame: 0, samples: [0.3, -0.2]))
+        await settle()
+
+        XCTAssertFalse(engine.isRecording)
+        XCTAssertEqual(publisher.startCount, 1)
+        XCTAssertEqual(publisher.publishedLeft, [[0.3, -0.2]])
+        XCTAssertEqual(publisher.publishedRight, [[0.3, -0.2]])
+
+        await engine.stopMonitoring()
+        XCTAssertEqual(publisher.stopCount, 1)
+    }
+
+    func testImmediateMuteGateSilencesRecordingBeforeDisplayNotification() async throws {
+        let source = FakeCaptureSource()
+        let writer = FakeWriter()
+        let publisher = FakeVirtualMicPublisher()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in writer },
+            mixerBlockFrames: 4,
+            virtualMicPublisher: publisher
+        )
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: "AirPods-UID",
+            baseFolder: temporaryFolder()
+        )
+
+        engine.applyInputMuteToAudioPaths(true)
+        XCTAssertFalse(engine.micMuted)
+        XCTAssertEqual(publisher.muteCalls, [true])
+
+        source.emit(try block(.system, frame: 0, samples: [0, 0, 0, 0]))
+        source.emit(try block(.microphone, frame: 0, samples: [1, 1, 1, 1]))
+        await settle()
+
+        XCTAssertEqual(writer.blocks.count, 1)
+        XCTAssertTrue(writer.blocks[0].left.allSatisfy { $0 == 0 })
+        XCTAssertTrue(writer.blocks[0].right.allSatisfy { $0 == 0 })
+
+        engine.updateMicMuteDisplay(true)
+        XCTAssertTrue(engine.micMuted)
+        _ = await engine.stop()
+    }
+
     func testStartDoesNotRequireBlackHoleDevice() async throws {
         let source = FakeCaptureSource()
         let writer = FakeWriter()
@@ -963,6 +1023,34 @@ private final class FakeWriterFactory {
         let writer = FakeWriter()
         writers.append(writer)
         return writer
+    }
+}
+
+private final class FakeVirtualMicPublisher: VirtualMicPublishing {
+    private(set) var state: VirtualMicPublisherState = .stopped
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    private(set) var muteCalls: [Bool] = []
+    private(set) var publishedLeft: [[Float]] = []
+    private(set) var publishedRight: [[Float]] = []
+
+    func start() {
+        startCount += 1
+        state = .ready
+    }
+
+    func publishMicrophone(left: [Float], right: [Float]) {
+        publishedLeft.append(left)
+        publishedRight.append(right)
+    }
+
+    func setMuted(_ muted: Bool) {
+        muteCalls.append(muted)
+    }
+
+    func stop() {
+        stopCount += 1
+        state = .stopped
     }
 }
 

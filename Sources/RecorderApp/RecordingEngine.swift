@@ -55,6 +55,7 @@ final class RecordingEngine: ObservableObject {
     private let writerFactory: MixedAudioWriterFactory
     private let mixerBlockFrames: Int
     private let callbackGate = RecordingCallbackGate()
+    nonisolated private let microphoneAudioPaths: MicrophoneAudioPaths
 
     private var mixer: TimestampedAudioMixer
     private var mixedWriter: MixedAudioWriting?
@@ -82,11 +83,13 @@ final class RecordingEngine: ObservableObject {
     init(
         captureSource: CaptureSourceProtocol = ScreenCaptureSource(),
         writerFactory: @escaping MixedAudioWriterFactory = { try AACMixedAudioWriter(url: $0) },
-        mixerBlockFrames: Int = 960
+        mixerBlockFrames: Int = 960,
+        virtualMicPublisher: VirtualMicPublishing = VirtualMicPublisher()
     ) {
         self.captureSource = captureSource
         self.writerFactory = writerFactory
         self.mixerBlockFrames = mixerBlockFrames
+        microphoneAudioPaths = MicrophoneAudioPaths(publisher: virtualMicPublisher)
         self.mixer = try! TimestampedAudioMixer(
             sampleRate: 48_000,
             blockFrames: mixerBlockFrames
@@ -171,6 +174,7 @@ final class RecordingEngine: ObservableObject {
         sourceSessionID = sessionID
         activeSelection = request.selection
         activeMicrophoneUID = request.microphoneUID
+        microphoneAudioPaths.start()
 
         do {
             try await captureSource.start(
@@ -206,6 +210,7 @@ final class RecordingEngine: ObservableObject {
             await captureSource.stop()
             callbackGate.deactivate(sessionID: sessionID)
             await callbackGate.waitForIdle(sessionID: sessionID)
+            microphoneAudioPaths.stop()
             clearSourceSession(sessionID: sessionID)
             if shouldApplyFailure {
                 applyStartFailure(error)
@@ -399,6 +404,7 @@ final class RecordingEngine: ObservableObject {
             callbackGate.deactivate(sessionID: sourceSessionID)
             await callbackGate.waitForIdle(sessionID: sourceSessionID)
         }
+        microphoneAudioPaths.stop()
 
         guard recordingEpoch == activeEpoch else {
             return nil
@@ -427,7 +433,6 @@ final class RecordingEngine: ObservableObject {
         startedAt = nil
         isRecording = false
         isStopping = false
-        micMuted = false
         if let sourceSessionID {
             clearSourceSession(sessionID: sourceSessionID)
         }
@@ -436,34 +441,47 @@ final class RecordingEngine: ObservableObject {
     }
 
     func toggleMicMute() {
-        micMuted.toggle()
+        let muted = !micMuted
+        applyInputMuteToAudioPaths(muted)
+        updateMicMuteDisplay(muted)
+    }
+
+    nonisolated func applyInputMuteToAudioPaths(_ muted: Bool) {
+        microphoneAudioPaths.setMuted(muted)
+    }
+
+    func updateMicMuteDisplay(_ muted: Bool) {
+        micMuted = muted
     }
 
     private func receive(_ block: AudioFrameBlock, ticket: RecordingCallbackTicket) {
         guard ticket.sourceSessionID == sourceSessionID else { return }
 
         let snapshot = Self.levelSnapshot(for: block)
-        switch block.source {
-        case .system:
-            latestSystemLevel = snapshot
-        case .microphone:
-            latestMicLevel = snapshot
-        }
+        microphoneAudioPaths.withLockedState { muted, publisher in
+            switch block.source {
+            case .system:
+                latestSystemLevel = snapshot
+            case .microphone:
+                latestMicLevel = snapshot
+                publisher.publishMicrophone(left: block.left, right: block.right)
+            }
 
-        guard let activeEpoch = recordingEpoch,
-              ticket.recordingEpoch == activeEpoch,
-              mixedWriter != nil else {
-            return
-        }
+            guard let activeEpoch = recordingEpoch,
+                  ticket.recordingEpoch == activeEpoch,
+                  mixedWriter != nil else {
+                return
+            }
 
-        updateHealth(with: snapshot, source: block.source)
-        mixer.isMicrophoneMuted = micMuted
-        latestObservedSourceEndFrame = max(
-            latestObservedSourceEndFrame ?? block.startFrame,
-            block.startFrame + Int64(block.frameCount)
-        )
-        write(mixer.push(block))
-        reconcileMixerHealth()
+            updateHealth(with: snapshot, source: block.source, microphoneMuted: muted)
+            mixer.isMicrophoneMuted = muted
+            latestObservedSourceEndFrame = max(
+                latestObservedSourceEndFrame ?? block.startFrame,
+                block.startFrame + Int64(block.frameCount)
+            )
+            write(mixer.push(block))
+            reconcileMixerHealth()
+        }
     }
 
     private func receive(_ event: CaptureEvent, ticket: RecordingCallbackTicket) {
@@ -507,15 +525,21 @@ final class RecordingEngine: ObservableObject {
         guard isMicrophoneCaptureConnected else { return }
         isMicrophoneCaptureConnected = false
         mixer.setMicrophoneSourceConnected(false)
+        microphoneAudioPaths.stop()
         if isRecording { currentHealth.microphoneDisconnects += 1 }
     }
 
-    private func updateHealth(with snapshot: LevelSnapshot, source: AudioSourceKind) {
+    private func updateHealth(
+        with snapshot: LevelSnapshot,
+        source: AudioSourceKind,
+        microphoneMuted: Bool
+    ) {
         switch source {
         case .system:
             currentHealth.systemSignalSeen = currentHealth.systemSignalSeen || snapshot.rms > -55
         case .microphone:
-            currentHealth.micSignalSeen = currentHealth.micSignalSeen || (!micMuted && snapshot.rms > -55)
+            currentHealth.micSignalSeen = currentHealth.micSignalSeen
+                || (!microphoneMuted && snapshot.rms > -55)
         }
         if snapshot.isClipping { currentHealth.clippingEvents += 1 }
     }
@@ -551,6 +575,7 @@ final class RecordingEngine: ObservableObject {
         await captureSource.stop()
         callbackGate.deactivate(sessionID: sourceSessionID)
         await callbackGate.waitForIdle(sessionID: sourceSessionID)
+        microphoneAudioPaths.stop()
         clearSourceSession(sessionID: sourceSessionID)
     }
 
@@ -570,6 +595,7 @@ final class RecordingEngine: ObservableObject {
         sourceSessionID = nil
         activeSelection = nil
         activeMicrophoneUID = nil
+        microphoneAudioPaths.stop()
         stopMeterTimer()
     }
 
@@ -607,7 +633,6 @@ final class RecordingEngine: ObservableObject {
         startedAt = nil
         isRecording = false
         isStopping = false
-        micMuted = false
         latestObservedSourceEndFrame = nil
         previousMixedSourceEndFrame = nil
         writerBoundaryDiscontinuities = 0
@@ -741,6 +766,43 @@ final class RecordingEngine: ObservableObject {
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         return formatter
     }()
+}
+
+private final class MicrophoneAudioPaths: @unchecked Sendable {
+    private let lock = NSLock()
+    private let publisher: VirtualMicPublishing
+    private var isMuted = false
+
+    init(publisher: VirtualMicPublishing) {
+        self.publisher = publisher
+    }
+
+    func start() {
+        lock.lock()
+        publisher.start()
+        lock.unlock()
+    }
+
+    func setMuted(_ muted: Bool) {
+        lock.lock()
+        isMuted = muted
+        publisher.setMuted(muted)
+        lock.unlock()
+    }
+
+    func withLockedState<T>(
+        _ body: (_ muted: Bool, _ publisher: VirtualMicPublishing) -> T
+    ) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(isMuted, publisher)
+    }
+
+    func stop() {
+        lock.lock()
+        publisher.stop()
+        lock.unlock()
+    }
 }
 
 private struct MonitoringRequest: Equatable {

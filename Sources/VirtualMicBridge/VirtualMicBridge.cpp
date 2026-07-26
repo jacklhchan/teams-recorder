@@ -1,15 +1,24 @@
 #include "VirtualMicBridge.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <limits.h>
 #include <new>
+#include <pthread.h>
+#include <cstdio>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "shared ABI requires little-endian layout");
+#endif
 
 struct alignas(64) VMSlot {
     uint64_t version;
@@ -41,7 +50,7 @@ struct alignas(64) VMSharedRegion {
     uint64_t ownerEpoch;
     uint64_t ownerToken;
     uint32_t ownerActive;
-    uint32_t reserved2;
+    uint32_t writeActive;
     uint64_t controlVersion;
     uint64_t controlGate;
     uint64_t reserved3[6];
@@ -50,10 +59,12 @@ struct alignas(64) VMSharedRegion {
 
 struct VMProducerHandle {
     int fd;
+    int lockFd;
     size_t mappedBytes;
     VMSharedRegion *region;
     uint64_t ownerToken;
     uint64_t ownerEpoch;
+    uint64_t processGeneration;
 };
 
 struct VMConsumerHandle {
@@ -73,6 +84,8 @@ constexpr uint32_t kAbiVersion = 2U;
 constexpr uint32_t kMutedFlag = 1U << 0;
 constexpr uint32_t kConnectedFlag = 1U << 1;
 constexpr uint32_t kMaxStableReadAttempts = 4U;
+constexpr uint32_t kMaxControlTransitionAttempts = 8U;
+constexpr size_t kSharedHeaderBytes = offsetof(VMSharedRegion, slots);
 
 static_assert(sizeof(float) == sizeof(uint32_t), "Float32 contract required");
 static_assert(__atomic_always_lock_free(sizeof(uint32_t), 0), "uint32 shared atomics must be lock-free");
@@ -80,6 +93,108 @@ static_assert(__atomic_always_lock_free(sizeof(uint64_t), 0), "uint64 shared ato
 static_assert(sizeof(VMSlot) == 64U, "slot ABI size changed");
 static_assert(alignof(VMSlot) == 64U, "slot ABI alignment changed");
 static_assert((offsetof(VMSharedRegion, slots) % alignof(VMSlot)) == 0U, "slot ABI alignment changed");
+static_assert(offsetof(VMSharedRegion, magic) == 0U, "magic ABI offset changed");
+static_assert(offsetof(VMSharedRegion, abiVersion) == 8U, "abiVersion ABI offset changed");
+static_assert(offsetof(VMSharedRegion, headerBytes) == 12U, "headerBytes ABI offset changed");
+static_assert(offsetof(VMSharedRegion, totalBytes) == 16U, "totalBytes ABI offset changed");
+static_assert(offsetof(VMSharedRegion, writeSequence) == 56U, "writeSequence ABI offset changed");
+static_assert(offsetof(VMSharedRegion, ownerActive) == 120U, "ownerActive ABI offset changed");
+static_assert(offsetof(VMSharedRegion, writeActive) == 124U, "writeActive ABI offset changed");
+static_assert(offsetof(VMSharedRegion, controlVersion) == 128U, "controlVersion ABI offset changed");
+static_assert(kSharedHeaderBytes == 192U, "shared header ABI size changed");
+
+uint64_t gProcessGeneration = 1U;
+pthread_once_t gAtForkOnce = PTHREAD_ONCE_INIT;
+int gAtForkStatus = 0;
+pthread_mutex_t gLocalOwnerTokensMutex = PTHREAD_MUTEX_INITIALIZER;
+uint64_t gLocalOwnerTokens[256] = {};
+
+void atForkChild() {
+    (void)__atomic_fetch_add(&gProcessGeneration, uint64_t{1}, __ATOMIC_RELAXED);
+}
+
+void registerAtForkOnce() {
+    gAtForkStatus = pthread_atfork(nullptr, nullptr, atForkChild);
+}
+
+VMStatus ensureAtForkRegistered() {
+    if (pthread_once(&gAtForkOnce, registerAtForkOnce) != 0 || gAtForkStatus != 0) {
+        return VM_STATUS_SYSTEM_ERROR;
+    }
+    return VM_STATUS_OK;
+}
+
+uint64_t currentProcessGeneration() {
+    uint64_t value = 0U;
+    __atomic_load(&gProcessGeneration, &value, __ATOMIC_ACQUIRE);
+    return value;
+}
+
+bool localOwnerTokenExists(uint64_t ownerToken) {
+    if (ownerToken == 0U) {
+        return false;
+    }
+    pthread_mutex_lock(&gLocalOwnerTokensMutex);
+    bool found = false;
+    for (uint64_t token : gLocalOwnerTokens) {
+        if (token == ownerToken) {
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&gLocalOwnerTokensMutex);
+    return found;
+}
+
+bool registerLocalOwnerToken(uint64_t ownerToken) {
+    if (ownerToken == 0U) {
+        return false;
+    }
+    pthread_mutex_lock(&gLocalOwnerTokensMutex);
+    bool inserted = false;
+    for (uint64_t &token : gLocalOwnerTokens) {
+        if (token == ownerToken) {
+            inserted = true;
+            break;
+        }
+        if (token == 0U) {
+            token = ownerToken;
+            inserted = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&gLocalOwnerTokensMutex);
+    return inserted;
+}
+
+void unregisterLocalOwnerToken(uint64_t ownerToken) {
+    if (ownerToken == 0U) {
+        return;
+    }
+    pthread_mutex_lock(&gLocalOwnerTokensMutex);
+    for (uint64_t &token : gLocalOwnerTokens) {
+        if (token == ownerToken) {
+            token = 0U;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&gLocalOwnerTokensMutex);
+}
+
+#ifdef VM_BRIDGE_TESTING
+using VMBridgeTestHook = void (*)(void *);
+constexpr uint32_t kTestHookWriteAfterSnapshot = 1U;
+std::atomic<VMBridgeTestHook> gWriteAfterSnapshotHook{nullptr};
+std::atomic<void *> gWriteAfterSnapshotContext{nullptr};
+std::atomic<bool> gForceFinalReadSnapshotFailure{false};
+
+void runWriteAfterSnapshotHook() {
+    VMBridgeTestHook hook = gWriteAfterSnapshotHook.load(std::memory_order_acquire);
+    if (hook != nullptr) {
+        hook(gWriteAfterSnapshotContext.load(std::memory_order_acquire));
+    }
+}
+#endif
 
 template <typename T>
 T atomicLoad(const T *ptr, int memoryOrder) {
@@ -186,8 +301,8 @@ void closeFdIfNeeded(int fd) {
 
 uint64_t makeOwnerToken() {
     static uint64_t processCounter = 0U;
-    processCounter += 1U;
-    return (static_cast<uint64_t>(getpid()) << 32) ^ processCounter ^ 0x9E3779B97F4A7C15ULL;
+    const uint64_t counter = atomicFetchAdd(&processCounter, uint64_t{1}, __ATOMIC_RELAXED) + 1U;
+    return (static_cast<uint64_t>(getpid()) << 32) ^ counter ^ 0x9E3779B97F4A7C15ULL;
 }
 
 VMSlot *slotForSequence(VMSharedRegion *region, uint64_t sequence) {
@@ -239,9 +354,12 @@ VMStatus validateRegion(const VMSharedRegion *region, size_t mappedBytes) {
     if (region == nullptr) {
         return VM_STATUS_INVALID_ARGUMENT;
     }
-    if (region->magic != kMagic ||
+    if (mappedBytes < kSharedHeaderBytes) {
+        return VM_STATUS_ABI_MISMATCH;
+    }
+    if (atomicLoad(&region->magic, __ATOMIC_ACQUIRE) != kMagic ||
         region->abiVersion != kAbiVersion ||
-        region->headerBytes != offsetof(VMSharedRegion, slots) ||
+        region->headerBytes != kSharedHeaderBytes ||
         region->slotBytes != sizeof(VMSlot) ||
         region->slotStride != sizeof(VMSlot) ||
         region->slotAlignment != alignof(VMSlot) ||
@@ -263,9 +381,8 @@ VMStatus validateRegion(const VMSharedRegion *region, size_t mappedBytes) {
 
 void initializeRegion(VMSharedRegion *region, size_t mappedBytes, size_t totalBytes, uint32_t capacityFrames) {
     std::memset(region, 0, mappedBytes);
-    region->magic = kMagic;
     region->abiVersion = kAbiVersion;
-    region->headerBytes = static_cast<uint32_t>(offsetof(VMSharedRegion, slots));
+    region->headerBytes = static_cast<uint32_t>(kSharedHeaderBytes);
     region->totalBytes = totalBytes;
     region->slotBytes = sizeof(VMSlot);
     region->slotStride = sizeof(VMSlot);
@@ -282,6 +399,7 @@ void initializeRegion(VMSharedRegion *region, size_t mappedBytes, size_t totalBy
     atomicStore(&region->ownerEpoch, uint64_t{0}, __ATOMIC_RELAXED);
     atomicStore(&region->ownerToken, uint64_t{0}, __ATOMIC_RELAXED);
     atomicStore(&region->ownerActive, uint32_t{0}, __ATOMIC_RELAXED);
+    atomicStore(&region->writeActive, uint32_t{0}, __ATOMIC_RELAXED);
     atomicStore(&region->controlVersion, uint64_t{0}, __ATOMIC_RELAXED);
     atomicStore(&region->controlGate, packControlGate(1U, 0U), __ATOMIC_RELAXED);
 
@@ -292,10 +410,14 @@ void initializeRegion(VMSharedRegion *region, size_t mappedBytes, size_t totalBy
         atomicStore(&region->slots[index].sampleBits, floatToBits(0.0F), __ATOMIC_RELAXED);
         std::memset(region->slots[index].reserved, 0, sizeof(region->slots[index].reserved));
     }
+    atomicStore(&region->magic, kMagic, __ATOMIC_RELEASE);
 }
 
 bool producerOwnsRegion(const VMProducerHandle *producer) {
     if (producer == nullptr || producer->region == nullptr) {
+        return false;
+    }
+    if (producer->processGeneration != currentProcessGeneration()) {
         return false;
     }
     const VMSharedRegion *region = producer->region;
@@ -304,37 +426,111 @@ bool producerOwnsRegion(const VMProducerHandle *producer) {
            atomicLoad(&region->ownerEpoch, __ATOMIC_ACQUIRE) == producer->ownerEpoch;
 }
 
-VMStatus acquireProducerOwnership(VMSharedRegion *region,
-                                  uint64_t ownerToken,
-                                  uint64_t *outOwnerEpoch) {
+VMStatus tryLockFd(int fd) {
+    if (fd < 0) {
+        return VM_STATUS_INVALID_ARGUMENT;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        return VM_STATUS_OK;
+    }
+    if (errno == EWOULDBLOCK || errno == EAGAIN || errno == EACCES) {
+        return VM_STATUS_BUSY;
+    }
+
+    struct flock lock {};
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 0;
+    lock.l_len = 0;
+    if (fcntl(fd, F_SETLK, &lock) == 0) {
+        return VM_STATUS_OK;
+    }
+    if (errno == EWOULDBLOCK || errno == EAGAIN || errno == EACCES) {
+        return VM_STATUS_BUSY;
+    }
+    return VM_STATUS_SYSTEM_ERROR;
+}
+
+uint64_t hashShmName(const char *shmName) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char *cursor = reinterpret_cast<const unsigned char *>(shmName);
+         cursor != nullptr && *cursor != 0U;
+         ++cursor) {
+        hash ^= static_cast<uint64_t>(*cursor);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+VMStatus acquireProducerLease(const char *shmName, int shmFd, int *outLockFd) {
+    if (!isValidName(shmName) || shmFd < 0 || outLockFd == nullptr) {
+        return VM_STATUS_INVALID_ARGUMENT;
+    }
+    *outLockFd = -1;
+
+    VMStatus status = tryLockFd(shmFd);
+    if (status == VM_STATUS_OK || status == VM_STATUS_BUSY) {
+        return status;
+    }
+
+    char lockPath[PATH_MAX] = {};
+    const int pathLength = std::snprintf(lockPath,
+                                         sizeof(lockPath),
+                                         "/tmp/vm-bridge-%016llx.lock",
+                                         static_cast<unsigned long long>(hashShmName(shmName)));
+    if (pathLength <= 0 || static_cast<size_t>(pathLength) >= sizeof(lockPath)) {
+        return VM_STATUS_SYSTEM_ERROR;
+    }
+
+    const int lockFd = open(lockPath, O_RDWR | O_CREAT, 0600);
+    if (lockFd < 0) {
+        return VM_STATUS_SYSTEM_ERROR;
+    }
+    status = tryLockFd(lockFd);
+    if (status != VM_STATUS_OK) {
+        close(lockFd);
+        return status;
+    }
+
+    *outLockFd = lockFd;
+    return VM_STATUS_OK;
+}
+
+VMStatus recoverAndAcquireProducerOwnership(VMSharedRegion *region,
+                                            uint64_t ownerToken,
+                                            uint64_t *outOwnerEpoch) {
     if (region == nullptr || outOwnerEpoch == nullptr) {
         return VM_STATUS_INVALID_ARGUMENT;
     }
 
-    uint32_t expectedActive = 0U;
-    if (!atomicCompareExchange(&region->ownerActive,
-                               &expectedActive,
-                               uint32_t{1},
-                               __ATOMIC_ACQ_REL,
-                               __ATOMIC_ACQUIRE)) {
-        return VM_STATUS_BUSY;
+    const uint64_t currentGate = atomicLoad(&region->controlGate, __ATOMIC_ACQUIRE);
+    const uint32_t currentGeneration = unpackGeneration(currentGate);
+    const uint64_t currentVersion = atomicLoad(&region->controlVersion, __ATOMIC_ACQUIRE);
+    if (currentGeneration == UINT32_MAX || currentVersion > UINT64_MAX - 2U) {
+        return VM_STATUS_SYSTEM_ERROR;
     }
-
-    const uint64_t currentToken = atomicLoad(&region->ownerToken, __ATOMIC_ACQUIRE);
-    if (currentToken != 0U) {
-        atomicStore(&region->ownerActive, uint32_t{0}, __ATOMIC_RELEASE);
-        return VM_STATUS_BUSY;
-    }
-
     const uint64_t previousEpoch = atomicLoad(&region->ownerEpoch, __ATOMIC_ACQUIRE);
     if (previousEpoch == UINT64_MAX) {
-        atomicStore(&region->ownerActive, uint32_t{0}, __ATOMIC_RELEASE);
         return VM_STATUS_SYSTEM_ERROR;
     }
 
+    atomicStore(&region->ownerActive, uint32_t{0}, __ATOMIC_RELEASE);
+    atomicStore(&region->ownerToken, uint64_t{0}, __ATOMIC_RELEASE);
+    atomicStore(&region->writeActive, uint32_t{0}, __ATOMIC_RELEASE);
+
+    const uint64_t writeSequence = atomicLoad(&region->writeSequence, __ATOMIC_ACQUIRE);
+    atomicStore(&region->generationStartSequence, writeSequence, __ATOMIC_RELEASE);
+    atomicStore(&region->controlGate,
+                packControlGate(currentGeneration + 1U, kConnectedFlag),
+                __ATOMIC_RELEASE);
+    atomicStore(&region->controlVersion,
+                (currentVersion & 1U) != 0U ? currentVersion + 1U : currentVersion + 2U,
+                __ATOMIC_RELEASE);
+
     const uint64_t nextEpoch = previousEpoch + 1U;
-    atomicStore(&region->ownerEpoch, nextEpoch, __ATOMIC_RELEASE);
     atomicStore(&region->ownerToken, ownerToken, __ATOMIC_RELEASE);
+    atomicStore(&region->ownerEpoch, nextEpoch, __ATOMIC_RELEASE);
+    atomicStore(&region->ownerActive, uint32_t{1}, __ATOMIC_RELEASE);
     *outOwnerEpoch = nextEpoch;
     return VM_STATUS_OK;
 }
@@ -349,6 +545,32 @@ void releaseProducerOwnership(VMProducerHandle *producer) {
     atomicStore(&region->ownerActive, uint32_t{0}, __ATOMIC_RELEASE);
 }
 
+struct WriteActiveGuard {
+    VMSharedRegion *region = nullptr;
+    bool acquired = false;
+
+    explicit WriteActiveGuard(VMSharedRegion *targetRegion) : region(targetRegion) {
+        if (region == nullptr) {
+            return;
+        }
+        uint32_t expected = 0U;
+        acquired = atomicCompareExchange(&region->writeActive,
+                                         &expected,
+                                         uint32_t{1},
+                                         __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE);
+    }
+
+    ~WriteActiveGuard() {
+        if (acquired && region != nullptr) {
+            atomicStore(&region->writeActive, uint32_t{0}, __ATOMIC_RELEASE);
+        }
+    }
+
+    WriteActiveGuard(const WriteActiveGuard &) = delete;
+    WriteActiveGuard &operator=(const WriteActiveGuard &) = delete;
+};
+
 VMStatus applyControlTransition(VMSharedRegion *region,
                                 uint32_t mask,
                                 uint32_t desiredBits,
@@ -357,10 +579,13 @@ VMStatus applyControlTransition(VMSharedRegion *region,
         return VM_STATUS_INVALID_ARGUMENT;
     }
 
-    for (;;) {
+    for (uint32_t attempt = 0; attempt < kMaxControlTransitionAttempts; ++attempt) {
         const uint64_t version = atomicLoad(&region->controlVersion, __ATOMIC_ACQUIRE);
         if ((version & 1U) != 0U) {
-            continue;
+            return VM_STATUS_BUSY;
+        }
+        if (version > UINT64_MAX - 2U) {
+            return VM_STATUS_SYSTEM_ERROR;
         }
 
         const uint64_t currentGate = atomicLoad(&region->controlGate, __ATOMIC_ACQUIRE);
@@ -383,6 +608,11 @@ VMStatus applyControlTransition(VMSharedRegion *region,
             continue;
         }
 
+        if (atomicLoad(&region->writeActive, __ATOMIC_ACQUIRE) != 0U) {
+            atomicStore(&region->controlVersion, version + 2U, __ATOMIC_RELEASE);
+            return VM_STATUS_BUSY;
+        }
+
         const uint64_t writeSequence = atomicLoad(&region->writeSequence, __ATOMIC_ACQUIRE);
         atomicStore(&region->generationStartSequence, writeSequence, __ATOMIC_RELEASE);
         if (counter != nullptr) {
@@ -394,6 +624,8 @@ VMStatus applyControlTransition(VMSharedRegion *region,
         atomicStore(&region->controlVersion, version + 2U, __ATOMIC_RELEASE);
         return VM_STATUS_OK;
     }
+
+    return VM_STATUS_BUSY;
 }
 
 void publishSlot(VMSlot *slot, uint64_t sequence, uint32_t generation, float sample) {
@@ -574,10 +806,12 @@ void destroyProducerHandle(VMProducerHandle *producer) {
                                          &producer->region->disconnectCount);
             releaseProducerOwnership(producer);
         }
+        unregisterLocalOwnerToken(producer->ownerToken);
         munmap(producer->region, producer->mappedBytes);
     }
 
     closeFdIfNeeded(producer->fd);
+    closeFdIfNeeded(producer->lockFd);
     delete producer;
 }
 
@@ -620,6 +854,11 @@ VMStatus VMProducerCreate(const char *shmName,
         return VM_STATUS_INVALID_SAMPLE_RATE;
     }
 
+    VMStatus status = ensureAtForkRegistered();
+    if (status != VM_STATUS_OK) {
+        return status;
+    }
+
     const size_t expectedBytes = regionSizeForCapacity(capacityFrames);
     if (expectedBytes == 0U) {
         return VM_STATUS_INVALID_ARGUMENT;
@@ -629,13 +868,24 @@ VMStatus VMProducerCreate(const char *shmName,
     VMSharedRegion *region = nullptr;
     size_t mappedBytes = 0U;
     bool created = false;
-    VMStatus status = createOrOpenProducerRegion(shmName,
-                                                 expectedBytes,
-                                                 &fd,
-                                                 &region,
-                                                 &mappedBytes,
-                                                 &created);
+    int lockFd = -1;
+    status = createOrOpenProducerRegion(shmName,
+                                        expectedBytes,
+                                        &fd,
+                                        &region,
+                                        &mappedBytes,
+                                        &created);
     if (status != VM_STATUS_OK) {
+        return status;
+    }
+
+    status = acquireProducerLease(shmName, fd, &lockFd);
+    if (status != VM_STATUS_OK) {
+        munmap(region, mappedBytes);
+        close(fd);
+        if (created) {
+            shm_unlink(shmName);
+        }
         return status;
     }
 
@@ -646,6 +896,7 @@ VMStatus VMProducerCreate(const char *shmName,
     status = validateRegion(region, mappedBytes);
     if (status != VM_STATUS_OK || region->capacityFrames != capacityFrames) {
         munmap(region, mappedBytes);
+        closeFdIfNeeded(lockFd);
         close(fd);
         if (created) {
             shm_unlink(shmName);
@@ -653,35 +904,52 @@ VMStatus VMProducerCreate(const char *shmName,
         return (status == VM_STATUS_OK) ? VM_STATUS_INVALID_ARGUMENT : status;
     }
 
-    const uint64_t ownerToken = makeOwnerToken();
-    uint64_t ownerEpoch = 0U;
-    status = acquireProducerOwnership(region, ownerToken, &ownerEpoch);
-    if (status != VM_STATUS_OK) {
+    if (atomicLoad(&region->ownerActive, __ATOMIC_ACQUIRE) == 1U &&
+        localOwnerTokenExists(atomicLoad(&region->ownerToken, __ATOMIC_ACQUIRE))) {
         munmap(region, mappedBytes);
+        closeFdIfNeeded(lockFd);
         close(fd);
-        return status;
+        if (created) {
+            shm_unlink(shmName);
+        }
+        return VM_STATUS_BUSY;
     }
 
-    status = applyControlTransition(region,
-                                    kConnectedFlag | kMutedFlag,
-                                    kConnectedFlag,
-                                    nullptr);
-    if (status != VM_STATUS_OK) {
-        atomicStore(&region->ownerToken, uint64_t{0}, __ATOMIC_RELEASE);
-        atomicStore(&region->ownerActive, uint32_t{0}, __ATOMIC_RELEASE);
+    const uint64_t ownerToken = makeOwnerToken();
+    VMProducerHandle *producer = new (std::nothrow) VMProducerHandle{
+        fd,
+        lockFd,
+        mappedBytes,
+        region,
+        ownerToken,
+        0U,
+        currentProcessGeneration()};
+    if (producer == nullptr) {
         munmap(region, mappedBytes);
+        closeFdIfNeeded(lockFd);
+        close(fd);
+        if (created) {
+            shm_unlink(shmName);
+        }
+        return VM_STATUS_SYSTEM_ERROR;
+    }
+
+    status = recoverAndAcquireProducerOwnership(region, ownerToken, &producer->ownerEpoch);
+    if (status != VM_STATUS_OK) {
+        delete producer;
+        munmap(region, mappedBytes);
+        closeFdIfNeeded(lockFd);
         close(fd);
         if (created) {
             shm_unlink(shmName);
         }
         return status;
     }
-
-    VMProducerHandle *producer = new (std::nothrow) VMProducerHandle{fd, mappedBytes, region, ownerToken, ownerEpoch};
-    if (producer == nullptr) {
-        atomicStore(&region->ownerToken, uint64_t{0}, __ATOMIC_RELEASE);
-        atomicStore(&region->ownerActive, uint32_t{0}, __ATOMIC_RELEASE);
+    if (!registerLocalOwnerToken(ownerToken)) {
+        releaseProducerOwnership(producer);
+        delete producer;
         munmap(region, mappedBytes);
+        closeFdIfNeeded(lockFd);
         close(fd);
         if (created) {
             shm_unlink(shmName);
@@ -740,6 +1008,15 @@ VMStatus VMProducerWriteFrames(VMProducerHandle *producer,
     if (!producerOwnsRegion(producer)) {
         return VM_STATUS_BUSY;
     }
+
+    WriteActiveGuard writeGuard(producer->region);
+    if (!writeGuard.acquired) {
+        return VM_STATUS_BUSY;
+    }
+    if (!producerOwnsRegion(producer)) {
+        return VM_STATUS_BUSY;
+    }
+
     if (frameCount == 0U) {
         return VM_STATUS_OK;
     }
@@ -750,6 +1027,12 @@ VMStatus VMProducerWriteFrames(VMProducerHandle *producer,
         return VM_STATUS_BUSY;
     }
     (void)generationStart;
+#ifdef VM_BRIDGE_TESTING
+    runWriteAfterSnapshotHook();
+#endif
+    if (!producerOwnsRegion(producer)) {
+        return VM_STATUS_BUSY;
+    }
 
     const uint32_t generation = unpackGeneration(controlGate);
     const uint32_t flags = unpackFlags(controlGate);
@@ -881,41 +1164,53 @@ VMStatus VMConsumerReadFrames(VMConsumerHandle *consumer,
     }
 
     const uint32_t generationBefore = unpackGeneration(gateBefore);
-    if (generationBefore != consumer->generation) {
-        consumer->readCursor = std::max(consumer->readCursor, startBefore);
-        consumer->generation = generationBefore;
+    uint64_t localCursor = consumer->readCursor;
+    uint32_t localGeneration = consumer->generation;
+    uint64_t localOverrun = consumer->overrunCount;
+    uint64_t localUnderrun = consumer->underrunCount;
+
+    if (generationBefore != localGeneration) {
+        localCursor = std::max(localCursor, startBefore);
+        localGeneration = generationBefore;
     }
 
     const uint64_t writeSequence = atomicLoad(&region->writeSequence, __ATOMIC_ACQUIRE);
     const uint64_t oldestSequence = (writeSequence > region->capacityFrames)
         ? (writeSequence - region->capacityFrames)
         : 0U;
-    if (consumer->readCursor < oldestSequence) {
-        consumer->overrunCount += oldestSequence - consumer->readCursor;
-        consumer->readCursor = oldestSequence;
+    if (localCursor < oldestSequence) {
+        localOverrun += oldestSequence - localCursor;
+        localCursor = oldestSequence;
     }
 
-    const uint64_t availableFrames = (writeSequence > consumer->readCursor)
-        ? (writeSequence - consumer->readCursor)
+    const uint64_t availableFrames = (writeSequence > localCursor)
+        ? (writeSequence - localCursor)
         : 0U;
     const uint32_t readableFrames = static_cast<uint32_t>(std::min<uint64_t>(availableFrames, frameCount));
     uint32_t consumedFrames = 0U;
     for (; consumedFrames < readableFrames; ++consumedFrames) {
-        const uint64_t sequence = consumer->readCursor + consumedFrames;
+        const uint64_t sequence = localCursor + consumedFrames;
         const VMSlot *slot = slotForSequence(region, sequence);
         float sample = 0.0F;
-        if (!tryReadSlotSample(slot, sequence, generationBefore, &sample)) {
+        if (!tryReadSlotSample(slot, sequence, localGeneration, &sample)) {
             break;
         }
         outFrames[consumedFrames] = sample;
     }
 
-    const uint64_t newCursor = consumer->readCursor + consumedFrames;
+    const uint64_t newCursor = localCursor + consumedFrames;
     uint64_t gateAfter = 0U;
     uint64_t startAfter = 0U;
-    if (!tryReadControlSnapshot(region, &gateAfter, &startAfter, kMaxStableReadAttempts)) {
-        gateAfter = gateBefore;
-        startAfter = startBefore;
+#ifdef VM_BRIDGE_TESTING
+    const bool forceFinalReadSnapshotFailure = gForceFinalReadSnapshotFailure.load(std::memory_order_acquire);
+#else
+    constexpr bool forceFinalReadSnapshotFailure = false;
+#endif
+    if (forceFinalReadSnapshotFailure ||
+        !tryReadControlSnapshot(region, &gateAfter, &startAfter, kMaxStableReadAttempts)) {
+        std::fill_n(outFrames, frameCount, 0.0F);
+        *framesRead = frameCount;
+        return VM_STATUS_OK;
     }
 
     if (gateAfter != gateBefore) {
@@ -927,9 +1222,12 @@ VMStatus VMConsumerReadFrames(VMConsumerHandle *consumer,
     }
 
     consumer->readCursor = newCursor;
+    consumer->generation = localGeneration;
+    consumer->overrunCount = localOverrun;
     if (frameCount > consumedFrames) {
-        consumer->underrunCount += static_cast<uint64_t>(frameCount - consumedFrames);
+        localUnderrun += static_cast<uint64_t>(frameCount - consumedFrames);
     }
+    consumer->underrunCount = localUnderrun;
 
     *framesRead = frameCount;
     return VM_STATUS_OK;
@@ -942,5 +1240,18 @@ VMStatus VMConsumerGetStats(const VMConsumerHandle *consumer, VMBridgeStats *out
     fillConsumerStats(consumer, outStats);
     return VM_STATUS_OK;
 }
+
+#ifdef VM_BRIDGE_TESTING
+void VMBridgeTestSetHook(uint32_t hookId, VMBridgeTestHook hook, void *context) {
+    if (hookId == kTestHookWriteAfterSnapshot) {
+        gWriteAfterSnapshotContext.store(context, std::memory_order_release);
+        gWriteAfterSnapshotHook.store(hook, std::memory_order_release);
+    }
+}
+
+void VMBridgeTestSetForceFinalReadSnapshotFailure(bool enabled) {
+    gForceFinalReadSnapshotFailure.store(enabled, std::memory_order_release);
+}
+#endif
 
 } // extern "C"

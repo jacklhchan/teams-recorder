@@ -1,16 +1,20 @@
 #include "VirtualMicBridge.h"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <functional>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <thread>
 #include <type_traits>
@@ -18,6 +22,14 @@
 #include <vector>
 
 extern "C" int vm_c_header_smoke(void);
+
+#ifdef VM_BRIDGE_TESTING
+extern "C" {
+typedef void (*VMBridgeTestHook)(void *);
+void VMBridgeTestSetHook(uint32_t hookId, VMBridgeTestHook hook, void *context);
+void VMBridgeTestSetForceFinalReadSnapshotFailure(bool enabled);
+}
+#endif
 
 static_assert(std::is_standard_layout<VMBridgeStats>::value, "VMBridgeStats must stay C-compatible");
 static_assert(std::is_trivially_copyable<VMBridgeStats>::value, "VMBridgeStats must remain POD-like");
@@ -91,6 +103,85 @@ void expectSequence(const std::vector<float> &values, std::initializer_list<floa
         ++index;
     }
 }
+
+struct PipePair {
+    int readFd = -1;
+    int writeFd = -1;
+
+    PipePair() {
+        int fds[2] = {-1, -1};
+        CHECK(pipe(fds) == 0);
+        readFd = fds[0];
+        writeFd = fds[1];
+    }
+
+    ~PipePair() {
+        if (readFd >= 0) {
+            close(readFd);
+        }
+        if (writeFd >= 0) {
+            close(writeFd);
+        }
+    }
+
+    PipePair(const PipePair &) = delete;
+    PipePair &operator=(const PipePair &) = delete;
+};
+
+void writeByte(int fd, uint8_t value) {
+    const ssize_t written = write(fd, &value, sizeof(value));
+    CHECK(written == static_cast<ssize_t>(sizeof(value)));
+}
+
+uint8_t readByte(int fd) {
+    uint8_t value = 0U;
+    const ssize_t bytesRead = read(fd, &value, sizeof(value));
+    CHECK(bytesRead == static_cast<ssize_t>(sizeof(value)));
+    return value;
+}
+
+void writeStatus(int fd, VMStatus status) {
+    const int value = static_cast<int>(status);
+    const ssize_t written = write(fd, &value, sizeof(value));
+    CHECK(written == static_cast<ssize_t>(sizeof(value)));
+}
+
+VMStatus readStatus(int fd) {
+    int value = -1;
+    const ssize_t bytesRead = read(fd, &value, sizeof(value));
+    CHECK(bytesRead == static_cast<ssize_t>(sizeof(value)));
+    return static_cast<VMStatus>(value);
+}
+
+template <typename Operation>
+void expectOkWithBusyRetries(Operation operation) {
+    for (uint32_t attempt = 0; attempt < 32U; ++attempt) {
+        const VMStatus status = operation();
+        if (status == VM_STATUS_OK) {
+            return;
+        }
+        CHECK(status == VM_STATUS_BUSY);
+        std::this_thread::yield();
+    }
+    fail("operation stayed BUSY after bounded retries", __FILE__, __LINE__);
+}
+
+#ifdef VM_BRIDGE_TESTING
+enum : uint32_t {
+    VM_BRIDGE_TEST_HOOK_WRITE_AFTER_SNAPSHOT = 1U
+};
+
+struct BlockingHookContext {
+    PipePair ready;
+    PipePair resume;
+};
+
+void blockingWriteHook(void *context) {
+    auto *hookContext = static_cast<BlockingHookContext *>(context);
+    writeByte(hookContext->ready.writeFd, 1U);
+    CHECK(readByte(hookContext->resume.readFd) == 1U);
+}
+#endif
 
 void testInvalidArgumentsAndSampleRate() {
     const std::string name = makeUniqueBridgeName("invalid-args");
@@ -368,12 +459,16 @@ void testConcurrentMuteAndDisconnectPreserveBothTransitions() {
         auto muteThread = std::thread([&]() {
             while (!start.load(std::memory_order_acquire)) {
             }
-            CHECK_STATUS(VMProducerSetMuted(bridge.producer, true), VM_STATUS_OK);
+            expectOkWithBusyRetries([&]() {
+                return VMProducerSetMuted(bridge.producer, true);
+            });
         });
         auto disconnectThread = std::thread([&]() {
             while (!start.load(std::memory_order_acquire)) {
             }
-            CHECK_STATUS(VMProducerDisconnect(bridge.producer), VM_STATUS_OK);
+            expectOkWithBusyRetries([&]() {
+                return VMProducerDisconnect(bridge.producer);
+            });
         });
 
         start.store(true, std::memory_order_release);
@@ -395,12 +490,12 @@ void testSecondProducerIsRejectedForActiveRegion() {
 
     VMProducerHandle *secondProducer = nullptr;
     const VMStatus status = VMProducerCreate(bridge.name.c_str(), 64U, VM_SAMPLE_RATE, &secondProducer);
-    CHECK(status != VM_STATUS_OK);
+    CHECK(status == VM_STATUS_BUSY);
     CHECK(secondProducer == nullptr);
 }
 
-void testForkedStaleProducerCannotWriteIntoNewOwnerRegion() {
-    const std::string name = makeUniqueBridgeName("stale-owner");
+void testForkInheritedProducerImmediatelyReturnsBusy() {
+    const std::string name = makeUniqueBridgeName("forkinh");
     CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
 
     VMProducerHandle *producer = nullptr;
@@ -408,21 +503,22 @@ void testForkedStaleProducerCannotWriteIntoNewOwnerRegion() {
     CHECK_STATUS(VMProducerCreate(name.c_str(), 64U, VM_SAMPLE_RATE, &producer), VM_STATUS_OK);
     CHECK_STATUS(VMConsumerCreate(name.c_str(), VM_SAMPLE_RATE, &consumer), VM_STATUS_OK);
 
+    PipePair childStatus;
     const pid_t child = fork();
     CHECK(child >= 0);
     if (child == 0) {
         std::array<float, 2> samples{{91.0F, 92.0F}};
         uint32_t written = 0;
-        sleep(1);
-        const VMStatus staleStatus = VMProducerWriteFrames(producer, samples.data(), 2U, VM_SAMPLE_RATE, &written);
-        VMProducerDestroy(producer);
-        _exit(staleStatus == VM_STATUS_OK ? 1 : 0);
+        close(childStatus.readFd);
+        const VMStatus status = VMProducerWriteFrames(producer, samples.data(), 2U, VM_SAMPLE_RATE, &written);
+        writeStatus(childStatus.writeFd, status);
+        _exit(0);
     }
 
-    VMProducerDestroy(producer);
-    producer = nullptr;
+    close(childStatus.writeFd);
+    childStatus.writeFd = -1;
+    CHECK(readStatus(childStatus.readFd) == VM_STATUS_BUSY);
 
-    CHECK_STATUS(VMProducerCreate(name.c_str(), 64U, VM_SAMPLE_RATE, &producer), VM_STATUS_OK);
     std::array<float, 2> fresh{{11.0F, 12.0F}};
     uint32_t written = 0;
     CHECK_STATUS(VMProducerWriteFrames(producer, fresh.data(), 2U, VM_SAMPLE_RATE, &written), VM_STATUS_OK);
@@ -443,47 +539,52 @@ void testForkedStaleProducerCannotWriteIntoNewOwnerRegion() {
 }
 
 void testForkedProducerConsumerRoundTrip() {
-    const std::string name = makeUniqueBridgeName("fork-roundtrip");
+    const std::string name = makeUniqueBridgeName("forkrt");
     CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
 
     VMProducerHandle *producer = nullptr;
     CHECK_STATUS(VMProducerCreate(name.c_str(), 256U, VM_SAMPLE_RATE, &producer), VM_STATUS_OK);
 
+    PipePair childReady;
+    PipePair parentWrote;
     const pid_t child = fork();
     CHECK(child >= 0);
     if (child == 0) {
+        close(childReady.readFd);
+        close(parentWrote.writeFd);
         VMConsumerHandle *consumer = nullptr;
         if (VMConsumerCreate(name.c_str(), VM_SAMPLE_RATE, &consumer) != VM_STATUS_OK) {
             _exit(2);
         }
+        writeByte(childReady.writeFd, 1U);
+        CHECK(readByte(parentWrote.readFd) == 1U);
+
         std::vector<float> output(32, 0.0F);
         uint32_t read = 0;
-        for (int attempt = 0; attempt < 200; ++attempt) {
-            if (VMConsumerReadFrames(consumer, output.data(), static_cast<uint32_t>(output.size()), VM_SAMPLE_RATE, &read) != VM_STATUS_OK) {
+        if (VMConsumerReadFrames(consumer, output.data(), static_cast<uint32_t>(output.size()), VM_SAMPLE_RATE, &read) != VM_STATUS_OK) {
+            VMConsumerDestroy(consumer);
+            _exit(3);
+        }
+        if (read != output.size()) {
+            VMConsumerDestroy(consumer);
+            _exit(4);
+        }
+        for (size_t index = 0; index < output.size(); ++index) {
+            if (output[index] != static_cast<float>(index + 1U)) {
                 VMConsumerDestroy(consumer);
-                _exit(3);
+                _exit(5);
             }
-            bool anyNonZero = false;
-            for (float sample : output) {
-                anyNonZero = anyNonZero || (sample != 0.0F);
-            }
-            if (anyNonZero) {
-                for (size_t index = 0; index < output.size(); ++index) {
-                    if (output[index] != static_cast<float>(index + 1U)) {
-                        VMConsumerDestroy(consumer);
-                        _exit(4);
-                    }
-                }
-                VMConsumerDestroy(consumer);
-                _exit(0);
-            }
-            usleep(1000);
         }
         VMConsumerDestroy(consumer);
-        _exit(5);
+        _exit(0);
     }
 
-    usleep(1000);
+    close(childReady.writeFd);
+    childReady.writeFd = -1;
+    close(parentWrote.readFd);
+    parentWrote.readFd = -1;
+    CHECK(readByte(childReady.readFd) == 1U);
+
     std::vector<float> input(32, 0.0F);
     for (size_t index = 0; index < input.size(); ++index) {
         input[index] = static_cast<float>(index + 1U);
@@ -491,6 +592,7 @@ void testForkedProducerConsumerRoundTrip() {
     uint32_t written = 0;
     CHECK_STATUS(VMProducerWriteFrames(producer, input.data(), static_cast<uint32_t>(input.size()), VM_SAMPLE_RATE, &written), VM_STATUS_OK);
     CHECK(written == input.size());
+    writeByte(parentWrote.writeFd, 1U);
 
     int status = 0;
     CHECK(waitpid(child, &status, 0) == child);
@@ -498,6 +600,166 @@ void testForkedProducerConsumerRoundTrip() {
     CHECK(WEXITSTATUS(status) == 0);
 
     VMProducerDestroy(producer);
+    CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
+}
+
+#ifdef VM_BRIDGE_TESTING
+void testActiveWriterMakesControlTransitionReturnBusyUntilWriterCompletes() {
+    ScopedBridge bridge(makeUniqueBridgeName("wrctl").c_str());
+    CHECK_STATUS(VMProducerCreate(bridge.name.c_str(), 64U, VM_SAMPLE_RATE, &bridge.producer), VM_STATUS_OK);
+    CHECK_STATUS(VMConsumerCreate(bridge.name.c_str(), VM_SAMPLE_RATE, &bridge.consumerA), VM_STATUS_OK);
+
+    BlockingHookContext hookContext;
+
+    const std::array<float, 4> samples{{1.0F, 2.0F, 3.0F, 4.0F}};
+    uint32_t written = 0;
+    VMStatus writeStatus = VM_STATUS_SYSTEM_ERROR;
+    VMBridgeTestSetHook(VM_BRIDGE_TEST_HOOK_WRITE_AFTER_SNAPSHOT, blockingWriteHook, &hookContext);
+    std::thread writer([&]() {
+        writeStatus = VMProducerWriteFrames(bridge.producer, samples.data(), 4U, VM_SAMPLE_RATE, &written);
+    });
+
+    CHECK(readByte(hookContext.ready.readFd) == 1U);
+    CHECK(VMProducerSetMuted(bridge.producer, true) == VM_STATUS_BUSY);
+    writeByte(hookContext.resume.writeFd, 1U);
+    writer.join();
+    VMBridgeTestSetHook(VM_BRIDGE_TEST_HOOK_WRITE_AFTER_SNAPSHOT, nullptr, nullptr);
+    CHECK(writeStatus == VM_STATUS_OK);
+    CHECK(written == 4U);
+
+    CHECK_STATUS(VMProducerSetMuted(bridge.producer, true), VM_STATUS_OK);
+    std::vector<float> output(4, -1.0F);
+    uint32_t read = 0;
+    CHECK_STATUS(VMConsumerReadFrames(bridge.consumerA, output.data(), 4U, VM_SAMPLE_RATE, &read), VM_STATUS_OK);
+    CHECK(read == 4U);
+    expectAllZero(output);
+}
+
+void testFinalReadSnapshotFailureZeroesOutputAndDoesNotAdvanceCursor() {
+    ScopedBridge bridge(makeUniqueBridgeName("rdfail").c_str());
+    CHECK_STATUS(VMProducerCreate(bridge.name.c_str(), 64U, VM_SAMPLE_RATE, &bridge.producer), VM_STATUS_OK);
+    CHECK_STATUS(VMConsumerCreate(bridge.name.c_str(), VM_SAMPLE_RATE, &bridge.consumerA), VM_STATUS_OK);
+
+    const std::array<float, 4> samples{{21.0F, 22.0F, 23.0F, 24.0F}};
+    uint32_t transferred = 0;
+    CHECK_STATUS(VMProducerWriteFrames(bridge.producer, samples.data(), 4U, VM_SAMPLE_RATE, &transferred), VM_STATUS_OK);
+
+    VMBridgeTestSetForceFinalReadSnapshotFailure(true);
+    std::vector<float> failedRead(4, -1.0F);
+    CHECK_STATUS(VMConsumerReadFrames(bridge.consumerA, failedRead.data(), 4U, VM_SAMPLE_RATE, &transferred), VM_STATUS_OK);
+    VMBridgeTestSetForceFinalReadSnapshotFailure(false);
+    CHECK(transferred == 4U);
+    expectAllZero(failedRead);
+
+    std::vector<float> retryRead(4, 0.0F);
+    CHECK_STATUS(VMConsumerReadFrames(bridge.consumerA, retryRead.data(), 4U, VM_SAMPLE_RATE, &transferred), VM_STATUS_OK);
+    CHECK(transferred == 4U);
+    expectSequence(retryRead, {21.0F, 22.0F, 23.0F, 24.0F});
+}
+#endif
+
+void testProducerCrashAllowsRestartAndInvalidatesOldSpeech() {
+    const std::string name = makeUniqueBridgeName("crash");
+    CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
+
+    PipePair childCreated;
+    PipePair parentConsumerReady;
+    PipePair childWrote;
+    const pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        close(childCreated.readFd);
+        close(parentConsumerReady.writeFd);
+        close(childWrote.readFd);
+
+        VMProducerHandle *producer = nullptr;
+        if (VMProducerCreate(name.c_str(), 64U, VM_SAMPLE_RATE, &producer) != VM_STATUS_OK) {
+            _exit(2);
+        }
+        writeByte(childCreated.writeFd, 1U);
+        CHECK(readByte(parentConsumerReady.readFd) == 1U);
+
+        const std::array<float, 2> stale{{70.0F, 71.0F}};
+        uint32_t written = 0;
+        if (VMProducerWriteFrames(producer, stale.data(), 2U, VM_SAMPLE_RATE, &written) != VM_STATUS_OK || written != 2U) {
+            _exit(3);
+        }
+        writeByte(childWrote.writeFd, 1U);
+        _exit(0);
+    }
+
+    close(childCreated.writeFd);
+    childCreated.writeFd = -1;
+    close(parentConsumerReady.readFd);
+    parentConsumerReady.readFd = -1;
+    close(childWrote.writeFd);
+    childWrote.writeFd = -1;
+
+    CHECK(readByte(childCreated.readFd) == 1U);
+    VMConsumerHandle *consumer = nullptr;
+    CHECK_STATUS(VMConsumerCreate(name.c_str(), VM_SAMPLE_RATE, &consumer), VM_STATUS_OK);
+    writeByte(parentConsumerReady.writeFd, 1U);
+    CHECK(readByte(childWrote.readFd) == 1U);
+
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+
+    VMProducerHandle *producer = nullptr;
+    CHECK_STATUS(VMProducerCreate(name.c_str(), 64U, VM_SAMPLE_RATE, &producer), VM_STATUS_OK);
+    const std::array<float, 2> fresh{{80.0F, 81.0F}};
+    uint32_t transferred = 0;
+    CHECK_STATUS(VMProducerWriteFrames(producer, fresh.data(), 2U, VM_SAMPLE_RATE, &transferred), VM_STATUS_OK);
+    CHECK(transferred == 2U);
+
+    std::vector<float> output(2, 0.0F);
+    CHECK_STATUS(VMConsumerReadFrames(consumer, output.data(), 2U, VM_SAMPLE_RATE, &transferred), VM_STATUS_OK);
+    CHECK(transferred == 2U);
+    expectSequence(output, {80.0F, 81.0F});
+
+    VMConsumerDestroy(consumer);
+    VMProducerDestroy(producer);
+    CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
+}
+
+void testTruncatedSharedMemoryReturnsAbiMismatchWithoutSignal() {
+    const std::string name = makeUniqueBridgeName("truncated");
+    CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
+
+    const int fd = shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+    CHECK(fd >= 0);
+    CHECK(ftruncate(fd, 1) == 0);
+    close(fd);
+
+    PipePair childStatus;
+    const pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        close(childStatus.readFd);
+        VMConsumerHandle *consumer = nullptr;
+        const VMStatus consumerStatus = VMConsumerCreate(name.c_str(), VM_SAMPLE_RATE, &consumer);
+        VMConsumerDestroy(consumer);
+        if (consumerStatus != VM_STATUS_ABI_MISMATCH) {
+            writeStatus(childStatus.writeFd, consumerStatus);
+            _exit(2);
+        }
+
+        VMProducerHandle *producer = nullptr;
+        const VMStatus producerStatus = VMProducerCreate(name.c_str(), 64U, VM_SAMPLE_RATE, &producer);
+        VMProducerDestroy(producer);
+        writeStatus(childStatus.writeFd, producerStatus);
+        _exit(producerStatus == VM_STATUS_ABI_MISMATCH ? 0 : 3);
+    }
+
+    close(childStatus.writeFd);
+    childStatus.writeFd = -1;
+    CHECK(readStatus(childStatus.readFd) == VM_STATUS_ABI_MISMATCH);
+
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
     CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
 }
 
@@ -536,7 +798,7 @@ void testDisconnectDuringReadZeroesEntireRequest() {
 void testStressDeliversExactOrderedSamplesAcrossWraparound() {
     ScopedBridge bridge(makeUniqueBridgeName("exact-stress").c_str());
     constexpr uint32_t kCapacity = 1024U;
-    constexpr uint32_t kTotalFrames = 1024U * 1024U;
+    constexpr uint32_t kTotalFrames = 1000000U;
     constexpr uint32_t kChunk = 257U;
     CHECK_STATUS(VMProducerCreate(bridge.name.c_str(), kCapacity, VM_SAMPLE_RATE, &bridge.producer), VM_STATUS_OK);
     CHECK_STATUS(VMConsumerCreate(bridge.name.c_str(), VM_SAMPLE_RATE, &bridge.consumerA), VM_STATUS_OK);
@@ -586,8 +848,14 @@ int main() {
     testConcurrentStressAndFiniteOutput();
     testConcurrentMuteAndDisconnectPreserveBothTransitions();
     testSecondProducerIsRejectedForActiveRegion();
-    testForkedStaleProducerCannotWriteIntoNewOwnerRegion();
+    testForkInheritedProducerImmediatelyReturnsBusy();
     testForkedProducerConsumerRoundTrip();
+#ifdef VM_BRIDGE_TESTING
+    testActiveWriterMakesControlTransitionReturnBusyUntilWriterCompletes();
+    testFinalReadSnapshotFailureZeroesOutputAndDoesNotAdvanceCursor();
+#endif
+    testProducerCrashAllowsRestartAndInvalidatesOldSpeech();
+    testTruncatedSharedMemoryReturnsAbiMismatchWithoutSignal();
     testDisconnectDuringReadZeroesEntireRequest();
     testStressDeliversExactOrderedSamplesAcrossWraparound();
     return 0;

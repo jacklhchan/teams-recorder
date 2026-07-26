@@ -15,28 +15,42 @@ int vm_c_header_smoke(void) {
     unsigned int transferred = 0;
     (void)snprintf(shm_name, sizeof(shm_name), "/vm-c-smoke-%llu-%u",
                    (unsigned long long)getpid(), counter++);
-    if (VMSharedMemoryUnlink(shm_name) != VM_STATUS_OK) {
+    VMStatus status = VMSharedMemoryUnlink(shm_name);
+    if (status != VM_STATUS_OK) {
+        fprintf(stderr, "C smoke VMSharedMemoryUnlink initial status %d\n", (int)status);
         return -1;
     }
-    if (VMProducerCreate(shm_name, 64U, VM_SAMPLE_RATE, &producer) != VM_STATUS_OK) {
+    status = VMProducerCreate(shm_name, 64U, VM_SAMPLE_RATE, &producer);
+    if (status != VM_STATUS_OK) {
+        fprintf(stderr, "C smoke VMProducerCreate status %d\n", (int)status);
         return -2;
     }
-    if (VMProducerGetStats(producer, &stats) != VM_STATUS_OK) {
+    status = VMProducerGetStats(producer, &stats);
+    if (status != VM_STATUS_OK) {
+        fprintf(stderr, "C smoke VMProducerGetStats status %d\n", (int)status);
         return -3;
     }
-    if (VMConsumerCreate(shm_name, VM_SAMPLE_RATE, &consumer) != VM_STATUS_OK) {
+    status = VMConsumerCreate(shm_name, VM_SAMPLE_RATE, &consumer);
+    if (status != VM_STATUS_OK) {
+        fprintf(stderr, "C smoke VMConsumerCreate status %d\n", (int)status);
         return -4;
     }
-    if (VMConsumerGetStats(consumer, &stats) != VM_STATUS_OK) {
+    status = VMConsumerGetStats(consumer, &stats);
+    if (status != VM_STATUS_OK) {
+        fprintf(stderr, "C smoke VMConsumerGetStats status %d\n", (int)status);
         return -5;
     }
-    if (VMProducerWriteFrames(producer, input, 4U, VM_SAMPLE_RATE, &transferred) != VM_STATUS_OK) {
+    status = VMProducerWriteFrames(producer, input, 4U, VM_SAMPLE_RATE, &transferred);
+    if (status != VM_STATUS_OK) {
+        fprintf(stderr, "C smoke VMProducerWriteFrames status %d\n", (int)status);
         return -6;
     }
     if (transferred != 4U) {
         return -7;
     }
-    if (VMConsumerReadFrames(consumer, output, 4U, VM_SAMPLE_RATE, &transferred) != VM_STATUS_OK) {
+    status = VMConsumerReadFrames(consumer, output, 4U, VM_SAMPLE_RATE, &transferred);
+    if (status != VM_STATUS_OK) {
+        fprintf(stderr, "C smoke VMConsumerReadFrames status %d\n", (int)status);
         return -8;
     }
     if (transferred != 4U) {
@@ -47,7 +61,9 @@ int vm_c_header_smoke(void) {
     }
     VMConsumerDestroy(consumer);
     VMProducerDestroy(producer);
-    if (VMSharedMemoryUnlink(shm_name) != VM_STATUS_OK) {
+    status = VMSharedMemoryUnlink(shm_name);
+    if (status != VM_STATUS_OK) {
+        fprintf(stderr, "C smoke VMSharedMemoryUnlink final status %d\n", (int)status);
         return -11;
     }
     return (int)stats.capacityFrames;

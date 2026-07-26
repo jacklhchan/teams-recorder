@@ -37,6 +37,7 @@ final class AppModel: ObservableObject {
     @Published var asrModelReady = false
     @Published var asrModelStatus = "Checking oMLX ASR server..."
     @Published var asrModelLogURL: URL?
+    @Published private(set) var inputMuteControlAvailable = false
 
     let recorder: RecordingEngine
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -50,26 +51,44 @@ final class AppModel: ObservableObject {
     private let capturePersistence: CaptureSelectionPersistence
     private let inputDevices: () -> [AudioDevice]
     private let defaultInputDeviceID: () -> AudioDeviceID?
+    private let inputMuteController: InputMuteControlling
     private var cancellables: Set<AnyCancellable> = []
     private var captureLifecycleGate = CaptureLifecycleGate()
     private var captureLifecycleTask: Task<Void, Never>?
+    private var inputMuteHandlingInstalled = false
+    private var pendingInputMuteRequest: Bool?
 
     init(
         defaults: UserDefaults = .standard,
         recorder: RecordingEngine? = nil,
         inputDevices: @escaping () -> [AudioDevice] = AudioDeviceManager.inputDevices,
         defaultInputDeviceID: @escaping () -> AudioDeviceID? = AudioDeviceManager.defaultInputDeviceID,
-        performStartupWork: Bool = true
+        performStartupWork: Bool = true,
+        inputMuteControllerFactory: (
+            (@escaping (Bool) -> Void) -> InputMuteControlling
+        )? = nil
     ) {
-        self.recorder = recorder ?? RecordingEngine()
+        let activeRecorder = recorder ?? RecordingEngine()
+        self.recorder = activeRecorder
         self.inputDevices = inputDevices
         self.defaultInputDeviceID = defaultInputDeviceID
+        let applyMuteToAudioPaths: (Bool) -> Void = { [weak activeRecorder] muted in
+            activeRecorder?.applyInputMuteToAudioPaths(muted)
+        }
+        if let inputMuteControllerFactory {
+            inputMuteController = inputMuteControllerFactory(applyMuteToAudioPaths)
+        } else {
+            inputMuteController = InputMuteController(
+                applyMuteToAudioPaths: applyMuteToAudioPaths
+            )
+        }
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
         observeRecorderConnection()
         refreshDevices()
         guard performStartupWork else { return }
+        installInputMuteHandling()
         hotKeyManager.register()
         refreshPermissionPreflight()
         refreshCaptureApplications()
@@ -613,8 +632,46 @@ final class AppModel: ObservableObject {
     }
 
     func toggleRecorderMicMute(source: String = "Button") {
-        recorder.toggleMicMute()
-        statusMessage = "\(source): recorder mic \(recorder.micMuted ? "muted" : "active")"
+        guard inputMuteHandlingInstalled else {
+            recorder.toggleMicMute()
+            statusMessage = "\(source): recorder mic \(recorder.micMuted ? "muted" : "active")"
+            return
+        }
+
+        let requestedMute = !(pendingInputMuteRequest ?? recorder.micMuted)
+        do {
+            try inputMuteController.setMuted(requestedMute)
+            pendingInputMuteRequest = requestedMute
+            statusMessage = requestedMute
+                ? "\(source): recorder mic mute requested"
+                : "\(source): recorder mic unmute requested"
+        } catch {
+            pendingInputMuteRequest = nil
+            recorder.toggleMicMute()
+            inputMuteControlAvailable = false
+            statusMessage = "\(source): recorder mic \(recorder.micMuted ? "muted" : "active")"
+        }
+    }
+
+    func installInputMuteHandling() {
+        guard !inputMuteHandlingInstalled else { return }
+
+        do {
+            try inputMuteController.install { [weak self] muted in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.pendingInputMuteRequest = nil
+                    self.recorder.updateMicMuteDisplay(muted)
+                    self.statusMessage = "AirPods / input: recorder mic \(muted ? "muted" : "active")"
+                }
+            }
+            inputMuteHandlingInstalled = true
+            inputMuteControlAvailable = true
+            recorder.updateMicMuteDisplay(inputMuteController.isMuted)
+        } catch {
+            inputMuteControlAvailable = false
+            statusMessage = "AirPods mute control unavailable: \(error.localizedDescription)"
+        }
     }
 
     func transcriptText(for session: RecordingSession) -> String {

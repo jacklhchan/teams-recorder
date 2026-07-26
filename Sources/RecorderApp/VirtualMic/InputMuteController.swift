@@ -51,6 +51,9 @@ final class InputMuteController: InputMuteControlling {
             return
         }
 
+        isMuted = application.isInputMuted
+        applyMuteToAudioPaths(isMuted)
+
         try application.setInputMuteStateChangeHandler { [applyMuteToAudioPaths] muted in
             applyMuteToAudioPaths(muted)
             return true

@@ -10,6 +10,21 @@ final class InputMuteControllerTests: XCTestCase {
         XCTAssertTrue(controller.isMuted)
     }
 
+    func testInstallImmediatelyAppliesCurrentMuteStateToAudioPaths() throws {
+        let application = FakeInputMuteApplication(initiallyMuted: true)
+        var applyCalls: [Bool] = []
+        let controller = makeController(
+            application: application,
+            applyMuteToAudioPaths: { muted in
+                applyCalls.append(muted)
+            }
+        )
+
+        try controller.install { _ in }
+
+        XCTAssertEqual(applyCalls, [true])
+    }
+
     func testInstallRegistersSingleHandlerAndAccessoryCallbackAppliesMuteSynchronously() throws {
         let application = FakeInputMuteApplication(initiallyMuted: false)
         var events: [String] = []
@@ -26,10 +41,11 @@ final class InputMuteControllerTests: XCTestCase {
 
         XCTAssertEqual(application.handlerRegistrationCount, 1)
         XCTAssertEqual(application.lastRegisteredHandlerWasNil, false)
+        XCTAssertEqual(events, ["apply:false"])
 
         let result = try XCTUnwrap(application.invokeAccessoryMute(true))
         XCTAssertTrue(result)
-        XCTAssertEqual(events, ["apply:true"])
+        XCTAssertEqual(events, ["apply:false", "apply:true"])
         XCTAssertFalse(controller.isMuted)
     }
 
@@ -51,6 +67,7 @@ final class InputMuteControllerTests: XCTestCase {
             changes.append(muted)
             changeExpectation.fulfill()
         }
+        applyCalls.removeAll()
 
         try controller.setMuted(true)
 
@@ -86,6 +103,7 @@ final class InputMuteControllerTests: XCTestCase {
         try controller.install { muted in
             changes.append(muted)
         }
+        applyCalls.removeAll()
 
         XCTAssertThrowsError(try controller.setMuted(true))
         XCTAssertEqual(application.setInputMutedCalls, [true])
@@ -115,6 +133,7 @@ final class InputMuteControllerTests: XCTestCase {
             observedOnMainThread = Thread.isMainThread
             changeExpectation.fulfill()
         }
+        applyCalls.removeAll()
 
         DispatchQueue.global().async {
             notificationCenter.post(
@@ -185,6 +204,7 @@ final class InputMuteControllerTests: XCTestCase {
         try controller.install { muted in
             changes.append(muted)
         }
+        applyCalls.removeAll()
         controller.uninstall()
 
         XCTAssertEqual(application.handlerRegistrationCount, 2)

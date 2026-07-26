@@ -22,7 +22,7 @@ final class TeamsThirdPartyAPIProtocolTests: XCTestCase {
         XCTAssertEqual(components.scheme, "ws")
         XCTAssertEqual(components.host, "127.0.0.1")
         XCTAssertEqual(components.port, 8124)
-        XCTAssertEqual(query["protocol-version"], "2.0.0.0")
+        XCTAssertEqual(query["protocol-version"], "2.0.0")
         XCTAssertEqual(query["manufacturer"], "Local Recorder")
         XCTAssertEqual(query["device"], "Mac & AirPods")
         XCTAssertEqual(query["app"], "Meeting Recorder")

@@ -45,7 +45,7 @@ enum TeamsThirdPartyAPIEvent: Equatable, Sendable {
 enum TeamsThirdPartyAPI {
     static let host = "127.0.0.1"
     static let port = 8124
-    static let protocolVersion = "2.0.0.0"
+    static let protocolVersion = "2.0.0"
 
     static func endpoint(
         token: String?,

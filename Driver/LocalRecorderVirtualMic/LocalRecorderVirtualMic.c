@@ -19,8 +19,13 @@ A minimal user-space driver.
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/syslog.h>
+
+#include "VirtualMicBridge.h"
 
 //==================================================================================================
 #pragma mark -
@@ -127,6 +132,22 @@ static Float64								gDevice_HostTicksPerFrame		= 0.0;
 static UInt64								gDevice_NumberTimeStamps		= 0;
 static Float64								gDevice_AnchorSampleTime		= 0.0;
 static UInt64								gDevice_AnchorHostTime			= 0;
+
+enum
+{
+	kDevice_MaxIOClients = 32
+};
+
+typedef struct LocalRecorderVirtualMicClientState
+{
+	_Atomic(UInt32)						mClientID;
+	_Atomic(UInt32)						mIsActive;
+	_Atomic(UInt32)						mReaders;
+	_Atomic(VMConsumerHandle*)			mConsumer;
+	UInt32								mStartCount;
+} LocalRecorderVirtualMicClientState;
+
+static LocalRecorderVirtualMicClientState	gDevice_IOClients[kDevice_MaxIOClients]	= { 0 };
 
 static bool									gStream_Input_IsActive			= true;
 	static bool									gStream_Output_IsActive			= false;
@@ -3609,6 +3630,50 @@ Done:
 
 #pragma mark IO Operations
 
+static LocalRecorderVirtualMicClientState*	LocalRecorderVirtualMic_FindClientState(UInt32 inClientID)
+{
+	for(UInt32 theIndex = 0; theIndex < kDevice_MaxIOClients; ++theIndex)
+	{
+		LocalRecorderVirtualMicClientState* theClientState = &gDevice_IOClients[theIndex];
+		if((atomic_load_explicit(&theClientState->mIsActive, memory_order_acquire) != 0) &&
+			(atomic_load_explicit(&theClientState->mClientID, memory_order_relaxed) == inClientID))
+		{
+			return theClientState;
+		}
+	}
+
+	return NULL;
+}
+
+static LocalRecorderVirtualMicClientState*	LocalRecorderVirtualMic_FindAvailableClientState(void)
+{
+	for(UInt32 theIndex = 0; theIndex < kDevice_MaxIOClients; ++theIndex)
+	{
+		LocalRecorderVirtualMicClientState* theClientState = &gDevice_IOClients[theIndex];
+		if(atomic_load_explicit(&theClientState->mIsActive, memory_order_acquire) == 0)
+		{
+			return theClientState;
+		}
+	}
+
+	return NULL;
+}
+
+static void	LocalRecorderVirtualMic_AttachConsumer(LocalRecorderVirtualMicClientState* inClientState)
+{
+	VMConsumerHandle* theConsumer = NULL;
+	VMStatus theStatus = VMConsumerCreate(
+		VM_DEFAULT_SHARED_MEMORY_NAME,
+		VM_SAMPLE_RATE,
+		&theConsumer
+	);
+
+	if(theStatus == VM_STATUS_OK)
+	{
+		atomic_store_explicit(&inClientState->mConsumer, theConsumer, memory_order_release);
+	}
+}
+
 static OSStatus	LocalRecorderVirtualMic_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID)
 {
 	//	This call tells the device that IO is starting for the given client. When this routine
@@ -3617,10 +3682,9 @@ static OSStatus	LocalRecorderVirtualMic_StartIO(AudioServerPlugInDriverRef inDri
 	//	So, work only needs to be done when the first client starts. All subsequent starts simply
 	//	increment the counter.
 
-	#pragma unused(inClientID)
-
 	//	declare the local variables
 	OSStatus theAnswer = 0;
+	LocalRecorderVirtualMicClientState* theClientState = NULL;
 
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "LocalRecorderVirtualMic_StartIO: bad driver reference");
@@ -3629,24 +3693,60 @@ static OSStatus	LocalRecorderVirtualMic_StartIO(AudioServerPlugInDriverRef inDri
 	//	The running count and clock anchor are one state domain.
 	pthread_mutex_lock(&gDevice_IOMutex);
 
-	//	figure out what we need to do
+	//	Reserve one independent bridge consumer per HAL client. A missing recorder producer is not
+	//	an audio-device failure: this client remains valid and reads fresh silence.
 	if(gDevice_IOIsRunning == UINT64_MAX)
 	{
-		//	overflowing is an error
 		theAnswer = kAudioHardwareIllegalOperationError;
-	}
-	else if(gDevice_IOIsRunning == 0)
-	{
-		//	We need to start the hardware, which in this case is just anchoring the time line.
-		gDevice_IOIsRunning = 1;
-		gDevice_NumberTimeStamps = 0;
-		gDevice_AnchorSampleTime = 0;
-		gDevice_AnchorHostTime = mach_absolute_time();
 	}
 	else
 	{
-		//	IO is already running, so just bump the counter
-		++gDevice_IOIsRunning;
+		theClientState = LocalRecorderVirtualMic_FindClientState(inClientID);
+		if(theClientState != NULL)
+		{
+			if(theClientState->mStartCount == UINT32_MAX)
+			{
+				theAnswer = kAudioHardwareIllegalOperationError;
+			}
+			else
+			{
+				if(atomic_load_explicit(&theClientState->mConsumer, memory_order_acquire) == NULL)
+				{
+					LocalRecorderVirtualMic_AttachConsumer(theClientState);
+				}
+				++theClientState->mStartCount;
+			}
+		}
+		else
+		{
+			theClientState = LocalRecorderVirtualMic_FindAvailableClientState();
+			if(theClientState == NULL)
+			{
+				theAnswer = kAudioHardwareIllegalOperationError;
+			}
+			else
+			{
+				atomic_store_explicit(&theClientState->mClientID, inClientID, memory_order_relaxed);
+				theClientState->mStartCount = 1;
+				LocalRecorderVirtualMic_AttachConsumer(theClientState);
+				atomic_store_explicit(&theClientState->mIsActive, 1, memory_order_release);
+			}
+		}
+
+		if(theAnswer == 0)
+		{
+			if(gDevice_IOIsRunning == 0)
+			{
+				gDevice_IOIsRunning = 1;
+				gDevice_NumberTimeStamps = 0;
+				gDevice_AnchorSampleTime = 0;
+				gDevice_AnchorHostTime = mach_absolute_time();
+			}
+			else
+			{
+				++gDevice_IOIsRunning;
+			}
+		}
 	}
 
 	pthread_mutex_unlock(&gDevice_IOMutex);
@@ -3660,10 +3760,10 @@ static OSStatus	LocalRecorderVirtualMic_StopIO(AudioServerPlugInDriverRef inDriv
 	//	This call tells the device that the client has stopped IO. The driver can stop the hardware
 	//	once all clients have stopped.
 
-	#pragma unused(inClientID)
-
 	//	declare the local variables
 	OSStatus theAnswer = 0;
+	LocalRecorderVirtualMicClientState* theClientState = NULL;
+	VMConsumerHandle* theConsumer = NULL;
 
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "LocalRecorderVirtualMic_StopIO: bad driver reference");
@@ -3671,21 +3771,34 @@ static OSStatus	LocalRecorderVirtualMic_StopIO(AudioServerPlugInDriverRef inDriv
 
 	pthread_mutex_lock(&gDevice_IOMutex);
 
-	//	figure out what we need to do
-	if(gDevice_IOIsRunning == 0)
+	theClientState = LocalRecorderVirtualMic_FindClientState(inClientID);
+	if((gDevice_IOIsRunning == 0) || (theClientState == NULL) || (theClientState->mStartCount == 0))
 	{
-		//	underflowing is an error
 		theAnswer = kAudioHardwareIllegalOperationError;
-	}
-	else if(gDevice_IOIsRunning == 1)
-	{
-		//	We need to stop the hardware, which in this case means that there's nothing to do.
-		gDevice_IOIsRunning = 0;
 	}
 	else
 	{
-		//	IO is still running, so just bump the counter
+		--theClientState->mStartCount;
 		--gDevice_IOIsRunning;
+
+		if(theClientState->mStartCount == 0)
+		{
+			//	Prevent new realtime readers from acquiring this slot, then wait only for readers
+			//	that already completed the acquire/recheck handshake.
+			atomic_store_explicit(&theClientState->mIsActive, 0, memory_order_seq_cst);
+			while(atomic_load_explicit(&theClientState->mReaders, memory_order_seq_cst) != 0)
+			{
+				sched_yield();
+			}
+
+			theConsumer = atomic_exchange_explicit(
+				&theClientState->mConsumer,
+				NULL,
+				memory_order_acq_rel
+			);
+			atomic_store_explicit(&theClientState->mClientID, 0, memory_order_relaxed);
+			VMConsumerDestroy(theConsumer);
+		}
 	}
 
 	pthread_mutex_unlock(&gDevice_IOMutex);
@@ -3810,24 +3923,63 @@ Done:
 
 static OSStatus	LocalRecorderVirtualMic_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo, void* ioMainBuffer, void* ioSecondaryBuffer)
 {
-	//	This is called to actuall perform a given operation. For this device, all we need to do is
-	//	clear the buffer for the ReadInput operation.
+	//	This is the realtime bridge read. It performs only bounded atomic operations and memory
+	//	copies; opening shared memory and allocating consumer handles remain in StartIO.
 
-	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer)
+	#pragma unused(inIOCycleInfo, ioSecondaryBuffer)
 
 	//	declare the local variables
 	OSStatus theAnswer = 0;
+	Float32* theMainBuffer = (Float32*)ioMainBuffer;
 
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "LocalRecorderVirtualMic_DoIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "LocalRecorderVirtualMic_DoIOOperation: bad device ID");
 	FailWithAction(inStreamObjectID != kObjectID_Stream_Input, theAnswer = kAudioHardwareBadObjectError, Done, "LocalRecorderVirtualMic_DoIOOperation: bad stream ID");
+	FailWithAction((inIOBufferFrameSize > 0) && (theMainBuffer == NULL), theAnswer = kAudioHardwareIllegalOperationError, Done, "LocalRecorderVirtualMic_DoIOOperation: missing main buffer");
 
-	//	clear the buffer if this iskAudioServerPlugInIOOperationReadInput
+	//	Every callback starts with deterministic fresh silence. Missing producers, underruns,
+	//	control transitions, and bridge errors therefore fail closed.
 	if(inOperationID == kAudioServerPlugInIOOperationReadInput)
 	{
-		//	The fixed input format is one channel of 32-bit floating-point samples.
-		memset(ioMainBuffer, 0, inIOBufferFrameSize * sizeof(Float32));
+		memset(theMainBuffer, 0, inIOBufferFrameSize * sizeof(Float32));
+
+		for(UInt32 theIndex = 0; theIndex < kDevice_MaxIOClients; ++theIndex)
+		{
+			LocalRecorderVirtualMicClientState* theClientState = &gDevice_IOClients[theIndex];
+			if((atomic_load_explicit(&theClientState->mIsActive, memory_order_seq_cst) == 0) ||
+				(atomic_load_explicit(&theClientState->mClientID, memory_order_relaxed) != inClientID))
+			{
+				continue;
+			}
+
+			atomic_fetch_add_explicit(&theClientState->mReaders, 1, memory_order_seq_cst);
+			if((atomic_load_explicit(&theClientState->mIsActive, memory_order_seq_cst) != 0) &&
+				(atomic_load_explicit(&theClientState->mClientID, memory_order_relaxed) == inClientID))
+			{
+				VMConsumerHandle* theConsumer = atomic_load_explicit(
+					&theClientState->mConsumer,
+					memory_order_acquire
+				);
+				if(theConsumer != NULL)
+				{
+					UInt32 theFramesRead = 0;
+					VMStatus theStatus = VMConsumerReadFrames(
+						theConsumer,
+						theMainBuffer,
+						inIOBufferFrameSize,
+						VM_SAMPLE_RATE,
+						&theFramesRead
+					);
+					if((theStatus != VM_STATUS_OK) || (theFramesRead != inIOBufferFrameSize))
+					{
+						memset(theMainBuffer, 0, inIOBufferFrameSize * sizeof(Float32));
+					}
+				}
+			}
+			atomic_fetch_sub_explicit(&theClientState->mReaders, 1, memory_order_seq_cst);
+			break;
+		}
 	}
 
 Done:

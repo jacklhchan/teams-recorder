@@ -7,6 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "VirtualMicBridge.h"
+
 void *LocalRecorderVirtualMic_Create(
     CFAllocatorRef allocator,
     CFUUIDRef requestedTypeUUID
@@ -529,6 +531,118 @@ static void testReadInputProducesFreshSilence(void) {
     REQUIRE((*gDriver)->StopIO(gDriver, deviceID, 1) == noErr);
 }
 
+static void testEachHALClientReadsTheSamePublishedMicrophoneFrames(void) {
+    REQUIRE(VMSharedMemoryUnlink(VM_DEFAULT_SHARED_MEMORY_NAME) == VM_STATUS_OK);
+
+    VMProducerHandle *producer = NULL;
+    REQUIRE(VMProducerCreate(
+        VM_DEFAULT_SHARED_MEMORY_NAME,
+        64,
+        VM_SAMPLE_RATE,
+        &producer
+    ) == VM_STATUS_OK);
+    if (producer == NULL) {
+        return;
+    }
+
+    AudioObjectID deviceID = publishedDevice();
+    AudioObjectID streamID = publishedInputStream(deviceID);
+    REQUIRE((*gDriver)->StartIO(gDriver, deviceID, 101) == noErr);
+    REQUIRE((*gDriver)->StartIO(gDriver, deviceID, 202) == noErr);
+
+    const Float32 speech[] = {0.125F, -0.25F, 0.5F, -0.75F};
+    UInt32 framesWritten = 0;
+    REQUIRE(VMProducerWriteFrames(
+        producer,
+        speech,
+        4,
+        VM_SAMPLE_RATE,
+        &framesWritten
+    ) == VM_STATUS_OK);
+    REQUIRE(framesWritten == 4);
+
+    Float32 firstClient[4] = {9, 9, 9, 9};
+    Float32 secondClient[4] = {8, 8, 8, 8};
+    AudioServerPlugInIOCycleInfo cycleInfo = {0};
+    REQUIRE((*gDriver)->DoIOOperation(
+        gDriver,
+        deviceID,
+        streamID,
+        101,
+        kAudioServerPlugInIOOperationReadInput,
+        4,
+        &cycleInfo,
+        firstClient,
+        NULL
+    ) == noErr);
+    REQUIRE((*gDriver)->DoIOOperation(
+        gDriver,
+        deviceID,
+        streamID,
+        202,
+        kAudioServerPlugInIOOperationReadInput,
+        4,
+        &cycleInfo,
+        secondClient,
+        NULL
+    ) == noErr);
+    REQUIRE(memcmp(firstClient, speech, sizeof(speech)) == 0);
+    REQUIRE(memcmp(secondClient, speech, sizeof(speech)) == 0);
+
+    REQUIRE(VMProducerSetMuted(producer, true) == VM_STATUS_OK);
+    const Float32 shouldBeMuted[] = {0.9F, 0.8F, 0.7F, 0.6F};
+    REQUIRE(VMProducerWriteFrames(
+        producer,
+        shouldBeMuted,
+        4,
+        VM_SAMPLE_RATE,
+        &framesWritten
+    ) == VM_STATUS_OK);
+    Float32 mutedFrames[4] = {7, 7, 7, 7};
+    REQUIRE((*gDriver)->DoIOOperation(
+        gDriver,
+        deviceID,
+        streamID,
+        101,
+        kAudioServerPlugInIOOperationReadInput,
+        4,
+        &cycleInfo,
+        mutedFrames,
+        NULL
+    ) == noErr);
+    for (size_t index = 0; index < 4; ++index) {
+        REQUIRE(mutedFrames[index] == 0.0F);
+    }
+
+    REQUIRE(VMProducerSetMuted(producer, false) == VM_STATUS_OK);
+    const Float32 freshSpeech[] = {-0.1F, -0.2F, 0.3F, 0.4F};
+    REQUIRE(VMProducerWriteFrames(
+        producer,
+        freshSpeech,
+        4,
+        VM_SAMPLE_RATE,
+        &framesWritten
+    ) == VM_STATUS_OK);
+    Float32 unmutedFrames[4] = {6, 6, 6, 6};
+    REQUIRE((*gDriver)->DoIOOperation(
+        gDriver,
+        deviceID,
+        streamID,
+        101,
+        kAudioServerPlugInIOOperationReadInput,
+        4,
+        &cycleInfo,
+        unmutedFrames,
+        NULL
+    ) == noErr);
+    REQUIRE(memcmp(unmutedFrames, freshSpeech, sizeof(freshSpeech)) == 0);
+
+    REQUIRE((*gDriver)->StopIO(gDriver, deviceID, 202) == noErr);
+    REQUIRE((*gDriver)->StopIO(gDriver, deviceID, 101) == noErr);
+    VMProducerDestroy(producer);
+    REQUIRE(VMSharedMemoryUnlink(VM_DEFAULT_SHARED_MEMORY_NAME) == VM_STATUS_OK);
+}
+
 static void testFixedFormatRejectsMutation(void) {
     AudioObjectID deviceID = publishedDevice();
     AudioObjectID streamID = publishedInputStream(deviceID);
@@ -669,6 +783,7 @@ int main(void) {
         testPluginPublishesOnlyDevice();
         testInputOnlyDeviceContract();
         testReadInputProducesFreshSilence();
+        testEachHALClientReadsTheSamePublishedMicrophoneFrames();
         testFixedFormatRejectsMutation();
         testClockCatchesUpWithoutResetForExtraClient();
     }

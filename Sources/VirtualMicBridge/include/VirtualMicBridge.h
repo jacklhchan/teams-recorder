@@ -15,7 +15,7 @@ enum {
 };
 
 // Shared by the recorder producer and HAL plug-in consumers.
-#define VM_DEFAULT_SHARED_MEMORY_NAME "/local.meeting.recorder.virtual-mic.v1"
+#define VM_DEFAULT_SHARED_MEMORY_NAME "/lmr.virtual-mic.v1"
 
 typedef struct VMProducerHandle VMProducerHandle;
 typedef struct VMConsumerHandle VMConsumerHandle;

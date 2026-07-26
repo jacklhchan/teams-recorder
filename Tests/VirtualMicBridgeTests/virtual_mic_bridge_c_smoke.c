@@ -14,7 +14,7 @@ int vm_c_header_smoke(void) {
     float output[4] = {0};
     unsigned int transferred = 0;
     if (strcmp(VM_DEFAULT_SHARED_MEMORY_NAME,
-               "/local.meeting.recorder.virtual-mic.v1") != 0) {
+               "/lmr.virtual-mic.v1") != 0) {
         return -12;
     }
     (void)snprintf(shm_name, sizeof(shm_name), "/vm-c-smoke-%llu-%u",

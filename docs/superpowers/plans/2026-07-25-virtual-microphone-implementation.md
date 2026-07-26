@@ -21,6 +21,52 @@
 - Keep unrelated installer manifest files out of every commit.
 - Complete Phase 1 before integrating Phase 2 into the app.
 
+## Execution Amendment (2026-07-26)
+
+The implementation follows these corrections before the numbered tasks below:
+
+1. Start with a driver-host viability slice derived from Apple's
+   `CreatingAnAudioServerDriverPlugIn` NullAudio sample. Publish an input-only
+   silence device first, install it only with explicit user approval, reboot,
+   and prove that Core Audio and Teams enumerate it before building the PCM
+   bridge.
+2. Use the exact device contract:
+   - display name: `Local Recorder Virtual Mic`
+   - device UID: `local.meeting.recorder.virtual-mic.v1`
+   - model UID: `local.meeting.recorder.virtual-mic.model.v1`
+   - input-only 48,000 Hz mono Float32
+3. Do not let the producer advance a shared consumer cursor. The producer owns
+   a monotonically increasing write sequence; every reader owns its own sample
+   cursor and advances itself on overrun.
+4. Tag published slots with source/mute generations. A mute, disconnect, or
+   producer restart invalidates queued speech so unmute cannot replay stale
+   microphone frames.
+5. Support multiple HAL clients and same-cycle fan-out. Reads are indexed by
+   device sample time, or one device-cycle result is copied to every client;
+   clients must never destructively consume one global stream.
+6. Publish normalized microphone blocks while monitoring, before the recording
+   writer guard. Make system-audio publication impossible at the Swift API
+   boundary.
+7. Apply mute/source-generation changes synchronously through one atomic gate.
+   Main-actor state is display state only.
+8. Treat direct POSIX shared-memory access from the sandboxed plug-in as
+   unproven until the installed driver-host spike passes. If blocked, retain
+   shared memory for realtime PCM and use a declared Mach-service handshake for
+   setup/control only.
+9. Do not assume mode `0666`, ad-hoc signing, or restarting `coreaudiod` is
+   sufficient. First install/removal uses the supported reboot flow. If the
+   ad-hoc bundle does not load with SIP enabled, obtain an Apple Development
+   identity or use the dedicated-helper process-tap fallback; do not disable
+   SIP by default.
+10. AirPods/Beats mute gesture support through `AVAudioApplication` is
+    conditional until observed with the exact accessory. App button and hotkey
+    mute are deterministic and feed the same recorder-plus-virtual-mic gate;
+    Teams UI mute is neither read nor changed.
+
+The effective execution order is therefore: driver viability, bridge and
+multi-reader tests, recorder publisher, unified mute, full driver data path,
+packaging/integration, then live isolation/Teams/AirPods acceptance.
+
 ---
 
 ## File Structure

@@ -34,7 +34,8 @@ struct TeamsCaptureViabilityReport: Codable, Equatable {
 enum TeamsCaptureViabilityEvaluator {
     private static let minimumDwellDuration: TimeInterval = 5
     private static let minimumCompleteFrames = 10
-    private static let maximumPTSGap: TimeInterval = 0.250
+    private static let maximumPTSGap =
+        TeamsCaptureViabilityGateFailure.maximumAllowedAudioGap
 
     static func failures(in report: TeamsCaptureViabilityReport) -> [String] {
         var failures: [String] = []
@@ -66,6 +67,11 @@ enum TeamsCaptureViabilityEvaluator {
             $0.localizedCaseInsensitiveContains("audio timing diagnostic")
         }) {
             failures.append("The report contains an audio timing diagnostic.")
+        }
+        if report.notes.contains(where: {
+            $0.hasPrefix(TeamsCaptureViabilityGateFailure.prefix)
+        }) {
+            failures.append("The report contains gate failure evidence.")
         }
 
         for dwell in report.windowFilterDwells {
@@ -102,6 +108,61 @@ enum TeamsCaptureViabilityEvaluator {
 enum TeamsCaptureViabilityFilterTarget: Equatable {
     case application
     case window(UInt32)
+}
+
+enum TeamsCaptureViabilityGateFailure {
+    static let prefix = "Gate failure:"
+    static let maximumAllowedAudioGap: TimeInterval = 0.250
+
+    static func filterUpdate(
+        target: TeamsCaptureViabilityFilterTarget,
+        attemptedRevision: UInt64,
+        errorDescription: String
+    ) -> String {
+        let targetLabel: String
+        switch target {
+        case .application:
+            targetLabel = "application"
+        case let .window(windowID):
+            targetLabel = "window(\(windowID))"
+        }
+        return "\(prefix) updateContentFilter target=\(targetLabel) revision=\(attemptedRevision) error=\(errorDescription)"
+    }
+
+    static func stopCapture(errorDescription: String) -> String {
+        "\(prefix) stopCapture error=\(errorDescription)"
+    }
+
+    static func audioGap(
+        source: AudioSourceKind,
+        filterRevision: UInt64,
+        unexplainedGap: TimeInterval
+    ) -> String {
+        let gap = String(
+            format: "%.6f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            unexplainedGap
+        )
+        return "\(prefix) unexplained audio gap source=\(source.viabilityLabel) revision=\(filterRevision) gap=\(gap)s"
+    }
+}
+
+struct TeamsCaptureViabilityStopFailurePlan: Equatable {
+    let gateFailureNote: String
+    let shouldDetachOutputs: Bool
+    let shouldRetireActiveStream: Bool
+    let shouldFinalizeEvidence: Bool
+
+    static func make(errorDescription: String) -> Self {
+        Self(
+            gateFailureNote: TeamsCaptureViabilityGateFailure.stopCapture(
+                errorDescription: errorDescription
+            ),
+            shouldDetachOutputs: true,
+            shouldRetireActiveStream: true,
+            shouldFinalizeEvidence: true
+        )
+    }
 }
 
 struct TeamsCaptureViabilityCycleCounter {
@@ -276,6 +337,59 @@ struct TeamsCaptureViabilityStartupAttemptSequence {
     }
 }
 
+enum TeamsCaptureViabilityDelegateStopDisposition: Equatable {
+    case ignored
+    case startupCandidate
+    case active(shouldFinalize: Bool)
+}
+
+struct TeamsCaptureViabilityEvidenceFinalizationCoordinator {
+    private var filterUpdateInFlight = false
+    private var stopRequestInFlight = false
+    private var finalizationRequested = false
+    private var finalizationScheduled = false
+
+    mutating func beginFilterUpdate() -> Bool {
+        guard !filterUpdateInFlight else { return false }
+        filterUpdateInFlight = true
+        return true
+    }
+
+    mutating func finishFilterUpdate() -> Bool {
+        guard filterUpdateInFlight else { return false }
+        filterUpdateInFlight = false
+        return scheduleIfReady()
+    }
+
+    mutating func beginStopRequest() -> Bool {
+        guard !stopRequestInFlight else { return false }
+        stopRequestInFlight = true
+        return true
+    }
+
+    mutating func finishStopRequest() -> Bool {
+        guard stopRequestInFlight else { return false }
+        stopRequestInFlight = false
+        return scheduleIfReady()
+    }
+
+    mutating func requestFinalization() -> Bool {
+        finalizationRequested = true
+        return scheduleIfReady()
+    }
+
+    private mutating func scheduleIfReady() -> Bool {
+        guard finalizationRequested,
+              !finalizationScheduled,
+              !filterUpdateInFlight,
+              !stopRequestInFlight else {
+            return false
+        }
+        finalizationScheduled = true
+        return true
+    }
+}
+
 struct TeamsCaptureViabilityLifecycleCoordinator {
     private enum State {
         case idle
@@ -286,6 +400,10 @@ struct TeamsCaptureViabilityLifecycleCoordinator {
     }
 
     private var state: State = .idle
+    private var nextGeneration: UInt64 = 0
+    private var startupCandidateGeneration: UInt64?
+    private var startupCandidateStopError: String?
+    private var activeGeneration: UInt64?
 
     var isCapturing: Bool {
         state == .capturing
@@ -298,7 +416,61 @@ struct TeamsCaptureViabilityLifecycleCoordinator {
     mutating func beginStart() -> Bool {
         guard state == .idle || state == .finalized else { return false }
         state = .starting
+        startupCandidateGeneration = nil
+        startupCandidateStopError = nil
+        activeGeneration = nil
         return true
+    }
+
+    mutating func registerStartupCandidate() -> UInt64? {
+        guard state == .starting, startupCandidateGeneration == nil else {
+            return nil
+        }
+        nextGeneration &+= 1
+        startupCandidateGeneration = nextGeneration
+        startupCandidateStopError = nil
+        return nextGeneration
+    }
+
+    mutating func recordDelegateStop(
+        generation: UInt64,
+        errorDescription: String
+    ) -> TeamsCaptureViabilityDelegateStopDisposition {
+        if startupCandidateGeneration == generation {
+            if startupCandidateStopError == nil {
+                startupCandidateStopError = errorDescription
+            }
+            return .startupCandidate
+        }
+        guard activeGeneration == generation else { return .ignored }
+        return .active(shouldFinalize: requestFinalization())
+    }
+
+    mutating func adoptStartupCandidate(generation: UInt64) -> Bool {
+        guard state == .starting,
+              startupCandidateGeneration == generation,
+              startupCandidateStopError == nil else {
+            return false
+        }
+        startupCandidateGeneration = nil
+        activeGeneration = generation
+        state = .capturing
+        return true
+    }
+
+    func startupCandidateFailure(generation: UInt64) -> String? {
+        guard startupCandidateGeneration == generation else { return nil }
+        return startupCandidateStopError
+    }
+
+    mutating func clearStartupCandidate(generation: UInt64) {
+        guard startupCandidateGeneration == generation else { return }
+        startupCandidateGeneration = nil
+        startupCandidateStopError = nil
+    }
+
+    func shouldPublishCapturing(generation: UInt64) -> Bool {
+        state == .capturing && activeGeneration == generation
     }
 
     mutating func startSucceeded() {
@@ -309,6 +481,9 @@ struct TeamsCaptureViabilityLifecycleCoordinator {
     mutating func startFailed() {
         guard state == .starting else { return }
         state = .idle
+        startupCandidateGeneration = nil
+        startupCandidateStopError = nil
+        activeGeneration = nil
     }
 
     mutating func requestFinalization() -> Bool {
@@ -325,6 +500,7 @@ struct TeamsCaptureViabilityLifecycleCoordinator {
     mutating func finishFinalization() {
         guard state == .finalizing else { return }
         state = .finalized
+        activeGeneration = nil
     }
 }
 
@@ -382,6 +558,8 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
     private lazy var evidenceImageContext = CIContext()
     private let stateLock = NSLock()
     private var stream: SCStream?
+    private var startupCandidate: (stream: SCStream, generation: UInt64)?
+    private var activeStreamGeneration: UInt64?
     private var applicationFilter: SCContentFilter?
     private var activeDwell: MutableDwell?
     private var applicationBaseline: MutableDwell?
@@ -395,7 +573,8 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
     private var systemPTSTracker = TeamsCaptureViabilityPTSTracker(source: .system)
     private var microphonePTSTracker = TeamsCaptureViabilityPTSTracker(source: .microphone)
     private var lifecycle = TeamsCaptureViabilityLifecycleCoordinator()
-    private var filterUpdateInFlight = false
+    private var evidenceFinalization =
+        TeamsCaptureViabilityEvidenceFinalizationCoordinator()
 
     func refreshWindows() {
         Task {
@@ -448,21 +627,24 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
         }
         Task {
             do {
-                let candidate = try await startCaptureCandidate()
-                let identity = withState { () -> String in
-                    resetEvidence(stream: candidate.stream)
-                    stream = candidate.stream
-                    applicationFilter = candidate.applicationFilter
-                    lifecycle.startSucceeded()
-                    return self.identity(of: candidate.stream)
-                }
+                let activeCapture = try await startCaptureCandidate()
                 publish {
+                    let isCurrentCapture = self.withState {
+                        self.stream === activeCapture.stream
+                            && self.activeStreamGeneration == activeCapture.generation
+                            && self.lifecycle.shouldPublishCapturing(
+                                generation: activeCapture.generation
+                            )
+                    }
+                    guard isCurrentCapture else { return }
                     self.isCapturing = true
-                    self.streamIdentity = identity
-                    self.status = "Application filter active on one \(candidate.pixelFormat.label) SCStream."
+                    self.streamIdentity = activeCapture.identity
+                    self.status = "Application filter active on one \(activeCapture.pixelFormat.label) SCStream."
                 }
             } catch {
                 withState {
+                    startupCandidate = nil
+                    activeStreamGeneration = nil
                     stream = nil
                     applicationFilter = nil
                     lifecycle.startFailed()
@@ -512,7 +694,13 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
 
     func stop() {
         let activeStream = withState { () -> SCStream? in
-            guard lifecycle.requestFinalization() else { return nil }
+            guard lifecycle.isCapturing,
+                  let stream,
+                  evidenceFinalization.beginStopRequest() else {
+                return nil
+            }
+            _ = lifecycle.requestFinalization()
+            _ = evidenceFinalization.requestFinalization()
             return stream
         }
         guard let activeStream else {
@@ -524,19 +712,45 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
             self.status = "Stopping probe and finalizing evidence."
         }
         Task {
+            var shouldFinalizeEvidence = true
             do {
                 try await activeStream.stopCapture()
             } catch {
-                appendUniqueNote("Stop request error: \(error.localizedDescription)")
+                let plan = TeamsCaptureViabilityStopFailurePlan.make(
+                    errorDescription: error.localizedDescription
+                )
+                shouldFinalizeEvidence = plan.shouldFinalizeEvidence
+                appendUniqueNote(plan.gateFailureNote)
+                if plan.shouldDetachOutputs {
+                    for cleanupFailure in detachOutputs(from: activeStream) {
+                        appendUniqueNote(
+                            "\(TeamsCaptureViabilityGateFailure.prefix) stop cleanup \(cleanupFailure)"
+                        )
+                    }
+                }
+                if plan.shouldRetireActiveStream {
+                    withState {
+                        guard stream === activeStream else { return }
+                        stream = nil
+                        activeStreamGeneration = nil
+                    }
+                }
             }
-            scheduleEvidenceFinalization()
+            guard shouldFinalizeEvidence else { return }
+            let shouldSchedule = withState {
+                evidenceFinalization.finishStopRequest()
+            }
+            if shouldSchedule {
+                scheduleEvidenceFinalization()
+            }
         }
     }
 
     private func startCaptureCandidate() async throws -> (
         stream: SCStream,
-        applicationFilter: SCContentFilter,
-        pixelFormat: TeamsCaptureViabilityPixelFormat
+        pixelFormat: TeamsCaptureViabilityPixelFormat,
+        generation: UInt64,
+        identity: String
     ) {
         guard CGPreflightScreenCaptureAccess() else {
             throw TeamsCaptureViabilityProbeError.screenRecordingPermissionDenied
@@ -580,12 +794,72 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
             )
             do {
                 try addOutputs(to: candidateStream)
-                try await candidateStream.startCapture()
-                return (candidateStream, filter, pixelFormat)
             } catch {
                 failures.append("\(pixelFormat.label): \(error.localizedDescription)")
-                await cleanUpFailedAttempt(candidateStream)
+                await cleanUpFailedAttempt(candidateStream, generation: nil)
+                continue
             }
+            guard let generation = withState({ () -> UInt64? in
+                guard let generation = lifecycle.registerStartupCandidate() else {
+                    return nil
+                }
+                startupCandidate = (candidateStream, generation)
+                return generation
+            }) else {
+                failures.append("\(pixelFormat.label): startup candidate registration failed")
+                await cleanUpFailedAttempt(candidateStream, generation: nil)
+                continue
+            }
+
+            do {
+                try await candidateStream.startCapture()
+            } catch {
+                let callbackFailure = withState {
+                    lifecycle.startupCandidateFailure(generation: generation)
+                }
+                var reason = "startCapture error=\(error.localizedDescription)"
+                if let callbackFailure {
+                    reason += " callback error=\(callbackFailure)"
+                }
+                failures.append("\(pixelFormat.label): \(reason)")
+                await cleanUpFailedAttempt(
+                    candidateStream,
+                    generation: generation
+                )
+                continue
+            }
+
+            let adoption = withState { () -> (identity: String?, failure: String?) in
+                guard let registration = startupCandidate,
+                      registration.stream === candidateStream,
+                      registration.generation == generation else {
+                    return (nil, "startup candidate registration was lost")
+                }
+                let callbackFailure = lifecycle.startupCandidateFailure(
+                    generation: generation
+                )
+                guard lifecycle.adoptStartupCandidate(generation: generation) else {
+                    return (
+                        nil,
+                        callbackFailure.map {
+                            "callback stopped before adoption error=\($0)"
+                        } ?? "startup candidate could not be adopted"
+                    )
+                }
+                startupCandidate = nil
+                stream = candidateStream
+                activeStreamGeneration = generation
+                applicationFilter = filter
+                resetEvidence(stream: candidateStream)
+                return (identity(of: candidateStream), nil)
+            }
+            if let identity = adoption.identity {
+                return (candidateStream, pixelFormat, generation, identity)
+            }
+            failures.append(
+                "\(pixelFormat.label): \(adoption.failure ?? "startup candidate could not be adopted")"
+            )
+            await cleanUpFailedAttempt(candidateStream, generation: generation)
         }
         throw TeamsCaptureViabilityProbeError.startupAttemptsFailed(failures)
     }
@@ -631,32 +905,67 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
         )
     }
 
-    private func cleanUpFailedAttempt(_ stream: SCStream) async {
-        try? stream.removeStreamOutput(self, type: .audio)
-        try? stream.removeStreamOutput(self, type: .microphone)
-        try? stream.removeStreamOutput(self, type: .screen)
+    private func cleanUpFailedAttempt(
+        _ stream: SCStream,
+        generation: UInt64?
+    ) async {
+        _ = detachOutputs(from: stream)
         try? await stream.stopCapture()
+        guard let generation else { return }
+        withState {
+            if let registration = startupCandidate,
+               registration.stream === stream,
+               registration.generation == generation {
+                startupCandidate = nil
+            }
+            lifecycle.clearStartupCandidate(generation: generation)
+        }
+    }
+
+    private func detachOutputs(from stream: SCStream) -> [String] {
+        var failures: [String] = []
+        do {
+            try stream.removeStreamOutput(self, type: .audio)
+        } catch {
+            failures.append("system-audio error=\(error.localizedDescription)")
+        }
+        do {
+            try stream.removeStreamOutput(self, type: .microphone)
+        } catch {
+            failures.append("microphone error=\(error.localizedDescription)")
+        }
+        do {
+            try stream.removeStreamOutput(self, type: .screen)
+        } catch {
+            failures.append("screen error=\(error.localizedDescription)")
+        }
+        return failures
     }
 
     private func updateFilter(
         _ filter: SCContentFilter,
         target: TeamsCaptureViabilityFilterTarget
     ) async throws {
-        let preparation = withState { () -> (SCStream?, String?) in
+        let preparation = withState {
+            () -> (stream: SCStream?, attemptedRevision: UInt64?, message: String?) in
             guard lifecycle.isCapturing, let stream else {
-                return (nil, "The viability probe is not running.")
-            }
-            guard !filterUpdateInFlight else {
-                return (nil, "Another filter update is already in progress.")
+                return (nil, nil, "The viability probe is not running.")
             }
             guard cycleCounter.shouldUpdateFilter(to: target) else {
-                return (nil, "The requested filter is already active; no round trip was counted.")
+                return (
+                    nil,
+                    nil,
+                    "The requested filter is already active; no round trip was counted."
+                )
             }
-            filterUpdateInFlight = true
-            return (stream, nil)
+            guard evidenceFinalization.beginFilterUpdate() else {
+                return (nil, nil, "Another filter update is already in progress.")
+            }
+            return (stream, activeFilterRevision &+ 1, nil)
         }
-        guard let activeStream = preparation.0 else {
-            if let message = preparation.1 {
+        guard let activeStream = preparation.stream,
+              let attemptedRevision = preparation.attemptedRevision else {
+            if let message = preparation.message {
                 publish { self.status = message }
             }
             return
@@ -664,14 +973,30 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
 
         do {
             try await activeStream.updateContentFilter(filter)
-            let revision = withState { () -> UInt64? in
-                defer { filterUpdateInFlight = false }
-                guard stream === activeStream, lifecycle.isCapturing else {
-                    return nil
-                }
+        } catch {
+            let shouldSchedule = withState {
+                appendUniqueNoteLocked(
+                    TeamsCaptureViabilityGateFailure.filterUpdate(
+                        target: target,
+                        attemptedRevision: attemptedRevision,
+                        errorDescription: error.localizedDescription
+                    )
+                )
+                return evidenceFinalization.finishFilterUpdate()
+            }
+            if shouldSchedule {
+                scheduleEvidenceFinalization()
+            }
+            throw error
+        }
+
+        let outcome = withState {
+            () -> (revision: UInt64?, shouldScheduleFinalization: Bool) in
+            let revision: UInt64?
+            if stream === activeStream, lifecycle.isCapturing {
                 finishActiveDwell(at: Date())
                 cycleCounter.recordSuccessfulSelection(target)
-                activeFilterRevision &+= 1
+                activeFilterRevision = attemptedRevision
                 let windowID: UInt32?
                 if case let .window(id) = target {
                     windowID = id
@@ -686,23 +1011,29 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
                 )
                 activeDwell = dwell
                 dwellsByRevision[activeFilterRevision] = dwell
-                return activeFilterRevision
+                revision = activeFilterRevision
+            } else {
+                revision = nil
             }
-            guard let revision else {
-                throw TeamsCaptureViabilityProbeError.streamNotRunning
-            }
-            publish {
-                self.filterRevision = revision
-                self.completeFrameCount = 0
-                self.systemPTSGap = 0
-                self.microphonePTSGap = 0
-                self.status = target == .application
-                    ? "Application filter active; completed round trips: \(self.completedRoundTrips)."
-                    : "Window filter active on the original SCStream."
-            }
-        } catch {
-            withState { filterUpdateInFlight = false }
-            throw error
+            return (
+                revision,
+                evidenceFinalization.finishFilterUpdate()
+            )
+        }
+        if outcome.shouldScheduleFinalization {
+            scheduleEvidenceFinalization()
+        }
+        guard let revision = outcome.revision else {
+            throw TeamsCaptureViabilityProbeError.streamNotRunning
+        }
+        publish {
+            self.filterRevision = revision
+            self.completeFrameCount = 0
+            self.systemPTSGap = 0
+            self.microphonePTSGap = 0
+            self.status = target == .application
+                ? "Application filter active; completed round trips: \(self.completedRoundTrips)."
+                : "Window filter active on the original SCStream."
         }
     }
 
@@ -759,6 +1090,16 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
                 rms: rms,
                 unexplainedGap: observation.unexplainedGap
             )
+            if observation.unexplainedGap
+                > TeamsCaptureViabilityGateFailure.maximumAllowedAudioGap {
+                appendUniqueNoteLocked(
+                    TeamsCaptureViabilityGateFailure.audioGap(
+                        source: source,
+                        filterRevision: revision,
+                        unexplainedGap: observation.unexplainedGap
+                    )
+                )
+            }
             if let diagnostic = observation.diagnostic {
                 appendUniqueNoteLocked(diagnostic)
             }
@@ -848,6 +1189,15 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
         }
     }
 
+    private func requestEvidenceFinalization() {
+        let shouldSchedule = withState {
+            evidenceFinalization.requestFinalization()
+        }
+        if shouldSchedule {
+            scheduleEvidenceFinalization()
+        }
+    }
+
     private func persistEvidenceExactlyOnce() {
         let snapshot = withState { () -> EvidenceSnapshot? in
             guard !lifecycle.isCapturing, lifecycle.acceptsCallbacks else {
@@ -864,10 +1214,13 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
                 observedWindowIDs: observedWindowIDs,
                 notes: notes
             )
+            startupCandidate = nil
+            activeStreamGeneration = nil
             stream = nil
             applicationFilter = nil
             activeDwell = nil
-            filterUpdateInFlight = false
+            evidenceFinalization =
+                TeamsCaptureViabilityEvidenceFinalizationCoordinator()
             lifecycle.finishFinalization()
             return snapshot
         }
@@ -944,7 +1297,8 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
         activeDwell = baseline
         windowDwells = []
         dwellsByRevision = [0: baseline]
-        filterUpdateInFlight = false
+        evidenceFinalization =
+            TeamsCaptureViabilityEvidenceFinalizationCoordinator()
         publish {
             self.filterRevision = 0
             self.systemRMS = 0
@@ -1022,22 +1376,37 @@ extension TeamsCaptureViabilityProbe: SCStreamOutput {
 
 extension TeamsCaptureViabilityProbe: SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        let decision = withState { () -> (isActiveStream: Bool, shouldFinalize: Bool) in
-            let isActiveStream = self.stream === stream
-            guard isActiveStream else { return (false, false) }
-            appendUniqueNoteLocked("Callback stopped: \(error.localizedDescription)")
-            return (
-                true,
-                lifecycle.requestDelegateFinalization(isActiveStream: true)
+        let decision = withState {
+            () -> TeamsCaptureViabilityDelegateStopDisposition in
+            if let registration = startupCandidate,
+               registration.stream === stream {
+                return lifecycle.recordDelegateStop(
+                    generation: registration.generation,
+                    errorDescription: error.localizedDescription
+                )
+            }
+            guard self.stream === stream,
+                  let generation = activeStreamGeneration else {
+                return .ignored
+            }
+            let decision = lifecycle.recordDelegateStop(
+                generation: generation,
+                errorDescription: error.localizedDescription
             )
+            if case .active = decision {
+                appendUniqueNoteLocked(
+                    "Callback stopped: \(error.localizedDescription)"
+                )
+            }
+            return decision
         }
-        guard decision.isActiveStream else { return }
+        guard case let .active(shouldFinalize) = decision else { return }
         publish {
             self.isCapturing = false
             self.status = "Callback stopped: \(error.localizedDescription)"
         }
-        if decision.shouldFinalize {
-            scheduleEvidenceFinalization()
+        if shouldFinalize {
+            requestEvidenceFinalization()
         }
     }
 }

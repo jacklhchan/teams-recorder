@@ -165,6 +165,64 @@ final class TeamsCaptureViabilityReportTests: XCTestCase {
         })
     }
 
+    func testReportFailsWhenGateFailureEvidenceExists() {
+        var report = passingReport
+        report.notes = [
+            "Gate failure: updateContentFilter target=window(42) revision=2 error=denied"
+        ]
+
+        XCTAssertTrue(TeamsCaptureViabilityEvaluator.failures(in: report).contains {
+            $0.contains("gate failure")
+        })
+    }
+
+    func testFilterUpdateFailureEvidenceIncludesTargetRevisionAndError() {
+        XCTAssertEqual(
+            TeamsCaptureViabilityGateFailure.filterUpdate(
+                target: .window(42),
+                attemptedRevision: 2,
+                errorDescription: "denied"
+            ),
+            "Gate failure: updateContentFilter target=window(42) revision=2 error=denied"
+        )
+    }
+
+    func testEvidenceFinalizationWaitsForFilterUpdateAndSchedulesOnce() {
+        var coordinator = TeamsCaptureViabilityEvidenceFinalizationCoordinator()
+
+        XCTAssertTrue(coordinator.beginFilterUpdate())
+        XCTAssertFalse(coordinator.requestFinalization())
+        XCTAssertTrue(coordinator.finishFilterUpdate())
+        XCTAssertFalse(coordinator.requestFinalization())
+    }
+
+    func testEvidenceFinalizationWaitsForStopRequestOutcome() {
+        var coordinator = TeamsCaptureViabilityEvidenceFinalizationCoordinator()
+
+        XCTAssertTrue(coordinator.beginStopRequest())
+        XCTAssertFalse(coordinator.requestFinalization())
+        XCTAssertTrue(coordinator.finishStopRequest())
+        XCTAssertFalse(coordinator.finishStopRequest())
+    }
+
+    func testStopFailureRequiresGateEvidenceDetachmentAndFinalization() {
+        let plan = TeamsCaptureViabilityStopFailurePlan.make(
+            errorDescription: "transport lost"
+        )
+
+        XCTAssertEqual(
+            plan.gateFailureNote,
+            "Gate failure: stopCapture error=transport lost"
+        )
+        XCTAssertTrue(plan.shouldDetachOutputs)
+        XCTAssertTrue(plan.shouldRetireActiveStream)
+        XCTAssertTrue(plan.shouldFinalizeEvidence)
+
+        var report = passingReport
+        report.notes = [plan.gateFailureNote]
+        XCTAssertFalse(TeamsCaptureViabilityEvaluator.failures(in: report).isEmpty)
+    }
+
     func testAudioDurationPrefersFrameCountAndSampleRateThenValidDuration() throws {
         XCTAssertEqual(
             try XCTUnwrap(
@@ -239,6 +297,64 @@ final class TeamsCaptureViabilityReportTests: XCTestCase {
         XCTAssertFalse(lifecycle.requestFinalization())
     }
 
+    func testStoppedStartupCandidateCannotBeAdoptedAndNextGenerationCanStart() throws {
+        var lifecycle = TeamsCaptureViabilityLifecycleCoordinator()
+        XCTAssertTrue(lifecycle.beginStart())
+        let nv12Generation = try XCTUnwrap(lifecycle.registerStartupCandidate())
+
+        XCTAssertEqual(
+            lifecycle.recordDelegateStop(
+                generation: nv12Generation,
+                errorDescription: "NV12 callback stopped"
+            ),
+            .startupCandidate
+        )
+        XCTAssertFalse(
+            lifecycle.adoptStartupCandidate(generation: nv12Generation)
+        )
+        XCTAssertEqual(
+            lifecycle.startupCandidateFailure(generation: nv12Generation),
+            "NV12 callback stopped"
+        )
+
+        lifecycle.clearStartupCandidate(generation: nv12Generation)
+        let bgraGeneration = try XCTUnwrap(lifecycle.registerStartupCandidate())
+        XCTAssertNotEqual(bgraGeneration, nv12Generation)
+        XCTAssertTrue(
+            lifecycle.adoptStartupCandidate(generation: bgraGeneration)
+        )
+        XCTAssertTrue(
+            lifecycle.shouldPublishCapturing(generation: bgraGeneration)
+        )
+        XCTAssertFalse(
+            lifecycle.shouldPublishCapturing(generation: nv12Generation)
+        )
+    }
+
+    func testQueuedStartupSuccessCannotPublishAfterSameGenerationDelegateStop() throws {
+        var lifecycle = TeamsCaptureViabilityLifecycleCoordinator()
+        XCTAssertTrue(lifecycle.beginStart())
+        let generation = try XCTUnwrap(lifecycle.registerStartupCandidate())
+        XCTAssertTrue(lifecycle.adoptStartupCandidate(generation: generation))
+
+        XCTAssertEqual(
+            lifecycle.recordDelegateStop(
+                generation: generation,
+                errorDescription: "stream stopped"
+            ),
+            .active(shouldFinalize: true)
+        )
+        XCTAssertFalse(lifecycle.shouldPublishCapturing(generation: generation))
+        XCTAssertFalse(lifecycle.isCapturing)
+        XCTAssertEqual(
+            lifecycle.recordDelegateStop(
+                generation: generation,
+                errorDescription: "stream stopped again"
+            ),
+            .active(shouldFinalize: false)
+        )
+    }
+
     func testLifecycleReturnsToIdleAfterAllStartupAttemptsFail() {
         var lifecycle = TeamsCaptureViabilityLifecycleCoordinator()
         XCTAssertTrue(lifecycle.beginStart())
@@ -266,6 +382,24 @@ final class TeamsCaptureViabilityReportTests: XCTestCase {
             lifecycle.requestDelegateFinalization(isActiveStream: true)
         )
         XCTAssertFalse(lifecycle.isCapturing)
+    }
+
+    func testTransitionBoundaryAudioGapPersistsGateFailureEvidence() {
+        let note = TeamsCaptureViabilityGateFailure.audioGap(
+            source: .microphone,
+            filterRevision: 0,
+            unexplainedGap: 0.380
+        )
+
+        XCTAssertEqual(
+            note,
+            "Gate failure: unexplained audio gap source=microphone revision=0 gap=0.380000s"
+        )
+        var report = passingReport
+        report.notes = [note]
+        XCTAssertTrue(TeamsCaptureViabilityEvaluator.failures(in: report).contains {
+            $0.contains("gate failure")
+        })
     }
 
     func testCallbackAndEvidenceQueuesAreAllDistinct() {

@@ -258,6 +258,7 @@ private extension Notification.Name {
 
 private enum FakeError: Error {
     case expectedFailure
+    case muteRejected
 }
 
 private final class FakeInputMuteApplication: InputMuteApplication {
@@ -280,6 +281,10 @@ private final class FakeInputMuteApplication: InputMuteApplication {
         if let setInputMutedError {
             throw setInputMutedError
         }
+        if let handlerResult = handler?(muted), !handlerResult {
+            throw FakeError.muteRejected
+        }
+        isInputMuted = muted
     }
 
     func setInputMuteStateChangeHandler(_ handler: ((Bool) -> Bool)?) throws {

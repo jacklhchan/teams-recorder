@@ -191,11 +191,26 @@ final class InputMuteControllerTests: XCTestCase {
         XCTAssertEqual(application.lastRegisteredHandlerWasNil, true)
         XCTAssertNil(application.invokeAccessoryMute(true))
 
-        notificationCenter.post(
-            name: .fakeInputMuteStateChange,
-            object: nil,
-            userInfo: [FakeInputMuteApplication.muteStateKey: true]
-        )
+        let unexpectedStateMutation = expectation(description: "controller state should remain unchanged after uninstall")
+        unexpectedStateMutation.isInverted = true
+        let backgroundPostFinished = expectation(description: "background notification post finished")
+
+        DispatchQueue.global().async {
+            notificationCenter.post(
+                name: .fakeInputMuteStateChange,
+                object: nil,
+                userInfo: [FakeInputMuteApplication.muteStateKey: true]
+            )
+            backgroundPostFinished.fulfill()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            if controller.isMuted {
+                unexpectedStateMutation.fulfill()
+            }
+        }
+
+        wait(for: [backgroundPostFinished, unexpectedStateMutation], timeout: 0.2)
 
         XCTAssertFalse(controller.isMuted)
         XCTAssertTrue(changes.isEmpty)

@@ -36,6 +36,7 @@ final class InputMuteControllerTests: XCTestCase {
     func testSetMutedCallsApplicationButDoesNotClaimStateBeforeNotification() throws {
         let application = FakeInputMuteApplication(initiallyMuted: false)
         let notificationCenter = NotificationCenter()
+        let changeExpectation = expectation(description: "mute state change delivered")
         var changes: [Bool] = []
         var applyCalls: [Bool] = []
         let controller = makeController(
@@ -48,6 +49,7 @@ final class InputMuteControllerTests: XCTestCase {
 
         try controller.install { muted in
             changes.append(muted)
+            changeExpectation.fulfill()
         }
 
         try controller.setMuted(true)
@@ -63,6 +65,7 @@ final class InputMuteControllerTests: XCTestCase {
             userInfo: [FakeInputMuteApplication.muteStateKey: true]
         )
 
+        wait(for: [changeExpectation], timeout: 1.0)
         XCTAssertTrue(controller.isMuted)
         XCTAssertEqual(changes, [true])
         XCTAssertTrue(applyCalls.isEmpty)
@@ -91,11 +94,14 @@ final class InputMuteControllerTests: XCTestCase {
         XCTAssertTrue(applyCalls.isEmpty)
     }
 
-    func testNotificationOnlyUpdatesObservationNotAudioGate() throws {
+    func testNotificationOnlyUpdatesObservationOnMainQueueNotAudioGate() throws {
         let application = FakeInputMuteApplication(initiallyMuted: false)
         let notificationCenter = NotificationCenter()
+        let changeExpectation = expectation(description: "mute notification observed")
+        let backgroundPosted = expectation(description: "background post completed")
         var changes: [Bool] = []
         var applyCalls: [Bool] = []
+        var observedOnMainThread = false
         let controller = makeController(
             application: application,
             notificationCenter: notificationCenter,
@@ -106,17 +112,61 @@ final class InputMuteControllerTests: XCTestCase {
 
         try controller.install { muted in
             changes.append(muted)
+            observedOnMainThread = Thread.isMainThread
+            changeExpectation.fulfill()
         }
 
-        notificationCenter.post(
-            name: .fakeInputMuteStateChange,
-            object: nil,
-            userInfo: [FakeInputMuteApplication.muteStateKey: true]
-        )
+        DispatchQueue.global().async {
+            notificationCenter.post(
+                name: .fakeInputMuteStateChange,
+                object: nil,
+                userInfo: [FakeInputMuteApplication.muteStateKey: true]
+            )
+            backgroundPosted.fulfill()
+        }
 
+        wait(for: [backgroundPosted, changeExpectation], timeout: 1.0)
         XCTAssertTrue(controller.isMuted)
         XCTAssertEqual(changes, [true])
+        XCTAssertTrue(observedOnMainThread)
         XCTAssertTrue(applyCalls.isEmpty)
+    }
+
+    func testSecondInstallReplacesOnChangeWithoutReregisteringHandlerOrObserver() throws {
+        let application = FakeInputMuteApplication(initiallyMuted: false)
+        let notificationCenter = NotificationCenter()
+        let firstExpectation = expectation(description: "first observer should not fire")
+        firstExpectation.isInverted = true
+        let secondExpectation = expectation(description: "second observer fires once")
+        var firstChanges: [Bool] = []
+        var secondChanges: [Bool] = []
+        let controller = makeController(
+            application: application,
+            notificationCenter: notificationCenter
+        )
+
+        try controller.install { muted in
+            firstChanges.append(muted)
+            firstExpectation.fulfill()
+        }
+        try controller.install { muted in
+            secondChanges.append(muted)
+            secondExpectation.fulfill()
+        }
+
+        XCTAssertEqual(application.handlerRegistrationCount, 1)
+
+        DispatchQueue.global().async {
+            notificationCenter.post(
+                name: .fakeInputMuteStateChange,
+                object: nil,
+                userInfo: [FakeInputMuteApplication.muteStateKey: true]
+            )
+        }
+
+        wait(for: [firstExpectation, secondExpectation], timeout: 1.0)
+        XCTAssertEqual(firstChanges, [])
+        XCTAssertEqual(secondChanges, [true])
     }
 
     func testUninstallRemovesHandlerAndObserver() throws {

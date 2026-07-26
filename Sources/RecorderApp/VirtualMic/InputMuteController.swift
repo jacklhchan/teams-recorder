@@ -22,7 +22,7 @@ final class InputMuteController: InputMuteControlling {
     private let notificationCenter: NotificationCenter
     private let notificationName: Notification.Name
     private let muteStateUserInfoKey: String
-    private let applyMuteToAudioPaths: (Bool) throws -> Void
+    private let applyMuteToAudioPaths: (Bool) -> Void
 
     private var observer: NSObjectProtocol?
     private var onChange: ((Bool) -> Void)?
@@ -34,7 +34,7 @@ final class InputMuteController: InputMuteControlling {
         notificationCenter: NotificationCenter = .default,
         notificationName: Notification.Name = AVAudioApplication.inputMuteStateChangeNotification,
         muteStateUserInfoKey: String = AVAudioApplication.muteStateKey,
-        applyMuteToAudioPaths: @escaping (Bool) throws -> Void
+        applyMuteToAudioPaths: @escaping (Bool) -> Void
     ) {
         self.application = application
         self.notificationCenter = notificationCenter
@@ -45,24 +45,21 @@ final class InputMuteController: InputMuteControlling {
     }
 
     func install(onChange: @escaping (Bool) -> Void) throws {
-        if observer != nil || self.onChange != nil {
-            uninstall()
-        }
         self.onChange = onChange
 
+        guard observer == nil else {
+            return
+        }
+
         try application.setInputMuteStateChangeHandler { [applyMuteToAudioPaths] muted in
-            do {
-                try applyMuteToAudioPaths(muted)
-                return true
-            } catch {
-                return false
-            }
+            applyMuteToAudioPaths(muted)
+            return true
         }
 
         observer = notificationCenter.addObserver(
             forName: notificationName,
             object: nil,
-            queue: nil
+            queue: .main
         ) { [weak self] notification in
             self?.handleMuteStateChange(notification)
         }

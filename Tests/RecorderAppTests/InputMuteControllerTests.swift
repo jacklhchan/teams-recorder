@@ -49,7 +49,7 @@ final class InputMuteControllerTests: XCTestCase {
         XCTAssertFalse(controller.isMuted)
     }
 
-    func testSetMutedCallsApplicationButDoesNotClaimStateBeforeNotification() throws {
+    func testSetMutedAppliesAudioGateButDoesNotClaimDisplayStateBeforeNotification() throws {
         let application = FakeInputMuteApplication(initiallyMuted: false)
         let notificationCenter = NotificationCenter()
         let changeExpectation = expectation(description: "mute state change delivered")
@@ -74,7 +74,7 @@ final class InputMuteControllerTests: XCTestCase {
         XCTAssertEqual(application.setInputMutedCalls, [true])
         XCTAssertFalse(controller.isMuted)
         XCTAssertTrue(changes.isEmpty)
-        XCTAssertTrue(applyCalls.isEmpty)
+        XCTAssertEqual(applyCalls, [true])
 
         notificationCenter.post(
             name: .fakeInputMuteStateChange,
@@ -85,7 +85,7 @@ final class InputMuteControllerTests: XCTestCase {
         wait(for: [changeExpectation], timeout: 1.0)
         XCTAssertTrue(controller.isMuted)
         XCTAssertEqual(changes, [true])
-        XCTAssertTrue(applyCalls.isEmpty)
+        XCTAssertEqual(applyCalls, [true])
     }
 
     func testSetMutedThrowRollsBackWithoutClaimingStateChange() throws {

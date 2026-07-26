@@ -70,6 +70,7 @@ final class InputMuteController: InputMuteControlling {
 
     func setMuted(_ muted: Bool) throws {
         try application.setInputMuted(muted)
+        applyMuteToAudioPaths(muted)
     }
 
     func uninstall() {

@@ -86,6 +86,7 @@ constexpr uint32_t kConnectedFlag = 1U << 1;
 constexpr uint32_t kMaxStableReadAttempts = 4U;
 constexpr uint32_t kMaxControlTransitionAttempts = 8U;
 constexpr size_t kSharedHeaderBytes = offsetof(VMSharedRegion, slots);
+constexpr mode_t kSharedMemoryPermissions = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
 static_assert(sizeof(float) == sizeof(uint32_t), "Float32 contract required");
 static_assert(__atomic_always_lock_free(sizeof(uint32_t), 0), "uint32 shared atomics must be lock-free");
@@ -107,14 +108,24 @@ uint64_t gProcessGeneration = 1U;
 pthread_once_t gAtForkOnce = PTHREAD_ONCE_INIT;
 int gAtForkStatus = 0;
 pthread_mutex_t gLocalOwnerTokensMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t gSharedMemoryCreateMutex = PTHREAD_MUTEX_INITIALIZER;
 uint64_t gLocalOwnerTokens[256] = {};
 
+void atForkPrepare() {
+    (void)pthread_mutex_lock(&gSharedMemoryCreateMutex);
+}
+
+void atForkParent() {
+    (void)pthread_mutex_unlock(&gSharedMemoryCreateMutex);
+}
+
 void atForkChild() {
+    (void)pthread_mutex_unlock(&gSharedMemoryCreateMutex);
     (void)__atomic_fetch_add(&gProcessGeneration, uint64_t{1}, __ATOMIC_RELAXED);
 }
 
 void registerAtForkOnce() {
-    gAtForkStatus = pthread_atfork(nullptr, nullptr, atForkChild);
+    gAtForkStatus = pthread_atfork(atForkPrepare, atForkParent, atForkChild);
 }
 
 VMStatus ensureAtForkRegistered() {
@@ -297,6 +308,55 @@ void closeFdIfNeeded(int fd) {
     if (fd >= 0) {
         close(fd);
     }
+}
+
+VMStatus verifySharedMemoryMode(int fd) {
+    struct stat statBuffer {};
+    if (fstat(fd, &statBuffer) != 0) {
+        return VM_STATUS_SYSTEM_ERROR;
+    }
+    return ((statBuffer.st_mode & 0777) == kSharedMemoryPermissions)
+               ? VM_STATUS_OK
+               : VM_STATUS_PERMISSION_ERROR;
+}
+
+VMStatus normalizeCreatedSharedMemoryPermissions(int fd) {
+    if (fd < 0) {
+        return VM_STATUS_INVALID_ARGUMENT;
+    }
+    if (fchmod(fd, kSharedMemoryPermissions) != 0) {
+        const int chmodErrno = errno;
+#if defined(__APPLE__)
+        if (chmodErrno == EINVAL) {
+            return verifySharedMemoryMode(fd);
+        }
+#endif
+        return VM_STATUS_SYSTEM_ERROR;
+    }
+
+    return verifySharedMemoryMode(fd);
+}
+
+VMStatus validateExistingSharedMemoryPermissions(int fd) {
+    if (fd < 0) {
+        return VM_STATUS_INVALID_ARGUMENT;
+    }
+    return verifySharedMemoryMode(fd);
+}
+
+int createSharedMemoryObjectWithExactMode(const char *shmName) {
+    const int lockStatus = pthread_mutex_lock(&gSharedMemoryCreateMutex);
+    if (lockStatus != 0) {
+        errno = lockStatus;
+        return -1;
+    }
+    const mode_t previousMask = umask(0);
+    const int fd = shm_open(shmName, O_RDWR | O_CREAT | O_EXCL, kSharedMemoryPermissions);
+    const int savedErrno = errno;
+    (void)umask(previousMask);
+    (void)pthread_mutex_unlock(&gSharedMemoryCreateMutex);
+    errno = savedErrno;
+    return fd;
 }
 
 uint64_t makeOwnerToken() {
@@ -677,7 +737,7 @@ VMStatus createOrOpenProducerRegion(const char *shmName,
     }
 
     bool created = false;
-    int fd = shm_open(shmName, O_RDWR | O_CREAT | O_EXCL, 0600);
+    int fd = createSharedMemoryObjectWithExactMode(shmName);
     if (fd >= 0) {
         created = true;
         if (ftruncate(fd, static_cast<off_t>(expectedBytes)) != 0) {
@@ -692,6 +752,17 @@ VMStatus createOrOpenProducerRegion(const char *shmName,
         }
     } else {
         return VM_STATUS_SYSTEM_ERROR;
+    }
+
+    const VMStatus status = created
+                                ? normalizeCreatedSharedMemoryPermissions(fd)
+                                : validateExistingSharedMemoryPermissions(fd);
+    if (status != VM_STATUS_OK) {
+        close(fd);
+        if (created) {
+            shm_unlink(shmName);
+        }
+        return status;
     }
 
     struct stat statBuffer {};

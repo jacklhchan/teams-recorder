@@ -23,7 +23,8 @@ typedef enum VMStatus {
     VM_STATUS_INVALID_SAMPLE_RATE = 2,
     VM_STATUS_SYSTEM_ERROR = 3,
     VM_STATUS_BUSY = 4,
-    VM_STATUS_ABI_MISMATCH = 5
+    VM_STATUS_ABI_MISMATCH = 5,
+    VM_STATUS_PERMISSION_ERROR = 6
 } VMStatus;
 
 typedef struct VMBridgeStats {

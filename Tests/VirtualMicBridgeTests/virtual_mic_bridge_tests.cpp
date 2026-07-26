@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
 #include <type_traits>
@@ -127,6 +128,96 @@ struct PipePair {
     PipePair(const PipePair &) = delete;
     PipePair &operator=(const PipePair &) = delete;
 };
+
+struct ScopedUmask {
+    mode_t previous = 0;
+
+    explicit ScopedUmask(mode_t mask) : previous(umask(mask)) {}
+
+    ~ScopedUmask() {
+        umask(previous);
+    }
+
+    ScopedUmask(const ScopedUmask &) = delete;
+    ScopedUmask &operator=(const ScopedUmask &) = delete;
+};
+
+struct SharedMemoryStat {
+    mode_t mode = 0;
+    dev_t device = 0;
+    ino_t inode = 0;
+    off_t size = 0;
+};
+
+SharedMemoryStat sharedMemoryStat(const char *name) {
+    const int fd = shm_open(name, O_RDONLY, 0);
+    CHECK(fd >= 0);
+    struct stat statBuffer {};
+    CHECK(fstat(fd, &statBuffer) == 0);
+    close(fd);
+    SharedMemoryStat result;
+    result.mode = statBuffer.st_mode & 0777;
+    result.device = statBuffer.st_dev;
+    result.inode = statBuffer.st_ino;
+    result.size = statBuffer.st_size;
+    return result;
+}
+
+mode_t sharedMemoryMode(const char *name) {
+    return sharedMemoryStat(name).mode;
+}
+
+bool sameSharedMemoryIdentity(const SharedMemoryStat &lhs, const SharedMemoryStat &rhs) {
+    return lhs.device == rhs.device && lhs.inode == rhs.inode && lhs.size == rhs.size;
+}
+
+void expectSharedMemoryMode(const char *name, mode_t expectedMode) {
+    const mode_t actualMode = sharedMemoryMode(name);
+    if (actualMode != expectedMode) {
+        std::fprintf(stderr,
+                     "shared memory mode for %s: expected 0%03o, actual 0%03o\n",
+                     name,
+                     static_cast<unsigned int>(expectedMode),
+                     static_cast<unsigned int>(actualMode));
+    }
+    CHECK(actualMode == expectedMode);
+}
+
+void cloneAbiValidSharedMemoryWithMode(const char *targetName, uint32_t capacityFrames, mode_t mode) {
+    ScopedBridge source(makeUniqueBridgeName("mode-source").c_str());
+    CHECK_STATUS(VMProducerCreate(source.name.c_str(), capacityFrames, VM_SAMPLE_RATE, &source.producer), VM_STATUS_OK);
+    VMProducerDestroy(source.producer);
+    source.producer = nullptr;
+
+    const int sourceFd = shm_open(source.name.c_str(), O_RDONLY, 0);
+    CHECK(sourceFd >= 0);
+
+    struct stat sourceStat {};
+    CHECK(fstat(sourceFd, &sourceStat) == 0);
+    CHECK(sourceStat.st_size > 0);
+
+    const size_t byteCount = static_cast<size_t>(sourceStat.st_size);
+    void *sourceMapping = mmap(nullptr, byteCount, PROT_READ, MAP_SHARED, sourceFd, 0);
+    CHECK(sourceMapping != MAP_FAILED);
+
+    int targetFd = -1;
+    {
+        ScopedUmask permissive(0);
+        targetFd = shm_open(targetName, O_RDWR | O_CREAT | O_EXCL, mode);
+    }
+    CHECK(targetFd >= 0);
+    CHECK(ftruncate(targetFd, sourceStat.st_size) == 0);
+
+    void *targetMapping = mmap(nullptr, byteCount, PROT_READ | PROT_WRITE, MAP_SHARED, targetFd, 0);
+    CHECK(targetMapping != MAP_FAILED);
+
+    std::memcpy(targetMapping, sourceMapping, byteCount);
+
+    CHECK(munmap(targetMapping, byteCount) == 0);
+    CHECK(munmap(sourceMapping, byteCount) == 0);
+    close(targetFd);
+    close(sourceFd);
+}
 
 void writeByte(int fd, uint8_t value) {
     const ssize_t written = write(fd, &value, sizeof(value));
@@ -494,6 +585,39 @@ void testSecondProducerIsRejectedForActiveRegion() {
     CHECK(secondProducer == nullptr);
 }
 
+void testProducerCreateSetsNewSharedMemoryModeToOwnerWriteWorldReadableUnderRestrictiveUmask() {
+    ScopedBridge bridge(makeUniqueBridgeName("mode-new").c_str());
+
+    VMStatus createStatus = VM_STATUS_SYSTEM_ERROR;
+    {
+        ScopedUmask restrictive(0077);
+        createStatus = VMProducerCreate(bridge.name.c_str(), 64U, VM_SAMPLE_RATE, &bridge.producer);
+    }
+
+    CHECK_STATUS(createStatus, VM_STATUS_OK);
+    expectSharedMemoryMode(bridge.name.c_str(), 0644);
+}
+
+void testProducerCreateRejectsExistingSharedMemoryWithWrongModeWithoutReplacingIt() {
+    const mode_t existingModes[] = {0600, 0666};
+
+    for (mode_t existingMode : existingModes) {
+        ScopedBridge bridge(makeUniqueBridgeName("mode-reuse").c_str());
+        cloneAbiValidSharedMemoryWithMode(bridge.name.c_str(), 64U, existingMode);
+        expectSharedMemoryMode(bridge.name.c_str(), existingMode);
+        const SharedMemoryStat before = sharedMemoryStat(bridge.name.c_str());
+
+        VMProducerHandle *producer = nullptr;
+        const VMStatus status = VMProducerCreate(bridge.name.c_str(), 64U, VM_SAMPLE_RATE, &producer);
+        CHECK_STATUS(status, VM_STATUS_PERMISSION_ERROR);
+        CHECK(producer == nullptr);
+
+        const SharedMemoryStat after = sharedMemoryStat(bridge.name.c_str());
+        CHECK(after.mode == existingMode);
+        CHECK(sameSharedMemoryIdentity(before, after));
+    }
+}
+
 void testForkInheritedProducerImmediatelyReturnsBusy() {
     const std::string name = makeUniqueBridgeName("forkinh");
     CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
@@ -727,7 +851,11 @@ void testTruncatedSharedMemoryReturnsAbiMismatchWithoutSignal() {
     const std::string name = makeUniqueBridgeName("truncated");
     CHECK_STATUS(VMSharedMemoryUnlink(name.c_str()), VM_STATUS_OK);
 
-    const int fd = shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+    int fd = -1;
+    {
+        ScopedUmask permissive(0);
+        fd = shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0644);
+    }
     CHECK(fd >= 0);
     CHECK(ftruncate(fd, 1) == 0);
     close(fd);
@@ -848,6 +976,8 @@ int main() {
     testConcurrentStressAndFiniteOutput();
     testConcurrentMuteAndDisconnectPreserveBothTransitions();
     testSecondProducerIsRejectedForActiveRegion();
+    testProducerCreateSetsNewSharedMemoryModeToOwnerWriteWorldReadableUnderRestrictiveUmask();
+    testProducerCreateRejectsExistingSharedMemoryWithWrongModeWithoutReplacingIt();
     testForkInheritedProducerImmediatelyReturnsBusy();
     testForkedProducerConsumerRoundTrip();
 #ifdef VM_BRIDGE_TESTING

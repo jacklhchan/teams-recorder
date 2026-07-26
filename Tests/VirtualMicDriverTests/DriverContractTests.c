@@ -643,6 +643,77 @@ static void testEachHALClientReadsTheSamePublishedMicrophoneFrames(void) {
     REQUIRE(VMSharedMemoryUnlink(VM_DEFAULT_SHARED_MEMORY_NAME) == VM_STATUS_OK);
 }
 
+static void testActiveClientAttachesWhenProducerStartsLater(void) {
+    REQUIRE(VMSharedMemoryUnlink(VM_DEFAULT_SHARED_MEMORY_NAME) == VM_STATUS_OK);
+
+    AudioObjectID deviceID = publishedDevice();
+    AudioObjectID streamID = publishedInputStream(deviceID);
+    AudioServerPlugInIOCycleInfo cycleInfo = {0};
+    REQUIRE((*gDriver)->StartIO(gDriver, deviceID, 303) == noErr);
+
+    Float32 initialFrames[4] = {9, 9, 9, 9};
+    REQUIRE((*gDriver)->DoIOOperation(
+        gDriver,
+        deviceID,
+        streamID,
+        303,
+        kAudioServerPlugInIOOperationReadInput,
+        4,
+        &cycleInfo,
+        initialFrames,
+        NULL
+    ) == noErr);
+    for (size_t index = 0; index < 4; ++index) {
+        REQUIRE(initialFrames[index] == 0.0F);
+    }
+
+    VMProducerHandle *producer = NULL;
+    REQUIRE(VMProducerCreate(
+        VM_DEFAULT_SHARED_MEMORY_NAME,
+        64,
+        VM_SAMPLE_RATE,
+        &producer
+    ) == VM_STATUS_OK);
+    if (producer == NULL) {
+        REQUIRE((*gDriver)->StopIO(gDriver, deviceID, 303) == noErr);
+        return;
+    }
+
+    const Float32 speech[] = {0.15F, -0.35F, 0.55F, -0.75F};
+    bool receivedSpeech = false;
+    for (size_t attempt = 0; attempt < 100 && !receivedSpeech; ++attempt) {
+        UInt32 framesWritten = 0;
+        REQUIRE(VMProducerWriteFrames(
+            producer,
+            speech,
+            4,
+            VM_SAMPLE_RATE,
+            &framesWritten
+        ) == VM_STATUS_OK);
+        REQUIRE(framesWritten == 4);
+        usleep(10000);
+
+        Float32 output[4] = {0};
+        REQUIRE((*gDriver)->DoIOOperation(
+            gDriver,
+            deviceID,
+            streamID,
+            303,
+            kAudioServerPlugInIOOperationReadInput,
+            4,
+            &cycleInfo,
+            output,
+            NULL
+        ) == noErr);
+        receivedSpeech = memcmp(output, speech, sizeof(speech)) == 0;
+    }
+    REQUIRE(receivedSpeech);
+
+    REQUIRE((*gDriver)->StopIO(gDriver, deviceID, 303) == noErr);
+    VMProducerDestroy(producer);
+    REQUIRE(VMSharedMemoryUnlink(VM_DEFAULT_SHARED_MEMORY_NAME) == VM_STATUS_OK);
+}
+
 static void testFixedFormatRejectsMutation(void) {
     AudioObjectID deviceID = publishedDevice();
     AudioObjectID streamID = publishedInputStream(deviceID);
@@ -784,6 +855,7 @@ int main(void) {
         testInputOnlyDeviceContract();
         testReadInputProducesFreshSilence();
         testEachHALClientReadsTheSamePublishedMicrophoneFrames();
+        testActiveClientAttachesWhenProducerStartsLater();
         testFixedFormatRejectsMutation();
         testClockCatchesUpWithoutResetForExtraClient();
     }

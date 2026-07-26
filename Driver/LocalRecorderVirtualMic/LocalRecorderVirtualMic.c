@@ -132,6 +132,7 @@ static Float64								gDevice_HostTicksPerFrame		= 0.0;
 static UInt64								gDevice_NumberTimeStamps		= 0;
 static Float64								gDevice_AnchorSampleTime		= 0.0;
 static UInt64								gDevice_AnchorHostTime			= 0;
+static dispatch_source_t					gDevice_ConsumerReconnectTimer	= NULL;
 
 enum
 {
@@ -3674,6 +3675,57 @@ static void	LocalRecorderVirtualMic_AttachConsumer(LocalRecorderVirtualMicClient
 	}
 }
 
+static void	LocalRecorderVirtualMic_EnsureConsumerReconnectTimer(void)
+{
+	if(gDevice_ConsumerReconnectTimer != NULL)
+	{
+		return;
+	}
+
+	dispatch_source_t theTimer = dispatch_source_create(
+		DISPATCH_SOURCE_TYPE_TIMER,
+		0,
+		0,
+		dispatch_get_global_queue(QOS_CLASS_UTILITY, 0)
+	);
+	if(theTimer == NULL)
+	{
+		return;
+	}
+
+#if defined(LOCAL_RECORDER_VIRTUAL_MIC_TESTING)
+	const UInt64 theInterval = 5ULL * NSEC_PER_MSEC;
+	const UInt64 theLeeway = 1ULL * NSEC_PER_MSEC;
+#else
+	const UInt64 theInterval = 250ULL * NSEC_PER_MSEC;
+	const UInt64 theLeeway = 25ULL * NSEC_PER_MSEC;
+#endif
+
+	dispatch_source_set_timer(
+		theTimer,
+		dispatch_time(DISPATCH_TIME_NOW, (int64_t)theInterval),
+		theInterval,
+		theLeeway
+	);
+	dispatch_source_set_event_handler(theTimer, ^
+	{
+		pthread_mutex_lock(&gDevice_IOMutex);
+		for(UInt32 theIndex = 0; theIndex < kDevice_MaxIOClients; ++theIndex)
+		{
+			LocalRecorderVirtualMicClientState* theClientState = &gDevice_IOClients[theIndex];
+			if((atomic_load_explicit(&theClientState->mIsActive, memory_order_acquire) != 0) &&
+				(atomic_load_explicit(&theClientState->mConsumer, memory_order_acquire) == NULL))
+			{
+				LocalRecorderVirtualMic_AttachConsumer(theClientState);
+			}
+		}
+		pthread_mutex_unlock(&gDevice_IOMutex);
+	});
+
+	gDevice_ConsumerReconnectTimer = theTimer;
+	dispatch_resume(theTimer);
+}
+
 static OSStatus	LocalRecorderVirtualMic_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID)
 {
 	//	This call tells the device that IO is starting for the given client. When this routine
@@ -3713,6 +3765,10 @@ static OSStatus	LocalRecorderVirtualMic_StartIO(AudioServerPlugInDriverRef inDri
 				if(atomic_load_explicit(&theClientState->mConsumer, memory_order_acquire) == NULL)
 				{
 					LocalRecorderVirtualMic_AttachConsumer(theClientState);
+					if(atomic_load_explicit(&theClientState->mConsumer, memory_order_acquire) == NULL)
+					{
+						LocalRecorderVirtualMic_EnsureConsumerReconnectTimer();
+					}
 				}
 				++theClientState->mStartCount;
 			}
@@ -3730,6 +3786,10 @@ static OSStatus	LocalRecorderVirtualMic_StartIO(AudioServerPlugInDriverRef inDri
 				theClientState->mStartCount = 1;
 				LocalRecorderVirtualMic_AttachConsumer(theClientState);
 				atomic_store_explicit(&theClientState->mIsActive, 1, memory_order_release);
+				if(atomic_load_explicit(&theClientState->mConsumer, memory_order_acquire) == NULL)
+				{
+					LocalRecorderVirtualMic_EnsureConsumerReconnectTimer();
+				}
 			}
 		}
 

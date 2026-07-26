@@ -17,6 +17,7 @@ DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
     -Wextra \
     -Werror \
     -Wno-unused-parameter \
+    -DLOCAL_RECORDER_VIRTUAL_MIC_TESTING \
     -I "$ROOT_DIR/Sources/VirtualMicBridge/include" \
     -c \
     "$ROOT_DIR/Tests/VirtualMicDriverTests/DriverContractTests.c" \

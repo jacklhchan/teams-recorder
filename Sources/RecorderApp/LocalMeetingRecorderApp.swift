@@ -7,7 +7,11 @@ struct LocalMeetingRecorderApp: App {
 
     var body: some Scene {
         Window("Local Meeting Recorder", id: "main") {
-            ContentView()
+            if CommandLine.arguments.contains("--teams-screen-viability-probe") {
+                TeamsCaptureViabilityProbeView()
+            } else {
+                ContentView()
+            }
         }
         .windowStyle(.titleBar)
         .commands {

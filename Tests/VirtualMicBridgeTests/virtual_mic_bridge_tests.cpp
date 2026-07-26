@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -246,13 +247,17 @@ VMStatus readStatus(int fd) {
 
 template <typename Operation>
 void expectOkWithBusyRetries(Operation operation) {
-    for (uint32_t attempt = 0; attempt < 32U; ++attempt) {
+    for (uint32_t attempt = 0; attempt < 256U; ++attempt) {
         const VMStatus status = operation();
         if (status == VM_STATUS_OK) {
             return;
         }
         CHECK(status == VM_STATUS_BUSY);
-        std::this_thread::yield();
+        if ((attempt + 1U) % 8U == 0U) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        } else {
+            std::this_thread::yield();
+        }
     }
     fail("operation stayed BUSY after bounded retries", __FILE__, __LINE__);
 }

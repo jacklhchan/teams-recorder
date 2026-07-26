@@ -11,8 +11,13 @@ let package = Package(
         .executable(name: "LocalMeetingRecorder", targets: ["RecorderApp"])
     ],
     targets: [
+        .target(
+            name: "VirtualMicBridge",
+            path: "Sources/VirtualMicBridge"
+        ),
         .executableTarget(
             name: "RecorderApp",
+            dependencies: ["VirtualMicBridge"],
             resources: [
                 .process("Resources/release-manifest.json")
             ],
@@ -30,5 +35,6 @@ let package = Package(
             name: "RecorderAppTests",
             dependencies: ["RecorderApp"]
         )
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

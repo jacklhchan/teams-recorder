@@ -26,7 +26,7 @@ add_executable(virtual_mic_bridge_tests
 )
 
 target_include_directories(virtual_mic_bridge_tests PRIVATE
-  ${CMAKE_CURRENT_LIST_DIR}/../../Sources/VirtualMicBridge
+  ${CMAKE_CURRENT_LIST_DIR}/../../Sources/VirtualMicBridge/include
 )
 
 target_compile_definitions(virtual_mic_bridge_tests PRIVATE

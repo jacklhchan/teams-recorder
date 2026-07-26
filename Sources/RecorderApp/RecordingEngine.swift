@@ -50,6 +50,7 @@ final class RecordingEngine: ObservableObject {
     @Published private(set) var isMicrophoneCaptureConnected = true
     @Published private(set) var captureStatus: CaptureStatus?
     @Published private(set) var captureConnectionSnapshot: CaptureConnectionSnapshot = .idle
+    @Published private(set) var virtualMicPublisherState: VirtualMicPublisherState = .stopped
 
     private let captureSource: CaptureSourceProtocol
     private let writerFactory: MixedAudioWriterFactory
@@ -174,7 +175,7 @@ final class RecordingEngine: ObservableObject {
         sourceSessionID = sessionID
         activeSelection = request.selection
         activeMicrophoneUID = request.microphoneUID
-        microphoneAudioPaths.start()
+        virtualMicPublisherState = microphoneAudioPaths.start()
 
         do {
             try await captureSource.start(
@@ -210,7 +211,7 @@ final class RecordingEngine: ObservableObject {
             await captureSource.stop()
             callbackGate.deactivate(sessionID: sessionID)
             await callbackGate.waitForIdle(sessionID: sessionID)
-            microphoneAudioPaths.stop()
+            virtualMicPublisherState = microphoneAudioPaths.stop()
             clearSourceSession(sessionID: sessionID)
             if shouldApplyFailure {
                 applyStartFailure(error)
@@ -404,7 +405,7 @@ final class RecordingEngine: ObservableObject {
             callbackGate.deactivate(sessionID: sourceSessionID)
             await callbackGate.waitForIdle(sessionID: sourceSessionID)
         }
-        microphoneAudioPaths.stop()
+        virtualMicPublisherState = microphoneAudioPaths.stop()
 
         guard recordingEpoch == activeEpoch else {
             return nil
@@ -447,7 +448,11 @@ final class RecordingEngine: ObservableObject {
     }
 
     nonisolated func applyInputMuteToAudioPaths(_ muted: Bool) {
-        microphoneAudioPaths.setMuted(muted)
+        _ = microphoneAudioPaths.setMuted(muted)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.virtualMicPublisherState = self.microphoneAudioPaths.currentPublisherState()
+        }
     }
 
     func updateMicMuteDisplay(_ muted: Bool) {
@@ -465,6 +470,7 @@ final class RecordingEngine: ObservableObject {
             case .microphone:
                 latestMicLevel = snapshot
                 publisher.publishMicrophone(left: block.left, right: block.right)
+                virtualMicPublisherState = publisher.state
             }
 
             guard let activeEpoch = recordingEpoch,
@@ -525,7 +531,7 @@ final class RecordingEngine: ObservableObject {
         guard isMicrophoneCaptureConnected else { return }
         isMicrophoneCaptureConnected = false
         mixer.setMicrophoneSourceConnected(false)
-        microphoneAudioPaths.stop()
+        virtualMicPublisherState = microphoneAudioPaths.stop()
         if isRecording { currentHealth.microphoneDisconnects += 1 }
     }
 
@@ -575,7 +581,7 @@ final class RecordingEngine: ObservableObject {
         await captureSource.stop()
         callbackGate.deactivate(sessionID: sourceSessionID)
         await callbackGate.waitForIdle(sessionID: sourceSessionID)
-        microphoneAudioPaths.stop()
+        virtualMicPublisherState = microphoneAudioPaths.stop()
         clearSourceSession(sessionID: sourceSessionID)
     }
 
@@ -595,7 +601,7 @@ final class RecordingEngine: ObservableObject {
         sourceSessionID = nil
         activeSelection = nil
         activeMicrophoneUID = nil
-        microphoneAudioPaths.stop()
+        virtualMicPublisherState = microphoneAudioPaths.stop()
         stopMeterTimer()
     }
 
@@ -777,17 +783,25 @@ private final class MicrophoneAudioPaths: @unchecked Sendable {
         self.publisher = publisher
     }
 
-    func start() {
+    func start() -> VirtualMicPublisherState {
         lock.lock()
+        defer { lock.unlock() }
         publisher.start()
-        lock.unlock()
+        return publisher.state
     }
 
-    func setMuted(_ muted: Bool) {
+    func setMuted(_ muted: Bool) -> VirtualMicPublisherState {
         lock.lock()
+        defer { lock.unlock() }
         isMuted = muted
         publisher.setMuted(muted)
-        lock.unlock()
+        return publisher.state
+    }
+
+    func currentPublisherState() -> VirtualMicPublisherState {
+        lock.lock()
+        defer { lock.unlock() }
+        return publisher.state
     }
 
     func withLockedState<T>(
@@ -798,10 +812,11 @@ private final class MicrophoneAudioPaths: @unchecked Sendable {
         return body(isMuted, publisher)
     }
 
-    func stop() {
+    func stop() -> VirtualMicPublisherState {
         lock.lock()
+        defer { lock.unlock() }
         publisher.stop()
-        lock.unlock()
+        return publisher.state
     }
 }
 

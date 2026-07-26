@@ -38,6 +38,7 @@ final class AppModel: ObservableObject {
     @Published var asrModelStatus = "Checking oMLX ASR server..."
     @Published var asrModelLogURL: URL?
     @Published private(set) var inputMuteControlAvailable = false
+    @Published private(set) var virtualMicInstallationState: VirtualMicInstallationState = .absent
 
     let recorder: RecordingEngine
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -52,11 +53,18 @@ final class AppModel: ObservableObject {
     private let inputDevices: () -> [AudioDevice]
     private let defaultInputDeviceID: () -> AudioDeviceID?
     private let inputMuteController: InputMuteControlling
+    private let virtualMicStateProvider: () -> VirtualMicInstallationState
+    private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
+    private let recordingSessionLoadingQueue = DispatchQueue(
+        label: "local.meeting.recorder.recording-library",
+        qos: .userInitiated
+    )
     private var cancellables: Set<AnyCancellable> = []
     private var captureLifecycleGate = CaptureLifecycleGate()
     private var captureLifecycleTask: Task<Void, Never>?
     private var inputMuteHandlingInstalled = false
     private var pendingInputMuteRequest: Bool?
+    private var recordingSessionRefreshGeneration: UInt = 0
 
     init(
         defaults: UserDefaults = .standard,
@@ -66,12 +74,20 @@ final class AppModel: ObservableObject {
         performStartupWork: Bool = true,
         inputMuteControllerFactory: (
             (@escaping (Bool) -> Void) -> InputMuteControlling
-        )? = nil
+        )? = nil,
+        virtualMicStateProvider: @escaping () -> VirtualMicInstallationState = {
+            VirtualMicInstallation.currentState()
+        },
+        recordingSessionLoader: @escaping @Sendable (URL) -> [RecordingSession] = {
+            RecordingSessionStore.load(from: $0)
+        }
     ) {
         let activeRecorder = recorder ?? RecordingEngine()
         self.recorder = activeRecorder
         self.inputDevices = inputDevices
         self.defaultInputDeviceID = defaultInputDeviceID
+        self.virtualMicStateProvider = virtualMicStateProvider
+        self.recordingSessionLoader = recordingSessionLoader
         let applyMuteToAudioPaths: (Bool) -> Void = { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
@@ -99,6 +115,7 @@ final class AppModel: ObservableObject {
 
     func refreshDevices() {
         devices = inputDevices()
+        virtualMicInstallationState = virtualMicStateProvider()
         if let selectedMicrophoneUID {
             selectedMicDevice = devices.first { $0.uid == selectedMicrophoneUID }
         } else if selectedMicDevice == nil {
@@ -318,9 +335,17 @@ final class AppModel: ObservableObject {
         panel.prompt = "Use Folder"
 
         if panel.runModal() == .OK, let url = panel.url {
-            outputFolder = url
-            refreshSessions()
+            setOutputFolder(url)
         }
+    }
+
+    func setOutputFolder(_ folder: URL) {
+        outputFolder = folder
+        sessions = []
+        transcriptionStatesBySessionID = [:]
+        transcriptURLsBySessionID = [:]
+        transcriptLogURLsBySessionID = [:]
+        refreshSessions()
     }
 
     func chooseAudioFileForTranscription() {
@@ -354,14 +379,60 @@ final class AppModel: ObservableObject {
     }
 
     func refreshSessions() {
-        sessions = RecordingSessionStore.load(from: outputFolder)
-        transcriptionStatesBySessionID = Dictionary(uniqueKeysWithValues: sessions.compactMap { session in
-            guard transcribingSessionID != session.id,
-                  let state = try? TranscriptionStateStore.markInterruptedIfNeeded(in: session.folderURL) else {
-                return nil
+        recordingSessionRefreshGeneration &+= 1
+        let generation = recordingSessionRefreshGeneration
+        let folder = outputFolder
+        let loader = recordingSessionLoader
+
+        recordingSessionLoadingQueue.async { [weak self] in
+            let loadedSessions = loader(folder)
+            let transcriptionStates: [RecordingSession.ID: TranscriptionState] = Dictionary(
+                uniqueKeysWithValues: loadedSessions.compactMap { session in
+                    guard let state = try? TranscriptionStateStore.load(
+                        in: session.folderURL
+                    ) else {
+                        return nil
+                    }
+                    return (session.id, state)
+                }
+            )
+
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.recordingSessionRefreshGeneration == generation else {
+                    return
+                }
+                self.sessions = loadedSessions
+                self.transcriptionStatesBySessionID = self.projectTranscriptionStates(
+                    transcriptionStates
+                )
             }
-            return (session.id, state)
-        })
+        }
+    }
+
+    private func projectTranscriptionStates(
+        _ loadedStates: [RecordingSession.ID: TranscriptionState]
+    ) -> [RecordingSession.ID: TranscriptionState] {
+        var projected = loadedStates.mapValues { state in
+            guard [.queued, .uploading, .transcribing].contains(state.phase) else {
+                return state
+            }
+            var interrupted = state
+            interrupted.phase = .interrupted
+            interrupted.message = "Transcription interrupted. You can start it again."
+            interrupted.finishedAt = Date()
+            return interrupted
+        }
+
+        guard let currentActiveID = transcribingSessionID else {
+            return projected
+        }
+        if let liveState = transcriptionStatesBySessionID[currentActiveID] {
+            projected[currentActiveID] = liveState
+        } else if let loadedState = loadedStates[currentActiveID] {
+            projected[currentActiveID] = loadedState
+        }
+        return projected
     }
 
     func play(session: RecordingSession) {
@@ -731,6 +802,10 @@ final class AppModel: ObservableObject {
         do {
             _ = try RecordingSessionStore.moveToTrash(folder: session.folderURL)
             if playingSessionID == session.id { stopPlayback() }
+            sessions.removeAll { $0.id == session.id }
+            transcriptionStatesBySessionID.removeValue(forKey: session.id)
+            transcriptURLsBySessionID.removeValue(forKey: session.id)
+            transcriptLogURLsBySessionID.removeValue(forKey: session.id)
             refreshSessions()
             statusMessage = "Moved \(session.displayName) to Trash"
         } catch {

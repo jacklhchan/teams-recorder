@@ -223,6 +223,20 @@ private struct CaptureControlsView: View {
                 .disabled(!model.sourceControlsEnabled)
                 Text(model.selectedMicDevice?.channelText ?? "Unavailable").foregroundStyle(.secondary)
             }
+
+            GridRow {
+                Label("Virtual Mic", systemImage: "person.wave.2").font(.headline)
+                VirtualMicIdentityView(
+                    recorder: model.recorder,
+                    installationState: model.virtualMicInstallationState,
+                    inputMuteControlAvailable: model.inputMuteControlAvailable
+                )
+                VirtualMicStateView(
+                    recorder: model.recorder,
+                    installationState: model.virtualMicInstallationState,
+                    inputMuteControlAvailable: model.inputMuteControlAvailable
+                )
+            }
         }
     }
 
@@ -236,6 +250,68 @@ private struct CaptureControlsView: View {
     private var selectedApplicationName: String {
         if case .application(let application) = model.resolvedCaptureSelection { return application.name }
         return "Choose an application"
+    }
+}
+
+private struct VirtualMicIdentityView: View {
+    @ObservedObject var recorder: RecordingEngine
+    let installationState: VirtualMicInstallationState
+    let inputMuteControlAvailable: Bool
+
+    private var presentation: VirtualMicStatusPresentation {
+        .make(
+            installation: installationState,
+            publisher: recorder.virtualMicPublisherState,
+            inputMuteControlAvailable: inputMuteControlAvailable
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("Local Recorder Virtual Mic")
+                .lineLimit(1)
+            Text(presentation.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(minWidth: 380, alignment: .leading)
+    }
+}
+
+private struct VirtualMicStateView: View {
+    @ObservedObject var recorder: RecordingEngine
+    let installationState: VirtualMicInstallationState
+    let inputMuteControlAvailable: Bool
+
+    private var presentation: VirtualMicStatusPresentation {
+        .make(
+            installation: installationState,
+            publisher: recorder.virtualMicPublisherState,
+            inputMuteControlAvailable: inputMuteControlAvailable
+        )
+    }
+
+    var body: some View {
+        Label(presentation.title, systemImage: iconName)
+            .foregroundStyle(statusColor)
+            .lineLimit(1)
+    }
+
+    private var iconName: String {
+        switch presentation.tone {
+        case .ready: "checkmark.circle.fill"
+        case .warning: "exclamationmark.triangle.fill"
+        case .neutral: "circle.dashed"
+        }
+    }
+
+    private var statusColor: Color {
+        switch presentation.tone {
+        case .ready: .green
+        case .warning: .orange
+        case .neutral: .secondary
+        }
     }
 }
 

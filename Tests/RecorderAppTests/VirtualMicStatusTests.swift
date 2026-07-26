@@ -2,6 +2,96 @@ import XCTest
 @testable import RecorderApp
 
 final class VirtualMicStatusTests: XCTestCase {
+    func testReadyPresentationOnlyClaimsObservableBridgeAndMuteState() {
+        XCTAssertEqual(
+            VirtualMicStatusPresentation.make(
+                installation: .ready,
+                publisher: .ready,
+                inputMuteControlAvailable: true
+            ),
+            .init(
+                title: "Virtual mic active",
+                detail: "Recorder mute controls output",
+                tone: .ready
+            )
+        )
+    }
+
+    func testUnavailablePublisherKeepsDriverStatusActionable() {
+        XCTAssertEqual(
+            VirtualMicStatusPresentation.make(
+                installation: .ready,
+                publisher: .unavailable,
+                inputMuteControlAvailable: false
+            ),
+            .init(
+                title: "Bridge unavailable",
+                detail: "Local recording continues",
+                tone: .warning
+            )
+        )
+    }
+
+    func testReadyPresentationUsesAppMuteCopyWhenInputHandlerIsUnavailable() {
+        XCTAssertEqual(
+            VirtualMicStatusPresentation.make(
+                installation: .ready,
+                publisher: .ready,
+                inputMuteControlAvailable: false
+            ),
+            .init(
+                title: "Virtual mic active",
+                detail: "App mute controls output",
+                tone: .ready
+            )
+        )
+    }
+
+    func testReadyDriverWithStoppedPublisherIsIdle() {
+        XCTAssertEqual(
+            VirtualMicStatusPresentation.make(
+                installation: .ready,
+                publisher: .stopped,
+                inputMuteControlAvailable: true
+            ),
+            .init(
+                title: "Driver ready",
+                detail: "Virtual mic idle",
+                tone: .neutral
+            )
+        )
+    }
+
+    func testEnumeratedRemovedDriverRequiresRestart() {
+        XCTAssertEqual(
+            VirtualMicStatusPresentation.make(
+                installation: .removalNeedsReboot,
+                publisher: .stopped,
+                inputMuteControlAvailable: false
+            ),
+            .init(
+                title: "Restart required",
+                detail: "Virtual microphone removal pending",
+                tone: .warning
+            )
+        )
+    }
+
+    func testInstalledDriverThatIsNotEnumeratedRequiresRestart() {
+        XCTAssertEqual(
+            VirtualMicStatusPresentation.make(
+                installation: .installedNeedsReboot,
+                publisher: .stopped,
+                inputMuteControlAvailable: true
+            ),
+            .init(
+                title: "Restart required",
+                detail: "Virtual microphone installed",
+                tone: .warning
+            )
+        )
+    }
+
     func testInstallationUsesExactDriverPathAndDeviceUID() {
         XCTAssertEqual(
             VirtualMicInstallation.driverURL.path,

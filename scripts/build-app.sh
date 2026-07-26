@@ -54,6 +54,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>Local Meeting Recorder needs microphone access to record your selected mic input.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Local Meeting Recorder reads and saves recordings in your Downloads folder.</string>
   <key>NSScreenCaptureUsageDescription</key>
   <string>Local Meeting Recorder captures system or selected app audio without changing your Mac output.</string>
 </dict>

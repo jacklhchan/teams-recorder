@@ -23,11 +23,55 @@ final class RecordingEngineStateTests: XCTestCase {
 
         XCTAssertFalse(engine.isRecording)
         XCTAssertEqual(publisher.startCount, 1)
+        XCTAssertEqual(engine.virtualMicPublisherState, .ready)
         XCTAssertEqual(publisher.publishedLeft, [[0.3, -0.2]])
         XCTAssertEqual(publisher.publishedRight, [[0.3, -0.2]])
 
         await engine.stopMonitoring()
         XCTAssertEqual(publisher.stopCount, 1)
+        XCTAssertEqual(engine.virtualMicPublisherState, .stopped)
+    }
+
+    func testPublisherWriteFailureBecomesObservableDuringMonitoring() async throws {
+        let source = FakeCaptureSource()
+        let publisher = FakeVirtualMicPublisher()
+        publisher.becomeUnavailableOnPublish = true
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in FakeWriter() },
+            mixerBlockFrames: 4,
+            virtualMicPublisher: publisher
+        )
+
+        try await engine.startMonitoring(
+            selection: .allSystemAudio,
+            microphoneUID: "AirPods-UID"
+        )
+        source.emit(try block(.microphone, frame: 0, samples: [0.3, -0.2]))
+        await settle()
+
+        XCTAssertEqual(engine.virtualMicPublisherState, .unavailable)
+    }
+
+    func testPendingMuteStateUpdateCannotOverwriteStoppedPublisherState() async throws {
+        let source = FakeCaptureSource()
+        let publisher = FakeVirtualMicPublisher()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in FakeWriter() },
+            mixerBlockFrames: 4,
+            virtualMicPublisher: publisher
+        )
+        try await engine.startMonitoring(
+            selection: .allSystemAudio,
+            microphoneUID: "AirPods-UID"
+        )
+
+        engine.applyInputMuteToAudioPaths(true)
+        await engine.stopMonitoring()
+        await settle()
+
+        XCTAssertEqual(engine.virtualMicPublisherState, .stopped)
     }
 
     func testImmediateMuteGateSilencesRecordingBeforeDisplayNotification() async throws {
@@ -1028,6 +1072,7 @@ private final class FakeWriterFactory {
 
 private final class FakeVirtualMicPublisher: VirtualMicPublishing {
     private(set) var state: VirtualMicPublisherState = .stopped
+    var becomeUnavailableOnPublish = false
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var muteCalls: [Bool] = []
@@ -1042,6 +1087,9 @@ private final class FakeVirtualMicPublisher: VirtualMicPublishing {
     func publishMicrophone(left: [Float], right: [Float]) {
         publishedLeft.append(left)
         publishedRight.append(right)
+        if becomeUnavailableOnPublish {
+            state = .unavailable
+        }
     }
 
     func setMuted(_ muted: Bool) {

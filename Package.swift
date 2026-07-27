@@ -28,7 +28,8 @@ let package = Package(
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("Security"),
                 .linkedFramework("ScreenCaptureKit"),
-                .linkedFramework("SwiftUI")
+                .linkedFramework("SwiftUI"),
+                .linkedFramework("VideoToolbox")
             ]
         ),
         .testTarget(

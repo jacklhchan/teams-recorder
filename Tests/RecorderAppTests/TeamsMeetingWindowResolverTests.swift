@@ -93,8 +93,6 @@ final class TeamsMeetingWindowResolverTests: XCTestCase {
         let reusedWindowID = TeamsWindowIdentity(processID: 8, windowID: 10)
 
         assertReady(resolver.observe([snapshot(identity: oldIdentity)], meetingActive: true, now: meetingStarted), identity: oldIdentity)
-        resolver.resetForApplicationRestart()
-
         assertReady(resolver.observe([snapshot(identity: reusedWindowID)], meetingActive: true, now: meetingStarted.addingTimeInterval(1)), identity: reusedWindowID)
     }
 

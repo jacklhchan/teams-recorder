@@ -102,6 +102,65 @@ final class PlaybackCoordinatorTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(snapshots.last).progress, 0, accuracy: 0.001)
     }
 
+    func testInFlightSeekCannotPolluteReplacementSession() async throws {
+        let first = try makeFixture(extension: "m4a")
+        let second = try makeFixture(extension: "mp4")
+        let observer = TestPlaybackObserver()
+        observer.suspendSeeks = true
+        let coordinator = PlaybackCoordinator(player: AVPlayer(), observer: observer)
+        var snapshots: [PlaybackSnapshot] = []
+        coordinator.onSnapshot = { snapshots.append($0) }
+
+        try await coordinator.load(first.session)
+        let firstItem = try XCTUnwrap(coordinator.player.currentItem)
+        let seekTask = Task { await coordinator.seek(to: 0.75) }
+        for _ in 0..<300 where observer.pendingSeekCount == 0 {
+            await Task.yield()
+        }
+        XCTAssertEqual(observer.pendingSeekCount, 1, "Seek must be suspended before replacing playback")
+
+        try await coordinator.load(second.session)
+        let replacementSnapshotCount = snapshots.count
+        observer.finishPendingSeeks()
+        await seekTask.value
+
+        XCTAssertTrue(observer.seekItems.first === firstItem)
+        XCTAssertTrue(observer.cancelledSeekItems.contains(where: { $0 === firstItem }))
+        XCTAssertEqual(snapshots.count, replacementSnapshotCount)
+        XCTAssertEqual(try XCTUnwrap(snapshots.last).sessionID, second.session.id)
+        XCTAssertEqual(try XCTUnwrap(snapshots.last).progress, 0, accuracy: 0.001)
+    }
+
+    func testInterruptedSameItemSeekCannotPublishStaleProgress() async throws {
+        let fixture = try makeFixture(extension: "mp4")
+        let observer = TestPlaybackObserver()
+        observer.suspendSeeks = true
+        let coordinator = PlaybackCoordinator(player: AVPlayer(), observer: observer)
+        var snapshots: [PlaybackSnapshot] = []
+        coordinator.onSnapshot = { snapshots.append($0) }
+
+        try await coordinator.load(fixture.session)
+        let olderSeek = Task { await coordinator.seek(to: 0.25) }
+        for _ in 0..<300 where observer.pendingSeekCount < 1 {
+            await Task.yield()
+        }
+        let newerSeek = Task { await coordinator.seek(to: 0.75) }
+        for _ in 0..<300 where observer.pendingSeekCount < 2 {
+            await Task.yield()
+        }
+        XCTAssertEqual(observer.pendingSeekCount, 2)
+
+        observer.finishNewestPendingSeek(succeeded: true)
+        await newerSeek.value
+        XCTAssertEqual(try XCTUnwrap(snapshots.last).progress, 0.75, accuracy: 0.001)
+        let snapshotCountAfterNewerSeek = snapshots.count
+
+        observer.finishOldestPendingSeek(succeeded: false)
+        await olderSeek.value
+        XCTAssertEqual(snapshots.count, snapshotCountAfterNewerSeek)
+        XCTAssertEqual(try XCTUnwrap(snapshots.last).progress, 0.75, accuracy: 0.001)
+    }
+
     func testCurrentLoadDurationFailureResetsItemObserversAndSnapshot() async throws {
         let first = try makeFixture(extension: "m4a")
         let second = try makeFixture(extension: "m4a")
@@ -151,23 +210,46 @@ final class PlaybackCoordinatorTests: XCTestCase {
 @MainActor
 private final class TestPlaybackObserver: PlaybackObserving {
     private final class Token {}
+    private struct PendingSeek {
+        let item: AVPlayerItem
+        let continuation: CheckedContinuation<Bool, Never>
+    }
 
     var loadedDuration: CMTime? = CMTime(seconds: 1, preferredTimescale: 600)
     var durationError: Error?
+    var suspendSeeks = false
     var onBothObserversRemoved: (() -> Void)?
     private(set) var endTokens: [Any] = []
     private(set) var observedItems: [AVPlayerItem] = []
+    private(set) var seekItems: [AVPlayerItem] = []
+    private(set) var cancelledSeekItems: [AVPlayerItem] = []
+    private(set) var pendingSeekCount = 0
     private(set) var periodicIntervals: [CMTime] = []
     private(set) var removedPeriodicCount = 0
     private(set) var removedEndCount = 0
     private var endHandlers: [ObjectIdentifier: @MainActor @Sendable () -> Void] = [:]
     private var allEndHandlers: [ObjectIdentifier: @MainActor @Sendable () -> Void] = [:]
     private var periodicHandlers: [ObjectIdentifier: @MainActor @Sendable (CMTime) -> Void] = [:]
+    private var pendingSeeks: [PendingSeek] = []
     private var hasReportedBothRemovals = false
 
     func duration(for item: AVPlayerItem) async throws -> CMTime {
         if let durationError { throw durationError }
         return loadedDuration ?? .zero
+    }
+
+    func seek(_ item: AVPlayerItem, to _: CMTime) async -> Bool {
+        seekItems.append(item)
+        guard suspendSeeks else { return true }
+        pendingSeekCount += 1
+        return await withCheckedContinuation { continuation in
+            pendingSeeks.append(PendingSeek(item: item, continuation: continuation))
+        }
+    }
+
+    func cancelPendingSeeks(for item: AVPlayerItem) {
+        cancelledSeekItems.append(item)
+        resumeSeek(for: item)
     }
 
     func addPeriodicTimeObserver(to player: AVPlayer, interval: CMTime, using block: @escaping @MainActor @Sendable (CMTime) -> Void) -> Any {
@@ -214,6 +296,37 @@ private final class TestPlaybackObserver: PlaybackObserving {
 
     func firePeriodic(at time: CMTime) {
         periodicHandlers.values.forEach { $0(time) }
+    }
+
+    func finishPendingSeeks() {
+        let pending = pendingSeeks
+        pendingSeeks.removeAll()
+        pendingSeekCount = 0
+        pending.forEach { $0.continuation.resume(returning: true) }
+    }
+
+    func finishNewestPendingSeek(succeeded: Bool) {
+        guard let pending = pendingSeeks.popLast() else { return }
+        pendingSeekCount -= 1
+        pending.continuation.resume(returning: succeeded)
+    }
+
+    func finishOldestPendingSeek(succeeded: Bool) {
+        guard !pendingSeeks.isEmpty else { return }
+        let pending = pendingSeeks.removeFirst()
+        pendingSeekCount -= 1
+        pending.continuation.resume(returning: succeeded)
+    }
+
+    private func resumeSeek(for item: AVPlayerItem) {
+        var cancelled: [PendingSeek] = []
+        pendingSeeks.removeAll { pending in
+            guard pending.item === item else { return false }
+            cancelled.append(pending)
+            return true
+        }
+        pendingSeekCount -= cancelled.count
+        cancelled.forEach { $0.continuation.resume(returning: false) }
     }
 
     private func reportBothObserversRemovedIfNeeded() {

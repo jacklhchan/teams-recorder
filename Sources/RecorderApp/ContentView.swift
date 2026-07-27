@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 struct ContentView: View {
@@ -54,6 +55,7 @@ struct ContentView: View {
                         playbackProgress: model.playbackProgress,
                         playbackDuration: model.playbackDuration,
                         isPlaybackActive: model.isPlaybackActive,
+                        playbackPlayer: model.playbackPlayer,
                         transcribingSessionID: model.transcribingSessionID,
                         transcriptionStatus: model.transcriptionStatus,
                         lastTranscriptionSessionID: model.lastTranscriptionSessionID,
@@ -69,6 +71,7 @@ struct ContentView: View {
                         stopPlayback: {
                             model.stopPlayback()
                         },
+                        togglePlayback: model.playbackToggle,
                         seekPlayback: model.seekPlayback,
                         transcribe: model.transcribe,
                         cancelTranscription: model.cancelTranscription,
@@ -81,7 +84,11 @@ struct ContentView: View {
                         saveMetadata: model.saveMetadata,
                         moveToTrash: model.moveSessionToTrash
                     )
-                    FooterView(recorder: model.recorder, outputFolder: model.outputFolder)
+                    FooterView(
+                        recorder: model.recorder,
+                        outputFolder: model.outputFolder,
+                        lastRecordingSavedAsM4A: model.lastRecordingSavedAsM4A
+                    )
                 }
                 .padding(20)
             }
@@ -766,6 +773,7 @@ private struct SessionListView: View {
     let playbackProgress: TimeInterval
     let playbackDuration: TimeInterval
     let isPlaybackActive: Bool
+    let playbackPlayer: AVPlayer
     let transcribingSessionID: RecordingSession.ID?
     let transcriptionStatus: String
     let lastTranscriptionSessionID: RecordingSession.ID?
@@ -779,6 +787,7 @@ private struct SessionListView: View {
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
     let stopPlayback: () -> Void
+    let togglePlayback: () -> Void
     let seekPlayback: (TimeInterval) -> Void
     let transcribe: (RecordingSession) -> Void
     let cancelTranscription: () -> Void
@@ -843,11 +852,16 @@ private struct SessionListView: View {
                                 }
                                 Spacer()
                                 Button {
-                                    play(session)
+                                    if playingSessionID == session.id {
+                                        togglePlayback()
+                                    } else {
+                                        play(session)
+                                    }
                                 } label: {
-                                    Image(systemName: playingSessionID == session.id && isPlaybackActive ? "play.fill" : "play.fill")
+                                    Image(systemName: playingSessionID == session.id && isPlaybackActive ? "pause.fill" : "play.fill")
                                 }
                                 .buttonStyle(.bordered)
+                                .help(playingSessionID == session.id && isPlaybackActive ? "Pause playback" : "Play recording")
                                 Button {
                                     open(session)
                                 } label: {
@@ -895,9 +909,13 @@ private struct SessionListView: View {
                             }
 
                             if playingSessionID == session.id {
-                                PlaybackBarView(
+                                RecordingPlaybackView(
+                                    session: session,
+                                    player: playbackPlayer,
                                     progress: playbackProgress,
                                     duration: playbackDuration,
+                                    isPlaying: isPlaybackActive,
+                                    togglePlayback: togglePlayback,
                                     stopPlayback: stopPlayback,
                                     seekPlayback: seekPlayback
                                 )
@@ -1092,54 +1110,10 @@ private struct RecordingMetadataEditorView: View {
     }
 }
 
-private struct PlaybackBarView: View {
-    let progress: TimeInterval
-    let duration: TimeInterval
-    let stopPlayback: () -> Void
-    let seekPlayback: (TimeInterval) -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(Self.timeText(progress))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .trailing)
-
-            Slider(
-                value: Binding(
-                    get: { progress },
-                    set: { seekPlayback($0) }
-                ),
-                in: 0...max(duration, 1)
-            )
-
-            Text(Self.timeText(duration))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .leading)
-
-            Button {
-                stopPlayback()
-            } label: {
-                Image(systemName: "stop.fill")
-            }
-            .buttonStyle(.bordered)
-            .help("Stop playback")
-        }
-        .padding(10)
-        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    private static func timeText(_ time: TimeInterval) -> String {
-        guard time.isFinite else { return "00:00" }
-        let seconds = max(0, Int(time.rounded()))
-        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
-    }
-}
-
 private struct FooterView: View {
     @ObservedObject var recorder: RecordingEngine
     let outputFolder: URL
+    let lastRecordingSavedAsM4A: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1148,11 +1122,18 @@ private struct FooterView: View {
                 .lineLimit(2)
                 .truncationMode(.middle)
             HStack {
-                Label("Writes one combined recording.m4a file", systemImage: "doc.badge.gearshape")
+                Label("Writes one combined recording.mp4 file", systemImage: "doc.badge.gearshape")
                 Spacer()
                 Label("Captures without changing Mac output", systemImage: "speaker.wave.2")
             }
             .foregroundStyle(.secondary)
+            if lastRecordingSavedAsM4A {
+                Label(
+                    "Last recording recovered as recording.m4a",
+                    systemImage: "waveform.badge.exclamationmark"
+                )
+                .foregroundStyle(.secondary)
+            }
         }
     }
 }

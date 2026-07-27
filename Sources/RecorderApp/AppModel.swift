@@ -20,6 +20,7 @@ final class AppModel: ObservableObject {
     @Published var statusMessage = "Ready"
     @Published var sessions: [RecordingSession] = []
     @Published var lastHealthReport: RecordingHealthReport?
+    @Published private(set) var lastRecordingSavedAsM4A = false
     @Published var isRunningTestRecording = false
     @Published var playingSessionID: RecordingSession.ID?
     @Published var playbackProgress: TimeInterval = 0
@@ -52,8 +53,10 @@ final class AppModel: ObservableObject {
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
-    private var audioPlayer: AVAudioPlayer?
-    private var playbackTimer: Timer?
+    private let playbackCoordinator: any PlaybackCoordinating
+    private var playbackLoadTask: Task<Void, Never>?
+    private var playbackGeneration: UInt64 = 0
+    private var playbackSessionID: RecordingSession.ID?
     private var transcriptionProcess: (any TranscriptionProcessing)?
     private var transcriptionTask: Task<Void, Never>?
     private var transcriptionGeneration: UInt64 = 0
@@ -75,6 +78,7 @@ final class AppModel: ObservableObject {
     private let volumeCapacityProvider: any VolumeCapacityProviding
     private let storagePolicy: RecordingStoragePolicy
     private let storageMonitorTick: @Sendable () async -> Void
+    private let testRecordingDelay: @Sendable () async -> Void
     private let transcriptionAudioPreparer: any TranscriptionAudioPreparing
     private let transcriptionProcessLauncher: any TranscriptionProcessLaunching
     private let transcriptionScriptURL: URL?
@@ -121,9 +125,13 @@ final class AppModel: ObservableObject {
         storageMonitorTick: @escaping @Sendable () async -> Void = {
             try? await Task.sleep(for: .seconds(15))
         },
+        testRecordingDelay: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(for: .seconds(10))
+        },
         transcriptionAudioPreparer: any TranscriptionAudioPreparing = TranscriptionAudioPreparer(),
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
-        transcriptionScriptURL: URL? = nil
+        transcriptionScriptURL: URL? = nil,
+        playbackCoordinator: (any PlaybackCoordinating)? = nil
     ) {
         let activeRecorder = recorder ?? RecordingEngine()
         self.recorder = activeRecorder
@@ -140,9 +148,11 @@ final class AppModel: ObservableObject {
         self.volumeCapacityProvider = volumeCapacityProvider
         self.storagePolicy = storagePolicy
         self.storageMonitorTick = storageMonitorTick
+        self.testRecordingDelay = testRecordingDelay
         self.transcriptionAudioPreparer = transcriptionAudioPreparer
         self.transcriptionProcessLauncher = transcriptionProcessLauncher
         self.transcriptionScriptURL = transcriptionScriptURL
+        self.playbackCoordinator = playbackCoordinator ?? PlaybackCoordinator()
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
@@ -169,6 +179,9 @@ final class AppModel: ObservableObject {
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
+        self.playbackCoordinator.onSnapshot = { [weak self] snapshot in
+            self?.handlePlaybackSnapshot(snapshot)
+        }
         observeRecorderConnection()
         observeRecorderRecordingState()
         refreshDevices()
@@ -188,6 +201,7 @@ final class AppModel: ObservableObject {
     deinit {
         storageMonitorTask?.cancel()
         testRecordingStopTask?.cancel()
+        playbackLoadTask?.cancel()
         transcriptionTask?.cancel()
         transcriptionProcess?.terminate()
         teamsMuteRelay.invalidate()
@@ -429,8 +443,9 @@ final class AppModel: ObservableObject {
                 return
             }
             testRecordingStopTask?.cancel()
-            testRecordingStopTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(10))
+            let delay = testRecordingDelay
+            testRecordingStopTask = Task { @MainActor [weak self, delay] in
+                await delay()
                 guard !Task.isCancelled,
                       let self,
                       self.isRunningTestRecording else { return }
@@ -551,28 +566,27 @@ final class AppModel: ObservableObject {
         return projected
     }
 
+    var playbackPlayer: AVPlayer { playbackCoordinator.player }
+
     func play(session: RecordingSession) {
-        do {
-            stopPlayback(resetStatus: false)
-            let player = try AVAudioPlayer(contentsOf: session.recordingURL)
-            audioPlayer = player
-            playingSessionID = session.id
-            playbackProgress = 0
-            playbackDuration = player.duration
-            isPlaybackActive = true
-            audioPlayer?.play()
-            startPlaybackTimer()
-            statusMessage = "Playing \(session.displayName)"
-        } catch {
-            statusMessage = "Playback failed: \(error.localizedDescription)"
+        startPlayback(session: session, successStatus: "Playing \(session.displayName)")
+    }
+
+    func playbackToggle() {
+        guard playbackSessionID != nil else { return }
+        if isPlaybackActive {
+            playbackCoordinator.pause()
+        } else {
+            playbackCoordinator.play()
         }
     }
 
     func stopPlayback(resetStatus: Bool = true) {
-        audioPlayer?.stop()
-        audioPlayer = nil
-        playbackTimer?.invalidate()
-        playbackTimer = nil
+        playbackGeneration &+= 1
+        playbackLoadTask?.cancel()
+        playbackLoadTask = nil
+        playbackSessionID = nil
+        playbackCoordinator.stop()
         playingSessionID = nil
         playbackProgress = 0
         playbackDuration = 0
@@ -583,14 +597,12 @@ final class AppModel: ObservableObject {
     }
 
     func seekPlayback(to time: TimeInterval) {
-        guard let audioPlayer else { return }
-        let clamped = max(0, min(time, audioPlayer.duration))
-        audioPlayer.currentTime = clamped
-        playbackProgress = clamped
-        if !audioPlayer.isPlaying {
-            audioPlayer.play()
-            isPlaybackActive = true
-            startPlaybackTimer()
+        guard playbackSessionID != nil else { return }
+        let generation = playbackGeneration
+        let coordinator = playbackCoordinator
+        Task { [weak self, coordinator] in
+            await coordinator.seek(to: time)
+            guard let self, self.playbackGeneration == generation else { return }
         }
     }
 
@@ -1133,40 +1145,65 @@ final class AppModel: ObservableObject {
         }
         isRunningTestRecording = false
         lastHealthReport = result.health
+        lastRecordingSavedAsM4A = result.recordingURL.lastPathComponent == "recording.m4a"
         refreshSessions()
         statusMessage = "Recording saved: \(result.health.summary)"
 
         if playAfterStop {
-            isRunningTestRecording = false
+            let session = RecordingSessionStore.session(
+                for: result.folderURL,
+                recordingURL: result.recordingURL
+            )
+            startPlayback(
+                session: session,
+                successStatus: "Test saved and playing: \(result.health.summary)"
+            )
+        }
+    }
+
+    private func startPlayback(session: RecordingSession, successStatus: String) {
+        playbackGeneration &+= 1
+        let generation = playbackGeneration
+        playbackLoadTask?.cancel()
+        playbackCoordinator.stop()
+        playbackSessionID = session.id
+        playingSessionID = session.id
+        playbackProgress = 0
+        playbackDuration = 0
+        isPlaybackActive = false
+        let coordinator = playbackCoordinator
+        playbackLoadTask = Task { [weak self, coordinator] in
             do {
-                audioPlayer = try AVAudioPlayer(contentsOf: result.recordingURL)
-                playingSessionID = nil
-                playbackProgress = 0
-                playbackDuration = audioPlayer?.duration ?? 0
-                isPlaybackActive = true
-                audioPlayer?.play()
-                startPlaybackTimer()
-                statusMessage = "Test saved and playing: \(result.health.summary)"
+                try await coordinator.load(session)
+                guard !Task.isCancelled,
+                      let self,
+                      self.playbackGeneration == generation,
+                      self.playbackSessionID == session.id else { return }
+                coordinator.play()
+                self.statusMessage = successStatus
+                self.playbackLoadTask = nil
             } catch {
-                statusMessage = "Test saved, playback failed: \(error.localizedDescription)"
+                guard !Task.isCancelled,
+                      let self,
+                      self.playbackGeneration == generation,
+                      self.playbackSessionID == session.id else { return }
+                self.playbackLoadTask = nil
+                self.playbackSessionID = nil
+                self.playingSessionID = nil
+                self.playbackProgress = 0
+                self.playbackDuration = 0
+                self.isPlaybackActive = false
+                self.statusMessage = "Playback failed: \(error.localizedDescription)"
             }
         }
     }
 
-    private func startPlaybackTimer() {
-        playbackTimer?.invalidate()
-        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, let audioPlayer = self.audioPlayer else { return }
-                self.playbackProgress = audioPlayer.currentTime
-                self.playbackDuration = audioPlayer.duration
-                if !audioPlayer.isPlaying {
-                    self.playbackTimer?.invalidate()
-                    self.playbackTimer = nil
-                    self.isPlaybackActive = false
-                }
-            }
-        }
+    private func handlePlaybackSnapshot(_ snapshot: PlaybackSnapshot) {
+        guard snapshot.sessionID == playbackSessionID else { return }
+        playingSessionID = snapshot.sessionID
+        playbackProgress = snapshot.progress
+        playbackDuration = snapshot.duration
+        isPlaybackActive = snapshot.isPlaying
     }
 
     private func handleTranscriptionOutput(

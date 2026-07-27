@@ -25,6 +25,8 @@ protocol PlaybackCoordinating: AnyObject {
 @MainActor
 protocol PlaybackObserving: AnyObject {
     func duration(for item: AVPlayerItem) async throws -> CMTime
+    func seek(_ item: AVPlayerItem, to time: CMTime) async -> Bool
+    func cancelPendingSeeks(for item: AVPlayerItem)
     func addPeriodicTimeObserver(to player: AVPlayer, interval: CMTime, using block: @escaping @MainActor @Sendable (CMTime) -> Void) -> Any
     func removePeriodicTimeObserver(_ token: Any, from player: AVPlayer)
     func addEndObserver(for item: AVPlayerItem, using block: @escaping @MainActor @Sendable () -> Void) -> Any
@@ -45,6 +47,7 @@ final class PlaybackCoordinator: PlaybackCoordinating {
     private var duration: TimeInterval = 0
     private var isPlaying = false
     private var generation = 0
+    private var seekRequestGeneration = 0
 
     init(player: AVPlayer, observer: PlaybackObserving) {
         self.player = player
@@ -102,9 +105,19 @@ final class PlaybackCoordinator: PlaybackCoordinating {
     }
 
     func seek(to seconds: TimeInterval) async {
-        guard currentItem != nil else { return }
+        guard let item = currentItem else { return }
+        let seekGeneration = generation
+        seekRequestGeneration += 1
+        let requestGeneration = seekRequestGeneration
         let target = clamped(seconds)
-        await player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+        let finished = await observer.seek(
+            item,
+            to: CMTime(seconds: target, preferredTimescale: 600)
+        )
+        guard finished,
+              generation == seekGeneration,
+              seekRequestGeneration == requestGeneration,
+              currentItem === item else { return }
         publish(progress: target)
     }
 
@@ -130,6 +143,9 @@ final class PlaybackCoordinator: PlaybackCoordinating {
 
     private func removeObserversAndItem() {
         player.pause()
+        if let currentItem {
+            observer.cancelPendingSeeks(for: currentItem)
+        }
         if let periodicObserver {
             observer.removePeriodicTimeObserver(periodicObserver, from: player)
             self.periodicObserver = nil
@@ -174,6 +190,14 @@ final class PlaybackCoordinator: PlaybackCoordinating {
 private final class AVPlayerPlaybackObserver: PlaybackObserving {
     func duration(for item: AVPlayerItem) async throws -> CMTime {
         try await item.asset.load(.duration)
+    }
+
+    func seek(_ item: AVPlayerItem, to time: CMTime) async -> Bool {
+        await item.seek(to: time)
+    }
+
+    func cancelPendingSeeks(for item: AVPlayerItem) {
+        item.cancelPendingSeeks()
     }
 
     func addPeriodicTimeObserver(to player: AVPlayer, interval: CMTime, using block: @escaping @MainActor @Sendable (CMTime) -> Void) -> Any {

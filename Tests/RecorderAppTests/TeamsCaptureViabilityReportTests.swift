@@ -3,6 +3,26 @@ import XCTest
 @testable import RecorderApp
 
 final class TeamsCaptureViabilityReportTests: XCTestCase {
+    func testLiveReportFromEnvironmentPassesWhenProvided() throws {
+        guard let path = ProcessInfo.processInfo.environment[
+            "TEAMS_CAPTURE_VIABILITY_REPORT"
+        ] else {
+            throw XCTSkip("Set TEAMS_CAPTURE_VIABILITY_REPORT to evaluate live evidence.")
+        }
+
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let report = try JSONDecoder().decode(
+            TeamsCaptureViabilityReport.self,
+            from: data
+        )
+        let failures = TeamsCaptureViabilityEvaluator.failures(in: report)
+
+        XCTAssertTrue(
+            failures.isEmpty,
+            "Live report evaluator failures:\n\(failures.joined(separator: "\n"))"
+        )
+    }
+
     func testReportPassesOnlyWhenOneStreamPreservesAllThreeMediaOutputs() {
         XCTAssertTrue(TeamsCaptureViabilityEvaluator.failures(in: passingReport).isEmpty)
     }

@@ -1,4 +1,14 @@
+import CoreVideo
 import Foundation
+
+typealias RecordingMediaCoordinatorFactory = (
+    RecordingOutputURLs,
+    UUID,
+    UInt64,
+    CaptureFilterRevision,
+    OSType
+) throws -> RecordingMediaCoordinating
+typealias RecordingMetadataWriter = (RecordingSessionMetadata, URL) throws -> Void
 
 protocol CaptureSourceProtocol: AnyObject {
     var screenVideoFormat: ScreenVideoFormat { get }
@@ -55,15 +65,18 @@ final class RecordingEngine: ObservableObject {
     @Published private(set) var captureStatus: CaptureStatus?
     @Published private(set) var captureConnectionSnapshot: CaptureConnectionSnapshot = .idle
     @Published private(set) var virtualMicPublisherState: VirtualMicPublisherState = .stopped
+    @Published private(set) var meetingScreenCaptureState: MeetingScreenCaptureState = .unavailable
 
     private let captureSource: CaptureSourceProtocol
-    private let writerFactory: MixedAudioWriterFactory
+    private let coordinatorFactory: RecordingMediaCoordinatorFactory
+    private let metadataWriter: RecordingMetadataWriter
     private let mixerBlockFrames: Int
     private let callbackGate = RecordingCallbackGate()
     nonisolated private let microphoneAudioPaths: MicrophoneAudioPaths
+    nonisolated private let videoIngress = VideoIngress()
 
     private var mixer: TimestampedAudioMixer
-    private var mixedWriter: MixedAudioWriting?
+    private var mediaCoordinator: RecordingMediaCoordinating?
     private var sourceSessionID: UUID?
     private var recordingEpoch: UInt64?
     private var nextRecordingEpoch: UInt64 = 0
@@ -84,15 +97,44 @@ final class RecordingEngine: ObservableObject {
     private var monitoringTransition: MonitoringTransition?
     private var recordingStartTransition: RecordingStartTransition?
     private var reconnectTransition: ReconnectTransition?
+    private var teamsWindowResolver = TeamsMeetingWindowResolver()
+    private var screenCaptureRequested = false
+    private var screenTarget: TeamsWindowDescriptor?
+    private var activeFilterRevision = CaptureFilterRevision(sessionGeneration: 0, revision: 0)
+    private var screenToggleGeneration: UInt64 = 0
+    private var hasHardScreenFailure = false
+    private var hasCountedMuxFallback = false
 
     init(
         captureSource: CaptureSourceProtocol = ScreenCaptureSource(),
-        writerFactory: @escaping MixedAudioWriterFactory = { try AACMixedAudioWriter(url: $0) },
+        writerFactory: MixedAudioWriterFactory? = nil,
+        coordinatorFactory: RecordingMediaCoordinatorFactory? = nil,
+        metadataWriter: @escaping RecordingMetadataWriter = { metadata, folder in
+            try RecordingSessionMetadataStore.save(metadata, in: folder)
+        },
         mixerBlockFrames: Int = 960,
         virtualMicPublisher: VirtualMicPublishing = VirtualMicPublisher()
     ) {
         self.captureSource = captureSource
-        self.writerFactory = writerFactory
+        self.metadataWriter = metadataWriter
+        if let coordinatorFactory {
+            self.coordinatorFactory = coordinatorFactory
+        } else if let writerFactory {
+            // Compatibility injection retained for the pre-media-pipeline test seam.
+            self.coordinatorFactory = { outputs, _, _, _, _ in
+                try LegacyMediaCoordinator(writer: writerFactory(outputs.recoveredM4A), outputs: outputs)
+            }
+        } else {
+            self.coordinatorFactory = { outputs, sourceSessionID, epoch, revision, pixelFormat in
+                try RecordingMediaCoordinator(
+                    outputs: outputs,
+                    sourceSessionID: sourceSessionID,
+                    recordingEpoch: epoch,
+                    activeFilterRevision: revision,
+                    pixelFormat: pixelFormat
+                )
+            }
+        }
         self.mixerBlockFrames = mixerBlockFrames
         microphoneAudioPaths = MicrophoneAudioPaths(publisher: virtualMicPublisher)
         self.mixer = try! TimestampedAudioMixer(
@@ -192,7 +234,11 @@ final class RecordingEngine: ObservableObject {
                         self?.receive(block, ticket: ticket)
                     }
                 },
-                onVideo: { _ in },
+                onVideo: { [callbackGate, videoIngress] frame in
+                    guard let ticket = callbackGate.begin(sessionID: sessionID) else { return }
+                    defer { callbackGate.finish(ticket) }
+                    videoIngress.enqueue(frame, ticket: ticket)
+                },
                 onEvent: { [weak self, callbackGate] event in
                     guard let ticket = callbackGate.begin(sessionID: sessionID) else { return }
                     Task { @MainActor [weak self, callbackGate] in
@@ -367,9 +413,21 @@ final class RecordingEngine: ObservableObject {
         }
         let createdFolder = !folderExistedBeforeStart
 
-        let recordingURL = folder.appendingPathComponent("recording.m4a")
+        let outputs = RecordingOutputURLs(folder: folder)
+        nextRecordingEpoch &+= 1
+        let epoch = nextRecordingEpoch
         do {
-            mixedWriter = try writerFactory(recordingURL)
+            let coordinator = try coordinatorFactory(
+                outputs,
+                sourceSessionID,
+                epoch,
+                activeFilterRevision,
+                captureSource.screenVideoFormat.pixelFormat
+            )
+            coordinator.setVideoEventHandler { [weak self] event in
+                Task { @MainActor [weak self] in self?.receive(videoEvent: event) }
+            }
+            mediaCoordinator = coordinator
         } catch {
             await rollbackFailedStart(
                 folder: folder,
@@ -378,8 +436,7 @@ final class RecordingEngine: ObservableObject {
             throw RecordingEngineError.writerFailed(error.localizedDescription)
         }
 
-        nextRecordingEpoch &+= 1
-        recordingEpoch = nextRecordingEpoch
+        recordingEpoch = epoch
         callbackGate.setRecordingEpoch(recordingEpoch, for: sourceSessionID)
         mixer = makeMixer()
         currentHealth = RecordingHealthReport(startedAt: Date())
@@ -387,11 +444,17 @@ final class RecordingEngine: ObservableObject {
         previousMixedSourceEndFrame = nil
         writerBoundaryDiscontinuities = 0
         observedMixerLateFrames = 0
-        currentRecordingURL = recordingURL
+        currentRecordingURL = outputs.finalMP4
         outputFolder = folder
         startedAt = Date()
         isRecording = true
         isStopping = false
+        screenCaptureRequested = false
+        screenTarget = nil
+        meetingScreenCaptureState = .off
+        hasHardScreenFailure = false
+        hasCountedMuxFallback = false
+        videoIngress.activate(sessionID: sourceSessionID, epoch: epoch, coordinator: mediaCoordinator)
         return folder
     }
 
@@ -401,8 +464,8 @@ final class RecordingEngine: ObservableObject {
             return nil
         }
         isStopping = true
+        screenToggleGeneration &+= 1
         let recordingFolder = outputFolder
-        let recordingURL = currentRecordingURL
         let sourceSessionID = sourceSessionID
 
         if let sourceSessionID {
@@ -410,6 +473,11 @@ final class RecordingEngine: ObservableObject {
             callbackGate.deactivate(sessionID: sourceSessionID)
             await callbackGate.waitForIdle(sessionID: sourceSessionID)
         }
+        currentHealth.videoInvalidTimestamps += videoIngress.takeInvalidTimestampCount(
+            sessionID: sourceSessionID,
+            epoch: activeEpoch
+        )
+        videoIngress.deactivate()
         virtualMicPublisherState = microphoneAudioPaths.stop()
 
         guard recordingEpoch == activeEpoch else {
@@ -421,29 +489,183 @@ final class RecordingEngine: ObservableObject {
         }
         reconcileMixerHealth()
 
-        let writer = mixedWriter
-        mixedWriter = nil
+        let coordinator = mediaCoordinator
+        var outcome: RecordingMediaOutcome?
         do {
-            try writer?.close()
+            outcome = try await coordinator?.finish()
         } catch {
             currentHealth.streamFailures += 1
             captureStatus = .error("Recording file could not be finalized")
         }
+        coordinator?.setVideoEventHandler(nil)
+        mediaCoordinator = nil
 
         currentHealth.endedAt = Date()
+        if let outcome {
+            currentHealth.videoDroppedFrames = max(
+                currentHealth.videoDroppedFrames,
+                outcome.videoDroppedFrames
+            )
+            if let warning = outcome.videoFailureDescription {
+                recordMuxFallbackIfNeeded()
+                captureStatus = .warning(warning)
+            }
+            if let recordingFolder {
+                do {
+                    try metadataWriter(
+                        RecordingSessionMetadata(
+                            mediaKind: outcome.mediaKind,
+                            screenIntervals: outcome.screenIntervals,
+                            capturedTeamsWindow: outcome.capturedWindow,
+                            recoveryState: outcome.recoveryState
+                        ),
+                        recordingFolder
+                    )
+                } catch {
+                    currentHealth.metadataWriteFailures += 1
+                    captureStatus = .warning("Recording saved, but metadata could not be written")
+                }
+            }
+        }
         let result = recordingFolder.flatMap { folder in
-            recordingURL.map { RecordingResult(folderURL: folder, recordingURL: $0, health: currentHealth) }
+            outcome.map {
+                RecordingResult(
+                    folderURL: folder,
+                    recordingURL: $0.finalURL,
+                    health: currentHealth,
+                    mediaKind: $0.mediaKind,
+                    screenIntervals: $0.screenIntervals,
+                    capturedWindow: $0.capturedWindow,
+                    recoveryState: $0.recoveryState,
+                    warning: currentHealth.metadataWriteFailures > 0
+                        ? "Recording saved, but metadata could not be written"
+                        : $0.safetyCleanupDiagnostic ?? $0.videoFailureDescription
+                )
+            }
         }
         recordingEpoch = nil
         currentRecordingURL = nil
         startedAt = nil
         isRecording = false
         isStopping = false
+        screenCaptureRequested = false
+        screenTarget = nil
+        meetingScreenCaptureState = .off
         if let sourceSessionID {
             clearSourceSession(sessionID: sourceSessionID)
         }
         resetMonitoringState()
         return result
+    }
+
+    func refreshTeamsWindows(
+        meetingActive: Bool,
+        manualOverride: TeamsWindowIdentity?
+    ) async {
+        screenToggleGeneration &+= 1
+        let generation = screenToggleGeneration
+        teamsWindowResolver.selectManualOverride(manualOverride)
+        do {
+            let windows = try await captureSource.refreshTeamsWindows()
+            guard generation == screenToggleGeneration, isRecording else { return }
+            switch teamsWindowResolver.observe(windows, meetingActive: meetingActive, now: Date()) {
+            case let .ready(match):
+                screenTarget = match.window
+                meetingScreenCaptureState = .ready(match.window)
+                if screenCaptureRequested {
+                    await applyScreenTarget(match.window, generation: generation)
+                }
+            case let .ambiguous(descriptors):
+                screenTarget = nil
+                meetingScreenCaptureState = .waiting(descriptors)
+                if screenCaptureRequested {
+                    await applyWaitingScreenTarget(generation: generation)
+                }
+            case .waiting:
+                screenTarget = nil
+                meetingScreenCaptureState = .waiting([])
+                if screenCaptureRequested {
+                    await applyWaitingScreenTarget(generation: generation)
+                }
+            }
+        } catch {
+            guard generation == screenToggleGeneration else { return }
+            meetingScreenCaptureState = .failed(error.localizedDescription)
+            currentHealth.videoFilterFailures += 1
+        }
+    }
+
+    func setScreenCaptureRequested(_ requested: Bool) async {
+        guard isRecording, let coordinator = mediaCoordinator else { return }
+        screenToggleGeneration &+= 1
+        let generation = screenToggleGeneration
+        screenCaptureRequested = requested
+        if !requested {
+            coordinator.setScreenCaptureRequested(false, expectedRevision: nil, window: nil)
+            do {
+                _ = try await captureSource.updateVideoTarget(nil)
+                guard generation == screenToggleGeneration else { return }
+                screenTarget = nil
+                meetingScreenCaptureState = .off
+            } catch {
+                guard generation == screenToggleGeneration else { return }
+                meetingScreenCaptureState = .failed(error.localizedDescription)
+                currentHealth.videoFilterFailures += 1
+            }
+            return
+        }
+
+        if let screenTarget {
+            await applyScreenTarget(screenTarget, generation: generation)
+        } else {
+            await refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        }
+    }
+
+    private func applyScreenTarget(_ target: TeamsWindowDescriptor, generation: UInt64) async {
+        guard let coordinator = mediaCoordinator,
+              isRecording,
+              !isStopping else { return }
+        do {
+            let revision = try await captureSource.updateVideoTarget(target.identity)
+            guard generation == screenToggleGeneration,
+                  screenCaptureRequested,
+                  isRecording,
+                  !isStopping else { return }
+            activeFilterRevision = revision
+            coordinator.setScreenCaptureRequested(
+                true,
+                expectedRevision: revision,
+                window: RecordedTeamsWindowIdentity(
+                    processID: target.identity.processID,
+                    windowID: target.identity.windowID,
+                    title: target.title
+                )
+            )
+            meetingScreenCaptureState = .capturing(target)
+        } catch {
+            guard generation == screenToggleGeneration else { return }
+            meetingScreenCaptureState = .failed(error.localizedDescription)
+            currentHealth.videoFilterFailures += 1
+        }
+    }
+
+    private func applyWaitingScreenTarget(generation: UInt64) async {
+        guard let coordinator = mediaCoordinator,
+              isRecording,
+              !isStopping else { return }
+        do {
+            _ = try await captureSource.updateVideoTarget(nil)
+            guard generation == screenToggleGeneration,
+                  screenCaptureRequested,
+                  isRecording,
+                  !isStopping else { return }
+            coordinator.setScreenCaptureRequested(true, expectedRevision: nil, window: nil)
+        } catch {
+            guard generation == screenToggleGeneration else { return }
+            meetingScreenCaptureState = .failed(error.localizedDescription)
+            currentHealth.videoFilterFailures += 1
+        }
     }
 
     func toggleMicMute() {
@@ -480,7 +702,7 @@ final class RecordingEngine: ObservableObject {
 
             guard let activeEpoch = recordingEpoch,
                   ticket.recordingEpoch == activeEpoch,
-                  mixedWriter != nil else {
+                  mediaCoordinator != nil else {
                 return
             }
 
@@ -515,13 +737,55 @@ final class RecordingEngine: ObservableObject {
              .missingCaptureEntitlements:
             if isRecording, ticket.recordingEpoch == recordingEpoch {
                 currentHealth.streamFailures += 1
+                Task { @MainActor [weak self] in _ = await self?.stop() }
+                return
             }
             terminateSourceSession(sessionID: ticket.sourceSessionID)
         case .microphoneSilence:
             break
-        case .screenTargetLost, .screenCaptureFailed:
+        case .screenTargetLost:
+            if isRecording, ticket.recordingEpoch == recordingEpoch {
+                mediaCoordinator?.markScreenSourceUnavailable()
+                meetingScreenCaptureState = .waiting([])
+            }
+        case .screenCaptureFailed:
+            if isRecording, ticket.recordingEpoch == recordingEpoch {
+                mediaCoordinator?.markScreenSourceUnavailable()
+                currentHealth.videoFilterFailures += 1
+                hasHardScreenFailure = true
+                meetingScreenCaptureState = .failed("Screen frame capture unavailable")
+            }
             break
         }
+    }
+
+    private func receive(videoEvent: RecordingVideoEvent) {
+        guard videoEvent.sourceSessionID == sourceSessionID,
+              videoEvent.recordingEpoch == recordingEpoch,
+              isRecording else { return }
+        switch videoEvent.kind {
+        case .sourceStalled:
+            currentHealth.videoStallEvents += 1
+            if !hasHardScreenFailure {
+                meetingScreenCaptureState = .waiting(screenTarget.map { [$0] } ?? [])
+            }
+        case .sourceRecovered:
+            if !hasHardScreenFailure, let screenTarget {
+                meetingScreenCaptureState = .capturing(screenTarget)
+            }
+        case let .droppedFrames(count):
+            currentHealth.videoDroppedFrames += count
+        case let .muxFailed(description):
+            hasHardScreenFailure = true
+            recordMuxFallbackIfNeeded()
+            meetingScreenCaptureState = .failed(description)
+        }
+    }
+
+    private func recordMuxFallbackIfNeeded() {
+        guard !hasCountedMuxFallback else { return }
+        hasCountedMuxFallback = true
+        currentHealth.muxFallbackEvents += 1
     }
 
     private func disconnectSystemCapture(publishSnapshot: Bool = true) {
@@ -564,12 +828,7 @@ final class RecordingEngine: ObservableObject {
                 writerBoundaryDiscontinuities += 1
             }
             previousMixedSourceEndFrame = block.startFrame + Int64(block.left.count)
-            do {
-                try mixedWriter?.write(block)
-            } catch {
-                currentHealth.streamFailures += 1
-                captureStatus = .error("Recording file write failed")
-            }
+            mediaCoordinator?.enqueueAudio(block)
         }
     }
 
@@ -639,7 +898,9 @@ final class RecordingEngine: ObservableObject {
         folder: URL,
         removeFolderIfEmpty: Bool
     ) async {
-        mixedWriter = nil
+        mediaCoordinator?.setVideoEventHandler(nil)
+        mediaCoordinator = nil
+        videoIngress.deactivate()
         recordingEpoch = nil
         currentRecordingURL = nil
         outputFolder = nil
@@ -650,6 +911,11 @@ final class RecordingEngine: ObservableObject {
         previousMixedSourceEndFrame = nil
         writerBoundaryDiscontinuities = 0
         observedMixerLateFrames = 0
+        screenCaptureRequested = false
+        screenTarget = nil
+        meetingScreenCaptureState = .off
+        hasHardScreenFailure = false
+        hasCountedMuxFallback = false
 
         await stopActiveSourceSession()
         resetMonitoringState()
@@ -927,5 +1193,88 @@ private final class RecordingCallbackGate: @unchecked Sendable {
                 lock.unlock()
             }
         }
+    }
+}
+
+private final class VideoIngress: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var coordinator: RecordingMediaCoordinating?
+    private var sessionID: UUID?
+    private var epoch: UInt64?
+    private var invalidTimestampCount = 0
+
+    func activate(sessionID: UUID, epoch: UInt64, coordinator: RecordingMediaCoordinating?) {
+        lock.lock()
+        self.sessionID = sessionID
+        self.epoch = epoch
+        self.coordinator = coordinator
+        invalidTimestampCount = 0
+        lock.unlock()
+    }
+
+    func deactivate() {
+        lock.lock()
+        sessionID = nil
+        epoch = nil
+        coordinator = nil
+        lock.unlock()
+    }
+
+    func enqueue(_ frame: ScreenVideoFrame, ticket: RecordingCallbackTicket) {
+        lock.lock()
+        guard ticket.sourceSessionID == sessionID, ticket.recordingEpoch == epoch else {
+            lock.unlock()
+            return
+        }
+        guard frame.sourcePTS.isValid, frame.sourcePTS.isNumeric, frame.sourcePTS >= .zero else {
+            invalidTimestampCount += 1
+            lock.unlock()
+            return
+        }
+        let target = coordinator
+        lock.unlock()
+        target?.enqueueVideo(frame)
+    }
+
+    func takeInvalidTimestampCount(sessionID: UUID?, epoch: UInt64) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard self.sessionID == sessionID, self.epoch == epoch else { return 0 }
+        let count = invalidTimestampCount
+        invalidTimestampCount = 0
+        return count
+    }
+}
+
+private final class LegacyMediaCoordinator: RecordingMediaCoordinating {
+    private let writer: MixedAudioWriting
+    private let outputs: RecordingOutputURLs
+
+    init(writer: MixedAudioWriting, outputs: RecordingOutputURLs) {
+        self.writer = writer
+        self.outputs = outputs
+    }
+
+    func setVideoEventHandler(_: (@Sendable (RecordingVideoEvent) -> Void)?) {}
+    func enqueueVideo(_: ScreenVideoFrame) {}
+    func setScreenCaptureRequested(_: Bool, expectedRevision _: CaptureFilterRevision?, window _: RecordedTeamsWindowIdentity?) {}
+    func markScreenSourceUnavailable() {}
+
+    func enqueueAudio(_ block: MixedAudioBlock) {
+        try? writer.write(block)
+    }
+
+    func finish() async throws -> RecordingMediaOutcome {
+        try writer.close()
+        return RecordingMediaOutcome(
+            finalURL: outputs.recoveredM4A,
+            mediaKind: .audio,
+            screenIntervals: [],
+            capturedWindow: nil,
+            recoveryState: .none,
+            videoDroppedFrames: 0,
+            videoFailureDescription: nil,
+            safetyCleanupDiagnostic: nil
+        )
     }
 }

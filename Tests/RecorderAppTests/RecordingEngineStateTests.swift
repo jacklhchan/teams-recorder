@@ -1,8 +1,430 @@
+import CoreMedia
+import CoreVideo
 import XCTest
 @testable import RecorderApp
 
 @MainActor
 final class RecordingEngineStateTests: XCTestCase {
+    // Coordinator-path regression matrix. Every test emits a real frame or event.
+    func testNewRecordingRequestsPartialMP4AndAudioBackupURLs() async throws {
+        let (engine, coordinator, _) = coordinatorEngine()
+        let folder = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        XCTAssertEqual(coordinator.outputs, RecordingOutputURLs(folder: folder))
+        XCTAssertEqual(coordinator.pixelFormat, kCVPixelFormatType_32BGRA)
+        _ = await engine.stop()
+    }
+
+    func testEveryNewRecordingResetsScreenIntentToOff() async throws {
+        let (engine, _, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 1)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.setScreenCaptureRequested(true)
+        assertScreenState(engine.meetingScreenCaptureState, identity: source.windows[0].identity, capturing: true)
+        _ = await engine.stop()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        XCTAssertEqual(engine.meetingScreenCaptureState, .off)
+        _ = await engine.stop()
+    }
+
+    func testVideoCallbackNeverUsesMixedAudioWriterPath() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        source.emit(video: try videoFrame(seconds: 0))
+        XCTAssertEqual(coordinator.videoFrames.count, 1)
+        XCTAssertTrue(coordinator.audioBlocks.isEmpty)
+        _ = await engine.stop()
+    }
+
+    func testVideoIngressRejectsMonitoringAndStaleRecordingEpochFrames() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        try await engine.startMonitoring(selection: .allSystemAudio, microphoneUID: nil)
+        source.emit(video: try videoFrame(seconds: 0))
+        XCTAssertTrue(coordinator.videoFrames.isEmpty)
+        await engine.stopMonitoring()
+        try await engine.startMonitoring(selection: .allSystemAudio, microphoneUID: nil)
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        source.emit(video: try videoFrame(seconds: 1))
+        source.emitOldVideo(0, frame: try videoFrame(seconds: 2))
+        XCTAssertEqual(coordinator.videoFrames.count, 1)
+        _ = await engine.stop()
+    }
+
+    func testVideoIngressForwardsWithoutMainActorHop() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await source.emitVideoOnBackground(try videoFrame(seconds: 0))
+        XCTAssertEqual(coordinator.videoFrames.count, 1)
+        XCTAssertEqual(coordinator.enqueueVideoOnMainActor, [false])
+        _ = await engine.stop()
+    }
+
+    func testEnableScreenUpdatesFilterWithoutRestartingSourceOrWriter() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 11)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        let session = engine.continuitySnapshot
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.setScreenCaptureRequested(true)
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(coordinator.finishCount, 0)
+        XCTAssertEqual(source.videoTargets.last, source.windows[0].identity)
+        XCTAssertEqual(coordinator.screenRequests.last?.requested, true)
+        XCTAssertEqual(engine.continuitySnapshot.recordingEpoch, session.recordingEpoch)
+        _ = await engine.stop()
+    }
+
+    func testDisableScreenKeepsAudioAndReturnsToApplicationFilter() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 12)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.setScreenCaptureRequested(true)
+        await engine.setScreenCaptureRequested(false)
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertNil(source.videoTargets.last!)
+        XCTAssertEqual(coordinator.screenRequests.last?.requested, false)
+        XCTAssertEqual(engine.meetingScreenCaptureState, .off)
+        _ = await engine.stop()
+    }
+
+    func testWindowReplacementPreservesSessionEpochAndMute() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 21)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.setScreenCaptureRequested(true)
+        let before = engine.continuitySnapshot
+        engine.toggleMicMute()
+        source.windows = [teamsWindow(id: 22)]
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        XCTAssertEqual(engine.continuitySnapshot.recordingEpoch, before.recordingEpoch)
+        XCTAssertTrue(engine.micMuted)
+        XCTAssertEqual(source.videoTargets.last!, source.windows[0].identity)
+        XCTAssertEqual(coordinator.finishCount, 0)
+        _ = await engine.stop()
+    }
+
+    func testScreenFailureDoesNotDisconnectSystemOrMicrophone() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        source.emit(event: .screenCaptureFailed)
+        await settle()
+        source.emit(try block(.system, frame: 0, samples: [1, 1, 1, 1]))
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+        XCTAssertTrue(engine.isMicrophoneCaptureConnected)
+        XCTAssertEqual(coordinator.screenUnavailableCount, 1)
+        XCTAssertEqual(engine.meetingScreenCaptureState, .failed("Screen frame capture unavailable"))
+        let result = await engine.stop()
+        XCTAssertEqual(result?.health.videoFilterFailures, 1)
+    }
+
+    func testScreenCaptureFailureRemainsFailedWhenCoordinatorThenStalls() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+
+        source.emit(event: .screenCaptureFailed)
+        await settle()
+        coordinator.emitCurrent(.sourceStalled)
+        await settle()
+
+        XCTAssertEqual(engine.meetingScreenCaptureState, .failed("Screen frame capture unavailable"))
+        let result = await engine.stop()
+        XCTAssertEqual(result?.health.videoFilterFailures, 1)
+    }
+
+    func testVideoStallShowsWaitingWithoutDisconnectingAudio() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 31)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.setScreenCaptureRequested(true)
+        coordinator.emitCurrent(.sourceStalled)
+        await settle()
+        assertScreenState(engine.meetingScreenCaptureState, identity: source.windows[0].identity, capturing: false)
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+        _ = await engine.stop()
+    }
+
+    func testRecoveredVideoReturnsToCapturingState() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 32)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.setScreenCaptureRequested(true)
+        coordinator.emitCurrent(.sourceStalled)
+        coordinator.emitCurrent(.sourceRecovered)
+        await settle()
+        assertScreenState(engine.meetingScreenCaptureState, identity: source.windows[0].identity, capturing: true)
+        _ = await engine.stop()
+    }
+
+    func testMuxFailureShowsScreenFailureWhileSafetyAudioContinues() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        coordinator.emitCurrent(.muxFailed("mux"))
+        await settle()
+        source.emit(try block(.system, frame: 0, samples: [1, 1, 1, 1]))
+        source.emit(try block(.microphone, frame: 0, samples: [0, 0, 0, 0]))
+        await settle()
+        XCTAssertEqual(engine.meetingScreenCaptureState, .failed("mux"))
+        XCTAssertTrue(engine.isRecording)
+        XCTAssertFalse(coordinator.audioBlocks.isEmpty)
+        _ = await engine.stop()
+    }
+
+    func testMuxFallbackEventAndOutcomeFailureAreCountedOnce() async throws {
+        let (engine, coordinator, _) = coordinatorEngine()
+        coordinator.outcome = .init(
+            finalURL: URL(fileURLWithPath: "/tmp/recording.m4a"), mediaKind: .audio,
+            screenIntervals: [], capturedWindow: nil, recoveryState: .videoLostAudioPreserved,
+            videoDroppedFrames: 0, videoFailureDescription: "mux unavailable", safetyCleanupDiagnostic: nil
+        )
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        coordinator.emitCurrent(.muxFailed("mux unavailable"))
+        await settle()
+
+        let result = await engine.stop()
+        XCTAssertEqual(result?.health.muxFallbackEvents, 1)
+        XCTAssertEqual(result?.warning, "mux unavailable")
+    }
+
+    func testDelayedVideoEventFromPriorEpochCannotChangeNewRecordingState() async throws {
+        let source = FakeCaptureSource()
+        let first = FakeMediaCoordinator()
+        let second = FakeMediaCoordinator()
+        var coordinators = [first, second]
+        let engine = RecordingEngine(captureSource: source, coordinatorFactory: { outputs, id, epoch, revision, format in
+            let coordinator = coordinators.removeFirst()
+            coordinator.configure(outputs: outputs, sourceSessionID: id, epoch: epoch, revision: revision, pixelFormat: format)
+            return coordinator
+        }, mixerBlockFrames: 4)
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        _ = await engine.stop()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        first.emitCurrent(.muxFailed("old"))
+        await settle()
+        XCTAssertEqual(engine.meetingScreenCaptureState, .off)
+        _ = await engine.stop()
+    }
+
+    func testStopDrainsCallbacksFlushesMixerThenFinalizesCoordinator() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        coordinator.blockVideoEnqueue = true
+        let frame = try videoFrame(seconds: 0)
+        let emission = Task.detached { [source] in
+            await source.emitVideoOnBackground(frame)
+        }
+        await coordinator.waitForVideoEnqueueStart()
+        let stop = Task { await engine.stop() }
+        await waitUntil { source.stopCount == 1 }
+        XCTAssertEqual(coordinator.finishCount, 0)
+        coordinator.releaseBlockedVideoEnqueue()
+        _ = await emission.value
+        _ = await stop.value
+        XCTAssertEqual(coordinator.finishCount, 1)
+        XCTAssertFalse(coordinator.videoFrames.isEmpty)
+        XCTAssertEqual(coordinator.handlerInstallCount, 2)
+        let finalVideoIndex = try XCTUnwrap(coordinator.events.lastIndex(of: "video"))
+        let finishIndex = try XCTUnwrap(coordinator.events.firstIndex(of: "finish"))
+        let handlerClearIndex = try XCTUnwrap(coordinator.events.firstIndex(of: "handler-clear"))
+        XCTAssertLessThan(finalVideoIndex, finishIndex)
+        XCTAssertLessThan(finishIndex, handlerClearIndex)
+        XCTAssertEqual(coordinator.events.last, "handler-clear")
+    }
+
+    func testStaleEnableCompletionAfterStopCannotEnableScreenForNewSession() async throws {
+        let source = FakeCaptureSource()
+        let first = FakeMediaCoordinator()
+        let second = FakeMediaCoordinator()
+        var coordinators = [first, second]
+        let engine = RecordingEngine(captureSource: source, coordinatorFactory: { outputs, id, epoch, revision, format in
+            let coordinator = coordinators.removeFirst()
+            coordinator.configure(outputs: outputs, sourceSessionID: id, epoch: epoch, revision: revision, pixelFormat: format)
+            return coordinator
+        }, mixerBlockFrames: 4)
+        source.windows = [teamsWindow(id: 71)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        source.pauseVideoTargetUpdates = true
+        async let enable: Void = engine.setScreenCaptureRequested(true)
+        await waitUntil { source.videoTargets.count == 1 }
+        _ = await engine.stop()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        source.completeNextVideoTarget()
+        await enable
+        XCTAssertEqual(engine.meetingScreenCaptureState, .off)
+        XCTAssertTrue(second.screenRequests.isEmpty)
+        _ = await engine.stop()
+    }
+
+    func testStaleDisableFailureAfterNewSessionCannotReplaceOffState() async throws {
+        let source = FakeCaptureSource()
+        let first = FakeMediaCoordinator()
+        let second = FakeMediaCoordinator()
+        var coordinators = [first, second]
+        let engine = RecordingEngine(captureSource: source, coordinatorFactory: { outputs, id, epoch, revision, format in
+            let coordinator = coordinators.removeFirst()
+            coordinator.configure(outputs: outputs, sourceSessionID: id, epoch: epoch, revision: revision, pixelFormat: format)
+            return coordinator
+        }, mixerBlockFrames: 4)
+        source.windows = [teamsWindow(id: 72)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.setScreenCaptureRequested(true)
+        source.pauseVideoTargetUpdates = true
+        async let disable: Void = engine.setScreenCaptureRequested(false)
+        await waitUntil { source.videoTargets.count == 2 }
+        _ = await engine.stop()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        source.failNextVideoTarget(TestError.failed)
+        await disable
+        XCTAssertEqual(engine.meetingScreenCaptureState, .off)
+        XCTAssertTrue(second.screenRequests.isEmpty)
+        _ = await engine.stop()
+    }
+
+    func testStaleWindowRefreshCompletionCannotApplyOldWindowRevision() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 73)]
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.setScreenCaptureRequested(true)
+        source.pauseVideoTargetUpdates = true
+        source.windows = [teamsWindow(id: 74)]
+        async let refresh: Void = engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await waitUntil { source.videoTargets.count == 2 }
+        async let disable: Void = engine.setScreenCaptureRequested(false)
+        await waitUntil { source.videoTargets.count == 3 }
+        source.completeNextVideoTarget()
+        source.completeNextVideoTarget()
+        await refresh
+        await disable
+        XCTAssertEqual(engine.meetingScreenCaptureState, .off)
+        XCTAssertEqual(coordinator.screenRequests.filter(\.requested).count, 1)
+        _ = await engine.stop()
+    }
+
+    func testFallbackResultReturnsRecordingM4AAndRecoveryState() async throws {
+        let (engine, coordinator, _) = coordinatorEngine()
+        coordinator.outcome = .init(finalURL: URL(fileURLWithPath: "/tmp/recording.m4a"), mediaKind: .audio, screenIntervals: [], capturedWindow: nil, recoveryState: .videoLostAudioPreserved, videoDroppedFrames: 0, videoFailureDescription: nil, safetyCleanupDiagnostic: nil)
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        let result = await engine.stop()
+        XCTAssertEqual(result?.recordingURL.lastPathComponent, "recording.m4a")
+        XCTAssertEqual(result?.recoveryState, .videoLostAudioPreserved)
+    }
+
+    func testInvalidVideoTimestampIsCountedOnlyForActiveRecording() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        source.emit(video: try videoFrame(seconds: 0, valid: false))
+        source.emit(video: try videoFrame(seconds: 1))
+        let result = await engine.stop()
+        XCTAssertEqual(coordinator.videoFrames.count, 1)
+        XCTAssertEqual(result?.health.videoInvalidTimestamps, 1)
+    }
+
+    func testOutcomeDroppedFramesMergeWithoutDuplicatingEventCount() async throws {
+        let (engine, coordinator, _) = coordinatorEngine()
+        coordinator.outcome = .init(
+            finalURL: URL(fileURLWithPath: "/tmp/recording.mp4"), mediaKind: .video,
+            screenIntervals: [], capturedWindow: nil, recoveryState: .none,
+            videoDroppedFrames: 3, videoFailureDescription: nil, safetyCleanupDiagnostic: nil
+        )
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        coordinator.emitCurrent(.droppedFrames(3))
+        await settle()
+        let result = await engine.stop()
+        XCTAssertEqual(result?.health.videoDroppedFrames, 3)
+    }
+
+    func testCoordinatorFactoryTakesPrecedenceOverLegacyWriterFactory() async throws {
+        let source = FakeCaptureSource()
+        let coordinator = FakeMediaCoordinator()
+        let writer = FakeWriter()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in writer },
+            coordinatorFactory: { outputs, sessionID, epoch, revision, pixelFormat in
+                coordinator.configure(outputs: outputs, sourceSessionID: sessionID, epoch: epoch, revision: revision, pixelFormat: pixelFormat)
+                return coordinator
+            },
+            mixerBlockFrames: 4
+        )
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        source.emit(try block(.system, frame: 0, samples: [1, 1, 1, 1]))
+        source.emit(try block(.microphone, frame: 0, samples: [0, 0, 0, 0]))
+        await settle()
+        XCTAssertFalse(coordinator.audioBlocks.isEmpty)
+        XCTAssertTrue(writer.blocks.isEmpty)
+        _ = await engine.stop()
+    }
+
+    func testTerminalSourceEventFinalizesCoordinatorExactlyOnce() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        source.emit(event: .streamStoppedBySystem)
+        await waitUntil { !engine.isRecording }
+        XCTAssertEqual(coordinator.finishCount, 1)
+        XCTAssertEqual(coordinator.events.filter { $0 == "finish" }.count, 1)
+    }
+
+    func testCoordinatorCreationFailureStopsSourceAndLeavesNoLiveRecording() async throws {
+        let source = FakeCaptureSource()
+        let engine = RecordingEngine(
+            captureSource: source,
+            coordinatorFactory: { _, _, _, _, _ in throw TestError.failed },
+            mixerBlockFrames: 4
+        )
+        do {
+            _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+            XCTFail("Expected coordinator creation failure")
+        } catch {
+            XCTAssertEqual(source.stopCount, 1)
+            XCTAssertFalse(engine.isRecording)
+            XCTAssertFalse(engine.isMonitoring)
+        }
+    }
+    func testRecordingMetadataPersistsIntervalsAndWindowIdentity() async throws {
+        let source = FakeCaptureSource()
+        let coordinator = FakeMediaCoordinator()
+        let interval = RecordedScreenInterval(startSeconds: 1, endSeconds: 2)
+        let window = RecordedTeamsWindowIdentity(processID: 7, windowID: 9, title: "Teams call")
+        coordinator.outcome = RecordingMediaOutcome(
+            finalURL: URL(fileURLWithPath: "/tmp/recording.mp4"), mediaKind: .video,
+            screenIntervals: [interval], capturedWindow: window, recoveryState: .none,
+            videoDroppedFrames: 2, videoFailureDescription: nil, safetyCleanupDiagnostic: nil
+        )
+        var written: RecordingSessionMetadata?
+        let engine = RecordingEngine(
+            captureSource: source,
+            coordinatorFactory: { _, _, _, _, _ in coordinator },
+            metadataWriter: { metadata, _ in written = metadata },
+            mixerBlockFrames: 4
+        )
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        let result = await engine.stop()
+
+        XCTAssertEqual(written?.mediaKind, .video)
+        XCTAssertEqual(written?.screenIntervals, [interval])
+        XCTAssertEqual(written?.capturedTeamsWindow, window)
+        XCTAssertEqual(result?.health.videoDroppedFrames, 2)
+    }
+
+    func testMetadataFailurePreservesFinalRecordingResult() async throws {
+        let source = FakeCaptureSource()
+        let coordinator = FakeMediaCoordinator()
+        let finalURL = URL(fileURLWithPath: "/tmp/final.mp4")
+        coordinator.outcome = RecordingMediaOutcome(finalURL: finalURL, mediaKind: .video, screenIntervals: [], capturedWindow: nil, recoveryState: .none, videoDroppedFrames: 0, videoFailureDescription: nil, safetyCleanupDiagnostic: nil)
+        let engine = RecordingEngine(captureSource: source, coordinatorFactory: { _, _, _, _, _ in coordinator }, metadataWriter: { _, _ in throw TestError.failed }, mixerBlockFrames: 4)
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
+        let result = await engine.stop()
+
+        XCTAssertEqual(result?.recordingURL, finalURL)
+        XCTAssertEqual(result?.health.metadataWriteFailures, 1)
+        XCTAssertNotNil(result?.warning)
+    }
     func testScreenFailureDoesNotDisconnectSystemAudio() async throws {
         let source = FakeCaptureSource()
         let engine = RecordingEngine(
@@ -726,7 +1148,7 @@ final class RecordingEngineStateTests: XCTestCase {
         _ = await engine.stop()
     }
 
-    func testTerminalEventDuringRecordingKeepsResultAvailableUntilStop() async throws {
+    func testTerminalEventDuringRecordingFinalizesOnce() async throws {
         let source = FakeCaptureSource()
         let writer = FakeWriter()
         let engine = makeEngine(source: source, writer: writer)
@@ -740,14 +1162,10 @@ final class RecordingEngineStateTests: XCTestCase {
         source.emit(event: .streamStoppedBySystem)
         await settle()
 
-        XCTAssertFalse(engine.isMonitoring)
-        XCTAssertFalse(engine.isSystemCaptureConnected)
-        XCTAssertFalse(engine.isMicrophoneCaptureConnected)
-        XCTAssertTrue(engine.isRecording)
-
-        let result = await engine.stop()
-        XCTAssertNotNil(result)
-        XCTAssertEqual(result?.health.streamFailures, 1)
+        await waitUntil { !engine.isRecording }
+        XCTAssertEqual(source.stopCount, 1)
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+        XCTAssertTrue(engine.isMicrophoneCaptureConnected)
         XCTAssertEqual(writer.closeCount, 1)
     }
 
@@ -908,6 +1326,56 @@ final class RecordingEngineStateTests: XCTestCase {
         )
     }
 
+    private func coordinatorEngine() -> (RecordingEngine, FakeMediaCoordinator, FakeCaptureSource) {
+        let source = FakeCaptureSource()
+        let coordinator = FakeMediaCoordinator()
+        let engine = RecordingEngine(captureSource: source, coordinatorFactory: { outputs, sessionID, epoch, revision, pixelFormat in
+            coordinator.configure(outputs: outputs, sourceSessionID: sessionID, epoch: epoch, revision: revision, pixelFormat: pixelFormat)
+            return coordinator
+        }, mixerBlockFrames: 4)
+        return (engine, coordinator, source)
+    }
+
+    private func teamsWindow(id: UInt32) -> TeamsWindowSnapshot {
+        TeamsWindowSnapshot(
+            identity: TeamsWindowIdentity(processID: 3016, windowID: id),
+            title: "Teams meeting \(id)",
+            frame: CGRect(x: 0, y: 0, width: 1280, height: 720),
+            isOnScreen: true,
+            layer: 0
+        )
+    }
+
+    private func assertScreenState(
+        _ state: MeetingScreenCaptureState,
+        identity: TeamsWindowIdentity,
+        capturing: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        switch state {
+        case let .capturing(descriptor) where capturing:
+            XCTAssertEqual(descriptor.identity, identity, file: file, line: line)
+        case let .waiting(descriptors) where !capturing:
+            XCTAssertEqual(descriptors.map(\.identity), [identity], file: file, line: line)
+        default:
+            XCTFail("Unexpected screen state: \(state)", file: file, line: line)
+        }
+    }
+
+    private func videoFrame(seconds: Int64, valid: Bool = true) throws -> ScreenVideoFrame {
+        var buffer: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(
+            nil, 2, 2, kCVPixelFormatType_32BGRA, nil, &buffer
+        ), kCVReturnSuccess)
+        return ScreenVideoFrame(
+            pixelBuffer: try XCTUnwrap(buffer),
+            sourcePTS: valid ? CMTime(value: seconds, timescale: 1) : .invalid,
+            status: .complete,
+            filterRevision: CaptureFilterRevision(sessionGeneration: 1, revision: 1)
+        )
+    }
+
     private func block(_ source: AudioSourceKind, frame: Int64, samples: [Float]) throws -> AudioFrameBlock {
         try AudioFrameBlock.stereo(source: source, startFrame: frame, left: samples, right: samples)
     }
@@ -930,12 +1398,15 @@ final class RecordingEngineStateTests: XCTestCase {
     }
 }
 
-private final class FakeCaptureSource: CaptureSourceProtocol {
-    let screenVideoFormat = ScreenVideoFormat(width: 1_600, height: 900, pixelFormat: 0)
+private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendable {
+    let screenVideoFormat = ScreenVideoFormat(width: 1_600, height: 900, pixelFormat: kCVPixelFormatType_32BGRA)
     private let streamIdentity = UUID()
+    private let callbackLock = NSLock()
     private var onAudio: ((AudioFrameBlock) -> Void)?
     private var onEvent: ((CaptureEvent) -> Void)?
+    private var onVideo: ((ScreenVideoFrame) -> Void)?
     private var audioHandlers: [(AudioFrameBlock) -> Void] = []
+    private var videoHandlers: [(ScreenVideoFrame) -> Void] = []
     private(set) var startedSelection: ResolvedCaptureSelection?
     private(set) var startedMicrophoneUID: String?
     private(set) var stopCount = 0
@@ -946,6 +1417,8 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
     private(set) var reconnectedSelection: ResolvedCaptureSelection?
     private(set) var reconnectCount = 0
     private(set) var filterUpdateCount = 0
+    private(set) var videoTargets: [TeamsWindowIdentity?] = []
+    private(set) var videoRevisions: [CaptureFilterRevision] = []
     private(set) var streamIdentityAtStart: UUID?
     private(set) var streamIdentityAtReconnect: UUID?
     var pauseStarts = false
@@ -953,16 +1426,29 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
     var startErrors: [Int: Error] = [:]
     var reconnectError: Error?
     var pauseStop = false
+    var pauseVideoTargetUpdates = false
+    var windows: [TeamsWindowSnapshot] = []
+    var videoTargetErrors: [Int: Error] = [:]
     private var startContinuations: [CheckedContinuation<Void, Never>] = []
     private var reconnectContinuations: [CheckedContinuation<Void, Never>] = []
     private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var videoTargetContinuations: [CheckedContinuation<CaptureFilterRevision, Error>] = []
 
     func refreshContent() async throws -> [CaptureApplication] { [] }
 
-    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] { [] }
+    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] { windows }
 
     func updateVideoTarget(_ target: TeamsWindowIdentity?) async throws -> CaptureFilterRevision {
-        CaptureFilterRevision(sessionGeneration: 1, revision: 1)
+        videoTargets.append(target)
+        let revision = CaptureFilterRevision(sessionGeneration: 1, revision: UInt64(videoTargets.count))
+        videoRevisions.append(revision)
+        if pauseVideoTargetUpdates {
+            return try await withCheckedThrowingContinuation { continuation in
+                videoTargetContinuations.append(continuation)
+            }
+        }
+        if let error = videoTargetErrors[videoTargets.count] { throw error }
+        return revision
     }
 
     func reconnect(selection: ResolvedCaptureSelection) async throws {
@@ -1002,9 +1488,7 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
         startedSelection = selection
         startedMicrophoneUID = microphoneUID
         streamIdentityAtStart = streamIdentity
-        self.onAudio = onAudio
-        self.onEvent = onEvent
-        audioHandlers.append(onAudio)
+        storeHandlers(audio: onAudio, video: onVideo, event: onEvent)
     }
 
     func stop() async {
@@ -1016,15 +1500,47 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
     }
 
     func emit(_ block: AudioFrameBlock) {
-        onAudio?(block)
+        callbackLock.lock()
+        let handler = onAudio
+        callbackLock.unlock()
+        handler?(block)
     }
 
     func emit(event: CaptureEvent) {
-        onEvent?(event)
+        callbackLock.lock()
+        let handler = onEvent
+        callbackLock.unlock()
+        handler?(event)
+    }
+
+    func emit(video: ScreenVideoFrame) {
+        callbackLock.lock()
+        let handler = onVideo
+        callbackLock.unlock()
+        handler?(video)
+    }
+
+    func emitVideoOnBackground(_ frame: ScreenVideoFrame) async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                emit(video: frame)
+                continuation.resume()
+            }
+        }
+    }
+
+    func emitOldVideo(_ index: Int, frame: ScreenVideoFrame) {
+        callbackLock.lock()
+        let handler = videoHandlers[index]
+        callbackLock.unlock()
+        handler(frame)
     }
 
     func emitFromSession(_ index: Int, _ block: AudioFrameBlock) {
-        audioHandlers[index](block)
+        callbackLock.lock()
+        let handler = audioHandlers[index]
+        callbackLock.unlock()
+        handler(block)
     }
 
     func resumeStop() {
@@ -1055,6 +1571,32 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
         reconnectContinuations.removeAll()
         continuations.forEach { $0.resume() }
     }
+
+    func completeNextVideoTarget() {
+        guard !videoTargetContinuations.isEmpty else { return }
+        let continuation = videoTargetContinuations.removeFirst()
+        let revision = videoRevisions[videoRevisions.count - videoTargetContinuations.count - 1]
+        continuation.resume(returning: revision)
+    }
+
+    func failNextVideoTarget(_ error: Error) {
+        guard !videoTargetContinuations.isEmpty else { return }
+        videoTargetContinuations.removeFirst().resume(throwing: error)
+    }
+
+    private func storeHandlers(
+        audio: @escaping (AudioFrameBlock) -> Void,
+        video: @escaping (ScreenVideoFrame) -> Void,
+        event: @escaping (CaptureEvent) -> Void
+    ) {
+        callbackLock.lock()
+        onAudio = audio
+        onVideo = video
+        onEvent = event
+        audioHandlers.append(audio)
+        videoHandlers.append(video)
+        callbackLock.unlock()
+    }
 }
 
 private final class FakeWriter: MixedAudioWriting {
@@ -1078,6 +1620,95 @@ private final class FakeWriter: MixedAudioWriting {
 
     func resetBlocks() {
         blocks.removeAll()
+    }
+}
+
+private enum TestError: Error { case failed }
+
+private final class FakeMediaCoordinator: RecordingMediaCoordinating, @unchecked Sendable {
+    private let lock = NSLock()
+    private let videoEnqueueStarted = DispatchSemaphore(value: 0)
+    private var blockedVideoEnqueue: DispatchSemaphore?
+    var blockVideoEnqueue = false
+    var outputs: RecordingOutputURLs?
+    private(set) var sourceSessionID: UUID?
+    private(set) var epoch: UInt64?
+    private(set) var revision: CaptureFilterRevision?
+    private(set) var pixelFormat: OSType?
+    var outcome = RecordingMediaOutcome(
+        finalURL: URL(fileURLWithPath: "/tmp/recording.mp4"), mediaKind: .video,
+        screenIntervals: [], capturedWindow: nil, recoveryState: .none,
+        videoDroppedFrames: 0, videoFailureDescription: nil, safetyCleanupDiagnostic: nil
+    )
+    private(set) var audioBlocks: [MixedAudioBlock] = []
+    private(set) var finishCount = 0
+    private(set) var videoFrames: [ScreenVideoFrame] = []
+    private(set) var enqueueVideoOnMainActor: [Bool] = []
+    private(set) var screenUnavailableCount = 0
+    private(set) var screenRequests: [(requested: Bool, revision: CaptureFilterRevision?, window: RecordedTeamsWindowIdentity?)] = []
+    private(set) var events: [String] = []
+    private(set) var handlerInstallCount = 0
+    private var handler: (@Sendable (RecordingVideoEvent) -> Void)?
+
+    func configure(outputs: RecordingOutputURLs, sourceSessionID: UUID, epoch: UInt64, revision: CaptureFilterRevision, pixelFormat: OSType) {
+        self.outputs = outputs
+        self.sourceSessionID = sourceSessionID
+        self.epoch = epoch
+        self.revision = revision
+        self.pixelFormat = pixelFormat
+    }
+
+    func setVideoEventHandler(_ handler: (@Sendable (RecordingVideoEvent) -> Void)?) {
+        self.handler = handler
+        handlerInstallCount += 1
+        events.append(handler == nil ? "handler-clear" : "handler-install")
+    }
+
+    func enqueueAudio(_ block: MixedAudioBlock) {
+        lock.lock()
+        audioBlocks.append(block)
+        events.append("audio")
+        lock.unlock()
+    }
+
+    func enqueueVideo(_ frame: ScreenVideoFrame) {
+        lock.lock()
+        videoFrames.append(frame)
+        enqueueVideoOnMainActor.append(Thread.isMainThread)
+        events.append("video")
+        let shouldBlock = blockVideoEnqueue
+        let semaphore = shouldBlock ? DispatchSemaphore(value: 0) : nil
+        blockedVideoEnqueue = semaphore
+        lock.unlock()
+        videoEnqueueStarted.signal()
+        guard shouldBlock else { return }
+        semaphore?.wait()
+    }
+
+    func waitForVideoEnqueueStart() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.videoEnqueueStarted.wait()
+                continuation.resume()
+            }
+        }
+    }
+
+    func releaseBlockedVideoEnqueue() {
+        lock.lock()
+        let semaphore = blockedVideoEnqueue
+        blockedVideoEnqueue = nil
+        lock.unlock()
+        semaphore?.signal()
+    }
+    func setScreenCaptureRequested(_ requested: Bool, expectedRevision: CaptureFilterRevision?, window: RecordedTeamsWindowIdentity?) {
+        screenRequests.append((requested, expectedRevision, window))
+    }
+    func markScreenSourceUnavailable() { screenUnavailableCount += 1 }
+    func finish() async throws -> RecordingMediaOutcome { finishCount += 1; events.append("finish"); return outcome }
+    func emitCurrent(_ kind: RecordingVideoEventKind) {
+        guard let sourceSessionID, let epoch else { return }
+        handler?(RecordingVideoEvent(sourceSessionID: sourceSessionID, recordingEpoch: epoch, kind: kind))
     }
 }
 

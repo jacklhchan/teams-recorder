@@ -15,7 +15,7 @@ struct VideoGate {
     private var screenIntent = false
     private var started = false
     private var openIntervalStartFrame: Int64?
-    private var lastCompleteFrame: Int64?
+    private var lastSourceActivityFrame: Int64?
     private var lastAppendedFrame: Int64?
     private(set) var recordedScreenIntervals: [RecordedScreenInterval] = []
 
@@ -46,23 +46,28 @@ struct VideoGate {
         if filterRevision != activeFilterRevision {
             return openIntervalStartFrame == nil ? [.drop] : closeWithBlack(at: frame)
         }
-        guard screenIntent, isComplete, sourceAvailable else {
+        if screenIntent, sourceAvailable {
+            lastSourceActivityFrame = frame
+        }
+        guard screenIntent, sourceAvailable else {
             if !sourceAvailable { return closeWithBlack(at: frame) }
             return [.drop]
         }
+        guard isComplete || openIntervalStartFrame == nil else { return [.drop] }
 
-        lastCompleteFrame = frame
         openIntervalStartFrame = openIntervalStartFrame ?? frame
         lastAppendedFrame = frame
         return [.appendReal(time(for: frame))]
     }
 
     mutating func checkForStall(at audioTime: CMTime) -> [VideoGateAction] {
-        guard let frame = frame(for: audioTime), let lastCompleteFrame else {
+        guard let frame = frame(for: audioTime),
+              let lastSourceActivityFrame else {
             return []
         }
-        let (elapsed, overflow) = frame.subtractingReportingOverflow(lastCompleteFrame)
-        guard (overflow && frame > lastCompleteFrame) || (!overflow && elapsed >= Self.stallFrames) else {
+        let (elapsed, overflow) = frame.subtractingReportingOverflow(lastSourceActivityFrame)
+        guard (overflow && frame > lastSourceActivityFrame)
+                || (!overflow && elapsed >= Self.stallFrames) else {
             return []
         }
         return closeWithBlack(at: frame)

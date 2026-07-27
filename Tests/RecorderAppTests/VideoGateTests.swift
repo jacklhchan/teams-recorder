@@ -34,6 +34,39 @@ final class VideoGateTests: XCTestCase {
         XCTAssertEqual(gate.checkForStall(at: time(72_961)), [])
     }
 
+    func testIdleSourceActivityKeepsTheOpenIntervalAlive() {
+        var gate = startedGate()
+        _ = gate.setScreenIntent(true, at: time(0))
+        _ = gate.submitFrame(
+            at: time(960),
+            isComplete: true,
+            sourceAvailable: true,
+            filterRevision: revision(7)
+        )
+        _ = gate.submitFrame(
+            at: time(48_000),
+            isComplete: false,
+            sourceAvailable: true,
+            filterRevision: revision(7)
+        )
+
+        XCTAssertEqual(gate.checkForStall(at: time(72_960)), [])
+    }
+
+    func testReusableIdleFrameCanOpenAnIntervalAfterCompleteFrameWasDropped() {
+        var gate = startedGate()
+        _ = gate.setScreenIntent(true, at: time(0))
+
+        let actions = gate.submitFrame(
+            at: time(960),
+            isComplete: false,
+            sourceAvailable: true,
+            filterRevision: revision(7)
+        )
+
+        XCTAssertEqual(actions, [.appendReal(time(960))])
+    }
+
     func testStaleFilterRevisionCannotEnterRecording() {
         var gate = startedGate()
         _ = gate.setScreenIntent(true, at: time(0))

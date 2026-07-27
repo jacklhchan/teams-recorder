@@ -343,6 +343,28 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertEqual(result?.health.videoDroppedFrames, 3)
     }
 
+    func testCumulativeDroppedFrameEventsAreNotAddedTogether() async throws {
+        let (engine, coordinator, _) = coordinatorEngine()
+        coordinator.outcome = .init(
+            finalURL: URL(fileURLWithPath: "/tmp/recording.mp4"), mediaKind: .video,
+            screenIntervals: [], capturedWindow: nil, recoveryState: .none,
+            videoDroppedFrames: 3, videoFailureDescription: nil, safetyCleanupDiagnostic: nil
+        )
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+
+        coordinator.emitCurrent(.droppedFrames(1))
+        coordinator.emitCurrent(.droppedFrames(2))
+        coordinator.emitCurrent(.droppedFrames(3))
+        await settle()
+
+        let result = await engine.stop()
+        XCTAssertEqual(result?.health.videoDroppedFrames, 3)
+    }
+
     func testCoordinatorFactoryTakesPrecedenceOverLegacyWriterFactory() async throws {
         let source = FakeCaptureSource()
         let coordinator = FakeMediaCoordinator()

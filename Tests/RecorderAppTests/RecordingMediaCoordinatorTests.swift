@@ -138,6 +138,67 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         XCTAssertTrue(events.kinds.contains(.sourceRecovered))
     }
 
+    func testIdleFramesKeepAStaticScreenIntervalAlive() async throws {
+        let state = ManualExecutor()
+        let fixture = try makeFixture(executor: state)
+        let events = EventCollector()
+        fixture.coordinator.setVideoEventHandler { events.append($0) }
+        fixture.coordinator.setScreenCaptureRequested(true, expectedRevision: fixture.revision, window: nil)
+        state.runAll()
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 1))
+        state.runAll()
+        fixture.coordinator.enqueueVideo(try videoFrame(time: .zero, revision: fixture.revision))
+        state.runAll()
+        fixture.coordinator.enqueueAudio(audioBlock(start: 1, frames: 60_000))
+        state.runAll()
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 60_000, timescale: 48_000),
+            revision: fixture.revision,
+            status: .idle
+        ))
+        state.runAll()
+        fixture.coordinator.enqueueAudio(audioBlock(start: 60_001, frames: 60_000))
+        state.runAll()
+
+        let outcome = try await finish(fixture.coordinator, using: state)
+
+        XCTAssertFalse(events.kinds.contains(.sourceStalled))
+        XCTAssertEqual(outcome.screenIntervals.count, 1)
+        XCTAssertGreaterThan(outcome.screenIntervals[0].endSeconds, 2)
+    }
+
+    func testCachedIdleFrameOpensScreenIntervalWhenMailboxEvictsCompleteFrame() async throws {
+        let state = ManualExecutor()
+        let fixture = try makeFixture(executor: state)
+        fixture.coordinator.setScreenCaptureRequested(true, expectedRevision: fixture.revision, window: nil)
+        state.runAll()
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 4_800))
+        state.runAll()
+
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: .zero,
+            revision: fixture.revision,
+            status: .complete
+        ))
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 1, timescale: 48_000),
+            revision: fixture.revision,
+            status: .idle
+        ))
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 2, timescale: 48_000),
+            revision: fixture.revision,
+            status: .idle
+        ))
+        state.runAll()
+
+        let outcome = try await finish(fixture.coordinator, using: state)
+
+        XCTAssertEqual(outcome.videoDroppedFrames, 1)
+        XCTAssertEqual(outcome.screenIntervals.count, 1)
+        XCTAssertTrue(fixture.mux.videoTimes.contains(CMTime(value: 1, timescale: 48_000)))
+    }
+
     func testVideoEventsCarrySourceSessionAndRecordingEpoch() async throws {
         let fixture = try makeFixture(muxSetupError: TestError.mux)
         let events = EventCollector()
@@ -688,8 +749,12 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         MixedAudioBlock(startFrame: start, left: Array(repeating: 0.1, count: frames), right: Array(repeating: 0.1, count: frames))
     }
 
-    private func videoFrame(time: CMTime, revision: CaptureFilterRevision = CaptureFilterRevision(sessionGeneration: 7, revision: 3)) throws -> ScreenVideoFrame {
-        ScreenVideoFrame(pixelBuffer: try blackBuffer(), sourcePTS: time, status: .complete, filterRevision: revision)
+    private func videoFrame(
+        time: CMTime,
+        revision: CaptureFilterRevision = CaptureFilterRevision(sessionGeneration: 7, revision: 3),
+        status: SCFrameStatus = .complete
+    ) throws -> ScreenVideoFrame {
+        ScreenVideoFrame(pixelBuffer: try blackBuffer(), sourcePTS: time, status: status, filterRevision: revision)
     }
 
     private func blackBuffer() throws -> CVPixelBuffer {

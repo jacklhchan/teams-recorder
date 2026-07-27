@@ -1835,6 +1835,7 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
     private let onEvent: (CaptureEvent) -> Void
     private let systemResampler = PersistentAudioResampler(source: .system)
     private let microphoneResampler = PersistentAudioResampler(source: .microphone)
+    private var screenFrameContinuity = ScreenVideoFrameContinuity()
 
     init(
         token: CaptureSessionToken,
@@ -1919,33 +1920,23 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
     }
 
     private func deliverScreenFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard let revision = videoRevision(),
-              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
-              CVPixelBufferGetPixelFormatType(imageBuffer)
-                == videoPixelFormat() else {
-            return
-        }
+        guard let revision = videoRevision() else { return }
         let attachments = CMSampleBufferGetSampleAttachmentsArray(
             sampleBuffer,
             createIfNecessary: false
         ) as? [[SCStreamFrameInfo: Any]]
         guard let rawStatus = attachments?.first?[.status] as? Int,
-              let status = SCFrameStatus(rawValue: rawStatus),
-              status == .complete else {
+              let status = SCFrameStatus(rawValue: rawStatus) else {
             return
         }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        guard pts.isValid, !pts.isIndefinite,
-              !pts.isPositiveInfinity, !pts.isNegativeInfinity else {
-            return
-        }
-        // Assigning the Core Foundation object to the frame transfers a strong ARC reference.
-        let frame = ScreenVideoFrame(
-            pixelBuffer: imageBuffer,
-            sourcePTS: pts,
+        guard let frame = screenFrameContinuity.makeFrame(
             status: status,
-            filterRevision: revision
-        )
+            pixelBuffer: CMSampleBufferGetImageBuffer(sampleBuffer),
+            sourcePTS: pts,
+            filterRevision: revision,
+            expectedPixelFormat: videoPixelFormat()
+        ) else { return }
         onVideo(frame)
     }
 

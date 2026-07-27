@@ -817,7 +817,7 @@ final class RecordingEngine: ObservableObject {
                 meetingScreenCaptureState = .capturing(screenTarget)
             }
         case let .droppedFrames(count):
-            currentHealth.videoDroppedFrames += count
+            currentHealth.videoDroppedFrames = max(currentHealth.videoDroppedFrames, count)
         case let .muxFailed(description):
             hasHardScreenFailure = true
             recordMuxFallbackIfNeeded()

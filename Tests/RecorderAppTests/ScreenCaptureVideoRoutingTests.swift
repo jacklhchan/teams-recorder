@@ -15,6 +15,20 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
         XCTAssertEqual(plan.outputs, [.audio, .microphone])
         XCTAssertFalse(plan.acceptsScreenFrames)
     }
+
+    func testTeamsScreenTargetMustMatchSelectedProcess() {
+        XCTAssertTrue(SelectedTeamsScreenTargetPlan.accepts(nil, selected: teams))
+        XCTAssertTrue(SelectedTeamsScreenTargetPlan.accepts(
+            .init(processID: teams.processID, windowID: 9),
+            selected: teams
+        ))
+        XCTAssertFalse(SelectedTeamsScreenTargetPlan.accepts(
+            .init(processID: 84, windowID: 9),
+            selected: teams
+        ))
+        XCTAssertFalse(SelectedTeamsScreenTargetPlan.accepts(nil, selected: nonTeams))
+    }
+
     func testProductionScreenConfigurationIsFixedStorageProfile() {
         let source = ScreenCaptureSource()
 

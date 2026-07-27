@@ -48,6 +48,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var isScreenCaptureAllowedByStorage = true
     @Published private(set) var screenCaptureStorageRestrictionReason: String?
     @Published private(set) var storageWarningMessage: String?
+    @Published private(set) var isTeamsScreenCaptureRequested = false
+    @Published private(set) var teamsManualWindowIdentity: TeamsWindowIdentity?
+    @Published private(set) var teamsScreenCaptureCandidates: [TeamsWindowDescriptor] = []
 
     let recorder: RecordingEngine
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -79,6 +82,7 @@ final class AppModel: ObservableObject {
     private let storagePolicy: RecordingStoragePolicy
     private let storageMonitorTick: @Sendable () async -> Void
     private let testRecordingDelay: @Sendable () async -> Void
+    private let teamsScreenRefreshTick: @Sendable () async -> Void
     private let transcriptionAudioPreparer: any TranscriptionAudioPreparing
     private let transcriptionProcessLauncher: any TranscriptionProcessLaunching
     private let transcriptionScriptURL: URL?
@@ -97,6 +101,9 @@ final class AppModel: ObservableObject {
     private var storageMonitorTask: Task<Void, Never>?
     private var storageMonitorGeneration: UInt64 = 0
     private var testRecordingStopTask: Task<Void, Never>?
+    private var teamsScreenRefreshTask: Task<Void, Never>?
+    private var teamsScreenRefreshGeneration: UInt64 = 0
+    private var teamsMeetingActive = false
 
     private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
 
@@ -128,6 +135,9 @@ final class AppModel: ObservableObject {
         testRecordingDelay: @escaping @Sendable () async -> Void = {
             try? await Task.sleep(for: .seconds(10))
         },
+        teamsScreenRefreshTick: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(for: .seconds(1))
+        },
         transcriptionAudioPreparer: any TranscriptionAudioPreparing = TranscriptionAudioPreparer(),
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
         transcriptionScriptURL: URL? = nil,
@@ -149,6 +159,7 @@ final class AppModel: ObservableObject {
         self.storagePolicy = storagePolicy
         self.storageMonitorTick = storageMonitorTick
         self.testRecordingDelay = testRecordingDelay
+        self.teamsScreenRefreshTick = teamsScreenRefreshTick
         self.transcriptionAudioPreparer = transcriptionAudioPreparer
         self.transcriptionProcessLauncher = transcriptionProcessLauncher
         self.transcriptionScriptURL = transcriptionScriptURL
@@ -203,6 +214,7 @@ final class AppModel: ObservableObject {
         testRecordingStopTask?.cancel()
         playbackLoadTask?.cancel()
         transcriptionTask?.cancel()
+        teamsScreenRefreshTask?.cancel()
         transcriptionProcess?.terminate()
         teamsMuteRelay.invalidate()
         teamsMuteSyncClient.stop()
@@ -232,12 +244,16 @@ final class AppModel: ObservableObject {
             do {
                 let applications = try await recorder.refreshCaptureApplications()
                 guard captureLifecycleGate.accepts(token) else { return }
+                let previousTeamsProcessID = selectedTeamsApplication?.processID
                 availableCaptureApplications = applications
                 resolvedCaptureSelection = CaptureConnectionProjection.resolveAfterRefresh(
                     selection: captureSelection,
                     applications: applications,
                     connectionState: captureConnectionState
                 )
+                if previousTeamsProcessID != selectedTeamsApplication?.processID {
+                    handleTeamsScreenSourceChange()
+                }
                 if !recorder.isRecording {
                     await startMonitoringIfReady()
                 }
@@ -257,6 +273,7 @@ final class AppModel: ObservableObject {
             availableApplications: availableCaptureApplications
         )
         persistCaptureSelection()
+        handleTeamsScreenSourceChange()
         refreshCaptureApplications()
     }
 
@@ -270,6 +287,7 @@ final class AppModel: ObservableObject {
             reconnect: true
         )
         persistCaptureSelection()
+        handleTeamsScreenSourceChange()
         refreshCaptureApplications()
     }
 
@@ -320,6 +338,119 @@ final class AppModel: ObservableObject {
         case .application(let app): app.name
         case .disconnected: "App audio disconnected"
         }
+    }
+
+    var showsTeamsScreenCaptureControls: Bool {
+        selectedTeamsApplication != nil
+    }
+
+    var isTeamsScreenCaptureToggleDisabled: Bool {
+        guard recorder.isRecording,
+              !isCaptureLifecycleWorking,
+              isScreenCaptureAllowedByStorage else { return true }
+        switch recorder.meetingScreenCaptureState {
+        case .unavailable, .failed: return true
+        default: return false
+        }
+    }
+
+    var teamsScreenStatusText: String {
+        if !isScreenCaptureAllowedByStorage { return TeamsScreenStatusText.unavailable }
+        if recorder.isRecording, !isTeamsScreenCaptureRequested {
+            return TeamsScreenStatusText.off
+        }
+        switch recorder.meetingScreenCaptureState {
+        case .unavailable, .failed: return TeamsScreenStatusText.unavailable
+        case .off: return TeamsScreenStatusText.off
+        case .ready: return TeamsScreenStatusText.ready
+        case .capturing: return TeamsScreenStatusText.capturing
+        case .waiting:
+            return recorder.isRecording && !isTeamsScreenCaptureRequested
+                ? TeamsScreenStatusText.off : TeamsScreenStatusText.waiting
+        }
+    }
+
+    func setTeamsScreenCaptureRequested(_ requested: Bool) async {
+        guard recorder.isRecording,
+              !isCaptureLifecycleWorking,
+              isScreenCaptureAllowedByStorage,
+              selectedTeamsApplication != nil else { return }
+        isTeamsScreenCaptureRequested = requested
+        if requested {
+            await refreshTeamsScreenCaptureNow()
+        }
+        await recorder.setScreenCaptureRequested(requested)
+        restartTeamsScreenRefreshIfNeeded()
+    }
+
+    func selectTeamsScreenCaptureWindow(_ identity: TeamsWindowIdentity?) async {
+        guard let app = selectedTeamsApplication,
+              identity == nil || identity?.processID == app.processID else { return }
+        teamsManualWindowIdentity = identity
+        await refreshTeamsScreenCaptureNow()
+    }
+
+    func refreshTeamsScreenCaptureNow() async {
+        guard let selectedTeamsApplication else { return }
+        let generation = teamsScreenRefreshGeneration
+        await recorder.refreshTeamsWindows(
+            selectedTeamsProcessID: selectedTeamsApplication.processID,
+            meetingActive: teamsMeetingActive,
+            manualOverride: teamsManualWindowIdentity
+        )
+        guard generation == teamsScreenRefreshGeneration else { return }
+        refreshTeamsScreenCandidateProjection()
+    }
+
+    private var selectedTeamsApplication: CaptureApplication? {
+        guard case let .application(application) = resolvedCaptureSelection,
+              application.bundleIdentifier == "com.microsoft.teams2" else { return nil }
+        return application
+    }
+
+    private func handleTeamsScreenSourceChange() {
+        invalidateTeamsScreenRefresh()
+        isTeamsScreenCaptureRequested = false
+        teamsMeetingActive = false
+        teamsManualWindowIdentity = nil
+        teamsScreenCaptureCandidates = []
+        recorder.resetTeamsWindowResolution()
+        guard selectedTeamsApplication != nil else { return }
+        Task { @MainActor [weak self] in
+            await self?.refreshTeamsScreenCaptureNow()
+        }
+    }
+
+    private func refreshTeamsScreenCandidateProjection() {
+        guard let application = selectedTeamsApplication else {
+            teamsScreenCaptureCandidates = []
+            return
+        }
+        teamsScreenCaptureCandidates = recorder.teamsWindowCandidates.filter {
+            $0.identity.processID == application.processID
+        }
+    }
+
+    private func restartTeamsScreenRefreshIfNeeded() {
+        invalidateTeamsScreenRefresh()
+        guard selectedTeamsApplication != nil,
+              recorder.isRecording || isTeamsScreenCaptureRequested else { return }
+        let generation = teamsScreenRefreshGeneration
+        let tick = teamsScreenRefreshTick
+        teamsScreenRefreshTask = Task { @MainActor [weak self, tick] in
+            while !Task.isCancelled {
+                await tick()
+                guard !Task.isCancelled, let self,
+                      generation == self.teamsScreenRefreshGeneration else { return }
+                await self.refreshTeamsScreenCaptureNow()
+            }
+        }
+    }
+
+    private func invalidateTeamsScreenRefresh() {
+        teamsScreenRefreshGeneration &+= 1
+        teamsScreenRefreshTask?.cancel()
+        teamsScreenRefreshTask = nil
     }
 
     func reconnectSelectedApplication() {
@@ -380,6 +511,9 @@ final class AppModel: ObservableObject {
                     baseFolder: recordingFolder
                 )
                 guard captureLifecycleGate.accepts(token) else { return }
+                isTeamsScreenCaptureRequested = false
+                await refreshTeamsScreenCaptureNow()
+                restartTeamsScreenRefreshIfNeeded()
                 if !isScreenCaptureAllowedByStorage {
                     await recorder.setScreenCaptureRequested(false)
                     guard captureLifecycleGate.accepts(token), recorder.isRecording else { return }
@@ -430,6 +564,9 @@ final class AppModel: ObservableObject {
                     folderPrefix: "test"
                 )
                 guard captureLifecycleGate.accepts(token) else { return }
+                isTeamsScreenCaptureRequested = false
+                await refreshTeamsScreenCaptureNow()
+                restartTeamsScreenRefreshIfNeeded()
                 if !isScreenCaptureAllowedByStorage {
                     await recorder.setScreenCaptureRequested(false)
                     guard captureLifecycleGate.accepts(token), recorder.isRecording else { return }
@@ -1018,11 +1155,18 @@ final class AppModel: ObservableObject {
             return
         }
 
+        invalidateTeamsScreenRefresh()
         let snapshot = teamsMuteRelay.disable()
         teamsMuteSyncClient.stop()
         teamsMuteSyncInstalled = false
         teamsMuteSyncStatus = .disabled
         publishMicrophoneMuteSnapshot(snapshot)
+        teamsMeetingActive = false
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.refreshTeamsScreenCaptureNow()
+            self.restartTeamsScreenRefreshIfNeeded()
+        }
     }
 
     func retryTeamsMuteSync() {
@@ -1052,10 +1196,14 @@ final class AppModel: ObservableObject {
                 statusMessage = "Teams sync lost: recorder mic muted"
             }
 
-        case .meetingState:
+        case .meetingState(let state):
             let snapshot = microphoneMuteGate.snapshot
             publishMicrophoneMuteSnapshot(snapshot)
             statusMessage = "Teams / AirPods: recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
+            teamsMeetingActive = state.isInMeeting
+            Task { @MainActor [weak self] in
+                await self?.refreshTeamsScreenCaptureNow()
+            }
         }
     }
 
@@ -1407,6 +1555,8 @@ final class AppModel: ObservableObject {
             return
         }
         invalidateStorageMonitoring()
+        invalidateTeamsScreenRefresh()
+        isTeamsScreenCaptureRequested = false
         testRecordingStopTask?.cancel()
         testRecordingStopTask = nil
         captureLifecycleTask?.cancel()
@@ -1456,6 +1606,8 @@ final class AppModel: ObservableObject {
             .sink { [weak self] isRecording in
                 guard let self, !isRecording else { return }
                 self.invalidateStorageMonitoring()
+                self.invalidateTeamsScreenRefresh()
+                self.isTeamsScreenCaptureRequested = false
             }
             .store(in: &cancellables)
     }
@@ -1516,6 +1668,7 @@ final class AppModel: ObservableObject {
             isScreenCaptureAllowedByStorage = false
             screenCaptureStorageRestrictionReason = reason
             storageWarningMessage = reason
+            isTeamsScreenCaptureRequested = false
             await recorder.setScreenCaptureRequested(false)
             guard generation == storageMonitorGeneration, recorder.isRecording else { return }
             statusMessage = "Low storage: screen capture disabled; audio recording continues."

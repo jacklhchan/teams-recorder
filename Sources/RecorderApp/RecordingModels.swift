@@ -67,6 +67,14 @@ enum MeetingScreenCaptureState: Equatable {
     case failed(String)
 }
 
+enum TeamsScreenStatusText {
+    static let off = "Screen off"
+    static let ready = "Teams window ready"
+    static let capturing = "Capturing Teams window"
+    static let waiting = "Waiting for Teams window"
+    static let unavailable = "Screen capture unavailable"
+}
+
 struct RecordingResult: Equatable {
     let folderURL: URL
     let recordingURL: URL

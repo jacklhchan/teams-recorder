@@ -66,6 +66,7 @@ final class RecordingEngine: ObservableObject {
     @Published private(set) var captureConnectionSnapshot: CaptureConnectionSnapshot = .idle
     @Published private(set) var virtualMicPublisherState: VirtualMicPublisherState = .stopped
     @Published private(set) var meetingScreenCaptureState: MeetingScreenCaptureState = .unavailable
+    @Published private(set) var teamsWindowCandidates: [TeamsWindowDescriptor] = []
 
     private let captureSource: CaptureSourceProtocol
     private let coordinatorFactory: RecordingMediaCoordinatorFactory
@@ -98,6 +99,9 @@ final class RecordingEngine: ObservableObject {
     private var recordingStartTransition: RecordingStartTransition?
     private var reconnectTransition: ReconnectTransition?
     private var teamsWindowResolver = TeamsMeetingWindowResolver()
+    private var teamsSourceProcessID: pid_t?
+    private var teamsMeetingActive = false
+    private var teamsManualWindowOverride: TeamsWindowIdentity?
     private var screenCaptureRequested = false
     private var screenTarget: TeamsWindowDescriptor?
     private var activeFilterRevision = CaptureFilterRevision(sessionGeneration: 0, revision: 0)
@@ -559,16 +563,33 @@ final class RecordingEngine: ObservableObject {
     }
 
     func refreshTeamsWindows(
+        selectedTeamsProcessID: pid_t,
         meetingActive: Bool,
         manualOverride: TeamsWindowIdentity?
     ) async {
         screenToggleGeneration &+= 1
         let generation = screenToggleGeneration
+        teamsSourceProcessID = selectedTeamsProcessID
+        teamsMeetingActive = meetingActive
+        teamsManualWindowOverride = manualOverride
         teamsWindowResolver.selectManualOverride(manualOverride)
         do {
-            let windows = try await captureSource.refreshTeamsWindows()
-            guard generation == screenToggleGeneration, isRecording else { return }
-            switch teamsWindowResolver.observe(windows, meetingActive: meetingActive, now: Date()) {
+            let windows = try await captureSource.refreshTeamsWindows().filter {
+                $0.identity.processID == selectedTeamsProcessID
+            }
+            guard generation == screenToggleGeneration else { return }
+            let now = Date()
+            teamsWindowCandidates = windows.compactMap { window in
+                guard window.isOnScreen,
+                      window.layer == 0,
+                      TeamsMeetingWindowResolver.rejectionReasons(for: window).isEmpty else { return nil }
+                return TeamsWindowDescriptor(
+                    identity: window.identity, title: window.title, frame: window.frame,
+                    isOnScreen: window.isOnScreen, layer: window.layer,
+                    firstSeenAt: now, lastSurfacedAt: window.isOnScreen ? now : nil
+                )
+            }
+            switch teamsWindowResolver.observe(windows, meetingActive: meetingActive, now: now) {
             case let .ready(match):
                 screenTarget = match.window
                 meetingScreenCaptureState = .ready(match.window)
@@ -595,6 +616,19 @@ final class RecordingEngine: ObservableObject {
         }
     }
 
+    func resetTeamsWindowResolution() {
+        screenToggleGeneration &+= 1
+        teamsWindowResolver.resetForApplicationRestart()
+        teamsSourceProcessID = nil
+        teamsMeetingActive = false
+        teamsManualWindowOverride = nil
+        teamsWindowCandidates = []
+        screenTarget = nil
+        if !isRecording {
+            meetingScreenCaptureState = .off
+        }
+    }
+
     func setScreenCaptureRequested(_ requested: Bool) async {
         guard isRecording, let coordinator = mediaCoordinator else { return }
         screenToggleGeneration &+= 1
@@ -618,7 +652,16 @@ final class RecordingEngine: ObservableObject {
         if let screenTarget {
             await applyScreenTarget(screenTarget, generation: generation)
         } else {
-            await refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+            guard let teamsSourceProcessID else {
+                meetingScreenCaptureState = .waiting([])
+                await applyWaitingScreenTarget(generation: generation)
+                return
+            }
+            await refreshTeamsWindows(
+                selectedTeamsProcessID: teamsSourceProcessID,
+                meetingActive: teamsMeetingActive,
+                manualOverride: teamsManualWindowOverride
+            )
         }
     }
 

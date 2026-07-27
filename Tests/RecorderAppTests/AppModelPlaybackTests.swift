@@ -4,6 +4,16 @@ import XCTest
 
 @MainActor
 final class AppModelPlaybackTests: XCTestCase {
+    private var defaultsSuiteNames: [String] = []
+
+    override func tearDown() {
+        for suiteName in defaultsSuiteNames {
+            UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        }
+        defaultsSuiteNames.removeAll()
+        super.tearDown()
+    }
+
     func testLibraryPlaybackLoadsThenPlaysAndProjectsSnapshot() async {
         let coordinator = FakePlaybackCoordinator()
         let model = makeModel(playbackCoordinator: coordinator)
@@ -76,6 +86,7 @@ final class AppModelPlaybackTests: XCTestCase {
         let delay = TestRecordingDelay()
         let microphone = AudioDevice(id: 1, uid: "test-mic", name: "Test Mic", manufacturer: "Tests", channelCount: 1)
         let model = AppModel(
+            defaults: makeDefaults(),
             recorder: engine,
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
@@ -130,6 +141,7 @@ final class AppModelPlaybackTests: XCTestCase {
             channelCount: 1
         )
         var model: AppModel? = AppModel(
+            defaults: makeDefaults(),
             recorder: engine,
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
@@ -168,11 +180,20 @@ final class AppModelPlaybackTests: XCTestCase {
 
     private func makeModel(playbackCoordinator: FakePlaybackCoordinator) -> AppModel {
         AppModel(
+            defaults: makeDefaults(),
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
             playbackCoordinator: playbackCoordinator
         )
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suiteName = "AppModelPlaybackTests.\(UUID().uuidString)"
+        defaultsSuiteNames.append(suiteName)
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
     }
 
     private func makeSession(extension fileExtension: String) -> RecordingSession {

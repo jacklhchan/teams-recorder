@@ -18,7 +18,7 @@ final class RecordingEngineStateTests: XCTestCase {
         let (engine, _, source) = coordinatorEngine()
         source.windows = [teamsWindow(id: 1)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
         assertScreenState(engine.meetingScreenCaptureState, identity: source.windows[0].identity, capturing: true)
         _ = await engine.stop()
@@ -64,7 +64,7 @@ final class RecordingEngineStateTests: XCTestCase {
         source.windows = [teamsWindow(id: 11)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
         let session = engine.continuitySnapshot
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
         XCTAssertEqual(source.startCount, 1)
         XCTAssertEqual(coordinator.finishCount, 0)
@@ -78,7 +78,7 @@ final class RecordingEngineStateTests: XCTestCase {
         let (engine, coordinator, source) = coordinatorEngine()
         source.windows = [teamsWindow(id: 12)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
         await engine.setScreenCaptureRequested(false)
         XCTAssertEqual(source.startCount, 1)
@@ -92,12 +92,12 @@ final class RecordingEngineStateTests: XCTestCase {
         let (engine, coordinator, source) = coordinatorEngine()
         source.windows = [teamsWindow(id: 21)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
         let before = engine.continuitySnapshot
         engine.toggleMicMute()
         source.windows = [teamsWindow(id: 22)]
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         XCTAssertEqual(engine.continuitySnapshot.recordingEpoch, before.recordingEpoch)
         XCTAssertTrue(engine.micMuted)
         XCTAssertEqual(source.videoTargets.last!, source.windows[0].identity)
@@ -137,7 +137,7 @@ final class RecordingEngineStateTests: XCTestCase {
         let (engine, coordinator, source) = coordinatorEngine()
         source.windows = [teamsWindow(id: 31)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
         coordinator.emitCurrent(.sourceStalled)
         await settle()
@@ -150,7 +150,7 @@ final class RecordingEngineStateTests: XCTestCase {
         let (engine, coordinator, source) = coordinatorEngine()
         source.windows = [teamsWindow(id: 32)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
         coordinator.emitCurrent(.sourceStalled)
         coordinator.emitCurrent(.sourceRecovered)
@@ -246,7 +246,7 @@ final class RecordingEngineStateTests: XCTestCase {
         }, mixerBlockFrames: 4)
         source.windows = [teamsWindow(id: 71)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         source.pauseVideoTargetUpdates = true
         async let enable: Void = engine.setScreenCaptureRequested(true)
         await waitUntil { source.videoTargets.count == 1 }
@@ -271,7 +271,7 @@ final class RecordingEngineStateTests: XCTestCase {
         }, mixerBlockFrames: 4)
         source.windows = [teamsWindow(id: 72)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
         source.pauseVideoTargetUpdates = true
         async let disable: Void = engine.setScreenCaptureRequested(false)
@@ -289,11 +289,15 @@ final class RecordingEngineStateTests: XCTestCase {
         let (engine, coordinator, source) = coordinatorEngine()
         source.windows = [teamsWindow(id: 73)]
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
-        await engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
         source.pauseVideoTargetUpdates = true
         source.windows = [teamsWindow(id: 74)]
-        async let refresh: Void = engine.refreshTeamsWindows(meetingActive: true, manualOverride: nil)
+        async let refresh: Void = engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
         await waitUntil { source.videoTargets.count == 2 }
         async let disable: Void = engine.setScreenCaptureRequested(false)
         await waitUntil { source.videoTargets.count == 3 }
@@ -1257,11 +1261,12 @@ final class RecordingEngineStateTests: XCTestCase {
         )
 
         async let first = engine.stop()
-        await Task.yield()
+        await waitUntil { source.stopCount == 1 }
         async let second = engine.stop()
-        await Task.yield()
+        let secondResult = await second
         source.resumeStop()
-        let results = await [first, second]
+        let firstResult = await first
+        let results = [firstResult, secondResult]
 
         XCTAssertEqual(results.compactMap { $0 }.count, 1)
         XCTAssertEqual(source.stopCount, 1)
@@ -1338,13 +1343,15 @@ final class RecordingEngineStateTests: XCTestCase {
 
     private func teamsWindow(id: UInt32) -> TeamsWindowSnapshot {
         TeamsWindowSnapshot(
-            identity: TeamsWindowIdentity(processID: 3016, windowID: id),
+            identity: TeamsWindowIdentity(processID: teamsProcessID, windowID: id),
             title: "Teams meeting \(id)",
             frame: CGRect(x: 0, y: 0, width: 1280, height: 720),
             isOnScreen: true,
             layer: 0
         )
     }
+
+    private var teamsProcessID: pid_t { 3016 }
 
     private func assertScreenState(
         _ state: MeetingScreenCaptureState,

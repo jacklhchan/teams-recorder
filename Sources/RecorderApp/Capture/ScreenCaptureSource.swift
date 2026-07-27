@@ -484,6 +484,18 @@ enum SelectedApplicationFilterPlan {
     }
 }
 
+enum SelectedTeamsScreenTargetPlan {
+    static func accepts(
+        _ target: TeamsWindowIdentity?,
+        selected: CaptureApplication
+    ) -> Bool {
+        guard selected.bundleIdentifier == ScreenCaptureRoutingPlan.teamsBundleIdentifier else {
+            return false
+        }
+        return target.map { $0.processID == selected.processID } ?? true
+    }
+}
+
 final class CaptureSessionGate {
     private let lock = NSLock()
     private var nextGeneration: UInt64 = 0
@@ -706,7 +718,7 @@ final class ScreenCaptureSource: NSObject {
     ) async throws -> CaptureFilterRevision {
         guard let session = currentSession(),
               let application = session.selectedApplication,
-              application.bundleIdentifier == ScreenCaptureRoutingPlan.teamsBundleIdentifier else {
+              SelectedTeamsScreenTargetPlan.accepts(target, selected: application) else {
             throw CaptureSourceError.selectedApplicationUnavailable
         }
         let intent = CaptureStreamIntent(

@@ -220,6 +220,10 @@ private struct CaptureControlsView: View {
                 }
             }
 
+            if model.showsTeamsScreenCaptureControls {
+                TeamsScreenCaptureControlsView(model: model)
+            }
+
             GridRow {
                 Label("Microphone", systemImage: "mic").font(.headline)
                 Picker("Microphone", selection: Binding(

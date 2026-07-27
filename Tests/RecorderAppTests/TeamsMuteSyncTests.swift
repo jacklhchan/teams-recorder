@@ -303,11 +303,29 @@ final class MicrophoneMuteCoordinatorTests: XCTestCase {
 
 @MainActor
 final class AppModelTeamsMuteSyncTests: XCTestCase {
+    private var enabledDefaults: UserDefaults!
+    private var enabledDefaultsSuiteName: String!
+
+    override func setUp() {
+        super.setUp()
+        enabledDefaultsSuiteName = "AppModelTeamsMuteSyncTests.enabled.\(UUID().uuidString)"
+        enabledDefaults = UserDefaults(suiteName: enabledDefaultsSuiteName)!
+        enabledDefaults.set(true, forKey: "teamsMuteSyncEnabled")
+    }
+
+    override func tearDown() {
+        enabledDefaults.removePersistentDomain(forName: enabledDefaultsSuiteName)
+        enabledDefaults = nil
+        enabledDefaultsSuiteName = nil
+        super.tearDown()
+    }
+
     func testTeamsMuteUpdateGatesRecordingAndVirtualMicOnce() async {
         let publisher = TeamsMuteSyncFakePublisher()
         let recorder = RecordingEngine(virtualMicPublisher: publisher)
         let client = TeamsMuteSyncFakeClient()
         let model = AppModel(
+            defaults: enabledDefaults,
             recorder: recorder,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
@@ -348,6 +366,7 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
         let recorder = RecordingEngine(virtualMicPublisher: publisher)
         let client = TeamsMuteSyncFakeClient()
         let model = AppModel(
+            defaults: enabledDefaults,
             recorder: recorder,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
@@ -386,6 +405,7 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
     func testTeamsStatusIsVisibleWithoutReplacingMainStatus() async {
         let client = TeamsMuteSyncFakeClient()
         let model = AppModel(
+            defaults: enabledDefaults,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
@@ -406,6 +426,7 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
         let recorder = RecordingEngine(virtualMicPublisher: publisher)
         let client = TeamsMuteSyncFakeClient()
         let model = AppModel(
+            defaults: enabledDefaults,
             recorder: recorder,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
@@ -441,6 +462,7 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
         let client = TeamsMuteSyncFakeClient()
         var controller: TeamsMuteSyncFakeInputController!
         let model = AppModel(
+            defaults: enabledDefaults,
             recorder: recorder,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
@@ -477,6 +499,7 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
         let recorder = RecordingEngine(virtualMicPublisher: publisher)
         let client = TeamsMuteSyncFakeClient()
         let model = AppModel(
+            defaults: enabledDefaults,
             recorder: recorder,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
@@ -548,6 +571,7 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
     func testAppModelTeardownStopsTeamsSyncClient() {
         let client = TeamsMuteSyncFakeClient()
         var model: AppModel? = AppModel(
+            defaults: enabledDefaults,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
@@ -565,6 +589,7 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
         let recorder = RecordingEngine(virtualMicPublisher: publisher)
         let client = TeamsMuteSyncFakeClient()
         var model: AppModel? = AppModel(
+            defaults: enabledDefaults,
             recorder: recorder,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
@@ -588,6 +613,46 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
 
         XCTAssertFalse(recorder.micMuted)
         XCTAssertTrue(publisher.muteCalls.isEmpty)
+    }
+
+    func testTeamsMeetingEventIsForwardedToWindowResolver() async {
+        let teams = CaptureApplication(processID: 42, bundleIdentifier: "com.microsoft.teams2", name: "Microsoft Teams")
+        let source = TeamsResolverCaptureSource(applications: [teams], windows: [
+            TeamsWindowSnapshot(identity: .init(processID: 42, windowID: 7), title: "Call", frame: CGRect(x: 0, y: 0, width: 1280, height: 720), isOnScreen: true, layer: 0)
+        ])
+        let client = TeamsMuteSyncFakeClient()
+        let recorder = RecordingEngine(captureSource: source)
+        let suiteName = "AppModelTeamsMuteSyncTests.forward.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(
+            defaults: defaults, recorder: recorder, inputDevices: { [] }, defaultInputDeviceID: { nil },
+            performStartupWork: false, teamsMuteSyncClient: client
+        )
+        model.captureSelection = .init(mode: .selectedApplication, selectedBundleIdentifier: teams.bundleIdentifier)
+        model.resolvedCaptureSelection = .application(teams)
+        await model.refreshTeamsScreenCaptureNow()
+        await settle()
+        model.installTeamsMuteSync()
+
+        client.emit(.status(.ready))
+        await settle()
+        XCTAssertEqual(model.teamsScreenStatusText, TeamsScreenStatusText.waiting)
+
+        client.emit(.meetingState(.init(isInMeeting: true, isMuted: true, canToggleMute: true, canPair: false)))
+        for _ in 0..<20 where model.teamsScreenStatusText != TeamsScreenStatusText.ready { await Task.yield() }
+        XCTAssertEqual(model.teamsScreenStatusText, TeamsScreenStatusText.ready)
+        XCTAssertTrue(model.teamsMicMuted)
+
+        model.setTeamsMuteSyncEnabled(false)
+        for _ in 0..<20 where model.teamsScreenStatusText != TeamsScreenStatusText.waiting { await Task.yield() }
+        XCTAssertEqual(model.teamsScreenStatusText, TeamsScreenStatusText.waiting)
+        XCTAssertFalse(model.teamsMicMuted)
+        client.emitStale(.meetingState(.init(isInMeeting: true, isMuted: true, canToggleMute: true, canPair: false)))
+        await settle()
+        XCTAssertEqual(model.teamsScreenStatusText, TeamsScreenStatusText.waiting)
+        XCTAssertFalse(model.teamsMicMuted)
     }
 
     private func settle() async {
@@ -622,6 +687,24 @@ private final class TeamsMuteSyncFakeClient: TeamsMuteSyncing {
     func emitStale(_ event: TeamsMuteSyncEvent) {
         staleOnEvent?(event)
     }
+}
+
+private final class TeamsResolverCaptureSource: CaptureSourceProtocol {
+    let screenVideoFormat = ScreenVideoFormat(width: 1280, height: 720, pixelFormat: 0)
+    let applications: [CaptureApplication]
+    let windows: [TeamsWindowSnapshot]
+
+    init(applications: [CaptureApplication], windows: [TeamsWindowSnapshot]) {
+        self.applications = applications
+        self.windows = windows
+    }
+
+    func refreshContent() async throws -> [CaptureApplication] { applications }
+    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] { windows }
+    func reconnect(selection _: ResolvedCaptureSelection) async throws {}
+    func updateVideoTarget(_: TeamsWindowIdentity?) async throws -> CaptureFilterRevision { .init(sessionGeneration: 0, revision: 0) }
+    func start(selection _: ResolvedCaptureSelection, microphoneUID _: String?, onAudio _: @escaping (AudioFrameBlock) -> Void, onVideo _: @escaping (ScreenVideoFrame) -> Void, onEvent _: @escaping (CaptureEvent) -> Void) async throws {}
+    func stop() async {}
 }
 
 private final class TeamsMuteSyncFakeInputController: InputMuteControlling {

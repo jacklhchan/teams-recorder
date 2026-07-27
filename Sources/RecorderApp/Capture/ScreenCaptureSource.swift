@@ -496,6 +496,19 @@ enum SelectedTeamsScreenTargetPlan {
     }
 }
 
+enum TeamsWindowFilterMatchPlan {
+    static func accepts(
+        _ identity: TeamsWindowIdentity,
+        windowID: CGWindowID,
+        ownerProcessID: pid_t?,
+        ownerBundleIdentifier: String?
+    ) -> Bool {
+        windowID == identity.windowID &&
+            ownerProcessID == identity.processID &&
+            ownerBundleIdentifier == ScreenCaptureRoutingPlan.teamsBundleIdentifier
+    }
+}
+
 final class CaptureSessionGate {
     private let lock = NSLock()
     private var nextGeneration: UInt64 = 0
@@ -598,8 +611,8 @@ final class ScreenCaptureSource: NSObject {
         var eventState = CaptureSessionEventState()
         var livenessTask: Task<Void, Never>?
         var screenTargetLivenessTask: Task<Void, Never>?
-        var filterCoordinator = CaptureFilterCoordinator()
-        var routingState = ScreenCaptureRoutingState()
+        var filterCoordinator: CaptureFilterCoordinator
+        var routingState: ScreenCaptureRoutingState
         var committedFilterRevision: CaptureFilterRevision?
         var committedFilterIntent: CaptureStreamIntent?
         var committedScreenTarget: TeamsWindowIdentity?
@@ -633,6 +646,16 @@ final class ScreenCaptureSource: NSObject {
                 SelectedApplicationSessionState.init(application:)
             )
             self.selectedMicrophoneUID = selectedMicrophoneUID
+            let initialIntent = selectedApplication.map {
+                CaptureStreamIntent(filter: .application($0), cadence: .idle)
+            }
+            let initialRevision = initialIntent.map { _ in
+                CaptureFilterCoordinator.startupRevision
+            }
+            self.filterCoordinator = CaptureFilterCoordinator(initialIntent: initialIntent)
+            self.routingState = ScreenCaptureRoutingState(initialRevision: initialRevision)
+            self.committedFilterRevision = initialRevision
+            self.committedFilterIntent = initialIntent
         }
     }
 
@@ -1015,9 +1038,8 @@ final class ScreenCaptureSource: NSObject {
             let routingPlan = ScreenCaptureRoutingPlan(
                 application: Self.selectedApplication(in: selection)
             )
-            var attempts = ScreenCaptureStartupAttemptSequence()
-            var lastError: Error?
-            while let pixelFormat = attempts.next() {
+            var pixelFormat = ScreenCaptureStartupPixelFormat.nv12
+            while !didInstallSession {
                 guard isStartReservationCurrent(reservation) else {
                     throw CaptureSourceError.streamStartCancelled
                 }
@@ -1054,32 +1076,37 @@ final class ScreenCaptureSource: NSObject {
                 pendingSession = session
                 do {
                     try addOutputs(for: session)
-                    try await stream.startCapture()
-                    guard install(reservation: reservation, session: session) else {
-                        await discardPendingSession(session)
-                        pendingSession = nil
-                        throw CaptureSourceError.streamStartCancelled
-                    }
-                    didInstallSession = true
-                    guard isSessionActive(session) else {
-                        await stop(expected: session)
-                        throw CaptureSourceError.streamStartCancelled
-                    }
-                    startSelectedApplicationLiveness(for: session)
-                    break
-                } catch let error as CaptureSourceError {
-                    if error == .streamStartCancelled { throw error }
-                    lastError = error
-                    await discardPendingSession(session)
-                    pendingSession = nil
                 } catch {
-                    lastError = error
                     await discardPendingSession(session)
                     pendingSession = nil
+                    throw error
                 }
-            }
-            if !didInstallSession {
-                throw lastError ?? CaptureSourceError.streamFailure
+                do {
+                    try await stream.startCapture()
+                } catch {
+                    await discardPendingSession(session)
+                    pendingSession = nil
+                    if let fallback = ScreenCaptureStartupRetryPolicy.fallback(
+                        after: error as NSError,
+                        stage: .streamStart,
+                        attemptedPixelFormat: pixelFormat
+                    ) {
+                        pixelFormat = fallback
+                        continue
+                    }
+                    throw error
+                }
+                guard install(reservation: reservation, session: session) else {
+                    await discardPendingSession(session)
+                    pendingSession = nil
+                    throw CaptureSourceError.streamStartCancelled
+                }
+                didInstallSession = true
+                guard isSessionActive(session) else {
+                    await stop(expected: session)
+                    throw CaptureSourceError.streamStartCancelled
+                }
+                startSelectedApplicationLiveness(for: session)
             }
         } catch {
             if didInstallSession, let pendingSession {
@@ -1257,8 +1284,12 @@ final class ScreenCaptureSource: NSObject {
             )
         case let .teamsWindow(identity):
             guard let window = content.windows.first(where: {
-                $0.windowID == identity.windowID &&
-                    $0.owningApplication?.processID == identity.processID
+                TeamsWindowFilterMatchPlan.accepts(
+                    identity,
+                    windowID: $0.windowID,
+                    ownerProcessID: $0.owningApplication?.processID,
+                    ownerBundleIdentifier: $0.owningApplication?.bundleIdentifier
+                )
             }) else {
                 throw CaptureSourceError.selectedApplicationUnavailable
             }

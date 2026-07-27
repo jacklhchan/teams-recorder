@@ -1,4 +1,5 @@
 import CoreVideo
+import ScreenCaptureKit
 import XCTest
 @testable import RecorderApp
 
@@ -29,6 +30,35 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
         XCTAssertFalse(SelectedTeamsScreenTargetPlan.accepts(nil, selected: nonTeams))
     }
 
+    func testTeamsWindowFilterRequiresWindowProcessAndBundleIdentity() {
+        let identity = TeamsWindowIdentity(processID: teams.processID, windowID: 9)
+
+        XCTAssertTrue(TeamsWindowFilterMatchPlan.accepts(
+            identity,
+            windowID: identity.windowID,
+            ownerProcessID: identity.processID,
+            ownerBundleIdentifier: teams.bundleIdentifier
+        ))
+        XCTAssertFalse(TeamsWindowFilterMatchPlan.accepts(
+            identity,
+            windowID: identity.windowID,
+            ownerProcessID: identity.processID,
+            ownerBundleIdentifier: "com.example.not-teams"
+        ))
+        XCTAssertFalse(TeamsWindowFilterMatchPlan.accepts(
+            identity,
+            windowID: 10,
+            ownerProcessID: identity.processID,
+            ownerBundleIdentifier: teams.bundleIdentifier
+        ))
+        XCTAssertFalse(TeamsWindowFilterMatchPlan.accepts(
+            identity,
+            windowID: identity.windowID,
+            ownerProcessID: 84,
+            ownerBundleIdentifier: teams.bundleIdentifier
+        ))
+    }
+
     func testProductionScreenConfigurationIsFixedStorageProfile() {
         let source = ScreenCaptureSource()
 
@@ -49,12 +79,95 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
         XCTAssertEqual(state.activePixelFormat, .bgra)
     }
 
-    func testNV12IsPreferredAndBGRAIsTheOnlyFallback() {
-        var attempts = ScreenCaptureStartupAttemptSequence()
+    func testNV12FallsBackToBGRAOnlyForExplicitStartCapturePixelFormatFailure() {
+        let invalidPixelFormat = NSError(
+            domain: NSOSStatusErrorDomain,
+            code: Int(kCVReturnInvalidPixelFormat)
+        )
 
-        XCTAssertEqual(attempts.next(), .nv12)
-        XCTAssertEqual(attempts.next(), .bgra)
-        XCTAssertNil(attempts.next())
+        XCTAssertEqual(
+            ScreenCaptureStartupRetryPolicy.fallback(
+                after: invalidPixelFormat,
+                stage: .streamStart,
+                attemptedPixelFormat: .nv12
+            ),
+            .bgra
+        )
+        XCTAssertNil(ScreenCaptureStartupRetryPolicy.fallback(
+            after: invalidPixelFormat,
+            stage: .outputRegistration,
+            attemptedPixelFormat: .nv12
+        ))
+        XCTAssertNil(ScreenCaptureStartupRetryPolicy.fallback(
+            after: NSError(
+                domain: SCStreamErrorDomain,
+                code: SCStreamError.Code.failedToStart.rawValue
+            ),
+            stage: .streamStart,
+            attemptedPixelFormat: .nv12
+        ))
+        XCTAssertNil(ScreenCaptureStartupRetryPolicy.fallback(
+            after: invalidPixelFormat,
+            stage: .streamStart,
+            attemptedPixelFormat: .bgra
+        ))
+    }
+
+    func testStartupRetryFindsExplicitPixelFormatFailureInUnderlyingError() {
+        let invalidPixelFormat = NSError(
+            domain: NSOSStatusErrorDomain,
+            code: Int(kCVReturnInvalidPixelFormat)
+        )
+        let wrapped = NSError(
+            domain: SCStreamErrorDomain,
+            code: SCStreamError.Code.failedToStart.rawValue,
+            userInfo: [NSUnderlyingErrorKey: invalidPixelFormat]
+        )
+
+        XCTAssertEqual(
+            ScreenCaptureStartupRetryPolicy.fallback(
+                after: wrapped,
+                stage: .streamStart,
+                attemptedPixelFormat: .nv12
+            ),
+            .bgra
+        )
+    }
+
+    func testStartupRetryNeverMasksPermissionFailure() {
+        let invalidPixelFormat = NSError(
+            domain: NSOSStatusErrorDomain,
+            code: Int(kCVReturnInvalidPixelFormat)
+        )
+        let permissionFailure = NSError(
+            domain: SCStreamErrorDomain,
+            code: SCStreamError.Code.userDeclined.rawValue,
+            userInfo: [NSUnderlyingErrorKey: invalidPixelFormat]
+        )
+
+        XCTAssertNil(ScreenCaptureStartupRetryPolicy.fallback(
+            after: permissionFailure,
+            stage: .streamStart,
+            attemptedPixelFormat: .nv12
+        ))
+    }
+
+    func testStartupRetryRejectsGenericOuterWrapper() {
+        let invalidPixelFormat = NSError(
+            domain: NSOSStatusErrorDomain,
+            code: Int(kCVReturnInvalidPixelFormat)
+        )
+        let genericWrapper = NSError(
+            domain: "com.example.capture",
+            code: 1,
+            userInfo: [NSUnderlyingErrorKey: invalidPixelFormat]
+        )
+
+        XCTAssertNil(ScreenCaptureStartupRetryPolicy.fallback(
+            after: genericWrapper,
+            stage: .streamStart,
+            attemptedPixelFormat: .nv12
+        ))
     }
 
     func testVideoUsesAQueueSeparateFromAudioDelivery() {
@@ -94,6 +207,21 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
         XCTAssertNil(state.videoRevision)
         state.restoreAfterVideoBarrier()
         XCTAssertEqual(state.videoRevision, old)
+    }
+
+    func testFirstFailedTransitionReopensStartupApplicationRevision() {
+        var state = ScreenCaptureRoutingState(
+            initialRevision: CaptureFilterCoordinator.startupRevision
+        )
+
+        state.beginTransition()
+        XCTAssertNil(state.videoRevision)
+        state.restoreAfterVideoBarrier()
+
+        XCTAssertEqual(
+            state.videoRevision,
+            CaptureFilterCoordinator.startupRevision
+        )
     }
 
     func testFilterAndFrameCadenceCommitAsOneRevision() {

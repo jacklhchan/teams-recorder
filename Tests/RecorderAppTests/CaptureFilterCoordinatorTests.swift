@@ -32,6 +32,26 @@ final class CaptureFilterCoordinatorTests: XCTestCase {
         XCTAssertNil(coordinator.complete(fallback!, result: .success(())))
     }
 
+    func testStartupApplicationBaselineSurvivesFirstWindowUpdateFailure() throws {
+        let application = CaptureStreamIntent(filter: .application(teams), cadence: .idle)
+        let window = intent(windowID: 7)
+        var coordinator = CaptureFilterCoordinator(initialIntent: application)
+
+        XCTAssertTrue(coordinator.isCommittedAndIdle(application))
+        XCTAssertNil(coordinator.request(application))
+
+        let update = try XCTUnwrap(
+            coordinator.requestFallback(
+                window,
+                matching: CaptureFilterCoordinator.startupRevision
+            )
+        )
+        XCTAssertNil(coordinator.complete(update, result: .failure(.streamFailure)))
+
+        XCTAssertTrue(coordinator.isCommittedAndIdle(application))
+        XCTAssertNil(coordinator.request(application))
+    }
+
     func testNewestRequestWinsOverStaleCompletion() {
         var coordinator = CaptureFilterCoordinator()
         let first = coordinator.request(intent(windowID: 1))!

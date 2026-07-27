@@ -1,5 +1,7 @@
 import CoreGraphics
+import CoreVideo
 import Foundation
+import ScreenCaptureKit
 
 struct CaptureFilterRevision: Hashable, Sendable {
     let sessionGeneration: UInt64
@@ -62,6 +64,10 @@ struct ScreenCaptureRoutingState: Equatable, Sendable {
     private var transitionInFlight = false
     private(set) var activePixelFormat: ScreenCaptureStartupPixelFormat = .nv12
 
+    init(initialRevision: CaptureFilterRevision? = nil) {
+        committedRevision = initialRevision
+    }
+
     var videoRevision: CaptureFilterRevision? {
         transitionInFlight ? nil : committedRevision
     }
@@ -94,11 +100,49 @@ enum ScreenCaptureStartupPixelFormat: Equatable, Sendable {
     case bgra
 }
 
-struct ScreenCaptureStartupAttemptSequence {
-    private var attempts: [ScreenCaptureStartupPixelFormat] = [.nv12, .bgra]
+enum ScreenCaptureStartupFailureStage: Equatable, Sendable {
+    case outputRegistration
+    case streamStart
+}
 
-    mutating func next() -> ScreenCaptureStartupPixelFormat? {
-        attempts.isEmpty ? nil : attempts.removeFirst()
+enum ScreenCaptureStartupRetryPolicy {
+    static func fallback(
+        after error: NSError,
+        stage: ScreenCaptureStartupFailureStage,
+        attemptedPixelFormat: ScreenCaptureStartupPixelFormat
+    ) -> ScreenCaptureStartupPixelFormat? {
+        guard stage == .streamStart,
+              attemptedPixelFormat == .nv12,
+              isEligibleStreamStartError(error),
+              containsInvalidPixelFormat(error) else {
+            return nil
+        }
+        return .bgra
+    }
+
+    private static func isEligibleStreamStartError(_ error: NSError) -> Bool {
+        if error.domain == NSOSStatusErrorDomain {
+            return error.code == Int(kCVReturnInvalidPixelFormat)
+        }
+        guard error.domain == SCStreamErrorDomain else { return false }
+        guard let code = SCStreamError.Code(rawValue: error.code) else { return false }
+        return code == .failedToStart ||
+            code == .internalError ||
+            code == .invalidParameter
+    }
+
+    private static func containsInvalidPixelFormat(_ error: NSError) -> Bool {
+        var current: NSError? = error
+        var visited = Set<ObjectIdentifier>()
+        while let candidate = current,
+              visited.insert(ObjectIdentifier(candidate)).inserted {
+            if candidate.domain == NSOSStatusErrorDomain,
+               candidate.code == Int(kCVReturnInvalidPixelFormat) {
+                return true
+            }
+            current = candidate.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
     }
 }
 
@@ -198,6 +242,11 @@ struct CaptureFilterWaiterRegistry {
 
 /// Serializes content-filter and frame-cadence transactions for one SCStream.
 struct CaptureFilterCoordinator {
+    static let startupRevision = CaptureFilterRevision(
+        sessionGeneration: 1,
+        revision: 0
+    )
+
     private var generation: UInt64 = 1
     private var nextRevision: UInt64 = 0
     private var committed: CaptureStreamIntent?
@@ -206,6 +255,12 @@ struct CaptureFilterCoordinator {
     private var inFlight: CaptureFilterUpdate?
     private var terminalFailure: CaptureStreamIntent?
     private var isStopped = false
+
+    init(initialIntent: CaptureStreamIntent? = nil) {
+        committed = initialIntent
+        committedRevision = initialIntent == nil ? nil : Self.startupRevision
+        desired = initialIntent
+    }
 
     mutating func request(_ intent: CaptureStreamIntent) -> CaptureFilterUpdate? {
         guard !isStopped else { return nil }

@@ -71,7 +71,8 @@ struct RecordingTimeline {
 
         let referenceFrame = max(currentAudioEndFrame, lastAcceptedVideoFrame ?? 0)
         let (maximumAllowedFrame, leadOverflow) = referenceFrame.addingReportingOverflow(Self.maximumVideoLeadFrames)
-        guard !leadOverflow, presentationFrame <= maximumAllowedFrame else {
+        let videoLeadLimit = leadOverflow ? Int64.max : maximumAllowedFrame
+        guard presentationFrame <= videoLeadLimit else {
             farFutureVideoCount += 1
             return .dropFarFuture
         }
@@ -91,7 +92,18 @@ struct RecordingTimeline {
         guard presentationTime.isValid, presentationTime.isNumeric, presentationTime >= .zero else {
             return nil
         }
-        return SampleBufferConverter.startFrame(for: presentationTime)
+        let converted = CMTimeConvertScale(
+            presentationTime,
+            timescale: Self.timescale,
+            method: .roundTowardZero
+        )
+        guard converted.isValid,
+              converted.isNumeric,
+              converted.timescale == Self.timescale,
+              converted >= .zero else {
+            return nil
+        }
+        return converted.value
     }
 
     private func time(for frame: Int64) -> CMTime {

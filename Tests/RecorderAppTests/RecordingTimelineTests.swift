@@ -119,13 +119,22 @@ final class RecordingTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.farFutureVideoCount, 1)
     }
 
-    func testOverflowingVideoLeadLimitDropsSafely() {
+    func testOverflowingVideoLeadLimitSaturatesAndAcceptsRepresentablePTS() {
         var timeline = RecordingTimeline()
         timeline.establishVideoAnchor(at: .zero)
-        _ = timeline.mapAudio(block(Int64.max, count: 1))
+        _ = timeline.mapAudio(block(Int64.max - 100, count: 1))
 
-        XCTAssertEqual(timeline.mapVideo(time(Int64.max)), .dropFarFuture)
-        XCTAssertEqual(timeline.farFutureVideoCount, 1)
+        XCTAssertEqual(timeline.currentAudioEndTime, time(Int64.max - 99))
+        XCTAssertEqual(timeline.mapVideo(time(Int64.max - 1)), .append(time(Int64.max - 1)))
+        XCTAssertEqual(timeline.farFutureVideoCount, 0)
+    }
+
+    func testExtremeNon48kVideoConversionDoesNotAppendInvalidPTS() {
+        var timeline = RecordingTimeline()
+        _ = timeline.mapAudio(block(0, count: 1))
+        let extreme = CMTime(value: Int64.max, timescale: 1)
+
+        XCTAssertEqual(timeline.mapVideo(extreme), .pending)
     }
 
     private func block(_ startFrame: Int64, count: Int) -> MixedAudioBlock {

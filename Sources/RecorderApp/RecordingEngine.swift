@@ -1,12 +1,16 @@
 import Foundation
 
 protocol CaptureSourceProtocol: AnyObject {
+    var screenVideoFormat: ScreenVideoFormat { get }
     func refreshContent() async throws -> [CaptureApplication]
+    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot]
     func reconnect(selection: ResolvedCaptureSelection) async throws
+    func updateVideoTarget(_ target: TeamsWindowIdentity?) async throws -> CaptureFilterRevision
     func start(
         selection: ResolvedCaptureSelection,
         microphoneUID: String?,
         onAudio: @escaping (AudioFrameBlock) -> Void,
+        onVideo: @escaping (ScreenVideoFrame) -> Void,
         onEvent: @escaping (CaptureEvent) -> Void
     ) async throws
     func stop() async
@@ -188,6 +192,7 @@ final class RecordingEngine: ObservableObject {
                         self?.receive(block, ticket: ticket)
                     }
                 },
+                onVideo: { _ in },
                 onEvent: { [weak self, callbackGate] event in
                     guard let ticket = callbackGate.begin(sessionID: sessionID) else { return }
                     Task { @MainActor [weak self, callbackGate] in
@@ -513,6 +518,8 @@ final class RecordingEngine: ObservableObject {
             }
             terminateSourceSession(sessionID: ticket.sourceSessionID)
         case .microphoneSilence:
+            break
+        case .screenTargetLost, .screenCaptureFailed:
             break
         }
     }

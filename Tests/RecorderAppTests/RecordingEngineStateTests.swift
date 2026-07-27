@@ -914,6 +914,7 @@ final class RecordingEngineStateTests: XCTestCase {
 }
 
 private final class FakeCaptureSource: CaptureSourceProtocol {
+    let screenVideoFormat = ScreenVideoFormat(width: 1_600, height: 900, pixelFormat: 0)
     private let streamIdentity = UUID()
     private var onAudio: ((AudioFrameBlock) -> Void)?
     private var onEvent: ((CaptureEvent) -> Void)?
@@ -941,6 +942,12 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
 
     func refreshContent() async throws -> [CaptureApplication] { [] }
 
+    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] { [] }
+
+    func updateVideoTarget(_ target: TeamsWindowIdentity?) async throws -> CaptureFilterRevision {
+        CaptureFilterRevision(sessionGeneration: 1, revision: 1)
+    }
+
     func reconnect(selection: ResolvedCaptureSelection) async throws {
         reconnectCount += 1
         if pauseReconnect {
@@ -958,6 +965,7 @@ private final class FakeCaptureSource: CaptureSourceProtocol {
         selection: ResolvedCaptureSelection,
         microphoneUID: String?,
         onAudio: @escaping (AudioFrameBlock) -> Void,
+        onVideo: @escaping (ScreenVideoFrame) -> Void,
         onEvent: @escaping (CaptureEvent) -> Void
     ) async throws {
         startCount += 1

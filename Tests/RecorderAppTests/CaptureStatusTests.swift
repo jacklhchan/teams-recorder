@@ -416,6 +416,17 @@ final class CaptureStatusTests: XCTestCase {
         )
     }
 
+    func testScreenTargetLossMapsToScreenOnlyWarning() {
+        XCTAssertEqual(
+            CaptureStatusMapper.status(for: .screenTargetLost),
+            .warning("Teams screen target was closed")
+        )
+        XCTAssertEqual(
+            CaptureStatusMapper.status(for: .screenCaptureFailed),
+            .warning("Screen frame capture unavailable")
+        )
+    }
+
     func testAudioDeviceCarriesStableUID() {
         let device = AudioDevice(
             id: 1,
@@ -527,10 +538,17 @@ final class CaptureStatusTests: XCTestCase {
 }
 
 private final class PausedStopCaptureSource: CaptureSourceProtocol {
+    let screenVideoFormat = ScreenVideoFormat(width: 1_600, height: 900, pixelFormat: 0)
     private(set) var stopCount = 0
     private var stopContinuation: CheckedContinuation<Void, Never>?
 
     func refreshContent() async throws -> [CaptureApplication] { [] }
+
+    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] { [] }
+
+    func updateVideoTarget(_ target: TeamsWindowIdentity?) async throws -> CaptureFilterRevision {
+        CaptureFilterRevision(sessionGeneration: 1, revision: 1)
+    }
 
     func reconnect(selection: ResolvedCaptureSelection) async throws {}
 
@@ -538,6 +556,7 @@ private final class PausedStopCaptureSource: CaptureSourceProtocol {
         selection: ResolvedCaptureSelection,
         microphoneUID: String?,
         onAudio: @escaping (AudioFrameBlock) -> Void,
+        onVideo: @escaping (ScreenVideoFrame) -> Void,
         onEvent: @escaping (CaptureEvent) -> Void
     ) async throws {}
 

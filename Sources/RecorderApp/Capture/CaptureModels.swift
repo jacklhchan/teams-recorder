@@ -5,7 +5,7 @@ enum CaptureMode: String, Codable, CaseIterable {
     case selectedApplication
 }
 
-struct CaptureApplication: Identifiable, Codable, Hashable {
+struct CaptureApplication: Identifiable, Codable, Hashable, Sendable {
     let processID: pid_t
     let bundleIdentifier: String
     let name: String

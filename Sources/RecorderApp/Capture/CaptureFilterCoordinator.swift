@@ -42,8 +42,10 @@ struct ScreenCaptureRoutingPlan: Equatable, Sendable {
 
     let outputs: [ScreenCaptureOutputKind]
 
-    init(isSelectedApplication: Bool) {
-        outputs = isSelectedApplication
+    static let teamsBundleIdentifier = "com.microsoft.teams2"
+
+    init(application: CaptureApplication?) {
+        outputs = application?.bundleIdentifier == Self.teamsBundleIdentifier
             ? [.audio, .microphone, .screen]
             : [.audio, .microphone]
     }
@@ -53,6 +55,38 @@ struct ScreenCaptureRoutingPlan: Equatable, Sendable {
     var videoQueueLabel: String { Self.videoQueueLabel }
     var outputsToRemoveOnStop: [ScreenCaptureOutputKind] { outputs }
     var drainsVideoBeforeRemovingOutputs: Bool { acceptsScreenFrames }
+}
+
+struct ScreenCaptureRoutingState: Equatable, Sendable {
+    private var committedRevision: CaptureFilterRevision?
+    private var transitionInFlight = false
+    private(set) var activePixelFormat: ScreenCaptureStartupPixelFormat = .nv12
+
+    var videoRevision: CaptureFilterRevision? {
+        transitionInFlight ? nil : committedRevision
+    }
+
+    mutating func adoptStartupFormat(_ format: ScreenCaptureStartupPixelFormat) {
+        activePixelFormat = format
+    }
+
+    mutating func publish(_ revision: CaptureFilterRevision) {
+        committedRevision = revision
+        transitionInFlight = false
+    }
+
+    mutating func beginTransition() {
+        transitionInFlight = true
+    }
+
+    mutating func publishAfterVideoBarrier(_ revision: CaptureFilterRevision) {
+        committedRevision = revision
+        transitionInFlight = false
+    }
+
+    mutating func restoreAfterVideoBarrier() {
+        transitionInFlight = false
+    }
 }
 
 enum ScreenCaptureStartupPixelFormat: Equatable, Sendable {

@@ -4,13 +4,13 @@ import XCTest
 
 final class ScreenCaptureVideoRoutingTests: XCTestCase {
     func testTeamsStreamRegistersAudioMicrophoneAndScreenOutputs() {
-        let plan = ScreenCaptureRoutingPlan(isSelectedApplication: true)
+        let plan = ScreenCaptureRoutingPlan(application: teams)
 
         XCTAssertEqual(plan.outputs, [.audio, .microphone, .screen])
     }
 
     func testNonTeamsStreamDoesNotDeliverRealScreenFrames() {
-        let plan = ScreenCaptureRoutingPlan(isSelectedApplication: false)
+        let plan = ScreenCaptureRoutingPlan(application: nonTeams)
 
         XCTAssertEqual(plan.outputs, [.audio, .microphone])
         XCTAssertFalse(plan.acceptsScreenFrames)
@@ -26,6 +26,15 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
         )
     }
 
+    func testActiveStartupFallbackFormatOverridesPreferredFormatOnlyForActiveSession() {
+        var state = ScreenCaptureRoutingState()
+        XCTAssertEqual(state.activePixelFormat, .nv12)
+
+        state.adoptStartupFormat(.bgra)
+
+        XCTAssertEqual(state.activePixelFormat, .bgra)
+    }
+
     func testNV12IsPreferredAndBGRAIsTheOnlyFallback() {
         var attempts = ScreenCaptureStartupAttemptSequence()
 
@@ -35,7 +44,7 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
     }
 
     func testVideoUsesAQueueSeparateFromAudioDelivery() {
-        let plan = ScreenCaptureRoutingPlan(isSelectedApplication: true)
+        let plan = ScreenCaptureRoutingPlan(application: teams)
 
         XCTAssertNotEqual(plan.audioQueueLabel, plan.videoQueueLabel)
     }
@@ -48,6 +57,29 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
         XCTAssertNil(gate.commitIfBarrierFinished())
         gate.finishVideoBarrier()
         XCTAssertEqual(gate.commitIfBarrierFinished(), revision)
+    }
+
+    func testTransitionBlocksNewFilterFramesUntilBarrierCommit() {
+        var state = ScreenCaptureRoutingState()
+        let old = CaptureFilterRevision(sessionGeneration: 1, revision: 1)
+        let new = CaptureFilterRevision(sessionGeneration: 1, revision: 2)
+        state.publish(old)
+        state.beginTransition()
+
+        XCTAssertNil(state.videoRevision)
+        state.publishAfterVideoBarrier(new)
+        XCTAssertEqual(state.videoRevision, new)
+    }
+
+    func testFailedTransitionReopensOnlyPriorCommittedRevisionAfterRestoreBarrier() {
+        var state = ScreenCaptureRoutingState()
+        let old = CaptureFilterRevision(sessionGeneration: 1, revision: 1)
+        state.publish(old)
+        state.beginTransition()
+
+        XCTAssertNil(state.videoRevision)
+        state.restoreAfterVideoBarrier()
+        XCTAssertEqual(state.videoRevision, old)
     }
 
     func testFilterAndFrameCadenceCommitAsOneRevision() {
@@ -93,7 +125,7 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
     }
 
     func testStopDrainsAndRemovesAllThreeOutputs() {
-        let plan = ScreenCaptureRoutingPlan(isSelectedApplication: true)
+        let plan = ScreenCaptureRoutingPlan(application: teams)
 
         XCTAssertEqual(plan.outputsToRemoveOnStop, [.audio, .microphone, .screen])
         XCTAssertTrue(plan.drainsVideoBeforeRemovingOutputs)
@@ -103,5 +135,10 @@ final class ScreenCaptureVideoRoutingTests: XCTestCase {
         processID: 7,
         bundleIdentifier: "com.microsoft.teams2",
         name: "Teams"
+    )
+    private let nonTeams = CaptureApplication(
+        processID: 8,
+        bundleIdentifier: "com.example.player",
+        name: "Player"
     )
 }

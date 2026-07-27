@@ -587,10 +587,11 @@ final class ScreenCaptureSource: NSObject {
         var livenessTask: Task<Void, Never>?
         var screenTargetLivenessTask: Task<Void, Never>?
         var filterCoordinator = CaptureFilterCoordinator()
-        var revisionGate = ScreenCaptureRevisionGate()
+        var routingState = ScreenCaptureRoutingState()
         var committedFilterRevision: CaptureFilterRevision?
         var committedFilterIntent: CaptureStreamIntent?
         var committedScreenTarget: TeamsWindowIdentity?
+        var filterWaiters: [FilterWaiter] = []
 
         init(
             stream: SCStream,
@@ -622,6 +623,19 @@ final class ScreenCaptureSource: NSObject {
         }
     }
 
+    private final class FilterWaiter {
+        let intent: CaptureStreamIntent
+        let continuation: CheckedContinuation<CaptureFilterRevision, Error>
+
+        init(
+            intent: CaptureStreamIntent,
+            continuation: CheckedContinuation<CaptureFilterRevision, Error>
+        ) {
+            self.intent = intent
+            self.continuation = continuation
+        }
+    }
+
     private let stateLock = NSLock()
     private let sessionGate = CaptureSessionGate()
     private let systemAudioQueue = DispatchQueue(
@@ -636,10 +650,13 @@ final class ScreenCaptureSource: NSObject {
     private var lifecycle = CaptureLifecycleCoordinator()
 
     var screenVideoFormat: ScreenVideoFormat {
-        ScreenVideoFormat(
+        stateLock.lock()
+        let pixelFormat = activeSession?.screenPixelFormat
+        stateLock.unlock()
+        return ScreenVideoFormat(
             width: 1_600,
             height: 900,
-            pixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            pixelFormat: pixelFormat ?? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         )
     }
 
@@ -657,7 +674,8 @@ final class ScreenCaptureSource: NSObject {
             onScreenWindowsOnly: false
         )
         return content.windows.compactMap { window in
-            guard let owner = window.owningApplication else { return nil }
+            guard let owner = window.owningApplication,
+                  owner.bundleIdentifier == ScreenCaptureRoutingPlan.teamsBundleIdentifier else { return nil }
             return TeamsWindowSnapshot(
                 identity: TeamsWindowIdentity(processID: owner.processID, windowID: window.windowID),
                 title: window.title ?? "",
@@ -702,7 +720,8 @@ final class ScreenCaptureSource: NSObject {
         _ target: TeamsWindowIdentity?
     ) async throws -> CaptureFilterRevision {
         guard let session = currentSession(),
-              let application = session.selectedApplication else {
+              let application = session.selectedApplication,
+              application.bundleIdentifier == ScreenCaptureRoutingPlan.teamsBundleIdentifier else {
             throw CaptureSourceError.selectedApplicationUnavailable
         }
         let intent = CaptureStreamIntent(
@@ -710,9 +729,7 @@ final class ScreenCaptureSource: NSObject {
             cadence: target == nil ? .idle : .enabled
         )
         guard let update = requestFilterUpdate(session, intent: intent) else {
-            let revision = committedRevision(for: session)
-            guard let revision else { throw CaptureSourceError.streamStartCancelled }
-            return revision
+            return try await waitForFilterCommit(session, intent: intent)
         }
         try await applyFilterUpdate(update, to: session)
         return update.revision
@@ -735,10 +752,33 @@ final class ScreenCaptureSource: NSObject {
         return session.committedFilterRevision
     }
 
+    private func waitForFilterCommit(
+        _ session: ActiveSession,
+        intent: CaptureStreamIntent
+    ) async throws -> CaptureFilterRevision {
+        try await withCheckedThrowingContinuation { continuation in
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            guard activeSession === session, lifecycle.isActive(session.token) else {
+                continuation.resume(throwing: CaptureSourceError.streamStartCancelled)
+                return
+            }
+            if session.committedFilterIntent == intent,
+               let revision = session.committedFilterRevision {
+                continuation.resume(returning: revision)
+                return
+            }
+            session.filterWaiters.append(FilterWaiter(intent: intent, continuation: continuation))
+        }
+    }
+
     private func applyFilterUpdate(
         _ update: CaptureFilterUpdate,
         to session: ActiveSession
     ) async throws {
+        guard beginVideoTransition(session) else {
+            throw CaptureSourceError.streamStartCancelled
+        }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false,
@@ -755,9 +795,8 @@ final class ScreenCaptureSource: NSObject {
             )
             try await session.stream.updateContentFilter(filter)
             try await session.stream.updateConfiguration(configuration)
-            beginVideoRevisionBarrier(session, revision: update.revision)
             session.videoQueue.sync {}
-            guard finishVideoRevisionBarrier(session) == update.revision else {
+            guard finishVideoTransition(session, revision: update.revision) else {
                 throw CaptureSourceError.streamStartCancelled
             }
             let next = completeFilterUpdate(session, update: update, result: .success(()))
@@ -766,8 +805,9 @@ final class ScreenCaptureSource: NSObject {
         } catch {
             let sourceError = error as? CaptureSourceError ?? .streamFailure
             await restoreCommittedFilter(for: session)
-            _ = completeFilterUpdate(session, update: update, result: .failure(sourceError))
+            let next = completeFilterUpdate(session, update: update, result: .failure(sourceError))
             session.output.enqueue(event: .screenCaptureFailed)
+            if let next { try await applyFilterUpdate(next, to: session) }
             throw sourceError
         }
     }
@@ -789,28 +829,35 @@ final class ScreenCaptureSource: NSObject {
             } else {
                 session.committedScreenTarget = nil
             }
+            let waiters = session.filterWaiters
+            session.filterWaiters.removeAll()
+            for waiter in waiters where waiter.intent == update.intent {
+                waiter.continuation.resume(returning: update.revision)
+            }
+            for waiter in waiters where waiter.intent != update.intent {
+                session.filterWaiters.append(waiter)
+            }
         }
         return next
     }
 
-    private func beginVideoRevisionBarrier(
-        _ session: ActiveSession,
-        revision: CaptureFilterRevision
-    ) {
+    private func beginVideoTransition(_ session: ActiveSession) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard activeSession === session, lifecycle.isActive(session.token) else { return }
-        session.revisionGate.begin(revision)
+        guard activeSession === session, lifecycle.isActive(session.token) else { return false }
+        session.routingState.beginTransition()
+        return true
     }
 
-    private func finishVideoRevisionBarrier(
-        _ session: ActiveSession
-    ) -> CaptureFilterRevision? {
+    private func finishVideoTransition(
+        _ session: ActiveSession,
+        revision: CaptureFilterRevision
+    ) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard activeSession === session, lifecycle.isActive(session.token) else { return nil }
-        session.revisionGate.finishVideoBarrier()
-        return session.revisionGate.commitIfBarrierFinished()
+        guard activeSession === session, lifecycle.isActive(session.token) else { return false }
+        session.routingState.publishAfterVideoBarrier(revision)
+        return true
     }
 
     private func restoreCommittedFilter(for session: ActiveSession) async {
@@ -838,6 +885,14 @@ final class ScreenCaptureSource: NSObject {
             )
         )
         session.videoQueue.sync {}
+        restoreVideoRevisionAfterBarrier(for: session)
+    }
+
+    private func restoreVideoRevisionAfterBarrier(for session: ActiveSession) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session, lifecycle.isActive(session.token) else { return }
+        session.routingState.restoreAfterVideoBarrier()
     }
 
     func start(
@@ -877,7 +932,7 @@ final class ScreenCaptureSource: NSObject {
             )
 
             let routingPlan = ScreenCaptureRoutingPlan(
-                isSelectedApplication: Self.selectedApplication(in: selection) != nil
+                application: Self.selectedApplication(in: selection)
             )
             var attempts = ScreenCaptureStartupAttemptSequence()
             var lastError: Error?
@@ -914,6 +969,7 @@ final class ScreenCaptureSource: NSObject {
                     selectedApplication: Self.selectedApplication(in: selection),
                     selectedMicrophoneUID: captureDeviceUID
                 )
+                session.routingState.adoptStartupFormat(pixelFormat)
                 pendingSession = session
                 do {
                     try addOutputs(for: session)
@@ -1332,14 +1388,16 @@ final class ScreenCaptureSource: NSObject {
         for token: CaptureSessionToken
     ) {
         stateLock.lock()
-        defer { stateLock.unlock() }
         guard let session = activeSession,
               session.token == token,
               lifecycle.isActive(token),
-              session.committedFilterRevision == frame.filterRevision else {
+              session.routingState.videoRevision == frame.filterRevision else {
+            stateLock.unlock()
             return
         }
-        session.videoHandler(frame)
+        let handler = session.videoHandler
+        stateLock.unlock()
+        handler(frame)
     }
 
     private func currentVideoRevision(
@@ -1352,7 +1410,7 @@ final class ScreenCaptureSource: NSObject {
               lifecycle.isActive(token) else {
             return nil
         }
-        return session.committedFilterRevision
+        return session.routingState.videoRevision
     }
 
     private func cancelStartReservation(
@@ -1407,6 +1465,7 @@ final class ScreenCaptureSource: NSObject {
         session.screenTargetLivenessTask?.cancel()
         session.screenTargetLivenessTask = nil
         session.filterCoordinator.stop()
+        resumeFilterWaiters(session, error: CaptureSourceError.streamStartCancelled)
         sessionGate.deactivate(session.token)
         return session
     }
@@ -1424,6 +1483,7 @@ final class ScreenCaptureSource: NSObject {
         session.screenTargetLivenessTask?.cancel()
         session.screenTargetLivenessTask = nil
         session.filterCoordinator.stop()
+        resumeFilterWaiters(session, error: CaptureSourceError.streamStartCancelled)
         sessionGate.deactivate(session.token)
         return session
     }
@@ -1436,6 +1496,12 @@ final class ScreenCaptureSource: NSObject {
             return
         }
         activeSession = nil
+    }
+
+    private func resumeFilterWaiters(_ session: ActiveSession, error: Error) {
+        let waiters = session.filterWaiters
+        session.filterWaiters.removeAll()
+        waiters.forEach { $0.continuation.resume(throwing: error) }
     }
 
     private func removeOutputs(

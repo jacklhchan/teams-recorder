@@ -81,9 +81,18 @@ final class CaptureFilterCoordinatorTests: XCTestCase {
         let first = coordinator.request(intent(windowID: 1))!
         let retry = coordinator.complete(first, result: .failure(.streamFailure))
 
-        XCTAssertEqual(retry?.intent, first.intent)
-        XCTAssertNotEqual(retry?.revision, first.revision)
+        XCTAssertNil(retry)
         XCTAssertNil(coordinator.complete(first, result: .success(())))
+    }
+
+    func testFailedUpdateOnlyContinuesWhenNewerDesiredIntentExists() {
+        var coordinator = CaptureFilterCoordinator()
+        let first = coordinator.request(intent(windowID: 1))!
+        XCTAssertNil(coordinator.request(intent(windowID: 2)))
+
+        let next = coordinator.complete(first, result: .failure(.streamFailure))
+
+        XCTAssertEqual(next?.intent, intent(windowID: 2))
     }
 
     func testInterleavedToggleReconnectAndEnableLeavesNewestEnabledIntent() {

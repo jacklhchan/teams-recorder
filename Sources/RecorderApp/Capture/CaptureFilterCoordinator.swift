@@ -166,7 +166,11 @@ struct CaptureFilterCoordinator {
             committed = update.intent
             committedRevision = update.revision
         }
-        guard let desired, desired != committed else { return nil }
+        guard let desired else { return nil }
+        if case .failure = result, desired == update.intent {
+            return nil
+        }
+        guard desired != committed else { return nil }
         return begin(desired)
     }
 

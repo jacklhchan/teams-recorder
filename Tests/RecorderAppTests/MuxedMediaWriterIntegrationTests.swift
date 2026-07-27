@@ -76,8 +76,8 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         XCTAssertEqual(stream.mSampleRate, 48_000, accuracy: 0.01)
         XCTAssertEqual(stream.mChannelsPerFrame, 2)
 
-        let videoSamples = try sampleTimes(url: fixture.url, mediaType: .video)
-        let audioSamples = try sampleTimes(url: fixture.url, mediaType: .audio)
+        let videoSamples = try await sampleTimes(url: fixture.url, mediaType: .video)
+        let audioSamples = try await sampleTimes(url: fixture.url, mediaType: .audio)
         XCTAssertGreaterThanOrEqual(videoSamples.count, 2)
         XCTAssertFalse(audioSamples.isEmpty)
         XCTAssertMonotonic(videoSamples.map(\.start))
@@ -97,26 +97,50 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         XCTAssertEqual(reader.status, .completed, "\\(reader.error?.localizedDescription ?? \"no reader error\")")
     }
 
-    func testTemporaryAudioBackpressureRecoversWithoutDroppedSamples() throws {
-        var fifo = MuxedMediaWriter.AudioFIFO()
-        try fifo.enqueue(start: .zero, duration: time(24_000))
-        try fifo.enqueue(start: time(24_000), duration: time(24_000))
-        XCTAssertEqual(fifo.drain(ready: [false, false, true]).map(\.start), [.zero, time(24_000)])
-        XCTAssertTrue(fifo.isEmpty)
+    func testTemporaryAudioBackpressureRecoversInProductionDrainStateAndFinishes() throws {
+        var state = MuxedMediaWriter.AudioDrainState<String>()
+        try state.enqueue("first", start: .zero, end: time(24_000))
+        try state.enqueue("second", start: time(24_000), end: time(48_000))
+        var readiness = [false, false, true, true, false]
+        var appended: [String] = []
+
+        state.drain(
+            isReady: { readiness.removeFirst() },
+            append: { appended.append($0); return true }
+        )
+        state.drain(
+            isReady: { readiness.removeFirst() },
+            append: { appended.append($0); return true }
+        )
+        XCTAssertTrue(appended.isEmpty)
+        XCTAssertFalse(state.isEmpty)
+
+        state.drain(
+            isReady: { readiness.removeFirst() },
+            append: { appended.append($0); return true }
+        )
+        XCTAssertEqual(appended, ["first", "second"])
+        XCTAssertTrue(state.isEmpty)
     }
 
     func testAudioFIFOOverflowReturnsTypedTerminalMuxFailure() throws {
-        var fifo = MuxedMediaWriter.AudioFIFO()
-        try fifo.enqueue(start: .zero, duration: time(240_000))
-        XCTAssertThrowsError(try fifo.enqueue(start: time(240_000), duration: time(1))) {
+        var fifo = MuxedMediaWriter.AudioDrainState<String>()
+        try fifo.enqueue("five-seconds", start: .zero, end: time(240_000))
+        XCTAssertThrowsError(try fifo.enqueue("overflow", start: time(240_000), end: time(240_001))) {
             guard case .audioFIFOOverflow = $0 as? MuxedMediaWriterError else {
                 return XCTFail("expected typed FIFO overflow, got \\($0)")
             }
         }
     }
 
-    func testFinishTimesOutWhenAudioFIFOCannotDrain() {
-        XCTAssertEqual(MuxedMediaWriter.finishResult(fifoDrained: false, deadlineReached: true), .finishTimedOut)
+    func testDrainStatePreservesFirstAppendFailureForWriterStatusInspection() throws {
+        var state = MuxedMediaWriter.AudioDrainState<String>()
+        try state.enqueue("first", start: .zero, end: time(1))
+        var attempted = 0
+        state.drain(isReady: { true }, append: { _ in attempted += 1; return false })
+
+        XCTAssertEqual(attempted, 1)
+        XCTAssertFalse(state.isEmpty)
     }
 
     private func makeFixture() throws -> (url: URL, folder: URL, profile: MuxedMediaProfile) {
@@ -169,9 +193,10 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         throw MuxedMediaWriterError.videoAppendDropped
     }
 
-    private func sampleTimes(url: URL, mediaType: AVMediaType) throws -> [(start: CMTime, end: CMTime)] {
+    private func sampleTimes(url: URL, mediaType: AVMediaType) async throws -> [(start: CMTime, end: CMTime)] {
         let asset = AVURLAsset(url: url)
-        let track = try XCTUnwrap(asset.tracks(withMediaType: mediaType).first)
+        let tracks = try await asset.loadTracks(withMediaType: mediaType)
+        let track = try XCTUnwrap(tracks.first)
         let reader = try AVAssetReader(asset: asset)
         let settings: [String: Any]? = mediaType == .video ? [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA

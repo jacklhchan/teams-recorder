@@ -45,7 +45,7 @@ enum MuxedMediaWriterError: Error, Equatable {
     case closed
 }
 
-final class MuxedMediaWriter: MuxedMediaWriting {
+final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
     typealias Settings = (video: [String: Any], audio: [String: Any])
 
     private static let sampleRate: CMTimeScale = 48_000
@@ -59,11 +59,13 @@ final class MuxedMediaWriter: MuxedMediaWriting {
     private let writerQueue = DispatchQueue(label: "local.meeting.recorder.muxed-media-writer")
     private let finishTimeout: TimeInterval
 
-    private var pendingAudio: [PendingAudio] = []
+    private var pendingAudio = AudioDrainState<PendingAudio>()
     private var lastAudioPTS: CMTime?
     private var lastVideoPTS: CMTime?
     private var terminalError: MuxedMediaWriterError?
     private var isFinishing = false
+    private var isCompleting = false
+    private var finishAudioEndTime: CMTime?
     private var finishContinuation: CheckedContinuation<Void, Error>?
     private var finishTimer: DispatchSourceTimer?
 
@@ -145,13 +147,7 @@ final class MuxedMediaWriter: MuxedMediaWriting {
                 throw MuxedMediaWriterError.nonMonotonicAudioPTS(previous: lastAudioPTS, received: block.presentationTime)
             }
             let pending = PendingAudio(sampleBuffer: sample, start: block.presentationTime, end: block.presentationTime + sample.duration)
-            let duration = coveredDuration(afterAdding: pending)
-            guard CMTimeCompare(duration, Self.maximumAudioFIFO) <= 0 else {
-                let error = MuxedMediaWriterError.audioFIFOOverflow(limit: Self.maximumAudioFIFO, queuedDuration: duration)
-                terminalError = error
-                throw error
-            }
-            pendingAudio.append(pending)
+            try pendingAudio.enqueue(pending, start: pending.start, end: pending.end)
             lastAudioPTS = block.presentationTime
             drainAudio()
         }
@@ -200,50 +196,48 @@ final class MuxedMediaWriter: MuxedMediaWriting {
                     return
                 }
                 self.isFinishing = true
+                self.finishAudioEndTime = audioEndTime
                 self.finishContinuation = continuation
                 self.scheduleFinishTimeout()
                 self.drainAudio()
-                if self.pendingAudio.isEmpty {
-                    self.completeFinish(at: audioEndTime)
-                }
             }
         }
     }
 
     private func drainAudio() {
         guard terminalError == nil else { return }
-        while !pendingAudio.isEmpty, audioInput.isReadyForMoreMediaData {
-            let pending = pendingAudio[0]
-            guard audioInput.append(pending.sampleBuffer) else {
-                if writer.status == .failed {
-                    terminalError = failWriter()
-                    finishWithTerminalError()
-                }
-                return
-            }
-            pendingAudio.removeFirst()
+        pendingAudio.drain(
+            isReady: { self.audioInput.isReadyForMoreMediaData },
+            append: { self.audioInput.append($0.sampleBuffer) }
+        )
+        if !pendingAudio.isEmpty, writer.status == .failed {
+            terminalError = failWriter()
+            finishWithTerminalError()
+            return
+        }
+        if isFinishing, pendingAudio.isEmpty, let finishAudioEndTime {
+            completeFinish(at: finishAudioEndTime)
         }
     }
 
     private func completeFinish(at audioEndTime: CMTime) {
-        guard finishContinuation != nil else { return }
-        finishTimer?.cancel()
-        finishTimer = nil
+        guard finishContinuation != nil, !isCompleting else { return }
+        isCompleting = true
         writer.endSession(atSourceTime: audioEndTime)
         videoInput.markAsFinished()
         audioInput.markAsFinished()
         writer.finishWriting { [weak self] in
-            self?.writerQueue.async {
-                guard let self, let continuation = self.finishContinuation else { return }
-                self.finishContinuation = nil
-                if self.writer.status == .completed, self.validateOutput() {
-                    continuation.resume()
-                } else if self.writer.status == .completed {
-                    continuation.resume(throwing: MuxedMediaWriterError.outputValidationFailed)
-                } else {
-                    continuation.resume(throwing: MuxedMediaWriterError.finishFailed(
-                        description: self.writer.error?.localizedDescription ?? "writer status \\(self.writer.status.rawValue)"
-                    ))
+            guard let self else { return }
+            Task {
+                let isValid = await self.validateOutput()
+                self.writerQueue.async {
+                    guard self.writer.status == .completed, isValid else {
+                        self.resumeFinish(throwing: self.writer.status == .completed
+                            ? MuxedMediaWriterError.outputValidationFailed
+                            : MuxedMediaWriterError.finishFailed(description: self.writer.error?.localizedDescription ?? "writer status \\(self.writer.status.rawValue)"))
+                        return
+                    }
+                    self.resumeFinish()
                 }
             }
         }
@@ -253,22 +247,18 @@ final class MuxedMediaWriter: MuxedMediaWriting {
         let timer = DispatchSource.makeTimerSource(queue: writerQueue)
         timer.schedule(deadline: .now() + finishTimeout)
         timer.setEventHandler { [weak self] in
-            guard let self, let continuation = self.finishContinuation else { return }
-            self.finishContinuation = nil
+            guard let self, self.finishContinuation != nil else { return }
             self.writer.cancelWriting()
-            continuation.resume(throwing: MuxedMediaWriterError.finishTimedOut)
+            self.resumeFinish(throwing: MuxedMediaWriterError.finishTimedOut)
         }
         finishTimer = timer
         timer.resume()
     }
 
     private func finishWithTerminalError() {
-        guard let continuation = finishContinuation, let terminalError else { return }
-        finishContinuation = nil
-        finishTimer?.cancel()
-        finishTimer = nil
+        guard finishContinuation != nil, let terminalError else { return }
         writer.cancelWriting()
-        continuation.resume(throwing: terminalError)
+        resumeFinish(throwing: terminalError)
     }
 
     private func ensureOpen() throws {
@@ -283,9 +273,12 @@ final class MuxedMediaWriter: MuxedMediaWriting {
         return error
     }
 
-    private func coveredDuration(afterAdding pending: PendingAudio) -> CMTime {
-        guard let first = pendingAudio.first else { return pending.end - pending.start }
-        return pending.end - first.start
+    private func resumeFinish(throwing error: Error? = nil) {
+        guard let continuation = finishContinuation else { return }
+        finishContinuation = nil
+        finishTimer?.cancel()
+        finishTimer = nil
+        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
     }
 
     private func makeAudioSample(_ timedBlock: TimedMixedAudioBlock) throws -> CMSampleBuffer {
@@ -377,38 +370,52 @@ final class MuxedMediaWriter: MuxedMediaWriting {
         return format
     }
 
-    private func validateOutput() -> Bool {
+    private func validateOutput() async -> Bool {
         let asset = AVURLAsset(url: writer.outputURL)
-        return asset.tracks(withMediaType: .video).count == 1 && asset.tracks(withMediaType: .audio).count == 1
+        do {
+            guard try await asset.load(.isPlayable) else { return false }
+            let videoTracks = try await asset.loadTracks(withMediaType: .video)
+            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+            guard videoTracks.count == 1, audioTracks.count == 1,
+                  let video = videoTracks.first, let audio = audioTracks.first else { return false }
+            let videoDescription = try await video.load(.formatDescriptions).first
+            guard let videoDescription,
+                  CMFormatDescriptionGetMediaSubType(videoDescription) == kCMVideoCodecType_HEVC else { return false }
+            let dimensions = CMVideoFormatDescriptionGetDimensions(videoDescription)
+            guard dimensions.width == 1_600, dimensions.height == 900 else { return false }
+            let audioDescription = try await audio.load(.formatDescriptions).first
+            guard let audioDescription,
+                  CMFormatDescriptionGetMediaSubType(audioDescription) == kAudioFormatMPEG4AAC,
+                  let stream = CMAudioFormatDescriptionGetStreamBasicDescription(audioDescription)?.pointee else { return false }
+            return abs(stream.mSampleRate - 48_000) < 0.01 && stream.mChannelsPerFrame == 2
+        } catch {
+            return false
+        }
     }
 
-    struct AudioFIFO {
-        struct Entry: Equatable {
+    struct AudioDrainState<Element> {
+        private struct Entry {
+            let element: Element
             let start: CMTime
-            let duration: CMTime
+            let end: CMTime
         }
 
         private var entries: [Entry] = []
         var isEmpty: Bool { entries.isEmpty }
 
-        mutating func enqueue(start: CMTime, duration: CMTime) throws {
-            let entry = Entry(start: start, duration: duration)
-            let span = (start + duration) - (entries.first?.start ?? start)
+        mutating func enqueue(_ element: Element, start: CMTime, end: CMTime) throws {
+            let span = end - (entries.first?.start ?? start)
             guard CMTimeCompare(span, MuxedMediaWriter.maximumAudioFIFO) <= 0 else {
                 throw MuxedMediaWriterError.audioFIFOOverflow(limit: MuxedMediaWriter.maximumAudioFIFO, queuedDuration: span)
             }
-            entries.append(entry)
+            entries.append(Entry(element: element, start: start, end: end))
         }
 
-        mutating func drain(ready: [Bool]) -> [Entry] {
-            guard ready.last == true else { return [] }
-            let drained = entries
-            entries.removeAll()
-            return drained
+        mutating func drain(isReady: () -> Bool, append: (Element) -> Bool) {
+            while let entry = entries.first, isReady() {
+                guard append(entry.element) else { return }
+                entries.removeFirst()
+            }
         }
-    }
-
-    static func finishResult(fifoDrained: Bool, deadlineReached: Bool) -> MuxedMediaWriterError? {
-        !fifoDrained && deadlineReached ? .finishTimedOut : nil
     }
 }

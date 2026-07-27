@@ -87,13 +87,20 @@ final class TeamsMeetingWindowResolverTests: XCTestCase {
         XCTAssertEqual(candidates.map(\.identity), [first, second])
     }
 
-    func testOwnerPIDPreventsReusedWindowIDFromMatchingAfterRestart() {
+    func testOwnerPIDPreventsReusedWindowIDFromInheritingPreMeetingState() {
         var resolver = TeamsMeetingWindowResolver()
         let oldIdentity = TeamsWindowIdentity(processID: 7, windowID: 10)
         let reusedWindowID = TeamsWindowIdentity(processID: 8, windowID: 10)
 
-        assertReady(resolver.observe([snapshot(identity: oldIdentity)], meetingActive: true, now: meetingStarted), identity: oldIdentity)
-        assertReady(resolver.observe([snapshot(identity: reusedWindowID)], meetingActive: true, now: meetingStarted.addingTimeInterval(1)), identity: reusedWindowID)
+        XCTAssertEqual(
+            resolver.observe([snapshot(identity: oldIdentity)], meetingActive: false, now: beforeMeeting),
+            .waiting
+        )
+        assertReady(
+            resolver.observe([snapshot(identity: reusedWindowID)], meetingActive: true, now: meetingStarted),
+            identity: reusedWindowID,
+            confidence: .high
+        )
     }
 
     func testMinimizedCurrentWindowRemainsIdentifiedButIsNotCaptureReady() {

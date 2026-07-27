@@ -9,33 +9,61 @@ protocol MixedAudioWriting: AnyObject {
 typealias MixedAudioWriterFactory = (URL) throws -> MixedAudioWriting
 
 enum AACMixedAudioWriterError: Error, Equatable {
+    case invalidBitRate(Int)
     case closed
     case emptyBlock
     case mismatchedChannelFrameCounts(left: Int, right: Int)
     case bufferAllocationFailed
 }
 
+struct AACMixedAudioWriterSettings: Equatable {
+    let bitRate: Int
+    let sampleRate: Double
+    let channelCount: AVAudioChannelCount
+
+    // Kept observable so tests can verify the exact settings handed to AVAudioFile.
+    var avFoundationSettings: [String: Any] {
+        [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channelCount,
+            AVEncoderBitRateKey: bitRate
+        ]
+    }
+}
+
 final class AACMixedAudioWriter: MixedAudioWriting {
     private let format: AVAudioFormat
     private var file: AVAudioFile?
 
-    init(url: URL) throws {
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 192_000
-        ]
+    init(url: URL, bitRate: Int = 192_000) throws {
+        let settings = try Self.outputSettings(bitRate: bitRate)
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: 48_000,
-            channels: 2,
+            sampleRate: settings.sampleRate,
+            channels: settings.channelCount,
             interleaved: false
         ) else {
             throw RecordingEngineError.unsupportedFormat
         }
         self.format = format
-        self.file = try AVAudioFile(forWriting: url, settings: settings)
+        self.file = try AVAudioFile(
+            forWriting: url,
+            settings: settings.avFoundationSettings
+        )
+    }
+
+    static func outputSettings(
+        bitRate: Int = 192_000
+    ) throws -> AACMixedAudioWriterSettings {
+        guard bitRate > 0 else {
+            throw AACMixedAudioWriterError.invalidBitRate(bitRate)
+        }
+        return AACMixedAudioWriterSettings(
+            bitRate: bitRate,
+            sampleRate: 48_000,
+            channelCount: 2
+        )
     }
 
     func write(_ block: MixedAudioBlock) throws {

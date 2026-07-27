@@ -3,6 +3,41 @@ import XCTest
 @testable import RecorderApp
 
 final class MixedAudioWriterTests: XCTestCase {
+    func testDefaultBitrateUses192KbpsSettings() throws {
+        let settings = try AACMixedAudioWriter.outputSettings()
+
+        XCTAssertEqual(settings.bitRate, 192_000)
+        XCTAssertEqual(settings.sampleRate, 48_000)
+        XCTAssertEqual(settings.channelCount, 2)
+    }
+
+    func testExplicit128KbpsBitrateIsReflectedInSettings() throws {
+        let settings = try AACMixedAudioWriter.outputSettings(bitRate: 128_000)
+
+        XCTAssertEqual(settings.bitRate, 128_000)
+        XCTAssertEqual(settings.sampleRate, 48_000)
+        XCTAssertEqual(settings.channelCount, 2)
+    }
+
+    func testExplicit128KbpsBitrateIsPassedToAVAudioFileSettings() throws {
+        let settings = try AACMixedAudioWriter.outputSettings(bitRate: 128_000)
+        let avSettings = settings.avFoundationSettings
+
+        XCTAssertEqual(avSettings[AVFormatIDKey] as? UInt32, kAudioFormatMPEG4AAC)
+        XCTAssertEqual(avSettings[AVSampleRateKey] as? Double, 48_000)
+        XCTAssertEqual(avSettings[AVNumberOfChannelsKey] as? AVAudioChannelCount, 2)
+        XCTAssertEqual(avSettings[AVEncoderBitRateKey] as? Int, 128_000)
+    }
+
+    func testNonPositiveBitrateReturnsTypedError() {
+        XCTAssertThrowsError(try AACMixedAudioWriter.outputSettings(bitRate: 0)) {
+            XCTAssertEqual($0 as? AACMixedAudioWriterError, .invalidBitRate(0))
+        }
+        XCTAssertThrowsError(try AACMixedAudioWriter.outputSettings(bitRate: -1)) {
+            XCTAssertEqual($0 as? AACMixedAudioWriterError, .invalidBitRate(-1))
+        }
+    }
+
     func testClosedWriterRejectsAdditionalBlocks() throws {
         let fixture = try makeWriter()
         defer { try? FileManager.default.removeItem(at: fixture.folder) }
@@ -58,7 +93,28 @@ final class MixedAudioWriterTests: XCTestCase {
         XCTAssertLessThan(duration, 0.2)
     }
 
-    private func makeWriter() throws -> (
+    func test128KbpsAACWriterProducesReopenableStereoContainer() throws {
+        let fixture = try makeWriter(bitRate: 128_000)
+        defer { try? FileManager.default.removeItem(at: fixture.folder) }
+
+        try fixture.writer.write(block(frameCount: 4_800, value: 0.2))
+        try fixture.writer.close()
+
+        let file = try AVAudioFile(forReading: fixture.url)
+
+        XCTAssertEqual(file.fileFormat.streamDescription.pointee.mFormatID, kAudioFormatMPEG4AAC)
+        XCTAssertEqual(file.fileFormat.sampleRate, 48_000, accuracy: 0.01)
+        XCTAssertEqual(file.fileFormat.channelCount, 2)
+        XCTAssertGreaterThan(file.length, 0)
+        let attributes = try FileManager.default.attributesOfItem(atPath: fixture.url.path)
+        let byteCount = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        XCTAssertGreaterThan(
+            byteCount,
+            0
+        )
+    }
+
+    private func makeWriter(bitRate: Int? = nil) throws -> (
         writer: AACMixedAudioWriter,
         url: URL,
         folder: URL
@@ -70,7 +126,13 @@ final class MixedAudioWriterTests: XCTestCase {
             withIntermediateDirectories: true
         )
         let url = folder.appendingPathComponent("recording.m4a")
-        return (try AACMixedAudioWriter(url: url), url, folder)
+        let writer: AACMixedAudioWriter
+        if let bitRate {
+            writer = try AACMixedAudioWriter(url: url, bitRate: bitRate)
+        } else {
+            writer = try AACMixedAudioWriter(url: url)
+        }
+        return (writer, url, folder)
     }
 
     private func block(
@@ -84,4 +146,5 @@ final class MixedAudioWriterTests: XCTestCase {
             right: Array(repeating: value, count: frameCount)
         )
     }
+
 }

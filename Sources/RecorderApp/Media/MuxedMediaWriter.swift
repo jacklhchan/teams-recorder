@@ -14,7 +14,14 @@ struct MuxedMediaProfile: Equatable, Sendable {
     let pixelFormat: OSType
 
     static func production(pixelFormat: OSType) -> MuxedMediaProfile {
-        .init(width: 1_600, height: 900, maximumFramesPerSecond: 10, videoBitRate: 1_200_000, audioBitRate: 128_000, pixelFormat: pixelFormat)
+        .init(
+            width: 1_600,
+            height: 900,
+            maximumFramesPerSecond: 10,
+            videoBitRate: 1_200_000,
+            audioBitRate: 128_000,
+            pixelFormat: pixelFormat
+        )
     }
 }
 
@@ -25,7 +32,13 @@ protocol MuxedMediaWriting: AnyObject {
 }
 
 enum MuxedMediaWriterError: Error, Equatable {
-    case invalidAudioBlock, invalidPresentationTime, writerSetupFailed, videoAppendDropped, finishTimedOut, outputValidationFailed, closed
+    case invalidAudioBlock
+    case invalidPresentationTime
+    case writerSetupFailed
+    case videoAppendDropped
+    case finishTimedOut
+    case outputValidationFailed
+    case closed
     case nonMonotonicAudioPTS(previous: CMTime, received: CMTime)
     case writerFailed(description: String)
     case audioFIFOOverflow(limit: CMTime, queuedDuration: CMTime)
@@ -87,6 +100,7 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
     private var finishAudioEndTime: CMTime?
     private var finishContinuation: CheckedContinuation<Void, Error>?
     private var finishTimer: MuxedMediaWriterTimeoutToken?
+    private var didCancelBackend = false
 
     private struct PendingAudio {
         let sampleBuffer: CMSampleBuffer
@@ -112,10 +126,18 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
             AVVideoCodecKey: AVVideoCodecType.hevc,
             AVVideoWidthKey: profile.width,
             AVVideoHeightKey: profile.height,
-            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: profile.videoBitRate, AVVideoExpectedSourceFrameRateKey: profile.maximumFramesPerSecond],
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: profile.videoBitRate,
+                AVVideoExpectedSourceFrameRateKey: profile.maximumFramesPerSecond
+            ],
             AVVideoEncoderSpecificationKey: [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true]
         ]
-        let audio: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: Int(sampleRate), AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: profile.audioBitRate]
+        let audio: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: Int(sampleRate),
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: profile.audioBitRate
+        ]
         return (video, audio)
     }
 
@@ -143,8 +165,13 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
     func appendVideo(_ pixelBuffer: CVPixelBuffer, at time: CMTime) throws {
         try writerQueue.sync {
             try ensureOpen()
-            guard time.isValid, time.isNumeric, CMTimeCompare(time, .zero) >= 0 else { throw MuxedMediaWriterError.invalidPresentationTime }
-            if let lastVideoPTS, CMTimeCompare(time - lastVideoPTS, CMTime(value: 1, timescale: 10)) < 0 { throw MuxedMediaWriterError.videoAppendDropped }
+            guard time.isValid, time.isNumeric, CMTimeCompare(time, .zero) >= 0 else {
+                throw MuxedMediaWriterError.invalidPresentationTime
+            }
+            if let lastVideoPTS,
+               CMTimeCompare(time - lastVideoPTS, CMTime(value: 1, timescale: 10)) < 0 {
+                throw MuxedMediaWriterError.videoAppendDropped
+            }
             guard backend.appendVideo(pixelBuffer, at: time) else {
                 if let description = backend.failureDescription { throw latch(.writerFailed(description: description)) }
                 throw MuxedMediaWriterError.videoAppendDropped
@@ -157,7 +184,12 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             writerQueue.async { [weak self] in
                 guard let self else { continuation.resume(throwing: MuxedMediaWriterError.closed); return }
-                guard audioEndTime.isValid, audioEndTime.isNumeric else { continuation.resume(throwing: MuxedMediaWriterError.invalidPresentationTime); return }
+                guard audioEndTime.isValid,
+                      audioEndTime.isNumeric,
+                      CMTimeCompare(audioEndTime, .zero) >= 0 else {
+                    continuation.resume(throwing: MuxedMediaWriterError.invalidPresentationTime)
+                    return
+                }
                 guard !self.isFinishing else { continuation.resume(throwing: MuxedMediaWriterError.closed); return }
                 if let terminalError = self.terminalError { continuation.resume(throwing: terminalError); return }
                 self.isFinishing = true
@@ -171,10 +203,18 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
 
     private func drainAudio() {
         guard terminalError == nil else { finishWithTerminalError(); return }
+        if let description = backend.failureDescription {
+            latch(.writerFailed(description: description))
+            finishWithTerminalError()
+            return
+        }
         while !pendingAudio.isEmpty, backend.isAudioReady {
             let next = pendingAudio[0]
             guard backend.appendAudio(next.sampleBuffer) else {
-                if let description = backend.failureDescription { latch(.writerFailed(description: description)); finishWithTerminalError() }
+                if let description = backend.failureDescription {
+                    latch(.writerFailed(description: description))
+                    finishWithTerminalError()
+                }
                 return
             }
             pendingAudio.removeFirst()
@@ -190,13 +230,22 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
         backend.finish { [weak self] in
             guard let self else { return }
             self.writerQueue.async {
+                let outputURL = self.backend.outputURL
+                let failureDescription = self.backend.failureDescription
                 Task { [weak self] in
                     guard let self else { return }
-                    let valid = await self.validateOutput()
+                    let valid = await self.validateOutput(
+                        outputURL: outputURL,
+                        backendWasSuccessful: failureDescription == nil
+                    )
                     self.writerQueue.async {
-                        if let failure = self.backend.failureDescription { self.resumeFinish(throwing: .finishFailed(description: failure)) }
-                        else if valid { self.resumeFinish() }
-                        else { self.resumeFinish(throwing: .outputValidationFailed) }
+                        if let failure = self.backend.failureDescription {
+                            self.resumeFinish(throwing: .finishFailed(description: failure))
+                        } else if valid {
+                            self.resumeFinish()
+                        } else {
+                            self.resumeFinish(throwing: .outputValidationFailed)
+                        }
                     }
                 }
             }
@@ -205,13 +254,12 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
 
     private func timeoutFinish() {
         guard finishContinuation != nil else { return }
-        backend.cancel()
+        cancelBackendOnce()
         resumeFinish(throwing: .finishTimedOut)
     }
 
     private func finishWithTerminalError() {
         guard let terminalError, finishContinuation != nil else { return }
-        backend.cancel()
         resumeFinish(throwing: terminalError)
     }
 
@@ -222,8 +270,17 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
     }
 
     @discardableResult private func latch(_ error: MuxedMediaWriterError) -> MuxedMediaWriterError {
-        if terminalError == nil { terminalError = error }
+        if terminalError == nil {
+            terminalError = error
+            cancelBackendOnce()
+        }
         return terminalError ?? error
+    }
+
+    private func cancelBackendOnce() {
+        guard !didCancelBackend else { return }
+        didCancelBackend = true
+        backend.cancel()
     }
 
     private func resumeFinish(throwing error: MuxedMediaWriterError? = nil) {
@@ -259,9 +316,10 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
         return format
     }
 
-    private func validateOutput() async -> Bool {
-        guard let url = backend.outputURL else { return backend.failureDescription == nil }
-        let asset = AVURLAsset(url: url)
+    private func validateOutput(outputURL: URL?, backendWasSuccessful: Bool) async -> Bool {
+        guard backendWasSuccessful else { return false }
+        guard let outputURL else { return true }
+        let asset = AVURLAsset(url: outputURL)
         do {
             guard try await asset.load(.isPlayable) else { return false }
             let videoTracks = try await asset.loadTracks(withMediaType: .video)

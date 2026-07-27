@@ -95,6 +95,19 @@ final class CaptureFilterCoordinatorTests: XCTestCase {
         XCTAssertEqual(next?.intent, intent(windowID: 2))
     }
 
+    func testSameFailedIntentRemainsTerminalUntilNewerIntentArrives() {
+        var coordinator = CaptureFilterCoordinator()
+        let failed = coordinator.request(intent(windowID: 1))!
+
+        XCTAssertNil(coordinator.complete(failed, result: .failure(.streamFailure)))
+        XCTAssertTrue(coordinator.hasTerminalFailure(for: intent(windowID: 1)))
+        XCTAssertNil(coordinator.request(intent(windowID: 1)))
+
+        let newer = coordinator.request(intent(windowID: 2))
+        XCTAssertFalse(coordinator.hasTerminalFailure(for: intent(windowID: 2)))
+        XCTAssertEqual(newer?.intent, intent(windowID: 2))
+    }
+
     func testInterleavedToggleReconnectAndEnableLeavesNewestEnabledIntent() {
         var coordinator = CaptureFilterCoordinator()
         let disabled = CaptureStreamIntent(filter: .application(teams), cadence: .idle)
@@ -151,10 +164,91 @@ final class CaptureFilterCoordinatorTests: XCTestCase {
         XCTAssertNil(next)
     }
 
+    func testWaiterSupersededByNewerDesiredIntentIsCancelledExactlyOnce() {
+        var registry = CaptureFilterWaiterRegistry()
+        let waiter = UUID()
+        let replacement = UUID()
+
+        XCTAssertTrue(registry.register(waiter, for: intent(windowID: 2)).isEmpty)
+        XCTAssertEqual(
+            registry.supersedeWaiters(except: intent(windowID: 3)),
+            [.resume(waiter, .failure(.streamStartCancelled))]
+        )
+        XCTAssertTrue(registry.register(replacement, for: intent(windowID: 3)).isEmpty)
+        XCTAssertEqual(
+            registry.resolveWaiters(for: intent(windowID: 3), result: .success(revision(3))),
+            [.resume(replacement, .success(revision(3)))]
+        )
+        XCTAssertTrue(registry.drain(error: .streamStartCancelled).isEmpty)
+    }
+
+    func testCancellationBeforeRegistrationIsObservedAndDoesNotRetainWaiter() {
+        var registry = CaptureFilterWaiterRegistry()
+        let waiter = UUID()
+
+        registry.prepare(waiter)
+        XCTAssertTrue(registry.cancel(waiter).isEmpty)
+        XCTAssertEqual(
+            registry.register(waiter, for: intent(windowID: 2)),
+            [.resume(waiter, .failure(.streamStartCancelled))]
+        )
+        XCTAssertTrue(registry.drain(error: .streamStartCancelled).isEmpty)
+    }
+
+    func testCancellationCommitAndStopProduceOneOutcomeAndLateCompletionIsIgnored() {
+        var registry = CaptureFilterWaiterRegistry()
+        let cancelled = UUID()
+        let committed = UUID()
+        let stopped = UUID()
+
+        XCTAssertTrue(registry.register(cancelled, for: intent(windowID: 2)).isEmpty)
+        XCTAssertEqual(registry.cancel(cancelled), [.resume(cancelled, .failure(.streamStartCancelled))])
+        XCTAssertTrue(registry.register(committed, for: intent(windowID: 3)).isEmpty)
+        XCTAssertEqual(
+            registry.resolveWaiters(for: intent(windowID: 3), result: .success(revision(3))),
+            [.resume(committed, .success(revision(3)))]
+        )
+        XCTAssertTrue(registry.register(stopped, for: intent(windowID: 4)).isEmpty)
+        XCTAssertEqual(
+            registry.drain(error: .streamStartCancelled),
+            [.resume(stopped, .failure(.streamStartCancelled))]
+        )
+        XCTAssertTrue(registry.drain(error: .streamStartCancelled).isEmpty)
+        XCTAssertTrue(
+            registry.resolveWaiters(for: intent(windowID: 4), result: .success(revision(4))).isEmpty
+        )
+    }
+
+    func testNormalStopRegistryDrainResumesOnceAndLateCompletionDoesNothing() {
+        assertStopDrainIsSingleOutcome()
+    }
+
+    func testDelegateStopRegistryDrainResumesOnceAndLateCompletionDoesNothing() {
+        assertStopDrainIsSingleOutcome()
+    }
+
     private func intent(windowID: CGWindowID) -> CaptureStreamIntent {
         CaptureStreamIntent(
             filter: .teamsWindow(.init(processID: 42, windowID: windowID)),
             cadence: .enabled
         )
+    }
+
+    private func revision(_ value: UInt64) -> CaptureFilterRevision {
+        CaptureFilterRevision(sessionGeneration: 1, revision: value)
+    }
+
+    private func assertStopDrainIsSingleOutcome() {
+        var registry = CaptureFilterWaiterRegistry()
+        let waiter = UUID()
+        let intent = intent(windowID: 5)
+
+        XCTAssertTrue(registry.register(waiter, for: intent).isEmpty)
+        XCTAssertEqual(
+            registry.drain(error: .streamStartCancelled),
+            [.resume(waiter, .failure(.streamStartCancelled))]
+        )
+        XCTAssertTrue(registry.drain(error: .streamStartCancelled).isEmpty)
+        XCTAssertTrue(registry.resolveWaiters(for: intent, result: .success(revision(5))).isEmpty)
     }
 }

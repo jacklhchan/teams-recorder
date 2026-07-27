@@ -125,6 +125,77 @@ struct ScreenCaptureRevisionGate {
     }
 }
 
+/// Lock-owned state for callers awaiting a particular filter intent.
+/// The source executes the returned actions after releasing its state lock.
+enum CaptureFilterWaiterAction: Equatable {
+    case resume(UUID, Result<CaptureFilterRevision, CaptureSourceError>)
+}
+
+struct CaptureFilterWaiterRegistry {
+    private var waiters: [UUID: CaptureStreamIntent] = [:]
+    private var pendingRegistration = Set<UUID>()
+    private var cancelledBeforeRegistration = Set<UUID>()
+
+    mutating func prepare(_ id: UUID) {
+        pendingRegistration.insert(id)
+    }
+
+    mutating func register(_ id: UUID, for intent: CaptureStreamIntent) -> [CaptureFilterWaiterAction] {
+        pendingRegistration.remove(id)
+        if cancelledBeforeRegistration.remove(id) != nil {
+            return [.resume(id, .failure(.streamStartCancelled))]
+        }
+        waiters[id] = intent
+        return []
+    }
+
+    mutating func cancel(_ id: UUID) -> [CaptureFilterWaiterAction] {
+        guard waiters.removeValue(forKey: id) != nil else {
+            guard pendingRegistration.contains(id) else { return [] }
+            cancelledBeforeRegistration.insert(id)
+            return []
+        }
+        return [.resume(id, .failure(.streamStartCancelled))]
+    }
+
+    mutating func discardUnregisteredCancellation(_ id: UUID) {
+        pendingRegistration.remove(id)
+        cancelledBeforeRegistration.remove(id)
+    }
+
+    mutating func supersedeWaiters(except intent: CaptureStreamIntent) -> [CaptureFilterWaiterAction] {
+        resolve(where: { $0 != intent }, result: .failure(.streamStartCancelled))
+    }
+
+    mutating func resolveWaiters(
+        for intent: CaptureStreamIntent,
+        result: Result<CaptureFilterRevision, CaptureSourceError>
+    ) -> [CaptureFilterWaiterAction] {
+        resolve(where: { $0 == intent }, result: result)
+    }
+
+    mutating func drain(error: CaptureSourceError) -> [CaptureFilterWaiterAction] {
+        let actions: [CaptureFilterWaiterAction] = waiters.keys.map {
+            .resume($0, .failure(error))
+        }
+        waiters.removeAll()
+        pendingRegistration.removeAll()
+        cancelledBeforeRegistration.removeAll()
+        return actions
+    }
+
+    private mutating func resolve(
+        where predicate: (CaptureStreamIntent) -> Bool,
+        result: Result<CaptureFilterRevision, CaptureSourceError>
+    ) -> [CaptureFilterWaiterAction] {
+        let ids = waiters.compactMap { id, intent in predicate(intent) ? id : nil }
+        return ids.compactMap { id in
+            guard waiters.removeValue(forKey: id) != nil else { return nil }
+            return .resume(id, result)
+        }
+    }
+}
+
 /// Serializes content-filter and frame-cadence transactions for one SCStream.
 struct CaptureFilterCoordinator {
     private var generation: UInt64 = 1
@@ -133,10 +204,15 @@ struct CaptureFilterCoordinator {
     private var committedRevision: CaptureFilterRevision?
     private var desired: CaptureStreamIntent?
     private var inFlight: CaptureFilterUpdate?
+    private var terminalFailure: CaptureStreamIntent?
     private var isStopped = false
 
     mutating func request(_ intent: CaptureStreamIntent) -> CaptureFilterUpdate? {
         guard !isStopped else { return nil }
+        guard terminalFailure != intent else { return nil }
+        if terminalFailure != nil {
+            terminalFailure = nil
+        }
         desired = intent
         guard inFlight == nil, committed != intent else { return nil }
         return begin(intent)
@@ -165,13 +241,23 @@ struct CaptureFilterCoordinator {
         if case .success = result {
             committed = update.intent
             committedRevision = update.revision
+            terminalFailure = nil
         }
         guard let desired else { return nil }
         if case .failure = result, desired == update.intent {
+            terminalFailure = update.intent
             return nil
         }
         guard desired != committed else { return nil }
         return begin(desired)
+    }
+
+    func hasTerminalFailure(for intent: CaptureStreamIntent) -> Bool {
+        terminalFailure == intent
+    }
+
+    func isCommittedAndIdle(_ intent: CaptureStreamIntent) -> Bool {
+        inFlight == nil && committed == intent
     }
 
     mutating func stop() {

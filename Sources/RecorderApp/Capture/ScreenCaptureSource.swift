@@ -591,7 +591,8 @@ final class ScreenCaptureSource: NSObject {
         var committedFilterRevision: CaptureFilterRevision?
         var committedFilterIntent: CaptureStreamIntent?
         var committedScreenTarget: TeamsWindowIdentity?
-        var filterWaiters: [FilterWaiter] = []
+        var filterWaiters = CaptureFilterWaiterRegistry()
+        var filterWaiterContinuations: [UUID: CheckedContinuation<CaptureFilterRevision, Error>] = [:]
 
         init(
             stream: SCStream,
@@ -620,22 +621,6 @@ final class ScreenCaptureSource: NSObject {
                 SelectedApplicationSessionState.init(application:)
             )
             self.selectedMicrophoneUID = selectedMicrophoneUID
-        }
-    }
-
-    private final class FilterWaiter {
-        let id: UUID
-        let intent: CaptureStreamIntent
-        let continuation: CheckedContinuation<CaptureFilterRevision, Error>
-
-        init(
-            id: UUID,
-            intent: CaptureStreamIntent,
-            continuation: CheckedContinuation<CaptureFilterRevision, Error>
-        ) {
-            self.id = id
-            self.intent = intent
-            self.continuation = continuation
         }
     }
 
@@ -701,11 +686,7 @@ final class ScreenCaptureSource: NSObject {
                 filter: .application(application),
                 cadence: .idle
             )
-            if let filterUpdate = requestFilterUpdate(session, intent: intent) {
-                try await applyFilterUpdate(filterUpdate, to: session)
-            } else {
-                _ = try await waitForFilterCommit(session, intent: intent)
-            }
+            _ = try await awaitFilterIntent(session, intent: intent)
             guard completeReconnect(session, update: update) else {
                 throw CaptureSourceError.streamStartCancelled
             }
@@ -732,11 +713,7 @@ final class ScreenCaptureSource: NSObject {
             filter: target.map(CaptureFilterIntent.teamsWindow) ?? .application(application),
             cadence: target == nil ? .idle : .enabled
         )
-        guard let update = requestFilterUpdate(session, intent: intent) else {
-            return try await waitForFilterCommit(session, intent: intent)
-        }
-        try await applyFilterUpdate(update, to: session)
-        return update.revision
+        return try await awaitFilterIntent(session, intent: intent)
     }
 
     private func requestFilterUpdate(
@@ -744,9 +721,18 @@ final class ScreenCaptureSource: NSObject {
         intent: CaptureStreamIntent
     ) -> CaptureFilterUpdate? {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        guard activeSession === session, lifecycle.isActive(session.token) else { return nil }
-        return session.filterCoordinator.request(intent)
+        guard activeSession === session, lifecycle.isActive(session.token) else {
+            stateLock.unlock()
+            return nil
+        }
+        let update = session.filterCoordinator.request(intent)
+        let resumes = takeFilterWaiterResumes(
+            session.filterWaiters.supersedeWaiters(except: intent),
+            from: session
+        )
+        stateLock.unlock()
+        resumeFilterWaiters(resumes)
+        return update
     }
 
     private func committedRevision(for session: ActiveSession) -> CaptureFilterRevision? {
@@ -756,28 +742,56 @@ final class ScreenCaptureSource: NSObject {
         return session.committedFilterRevision
     }
 
-    private func waitForFilterCommit(
+    private func awaitFilterIntent(
         _ session: ActiveSession,
         intent: CaptureStreamIntent
     ) async throws -> CaptureFilterRevision {
         let id = UUID()
+        guard prepareFilterWaiter(id: id, session: session) else {
+            throw CaptureSourceError.streamStartCancelled
+        }
         return try await withTaskCancellationHandler(operation: {
-            if Task.isCancelled { throw CaptureSourceError.streamStartCancelled }
+            if Task.isCancelled {
+                discardFilterWaiterCancellation(id: id, session: session)
+                throw CaptureSourceError.streamStartCancelled
+            }
             return try await withCheckedThrowingContinuation { continuation in
-            stateLock.lock()
-            guard activeSession === session, lifecycle.isActive(session.token) else {
+                stateLock.lock()
+                guard activeSession === session, lifecycle.isActive(session.token) else {
+                    session.filterWaiters.discardUnregisteredCancellation(id)
+                    stateLock.unlock()
+                    continuation.resume(throwing: CaptureSourceError.streamStartCancelled)
+                    return
+                }
+                if session.filterCoordinator.hasTerminalFailure(for: intent) {
+                    session.filterWaiters.discardUnregisteredCancellation(id)
+                    stateLock.unlock()
+                    continuation.resume(throwing: CaptureSourceError.streamFailure)
+                    return
+                }
+                let update = session.filterCoordinator.request(intent)
+                let superseded = session.filterWaiters.supersedeWaiters(except: intent)
+                session.filterWaiterContinuations[id] = continuation
+                let registration = session.filterWaiters.register(id, for: intent)
+                let immediate: [CaptureFilterWaiterAction]
+                if session.filterCoordinator.isCommittedAndIdle(intent),
+                   let revision = session.committedFilterRevision {
+                    immediate = session.filterWaiters.resolveWaiters(
+                        for: intent,
+                        result: .success(revision)
+                    )
+                } else {
+                    immediate = []
+                }
+                let resumes = takeFilterWaiterResumes(superseded + registration + immediate, from: session)
                 stateLock.unlock()
-                continuation.resume(throwing: CaptureSourceError.streamStartCancelled)
-                return
-            }
-            if session.committedFilterIntent == intent,
-               let revision = session.committedFilterRevision {
-                stateLock.unlock()
-                continuation.resume(returning: revision)
-                return
-            }
-            session.filterWaiters.append(FilterWaiter(id: id, intent: intent, continuation: continuation))
-            stateLock.unlock()
+                resumeFilterWaiters(resumes)
+                if let update {
+                    Task { [weak self, weak session] in
+                        guard let self, let session else { return }
+                        _ = try? await self.applyFilterUpdate(update, to: session)
+                    }
+                }
             }
         }, onCancel: { [weak self, weak session] in
             self?.cancelFilterWaiter(id: id, session: session)
@@ -787,13 +801,26 @@ final class ScreenCaptureSource: NSObject {
     private func cancelFilterWaiter(id: UUID, session: ActiveSession?) {
         guard let session else { return }
         stateLock.lock()
-        guard let index = session.filterWaiters.firstIndex(where: { $0.id == id }) else {
-            stateLock.unlock()
-            return
-        }
-        let waiter = session.filterWaiters.remove(at: index)
+        let resumes = takeFilterWaiterResumes(session.filterWaiters.cancel(id), from: session)
         stateLock.unlock()
-        waiter.continuation.resume(throwing: CaptureSourceError.streamStartCancelled)
+        resumeFilterWaiters(resumes)
+    }
+
+    private func prepareFilterWaiter(id: UUID, session: ActiveSession) -> Bool {
+        stateLock.lock()
+        guard activeSession === session, lifecycle.isActive(session.token) else {
+            stateLock.unlock()
+            return false
+        }
+        session.filterWaiters.prepare(id)
+        stateLock.unlock()
+        return true
+    }
+
+    private func discardFilterWaiterCancellation(id: UUID, session: ActiveSession) {
+        stateLock.lock()
+        session.filterWaiters.discardUnregisteredCancellation(id)
+        stateLock.unlock()
     }
 
     private func applyFilterUpdate(
@@ -847,7 +874,7 @@ final class ScreenCaptureSource: NSObject {
             return nil
         }
         let next = session.filterCoordinator.complete(update, result: result)
-        var resumes: [(FilterWaiter, Result<CaptureFilterRevision, Error>)] = []
+        var actions: [CaptureFilterWaiterAction] = []
         if case .success = result {
             session.committedFilterRevision = update.revision
             session.committedFilterIntent = update.intent
@@ -856,31 +883,25 @@ final class ScreenCaptureSource: NSObject {
             } else {
                 session.committedScreenTarget = nil
             }
-            let waiters = session.filterWaiters
-            session.filterWaiters.removeAll()
-            for waiter in waiters where waiter.intent == update.intent {
-                resumes.append((waiter, .success(update.revision)))
-            }
-            for waiter in waiters where waiter.intent != update.intent {
-                session.filterWaiters.append(waiter)
-            }
+            actions = session.filterWaiters.resolveWaiters(
+                for: update.intent,
+                result: .success(update.revision)
+            )
         } else if next == nil {
-            let waiters = session.filterWaiters
-            session.filterWaiters.removeAll()
-            for waiter in waiters where waiter.intent == update.intent {
-                resumes.append((waiter, .failure(CaptureSourceError.streamFailure)))
+            let error: CaptureSourceError
+            if case let .failure(failure) = result {
+                error = failure
+            } else {
+                error = .streamFailure
             }
-            for waiter in waiters where waiter.intent != update.intent {
-                session.filterWaiters.append(waiter)
-            }
+            actions = session.filterWaiters.resolveWaiters(
+                for: update.intent,
+                result: .failure(error)
+            )
         }
+        let resumes = takeFilterWaiterResumes(actions, from: session)
         stateLock.unlock()
-        for (waiter, outcome) in resumes {
-            switch outcome {
-            case let .success(revision): waiter.continuation.resume(returning: revision)
-            case let .failure(error): waiter.continuation.resume(throwing: error)
-            }
-        }
+        resumeFilterWaiters(resumes)
         return next
     }
 
@@ -1546,12 +1567,38 @@ final class ScreenCaptureSource: NSObject {
         activeSession = nil
     }
 
-    private func resumeFilterWaiters(_ session: ActiveSession, error: Error) {
+    private func resumeFilterWaiters(_ session: ActiveSession, error: CaptureSourceError) {
         stateLock.lock()
-        let waiters = session.filterWaiters
-        session.filterWaiters.removeAll()
+        let resumes = takeFilterWaiterResumes(
+            session.filterWaiters.drain(error: error),
+            from: session
+        )
         stateLock.unlock()
-        waiters.forEach { $0.continuation.resume(throwing: error) }
+        resumeFilterWaiters(resumes)
+    }
+
+    private func takeFilterWaiterResumes(
+        _ actions: [CaptureFilterWaiterAction],
+        from session: ActiveSession
+    ) -> [(CheckedContinuation<CaptureFilterRevision, Error>, Result<CaptureFilterRevision, CaptureSourceError>)] {
+        actions.compactMap { action in
+            guard case let .resume(id, result) = action,
+                  let continuation = session.filterWaiterContinuations.removeValue(forKey: id) else {
+                return nil
+            }
+            return (continuation, result)
+        }
+    }
+
+    private func resumeFilterWaiters(
+        _ resumes: [(CheckedContinuation<CaptureFilterRevision, Error>, Result<CaptureFilterRevision, CaptureSourceError>)]
+    ) {
+        for (continuation, result) in resumes {
+            switch result {
+            case let .success(revision): continuation.resume(returning: revision)
+            case let .failure(error): continuation.resume(throwing: error)
+            }
+        }
     }
 
     private func removeOutputs(

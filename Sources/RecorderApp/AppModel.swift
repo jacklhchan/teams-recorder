@@ -44,6 +44,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var localMicMuted = false
     @Published private(set) var nativeInputMicMuted = false
     @Published private(set) var teamsMicMuted = false
+    @Published private(set) var isScreenCaptureAllowedByStorage = true
+    @Published private(set) var screenCaptureStorageRestrictionReason: String?
+    @Published private(set) var storageWarningMessage: String?
 
     let recorder: RecordingEngine
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -64,6 +67,10 @@ final class AppModel: ObservableObject {
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
     private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
     private let recordingSessionRecovery: @Sendable (URL) -> Void
+    private let permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)?
+    private let volumeCapacityProvider: any VolumeCapacityProviding
+    private let storagePolicy: RecordingStoragePolicy
+    private let storageMonitorTick: @Sendable () async -> Void
     private let defaults: UserDefaults
     private let recordingSessionLoadingQueue = DispatchQueue(
         label: "local.meeting.recorder.recording-library",
@@ -76,6 +83,9 @@ final class AppModel: ObservableObject {
     private var teamsMuteSyncInstalled = false
     private var recordingSessionRefreshGeneration: UInt = 0
     private var recoveredLibraryFolders: Set<URL> = []
+    private var storageMonitorTask: Task<Void, Never>?
+    private var storageMonitorGeneration: UInt64 = 0
+    private var testRecordingStopTask: Task<Void, Never>?
 
     private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
 
@@ -97,6 +107,12 @@ final class AppModel: ObservableObject {
         },
         recordingSessionRecovery: @escaping @Sendable (URL) -> Void = {
             IncompleteSessionRecovery().recover(in: $0)
+        },
+        permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)? = nil,
+        volumeCapacityProvider: any VolumeCapacityProviding = SelectedVolumeCapacityProvider(),
+        storagePolicy: RecordingStoragePolicy = RecordingStoragePolicy(),
+        storageMonitorTick: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(for: .seconds(15))
         }
     ) {
         let activeRecorder = recorder ?? RecordingEngine()
@@ -110,6 +126,10 @@ final class AppModel: ObservableObject {
         self.virtualMicStateProvider = virtualMicStateProvider
         self.recordingSessionLoader = recordingSessionLoader
         self.recordingSessionRecovery = recordingSessionRecovery
+        self.permissionRequestHandler = permissionRequestHandler
+        self.volumeCapacityProvider = volumeCapacityProvider
+        self.storagePolicy = storagePolicy
+        self.storageMonitorTick = storageMonitorTick
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
@@ -137,6 +157,7 @@ final class AppModel: ObservableObject {
         captureSelection = capturePersistence.loadSelection()
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
         observeRecorderConnection()
+        observeRecorderRecordingState()
         refreshDevices()
         guard performStartupWork else { return }
         installInputMuteHandling()
@@ -152,6 +173,8 @@ final class AppModel: ObservableObject {
     }
 
     deinit {
+        storageMonitorTask?.cancel()
+        testRecordingStopTask?.cancel()
         teamsMuteRelay.invalidate()
         teamsMuteSyncClient.stop()
         inputMuteController.uninstall()
@@ -314,15 +337,27 @@ final class AppModel: ObservableObject {
                 statusMessage = readinessMessage
                 return
             }
+            let recordingFolder = outputFolder
+            guard await prepareStorageForNewRecording(in: recordingFolder) else { return }
+            guard captureLifecycleGate.accepts(token) else { return }
+            guard outputFolder == recordingFolder else {
+                statusMessage = "Output folder changed. Start recording again."
+                return
+            }
             do {
                 try await recorder.start(
                     selection: resolvedCaptureSelection,
                     microphoneUID: selectedMicDevice?.uid,
-                    baseFolder: outputFolder
+                    baseFolder: recordingFolder
                 )
                 guard captureLifecycleGate.accepts(token) else { return }
+                if !isScreenCaptureAllowedByStorage {
+                    await recorder.setScreenCaptureRequested(false)
+                    guard captureLifecycleGate.accepts(token), recorder.isRecording else { return }
+                }
                 statusMessage = "Recording"
                 lastHealthReport = nil
+                startStorageMonitoring(folder: recordingFolder)
             } catch {
                 guard captureLifecycleGate.accepts(token) else { return }
                 statusMessage = error.localizedDescription
@@ -347,24 +382,43 @@ final class AppModel: ObservableObject {
                 statusMessage = readinessMessage
                 return
             }
+            let recordingFolder = outputFolder
+            guard await prepareStorageForNewRecording(in: recordingFolder) else {
+                isRunningTestRecording = false
+                return
+            }
+            guard captureLifecycleGate.accepts(token) else { return }
+            guard outputFolder == recordingFolder else {
+                isRunningTestRecording = false
+                statusMessage = "Output folder changed. Start recording again."
+                return
+            }
             do {
                 try await recorder.start(
                     selection: resolvedCaptureSelection,
                     microphoneUID: selectedMicDevice?.uid,
-                    baseFolder: outputFolder,
+                    baseFolder: recordingFolder,
                     folderPrefix: "test"
                 )
                 guard captureLifecycleGate.accepts(token) else { return }
+                if !isScreenCaptureAllowedByStorage {
+                    await recorder.setScreenCaptureRequested(false)
+                    guard captureLifecycleGate.accepts(token), recorder.isRecording else { return }
+                }
                 statusMessage = "Test recording: 10 seconds"
+                startStorageMonitoring(folder: recordingFolder)
             } catch {
                 guard captureLifecycleGate.accepts(token) else { return }
                 isRunningTestRecording = false
                 statusMessage = error.localizedDescription
                 return
             }
-            Task { @MainActor [weak self] in
+            testRecordingStopTask?.cancel()
+            testRecordingStopTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(10))
-                guard let self, self.isRunningTestRecording else { return }
+                guard !Task.isCancelled,
+                      let self,
+                      self.isRunningTestRecording else { return }
                 self.stopCaptureLifecycle(playAfterStop: true)
             }
         }
@@ -1103,6 +1157,10 @@ final class AppModel: ObservableObject {
         requestSystemOnly: Bool = false,
         requestMicrophoneOnly: Bool = false
     ) async {
+        if let permissionRequestHandler {
+            await permissionRequestHandler(requestSystemOnly, requestMicrophoneOnly)
+            return
+        }
         refreshPermissionPreflight()
         if !requestMicrophoneOnly {
             switch systemAudioPermission {
@@ -1183,6 +1241,9 @@ final class AppModel: ObservableObject {
         guard let token = captureLifecycleGate.cancelAndBeginStop() else {
             return
         }
+        invalidateStorageMonitoring()
+        testRecordingStopTask?.cancel()
+        testRecordingStopTask = nil
         captureLifecycleTask?.cancel()
         isCaptureLifecycleWorking = true
         let task = Task { @MainActor [weak self] in
@@ -1223,4 +1284,110 @@ final class AppModel: ObservableObject {
             }
             .store(in: &cancellables)
     }
+
+    private func observeRecorderRecordingState() {
+        recorder.$isRecording
+            .dropFirst()
+            .sink { [weak self] isRecording in
+                guard let self, !isRecording else { return }
+                self.invalidateStorageMonitoring()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func prepareStorageForNewRecording(in folder: URL) async -> Bool {
+        invalidateStorageMonitoring(resetAllowance: true)
+        let check = await storageCapacityCheck(for: folder)
+        switch check {
+        case .decision(.normal):
+            return true
+        case .decision(.warn):
+            storageWarningMessage = "Low storage space: less than 5 GB available."
+            return true
+        case .decision(.audioOnly):
+            let reason = "Screen capture disabled: less than 1 GB available. Audio recording can continue."
+            isScreenCaptureAllowedByStorage = false
+            screenCaptureStorageRestrictionReason = reason
+            storageWarningMessage = reason
+            return true
+        case .decision(.stop):
+            statusMessage = "Recording cannot start: less than 256 MB available."
+            return false
+        case .unavailable(let description):
+            storageWarningMessage = "Storage check unavailable: \(description). Recording can continue."
+            return true
+        }
+    }
+
+    private func startStorageMonitoring(folder: URL) {
+        guard recorder.isRecording else { return }
+        storageMonitorTask?.cancel()
+        storageMonitorGeneration &+= 1
+        let generation = storageMonitorGeneration
+        let tick = storageMonitorTick
+        storageMonitorTask = Task(priority: .utility) { [weak self, tick] in
+            while !Task.isCancelled {
+                await tick()
+                guard !Task.isCancelled, let self else { return }
+                await self.runStorageMonitorCheck(
+                    generation: generation,
+                    folder: folder
+                )
+            }
+        }
+    }
+
+    private func runStorageMonitorCheck(generation: UInt64, folder: URL) async {
+        let check = await storageCapacityCheck(for: folder)
+        guard generation == storageMonitorGeneration, recorder.isRecording else { return }
+
+        switch check {
+        case .decision(.normal):
+            return
+        case .decision(.warn):
+            storageWarningMessage = "Low storage space: less than 5 GB available."
+        case .decision(.audioOnly):
+            let reason = "Screen capture disabled: less than 1 GB available. Audio recording can continue."
+            isScreenCaptureAllowedByStorage = false
+            screenCaptureStorageRestrictionReason = reason
+            storageWarningMessage = reason
+            await recorder.setScreenCaptureRequested(false)
+            guard generation == storageMonitorGeneration, recorder.isRecording else { return }
+            statusMessage = "Low storage: screen capture disabled; audio recording continues."
+        case .decision(.stop):
+            statusMessage = "Low storage: finalizing recording safely."
+            stopCaptureLifecycle(playAfterStop: false)
+        case .unavailable(let description):
+            storageWarningMessage = "Storage check unavailable: \(description). Recording can continue."
+            statusMessage = storageWarningMessage ?? statusMessage
+        }
+    }
+
+    private func storageCapacityCheck(for folder: URL) async -> StorageCapacityCheck {
+        let policy = storagePolicy
+        let provider = volumeCapacityProvider
+        return await Task.detached(priority: .utility) {
+            do {
+                let availableBytes = try provider.availableBytes(onVolumeContaining: folder)
+                return .decision(policy.decision(availableBytes: availableBytes))
+            } catch {
+                return .unavailable(error.localizedDescription)
+            }
+        }.value
+    }
+
+    private func invalidateStorageMonitoring(resetAllowance: Bool = false) {
+        storageMonitorGeneration &+= 1
+        storageMonitorTask?.cancel()
+        storageMonitorTask = nil
+        guard resetAllowance else { return }
+        isScreenCaptureAllowedByStorage = true
+        screenCaptureStorageRestrictionReason = nil
+        storageWarningMessage = nil
+    }
+}
+
+private enum StorageCapacityCheck: Sendable {
+    case decision(RecordingStorageDecision)
+    case unavailable(String)
 }

@@ -1,13 +1,13 @@
 import Foundation
 
-enum RecordingStorageDecision: Equatable {
+enum RecordingStorageDecision: Equatable, Sendable {
     case normal
     case warn
     case audioOnly
     case stop
 }
 
-struct RecordingStoragePolicy {
+struct RecordingStoragePolicy: Sendable {
     static let warningBytes: Int64 = 5 * 1_024 * 1_024 * 1_024
     static let videoMinimumBytes: Int64 = 1 * 1_024 * 1_024 * 1_024
     static let audioStopBytes: Int64 = 256 * 1_024 * 1_024
@@ -32,7 +32,7 @@ struct RecordingStoragePolicy {
     }
 }
 
-protocol VolumeCapacityProviding {
+protocol VolumeCapacityProviding: Sendable {
     func availableBytes(onVolumeContaining url: URL) throws -> Int64
 }
 
@@ -41,9 +41,11 @@ enum RecordingStorageError: Error, Equatable {
 }
 
 struct SelectedVolumeCapacityProvider: VolumeCapacityProviding {
-    private let capacityLookup: (URL) throws -> Int64?
+    private let capacityLookup: @Sendable (URL) throws -> Int64?
 
-    init(capacityLookup: @escaping (URL) throws -> Int64? = Self.importantUsageCapacity) {
+    init(capacityLookup: @escaping @Sendable (URL) throws -> Int64? = { url in
+        try Self.importantUsageCapacity(for: url)
+    }) {
         self.capacityLookup = capacityLookup
     }
 

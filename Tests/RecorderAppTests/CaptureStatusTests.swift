@@ -561,9 +561,9 @@ private final class PausedStopCaptureSource: CaptureSourceProtocol {
     ) async throws {}
 
     func stop() async {
-        stopCount += 1
         await withCheckedContinuation { continuation in
             stopContinuation = continuation
+            stopCount += 1
         }
     }
 

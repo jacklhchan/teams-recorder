@@ -335,6 +335,10 @@ struct CaptureLifecycleCoordinator {
     func isActive(_ token: CaptureSessionToken) -> Bool {
         state == .active(token)
     }
+
+    func isStarting(_ reservation: CaptureStartReservation) -> Bool {
+        state == .starting(reservation)
+    }
 }
 
 struct CaptureSessionEventState {
@@ -574,6 +578,8 @@ final class ScreenCaptureSource: NSObject {
         let eventHandler: EventHandler
         let videoHandler: VideoHandler
         let videoQueue: DispatchQueue
+        let routingPlan: ScreenCaptureRoutingPlan
+        let screenPixelFormat: OSType
         let selectedApplication: CaptureApplication?
         var selectedApplicationState: SelectedApplicationSessionState?
         let selectedMicrophoneUID: String?
@@ -581,6 +587,7 @@ final class ScreenCaptureSource: NSObject {
         var livenessTask: Task<Void, Never>?
         var screenTargetLivenessTask: Task<Void, Never>?
         var filterCoordinator = CaptureFilterCoordinator()
+        var revisionGate = ScreenCaptureRevisionGate()
         var committedFilterRevision: CaptureFilterRevision?
         var committedFilterIntent: CaptureStreamIntent?
         var committedScreenTarget: TeamsWindowIdentity?
@@ -591,6 +598,8 @@ final class ScreenCaptureSource: NSObject {
             token: CaptureSessionToken,
             eventHandler: @escaping EventHandler,
             videoHandler: @escaping VideoHandler,
+            routingPlan: ScreenCaptureRoutingPlan,
+            screenPixelFormat: OSType,
             selectedApplication: CaptureApplication?,
             selectedMicrophoneUID: String?
         ) {
@@ -599,8 +608,10 @@ final class ScreenCaptureSource: NSObject {
             self.token = token
             self.eventHandler = eventHandler
             self.videoHandler = videoHandler
+            self.routingPlan = routingPlan
+            self.screenPixelFormat = screenPixelFormat
             self.videoQueue = DispatchQueue(
-                label: "local-meeting-recorder.capture.video.\(token.generation)",
+                label: "\(routingPlan.videoQueueLabel).\(token.generation)",
                 qos: .userInitiated
             )
             self.selectedApplication = selectedApplication
@@ -739,11 +750,16 @@ final class ScreenCaptureSource: NSObject {
             let filter = try Self.makeFilter(intent: update.intent, content: content, display: display)
             let configuration = Self.screenConfiguration(
                 for: update.intent,
-                microphoneUID: session.selectedMicrophoneUID
+                microphoneUID: session.selectedMicrophoneUID,
+                pixelFormat: session.screenPixelFormat
             )
             try await session.stream.updateContentFilter(filter)
             try await session.stream.updateConfiguration(configuration)
+            beginVideoRevisionBarrier(session, revision: update.revision)
             session.videoQueue.sync {}
+            guard finishVideoRevisionBarrier(session) == update.revision else {
+                throw CaptureSourceError.streamStartCancelled
+            }
             let next = completeFilterUpdate(session, update: update, result: .success(()))
             startScreenTargetLiveness(for: session)
             if let next { try await applyFilterUpdate(next, to: session) }
@@ -777,6 +793,26 @@ final class ScreenCaptureSource: NSObject {
         return next
     }
 
+    private func beginVideoRevisionBarrier(
+        _ session: ActiveSession,
+        revision: CaptureFilterRevision
+    ) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session, lifecycle.isActive(session.token) else { return }
+        session.revisionGate.begin(revision)
+    }
+
+    private func finishVideoRevisionBarrier(
+        _ session: ActiveSession
+    ) -> CaptureFilterRevision? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session, lifecycle.isActive(session.token) else { return nil }
+        session.revisionGate.finishVideoBarrier()
+        return session.revisionGate.commitIfBarrierFinished()
+    }
+
     private func restoreCommittedFilter(for session: ActiveSession) async {
         let intent: CaptureStreamIntent? = {
             stateLock.lock()
@@ -795,7 +831,11 @@ final class ScreenCaptureSource: NSObject {
         }
         try? await session.stream.updateContentFilter(filter)
         try? await session.stream.updateConfiguration(
-            Self.screenConfiguration(for: intent, microphoneUID: session.selectedMicrophoneUID)
+            Self.screenConfiguration(
+                for: intent,
+                microphoneUID: session.selectedMicrophoneUID,
+                pixelFormat: session.screenPixelFormat
+            )
         )
         session.videoQueue.sync {}
     }
@@ -836,79 +876,74 @@ final class ScreenCaptureSource: NSObject {
                 coreAudioUID: microphoneUID
             )
 
-            let configuration = SCStreamConfiguration()
-            configuration.capturesAudio = true
-            configuration.captureMicrophone = true
-            configuration.sampleRate = Int(SampleBufferConverter.outputSampleRate)
-            configuration.channelCount = 2
-            configuration.excludesCurrentProcessAudio = true
-            configuration.microphoneCaptureDeviceID = captureDeviceUID
-            Self.configureScreenFrames(configuration, cadence: .idle)
-
-            let stream = SCStream(
-                filter: filter,
-                configuration: configuration,
-                delegate: self
+            let routingPlan = ScreenCaptureRoutingPlan(
+                isSelectedApplication: Self.selectedApplication(in: selection) != nil
             )
-            let token = sessionGate.issueToken(
-                streamIdentity: ObjectIdentifier(stream)
-            )
-            let output = ScreenCaptureStreamOutput(
-                token: token,
-                gate: sessionGate,
-                onAudio: { [weak self] block in
-                    if block.source == .microphone {
-                        self?.recordMicrophoneAudio(for: token)
-                    }
-                    onAudio(block)
-                },
-                onVideo: { [weak self] frame in
-                    self?.deliverVideo(frame, for: token)
-                },
-                videoRevision: { [weak self] in
-                    self?.currentVideoRevision(for: token)
-                },
-                onEvent: onEvent
-            )
-            let session = ActiveSession(
-                stream: stream,
-                output: output,
-                token: token,
-                eventHandler: onEvent,
-                videoHandler: onVideo,
-                selectedApplication: Self.selectedApplication(in: selection),
-                selectedMicrophoneUID: captureDeviceUID
-            )
-            pendingSession = session
-            try stream.addStreamOutput(
-                output,
-                type: .audio,
-                sampleHandlerQueue: systemAudioQueue
-            )
-            try stream.addStreamOutput(
-                output,
-                type: .microphone,
-                sampleHandlerQueue: microphoneQueue
-            )
-            if Self.selectedApplication(in: selection) != nil {
-                try stream.addStreamOutput(
-                    output,
-                    type: .screen,
-                    sampleHandlerQueue: session.videoQueue
+            var attempts = ScreenCaptureStartupAttemptSequence()
+            var lastError: Error?
+            while let pixelFormat = attempts.next() {
+                guard isStartReservationCurrent(reservation) else {
+                    throw CaptureSourceError.streamStartCancelled
+                }
+                let configuration = Self.startupConfiguration(
+                    pixelFormat: pixelFormat,
+                    microphoneUID: captureDeviceUID
                 )
+                let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+                let token = sessionGate.issueToken(streamIdentity: ObjectIdentifier(stream))
+                let output = ScreenCaptureStreamOutput(
+                    token: token,
+                    gate: sessionGate,
+                    onAudio: { [weak self] block in
+                        if block.source == .microphone { self?.recordMicrophoneAudio(for: token) }
+                        onAudio(block)
+                    },
+                    onVideo: { [weak self] frame in self?.deliverVideo(frame, for: token) },
+                    videoRevision: { [weak self] in self?.currentVideoRevision(for: token) },
+                    videoPixelFormat: { pixelFormat.coreVideoValue },
+                    onEvent: onEvent
+                )
+                let session = ActiveSession(
+                    stream: stream,
+                    output: output,
+                    token: token,
+                    eventHandler: onEvent,
+                    videoHandler: onVideo,
+                    routingPlan: routingPlan,
+                    screenPixelFormat: pixelFormat.coreVideoValue,
+                    selectedApplication: Self.selectedApplication(in: selection),
+                    selectedMicrophoneUID: captureDeviceUID
+                )
+                pendingSession = session
+                do {
+                    try addOutputs(for: session)
+                    try await stream.startCapture()
+                    guard install(reservation: reservation, session: session) else {
+                        await discardPendingSession(session)
+                        pendingSession = nil
+                        throw CaptureSourceError.streamStartCancelled
+                    }
+                    didInstallSession = true
+                    guard isSessionActive(session) else {
+                        await stop(expected: session)
+                        throw CaptureSourceError.streamStartCancelled
+                    }
+                    startSelectedApplicationLiveness(for: session)
+                    break
+                } catch let error as CaptureSourceError {
+                    if error == .streamStartCancelled { throw error }
+                    lastError = error
+                    await discardPendingSession(session)
+                    pendingSession = nil
+                } catch {
+                    lastError = error
+                    await discardPendingSession(session)
+                    pendingSession = nil
+                }
             }
-
-            guard install(reservation: reservation, session: session) else {
-                throw CaptureSourceError.streamStartCancelled
+            if !didInstallSession {
+                throw lastError ?? CaptureSourceError.streamFailure
             }
-            didInstallSession = true
-
-            try await stream.startCapture()
-            guard isSessionActive(session) else {
-                await stop(expected: session)
-                throw CaptureSourceError.streamStartCancelled
-            }
-            startSelectedApplicationLiveness(for: session)
         } catch {
             if didInstallSession, let pendingSession {
                 await stop(expected: pendingSession)
@@ -1095,7 +1130,8 @@ final class ScreenCaptureSource: NSObject {
 
     private static func screenConfiguration(
         for intent: CaptureStreamIntent,
-        microphoneUID: String?
+        microphoneUID: String?,
+        pixelFormat: OSType
     ) -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
         configuration.capturesAudio = true
@@ -1105,7 +1141,49 @@ final class ScreenCaptureSource: NSObject {
         configuration.excludesCurrentProcessAudio = true
         configuration.microphoneCaptureDeviceID = microphoneUID
         configureScreenFrames(configuration, cadence: intent.cadence)
+        configuration.pixelFormat = pixelFormat
         return configuration
+    }
+
+    private static func startupConfiguration(
+        pixelFormat: ScreenCaptureStartupPixelFormat,
+        microphoneUID: String?
+    ) -> SCStreamConfiguration {
+        let configuration = SCStreamConfiguration()
+        configuration.capturesAudio = true
+        configuration.captureMicrophone = true
+        configuration.sampleRate = Int(SampleBufferConverter.outputSampleRate)
+        configuration.channelCount = 2
+        configuration.excludesCurrentProcessAudio = true
+        configuration.microphoneCaptureDeviceID = microphoneUID
+        configureScreenFrames(configuration, cadence: .idle)
+        configuration.pixelFormat = pixelFormat.coreVideoValue
+        return configuration
+    }
+
+    private func addOutputs(for session: ActiveSession) throws {
+        for output in session.routingPlan.outputs {
+            switch output {
+            case .audio:
+                try session.stream.addStreamOutput(
+                    session.output,
+                    type: .audio,
+                    sampleHandlerQueue: systemAudioQueue
+                )
+            case .microphone:
+                try session.stream.addStreamOutput(
+                    session.output,
+                    type: .microphone,
+                    sampleHandlerQueue: microphoneQueue
+                )
+            case .screen:
+                try session.stream.addStreamOutput(
+                    session.output,
+                    type: .screen,
+                    sampleHandlerQueue: session.videoQueue
+                )
+            }
+        }
     }
 
     private static func configureScreenFrames(
@@ -1139,6 +1217,12 @@ final class ScreenCaptureSource: NSObject {
         stateLock.lock()
         defer { stateLock.unlock() }
         return try lifecycle.reserveStart()
+    }
+
+    private func isStartReservationCurrent(_ reservation: CaptureStartReservation) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return lifecycle.isStarting(reservation)
     }
 
     private func install(
@@ -1358,25 +1442,25 @@ final class ScreenCaptureSource: NSObject {
         for session: ActiveSession,
         reportErrors: Bool
     ) {
-        do {
-            try session.stream.removeStreamOutput(session.output, type: .audio)
-        } catch {
-            if reportErrors {
-                session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
-            }
+        if session.routingPlan.drainsVideoBeforeRemovingOutputs {
+            session.videoQueue.sync {}
         }
-        do {
-            try session.stream.removeStreamOutput(session.output, type: .microphone)
-        } catch {
-            if reportErrors {
-                session.eventHandler(CaptureErrorMapper.event(for: error as NSError))
-            }
-        }
-        do {
-            try session.stream.removeStreamOutput(session.output, type: .screen)
-        } catch {
-            if reportErrors {
-                session.eventHandler(.screenCaptureFailed)
+        for output in session.routingPlan.outputsToRemoveOnStop {
+            do {
+                switch output {
+                case .audio:
+                    try session.stream.removeStreamOutput(session.output, type: .audio)
+                case .microphone:
+                    try session.stream.removeStreamOutput(session.output, type: .microphone)
+                case .screen:
+                    try session.stream.removeStreamOutput(session.output, type: .screen)
+                }
+            } catch {
+                if reportErrors {
+                    session.eventHandler(output == .screen
+                        ? .screenCaptureFailed
+                        : CaptureErrorMapper.event(for: error as NSError))
+                }
             }
         }
     }
@@ -1541,6 +1625,7 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
     private let onAudio: (AudioFrameBlock) -> Void
     private let onVideo: (ScreenVideoFrame) -> Void
     private let videoRevision: () -> CaptureFilterRevision?
+    private let videoPixelFormat: () -> OSType
     private let onEvent: (CaptureEvent) -> Void
     private let systemResampler = PersistentAudioResampler(source: .system)
     private let microphoneResampler = PersistentAudioResampler(source: .microphone)
@@ -1551,6 +1636,7 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         onAudio: @escaping (AudioFrameBlock) -> Void,
         onVideo: @escaping (ScreenVideoFrame) -> Void,
         videoRevision: @escaping () -> CaptureFilterRevision?,
+        videoPixelFormat: @escaping () -> OSType,
         onEvent: @escaping (CaptureEvent) -> Void
     ) {
         self.token = token
@@ -1563,6 +1649,7 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         self.onAudio = onAudio
         self.onVideo = onVideo
         self.videoRevision = videoRevision
+        self.videoPixelFormat = videoPixelFormat
         self.onEvent = onEvent
     }
 
@@ -1629,7 +1716,7 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         guard let revision = videoRevision(),
               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               CVPixelBufferGetPixelFormatType(imageBuffer)
-                == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange else {
+                == videoPixelFormat() else {
             return
         }
         let attachments = CMSampleBufferGetSampleAttachmentsArray(

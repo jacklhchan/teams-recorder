@@ -3,6 +3,23 @@ import XCTest
 
 @MainActor
 final class RecordingEngineStateTests: XCTestCase {
+    func testScreenFailureDoesNotDisconnectSystemAudio() async throws {
+        let source = FakeCaptureSource()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in FakeWriter() },
+            mixerBlockFrames: 4
+        )
+        try await engine.startMonitoring(selection: .allSystemAudio, microphoneUID: nil)
+
+        source.emit(event: .screenCaptureFailed)
+        await settle()
+
+        XCTAssertTrue(engine.isMonitoring)
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+        XCTAssertEqual(engine.captureStatus, .warning("Screen frame capture unavailable"))
+    }
+
     func testMonitoringPublishesOnlyMicrophoneBeforeRecordingStarts() async throws {
         let source = FakeCaptureSource()
         let publisher = FakeVirtualMicPublisher()

@@ -53,6 +53,73 @@ final class CaptureFilterCoordinatorTests: XCTestCase {
         XCTAssertNotEqual(retry?.revision, first.revision)
     }
 
+    func testWindowReplacementPublishesOnlyReplacementAfterFirstCompletion() {
+        var coordinator = CaptureFilterCoordinator()
+        let first = coordinator.request(intent(windowID: 1))!
+        XCTAssertNil(coordinator.request(intent(windowID: 2)))
+
+        let replacement = coordinator.complete(first, result: .success(()))
+
+        XCTAssertEqual(replacement?.intent, intent(windowID: 2))
+        XCTAssertNotEqual(replacement?.revision, first.revision)
+    }
+
+    func testWindowToApplicationFallbackHasIdleCadence() {
+        var coordinator = CaptureFilterCoordinator()
+        let window = coordinator.request(intent(windowID: 1))!
+        XCTAssertNil(coordinator.complete(window, result: .success(())))
+        let application = CaptureStreamIntent(filter: .application(teams), cadence: .idle)
+
+        let fallback = coordinator.request(application)
+
+        XCTAssertEqual(fallback?.intent, application)
+        XCTAssertEqual(fallback?.intent.cadence.framesPerSecond, 1)
+    }
+
+    func testFailedFilterOrConfigurationUpdateDoesNotCommitFailedIntent() {
+        var coordinator = CaptureFilterCoordinator()
+        let first = coordinator.request(intent(windowID: 1))!
+        let retry = coordinator.complete(first, result: .failure(.streamFailure))
+
+        XCTAssertEqual(retry?.intent, first.intent)
+        XCTAssertNotEqual(retry?.revision, first.revision)
+        XCTAssertNil(coordinator.complete(first, result: .success(())))
+    }
+
+    func testInterleavedToggleReconnectAndEnableLeavesNewestEnabledIntent() {
+        var coordinator = CaptureFilterCoordinator()
+        let disabled = CaptureStreamIntent(filter: .application(teams), cadence: .idle)
+        let reconnect = CaptureStreamIntent(
+            filter: .application(CaptureApplication(
+                processID: 43,
+                bundleIdentifier: teams.bundleIdentifier,
+                name: teams.name
+            )),
+            cadence: .idle
+        )
+        let enabled = intent(windowID: 3)
+        let first = coordinator.request(disabled)!
+        XCTAssertNil(coordinator.request(reconnect))
+        XCTAssertNil(coordinator.request(enabled))
+
+        let newest = coordinator.complete(first, result: .success(()))
+
+        XCTAssertEqual(newest?.intent, enabled)
+        XCTAssertEqual(newest?.intent.cadence.framesPerSecond, 10)
+    }
+
+    func testReconnectUsesSameCoordinatorAndCannotBypassPendingManualTarget() {
+        var coordinator = CaptureFilterCoordinator()
+        let first = coordinator.request(intent(windowID: 1))!
+        let reconnect = CaptureStreamIntent(filter: .application(teams), cadence: .idle)
+        XCTAssertNil(coordinator.request(reconnect))
+        XCTAssertNil(coordinator.request(intent(windowID: 2)))
+
+        let next = coordinator.complete(first, result: .success(()))
+
+        XCTAssertEqual(next?.intent, intent(windowID: 2))
+    }
+
     func testStopWinsOverEveryPendingCompletion() {
         var coordinator = CaptureFilterCoordinator()
         let update = coordinator.request(intent(windowID: 1))!

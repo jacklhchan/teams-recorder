@@ -19,11 +19,76 @@ enum CaptureFilterIntent: Equatable, Sendable {
 enum ScreenFrameCadence: Equatable, Sendable {
     case idle
     case enabled
+
+    var framesPerSecond: Int {
+        self == .enabled ? 10 : 1
+    }
 }
 
 struct CaptureStreamIntent: Equatable, Sendable {
     let filter: CaptureFilterIntent
     let cadence: ScreenFrameCadence
+}
+
+enum ScreenCaptureOutputKind: Equatable, Sendable {
+    case audio
+    case microphone
+    case screen
+}
+
+struct ScreenCaptureRoutingPlan: Equatable, Sendable {
+    static let audioQueueLabel = "local-meeting-recorder.capture.system"
+    static let videoQueueLabel = "local-meeting-recorder.capture.video"
+
+    let outputs: [ScreenCaptureOutputKind]
+
+    init(isSelectedApplication: Bool) {
+        outputs = isSelectedApplication
+            ? [.audio, .microphone, .screen]
+            : [.audio, .microphone]
+    }
+
+    var acceptsScreenFrames: Bool { outputs.contains(.screen) }
+    var audioQueueLabel: String { Self.audioQueueLabel }
+    var videoQueueLabel: String { Self.videoQueueLabel }
+    var outputsToRemoveOnStop: [ScreenCaptureOutputKind] { outputs }
+    var drainsVideoBeforeRemovingOutputs: Bool { acceptsScreenFrames }
+}
+
+enum ScreenCaptureStartupPixelFormat: Equatable, Sendable {
+    case nv12
+    case bgra
+}
+
+struct ScreenCaptureStartupAttemptSequence {
+    private var attempts: [ScreenCaptureStartupPixelFormat] = [.nv12, .bgra]
+
+    mutating func next() -> ScreenCaptureStartupPixelFormat? {
+        attempts.isEmpty ? nil : attempts.removeFirst()
+    }
+}
+
+struct ScreenCaptureRevisionGate {
+    private var pending: CaptureFilterRevision?
+    private var barrierFinished = false
+
+    mutating func begin(_ revision: CaptureFilterRevision) {
+        pending = revision
+        barrierFinished = false
+    }
+
+    mutating func finishVideoBarrier() {
+        barrierFinished = true
+    }
+
+    mutating func commitIfBarrierFinished() -> CaptureFilterRevision? {
+        guard barrierFinished else { return nil }
+        defer {
+            pending = nil
+            barrierFinished = false
+        }
+        return pending
+    }
 }
 
 /// Serializes content-filter and frame-cadence transactions for one SCStream.

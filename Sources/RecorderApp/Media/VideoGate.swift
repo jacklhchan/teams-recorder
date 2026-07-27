@@ -11,7 +11,7 @@ struct VideoGate {
     private static let timescale: CMTimeScale = 48_000
     private static let stallFrames: Int64 = 72_000
 
-    private let activeFilterRevision: Int
+    private let activeFilterRevision: CaptureFilterRevision
     private var screenIntent = false
     private var started = false
     private var openIntervalStartFrame: Int64?
@@ -19,15 +19,15 @@ struct VideoGate {
     private var lastAppendedFrame: Int64?
     private(set) var recordedScreenIntervals: [RecordedScreenInterval] = []
 
-    init(activeFilterRevision: Int) {
+    init(activeFilterRevision: CaptureFilterRevision) {
         self.activeFilterRevision = activeFilterRevision
     }
 
     mutating func start(at audioTime: CMTime) -> [VideoGateAction] {
-        guard !started, let frame = frame(for: audioTime) else { return [] }
+        guard !started else { return [] }
         started = true
-        lastAppendedFrame = frame
-        return [.appendBlack(time(for: frame))]
+        lastAppendedFrame = 0
+        return [.appendBlack(.zero)]
     }
 
     mutating func setScreenIntent(_ enabled: Bool, at audioTime: CMTime) -> [VideoGateAction] {
@@ -40,10 +40,13 @@ struct VideoGate {
         at audioTime: CMTime,
         isComplete: Bool,
         sourceAvailable: Bool,
-        filterRevision: Int
+        filterRevision: CaptureFilterRevision
     ) -> [VideoGateAction] {
         guard let frame = frame(for: audioTime) else { return [.drop] }
-        guard screenIntent, isComplete, sourceAvailable, filterRevision == activeFilterRevision else {
+        if filterRevision != activeFilterRevision {
+            return openIntervalStartFrame == nil ? [.drop] : closeWithBlack(at: frame)
+        }
+        guard screenIntent, isComplete, sourceAvailable else {
             if !sourceAvailable { return closeWithBlack(at: frame) }
             return [.drop]
         }
@@ -55,8 +58,11 @@ struct VideoGate {
     }
 
     mutating func checkForStall(at audioTime: CMTime) -> [VideoGateAction] {
-        guard let frame = frame(for: audioTime), let lastCompleteFrame,
-              frame - lastCompleteFrame >= Self.stallFrames else {
+        guard let frame = frame(for: audioTime), let lastCompleteFrame else {
+            return []
+        }
+        let (elapsed, overflow) = frame.subtractingReportingOverflow(lastCompleteFrame)
+        guard (overflow && frame > lastCompleteFrame) || (!overflow && elapsed >= Self.stallFrames) else {
             return []
         }
         return closeWithBlack(at: frame)
@@ -66,7 +72,12 @@ struct VideoGate {
         guard let audioEndFrame = frame(for: audioEndTime), let openIntervalStartFrame else {
             return []
         }
-        let finalBlackFrame = audioEndFrame - 1
+        let (finalBlackFrame, subtractionOverflow) = audioEndFrame.subtractingReportingOverflow(1)
+        guard !subtractionOverflow else {
+            closeInterval(startFrame: openIntervalStartFrame, endFrame: audioEndFrame)
+            self.openIntervalStartFrame = nil
+            return []
+        }
         guard let lastAppendedFrame, finalBlackFrame > lastAppendedFrame else {
             closeInterval(startFrame: openIntervalStartFrame, endFrame: audioEndFrame)
             self.openIntervalStartFrame = nil
@@ -82,7 +93,7 @@ struct VideoGate {
         guard let openIntervalStartFrame else { return [] }
         self.openIntervalStartFrame = nil
         closeInterval(startFrame: openIntervalStartFrame, endFrame: frame)
-        guard lastAppendedFrame != frame else { return [] }
+        guard lastAppendedFrame.map({ frame > $0 }) ?? true else { return [] }
         lastAppendedFrame = frame
         return [.appendBlack(time(for: frame))]
     }

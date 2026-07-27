@@ -38,6 +38,14 @@ final class RecordingTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.currentAudioEndTime, time(48_480))
     }
 
+    func testInitialVideoBeforeAnchorDropsBackwardWithoutNegativePTS() {
+        var timeline = RecordingTimeline()
+        timeline.establishVideoAnchor(at: time(100))
+
+        XCTAssertEqual(timeline.mapVideo(time(99)), .dropBackward)
+        XCTAssertEqual(timeline.backwardVideoCount, 1)
+    }
+
     func testAudioGapUsesSparsePresentationTimeWithoutAllocatingSilence() {
         var timeline = RecordingTimeline()
         let first = timeline.mapAudio(block(0, count: 4))
@@ -89,6 +97,35 @@ final class RecordingTimelineTests: XCTestCase {
 
         XCTAssertEqual(mapped.presentationTime, time(1_920))
         XCTAssertEqual(timeline.currentAudioEndTime, time(2_880))
+    }
+
+    func testExtremeAudioFramesSaturateWithoutAllocatingOrTrapping() {
+        var timeline = RecordingTimeline()
+        let first = timeline.mapAudio(block(Int64.min, count: 1))
+        let second = timeline.mapAudio(block(Int64.max, count: 1))
+
+        XCTAssertEqual(first.presentationTime, .zero)
+        XCTAssertEqual(second.presentationTime, time(Int64.max))
+        XCTAssertEqual(timeline.currentAudioEndTime, time(Int64.max))
+        XCTAssertEqual(first.block.left.count + second.block.left.count, 2)
+    }
+
+    func testOverflowingVideoDifferenceDropsSafely() {
+        var timeline = RecordingTimeline()
+        _ = timeline.mapAudio(block(Int64.min, count: 1))
+        _ = timeline.mapAudio(block(Int64.max, count: 1))
+
+        XCTAssertEqual(timeline.mapVideo(time(Int64.max)), .dropFarFuture)
+        XCTAssertEqual(timeline.farFutureVideoCount, 1)
+    }
+
+    func testOverflowingVideoLeadLimitDropsSafely() {
+        var timeline = RecordingTimeline()
+        timeline.establishVideoAnchor(at: .zero)
+        _ = timeline.mapAudio(block(Int64.max, count: 1))
+
+        XCTAssertEqual(timeline.mapVideo(time(Int64.max)), .dropFarFuture)
+        XCTAssertEqual(timeline.farFutureVideoCount, 1)
     }
 
     private func block(_ startFrame: Int64, count: Int) -> MixedAudioBlock {

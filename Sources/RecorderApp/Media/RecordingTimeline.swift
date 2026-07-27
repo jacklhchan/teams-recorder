@@ -34,8 +34,12 @@ struct RecordingTimeline {
             sourceAnchorFrame = block.startFrame
         }
 
-        let presentationFrame = block.startFrame - sourceAnchorFrame!
-        let endFrame = presentationFrame + Int64(block.left.count)
+        let (subtractedFrame, subtractionOverflow) = block.startFrame.subtractingReportingOverflow(sourceAnchorFrame!)
+        let presentationFrame = subtractionOverflow
+            ? saturatedDifference(lhs: block.startFrame, rhs: sourceAnchorFrame!)
+            : subtractedFrame
+        let (addedEndFrame, additionOverflow) = presentationFrame.addingReportingOverflow(Int64(block.left.count))
+        let endFrame = additionOverflow ? Int64.max : addedEndFrame
         currentAudioEndFrame = max(currentAudioEndFrame, endFrame)
         return TimedMixedAudioBlock(block: block, presentationTime: time(for: presentationFrame))
     }
@@ -45,7 +49,15 @@ struct RecordingTimeline {
             return .pending
         }
 
-        let presentationFrame = sourceFrame - sourceAnchorFrame
+        let (presentationFrame, subtractionOverflow) = sourceFrame.subtractingReportingOverflow(sourceAnchorFrame)
+        guard !subtractionOverflow else {
+            farFutureVideoCount += 1
+            return .dropFarFuture
+        }
+        guard presentationFrame >= 0 else {
+            backwardVideoCount += 1
+            return .dropBackward
+        }
         if let lastAcceptedVideoFrame {
             if presentationFrame == lastAcceptedVideoFrame {
                 duplicateVideoCount += 1
@@ -58,7 +70,8 @@ struct RecordingTimeline {
         }
 
         let referenceFrame = max(currentAudioEndFrame, lastAcceptedVideoFrame ?? 0)
-        guard presentationFrame <= referenceFrame + Self.maximumVideoLeadFrames else {
+        let (maximumAllowedFrame, leadOverflow) = referenceFrame.addingReportingOverflow(Self.maximumVideoLeadFrames)
+        guard !leadOverflow, presentationFrame <= maximumAllowedFrame else {
             farFutureVideoCount += 1
             return .dropFarFuture
         }
@@ -83,5 +96,9 @@ struct RecordingTimeline {
 
     private func time(for frame: Int64) -> CMTime {
         CMTime(value: CMTimeValue(frame), timescale: Self.timescale)
+    }
+
+    private func saturatedDifference(lhs: Int64, rhs: Int64) -> Int64 {
+        lhs >= 0 && rhs < 0 ? Int64.max : Int64.min
     }
 }

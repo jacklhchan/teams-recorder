@@ -54,7 +54,11 @@ final class AppModel: ObservableObject {
     }
     private var audioPlayer: AVAudioPlayer?
     private var playbackTimer: Timer?
-    private var transcriptionProcess: Process?
+    private var transcriptionProcess: (any TranscriptionProcessing)?
+    private var transcriptionTask: Task<Void, Never>?
+    private var transcriptionGeneration: UInt64 = 0
+    private var activeTranscriptionAttempt: UUID?
+    private var activeTranscriptionSession: RecordingSession?
     private var transcriptionCancellationRequested = false
     private var asrPrepareProcess: Process?
     private let capturePersistence: CaptureSelectionPersistence
@@ -71,6 +75,9 @@ final class AppModel: ObservableObject {
     private let volumeCapacityProvider: any VolumeCapacityProviding
     private let storagePolicy: RecordingStoragePolicy
     private let storageMonitorTick: @Sendable () async -> Void
+    private let transcriptionAudioPreparer: any TranscriptionAudioPreparing
+    private let transcriptionProcessLauncher: any TranscriptionProcessLaunching
+    private let transcriptionScriptURL: URL?
     private let defaults: UserDefaults
     private let recordingSessionLoadingQueue = DispatchQueue(
         label: "local.meeting.recorder.recording-library",
@@ -113,7 +120,10 @@ final class AppModel: ObservableObject {
         storagePolicy: RecordingStoragePolicy = RecordingStoragePolicy(),
         storageMonitorTick: @escaping @Sendable () async -> Void = {
             try? await Task.sleep(for: .seconds(15))
-        }
+        },
+        transcriptionAudioPreparer: any TranscriptionAudioPreparing = TranscriptionAudioPreparer(),
+        transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
+        transcriptionScriptURL: URL? = nil
     ) {
         let activeRecorder = recorder ?? RecordingEngine()
         self.recorder = activeRecorder
@@ -130,6 +140,9 @@ final class AppModel: ObservableObject {
         self.volumeCapacityProvider = volumeCapacityProvider
         self.storagePolicy = storagePolicy
         self.storageMonitorTick = storageMonitorTick
+        self.transcriptionAudioPreparer = transcriptionAudioPreparer
+        self.transcriptionProcessLauncher = transcriptionProcessLauncher
+        self.transcriptionScriptURL = transcriptionScriptURL
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
@@ -175,6 +188,8 @@ final class AppModel: ObservableObject {
     deinit {
         storageMonitorTask?.cancel()
         testRecordingStopTask?.cancel()
+        transcriptionTask?.cancel()
+        transcriptionProcess?.terminate()
         teamsMuteRelay.invalidate()
         teamsMuteSyncClient.stop()
         inputMuteController.uninstall()
@@ -584,7 +599,7 @@ final class AppModel: ObservableObject {
     }
 
     func transcribe(session: RecordingSession) {
-        guard transcribingSessionID == nil else {
+        guard transcriptionTask == nil, transcribingSessionID == nil else {
             statusMessage = "A transcription is already running."
             return
         }
@@ -594,7 +609,8 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let scriptURL = Bundle.main.resourceURL?.appendingPathComponent("transcribe-qwen-asr.sh")
+        let scriptURL = transcriptionScriptURL
+            ?? Bundle.main.resourceURL?.appendingPathComponent("transcribe-qwen-asr.sh")
             ?? URL(fileURLWithPath: "/Users/apple/Documents/recorder/scripts/transcribe-qwen-asr.sh")
         guard FileManager.default.isExecutableFile(atPath: scriptURL.path) else {
             statusMessage = "Missing transcription launcher: \(scriptURL.path)"
@@ -602,7 +618,12 @@ final class AppModel: ObservableObject {
         }
 
         transcribingSessionID = session.id
+        activeTranscriptionSession = session
         transcriptionCancellationRequested = false
+        transcriptionGeneration &+= 1
+        let generation = transcriptionGeneration
+        let attempt = UUID()
+        activeTranscriptionAttempt = attempt
         lastTranscriptionSessionID = session.id
         lastTranscriptionStatus = "Preparing transcription"
         lastTranscriptionDidFail = false
@@ -613,84 +634,184 @@ final class AppModel: ObservableObject {
             for: session
         )
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [scriptURL.path, session.recordingURL.path, session.folderURL.path]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        transcriptionProcess = process
-
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in
-                self?.handleTranscriptionOutput(text, session: session)
-            }
-        }
-
-        process.terminationHandler = { [weak self] process in
-            Task { @MainActor in
-                pipe.fileHandleForReading.readabilityHandler = nil
-                self?.transcriptionProcess = nil
-                self?.transcribingSessionID = nil
-                if self?.transcriptionCancellationRequested == true {
-                    self?.transcriptionStatus = "Transcription cancelled"
-                    self?.lastTranscriptionStatus = "Transcription cancelled"
-                    self?.lastTranscriptionDidFail = false
-                    self?.updateTranscriptionState(
-                        .init(phase: .cancelled, message: "Transcription cancelled", startedAt: self?.transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
-                        for: session
-                    )
-                    self?.statusMessage = "Transcription cancelled"
-                } else if process.terminationStatus == 0 {
-                    self?.transcriptionStatus = "Transcription complete"
-                    self?.lastTranscriptionStatus = "Transcription complete"
-                    self?.lastTranscriptionDidFail = false
-                    self?.updateTranscriptionState(
-                        .init(phase: .completed, message: "Transcription complete", startedAt: self?.transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
-                        for: session
-                    )
-                    self?.statusMessage = "Transcription complete"
-                } else {
-                    self?.transcriptionStatus = "Transcription failed"
-                    self?.lastTranscriptionStatus = "Transcription failed with exit code \(process.terminationStatus). Open the ASR log for details."
-                    self?.lastTranscriptionDidFail = true
-                    self?.updateTranscriptionState(
-                        .init(phase: .failed, message: self?.lastTranscriptionStatus ?? "Transcription failed", startedAt: self?.transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
-                        for: session
-                    )
-                    self?.statusMessage = "Transcription failed with exit code \(process.terminationStatus). Open the ASR log for details."
+        let audioPreparer = transcriptionAudioPreparer
+        let processLauncher = transcriptionProcessLauncher
+        transcriptionTask = Task { @MainActor [weak self, audioPreparer, processLauncher] in
+            var prepared: PreparedTranscriptionAudio?
+            defer {
+                if let prepared {
+                    audioPreparer.cleanup(prepared)
                 }
             }
-        }
 
-        do {
-            try process.run()
-        } catch {
-            transcribingSessionID = nil
-            transcriptionProcess = nil
-            transcriptionStatus = "Transcription launch failed"
-            statusMessage = "Transcription launch failed: \(error.localizedDescription)"
-            updateTranscriptionState(
-                .init(phase: .failed, message: statusMessage, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
-                for: session
-            )
+            do {
+                try Task.checkCancellation()
+                let audio = try await audioPreparer.prepare(for: session)
+                prepared = audio
+                try Task.checkCancellation()
+                guard self?.isActiveTranscription(generation: generation, attempt: attempt) == true else {
+                    return
+                }
+
+                let process = try processLauncher.makeProcess(
+                    request: .init(
+                        scriptURL: scriptURL,
+                        audioURL: audio.audioURL,
+                        folderURL: session.folderURL
+                    ),
+                    onOutput: { [weak self] output in
+                        Task { @MainActor [weak self] in
+                            self?.handleTranscriptionOutput(
+                                output,
+                                session: session,
+                                generation: generation,
+                                attempt: attempt
+                            )
+                        }
+                    }
+                )
+                guard self?.isActiveTranscription(generation: generation, attempt: attempt) == true else {
+                    return
+                }
+                self?.transcriptionProcess = process
+                try Task.checkCancellation()
+                try process.run()
+                let result = await process.waitForExit()
+                guard self?.isActiveTranscription(generation: generation, attempt: attempt) == true else {
+                    return
+                }
+
+                // Re-parse the complete drained output before clearing the attempt.
+                self?.handleTranscriptionOutput(
+                    result.output,
+                    session: session,
+                    generation: generation,
+                    attempt: attempt
+                )
+                if Task.isCancelled || self?.transcriptionCancellationRequested == true {
+                    self?.finishTranscriptionCancellation(
+                        session: session,
+                        generation: generation,
+                        attempt: attempt
+                    )
+                } else if result.exitStatus == 0 {
+                    self?.finishTranscriptionSuccess(
+                        session: session,
+                        generation: generation,
+                        attempt: attempt
+                    )
+                } else {
+                    self?.finishTranscriptionFailure(
+                        session: session,
+                        message: "Transcription failed with exit code \(result.exitStatus). Open the ASR log for details.",
+                        generation: generation,
+                        attempt: attempt
+                    )
+                }
+            } catch is CancellationError {
+                self?.finishTranscriptionCancellation(
+                    session: session,
+                    generation: generation,
+                    attempt: attempt
+                )
+            } catch {
+                if Task.isCancelled || self?.transcriptionCancellationRequested == true {
+                    self?.finishTranscriptionCancellation(
+                        session: session,
+                        generation: generation,
+                        attempt: attempt
+                    )
+                } else {
+                    let prefix = prepared == nil
+                        ? "Transcription preparation failed"
+                        : "Transcription launch failed"
+                    self?.finishTranscriptionFailure(
+                        session: session,
+                        message: "\(prefix): \(error.localizedDescription)",
+                        generation: generation,
+                        attempt: attempt
+                    )
+                }
+            }
         }
     }
 
     func cancelTranscription() {
-        guard let process = transcriptionProcess, let sessionID = transcribingSessionID,
-              let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        guard let session = activeTranscriptionSession, transcriptionTask != nil else { return }
         transcriptionCancellationRequested = true
-        process.terminate()
+        transcriptionTask?.cancel()
+        transcriptionProcess?.terminate()
         transcriptionStatus = "Cancelling transcription..."
         lastTranscriptionStatus = transcriptionStatus
         updateTranscriptionState(
             .init(phase: .cancelled, message: transcriptionStatus, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
             for: session
         )
+    }
+
+    private func isActiveTranscription(generation: UInt64, attempt: UUID) -> Bool {
+        transcriptionGeneration == generation && activeTranscriptionAttempt == attempt
+    }
+
+    private func clearActiveTranscription(generation: UInt64, attempt: UUID) {
+        guard isActiveTranscription(generation: generation, attempt: attempt) else { return }
+        transcriptionProcess = nil
+        transcriptionTask = nil
+        transcribingSessionID = nil
+        activeTranscriptionAttempt = nil
+        activeTranscriptionSession = nil
+    }
+
+    private func finishTranscriptionCancellation(
+        session: RecordingSession,
+        generation: UInt64,
+        attempt: UUID
+    ) {
+        guard isActiveTranscription(generation: generation, attempt: attempt) else { return }
+        transcriptionStatus = "Transcription cancelled"
+        lastTranscriptionStatus = "Transcription cancelled"
+        lastTranscriptionDidFail = false
+        updateTranscriptionState(
+            .init(phase: .cancelled, message: transcriptionStatus, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
+            for: session
+        )
+        statusMessage = "Transcription cancelled"
+        clearActiveTranscription(generation: generation, attempt: attempt)
+    }
+
+    private func finishTranscriptionSuccess(
+        session: RecordingSession,
+        generation: UInt64,
+        attempt: UUID
+    ) {
+        guard isActiveTranscription(generation: generation, attempt: attempt) else { return }
+        transcriptionStatus = "Transcription complete"
+        lastTranscriptionStatus = "Transcription complete"
+        lastTranscriptionDidFail = false
+        updateTranscriptionState(
+            .init(phase: .completed, message: transcriptionStatus, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
+            for: session
+        )
+        statusMessage = transcriptionStatus
+        clearActiveTranscription(generation: generation, attempt: attempt)
+    }
+
+    private func finishTranscriptionFailure(
+        session: RecordingSession,
+        message: String,
+        generation: UInt64,
+        attempt: UUID
+    ) {
+        guard isActiveTranscription(generation: generation, attempt: attempt) else { return }
+        transcriptionStatus = "Transcription failed"
+        lastTranscriptionStatus = message
+        lastTranscriptionDidFail = true
+        updateTranscriptionState(
+            .init(phase: .failed, message: message, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
+            for: session
+        )
+        statusMessage = message
+        clearActiveTranscription(generation: generation, attempt: attempt)
     }
 
     func prepareASRModelIfNeeded() {
@@ -1048,7 +1169,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func handleTranscriptionOutput(_ text: String, session: RecordingSession) {
+    private func handleTranscriptionOutput(
+        _ text: String,
+        session: RecordingSession,
+        generation: UInt64,
+        attempt: UUID
+    ) {
+        guard isActiveTranscription(generation: generation, attempt: attempt),
+              !transcriptionCancellationRequested else { return }
         let lines = text.split(whereSeparator: \.isNewline).map(String.init)
         if let lastUsefulLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
             transcriptionStatus = lastUsefulLine

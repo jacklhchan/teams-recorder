@@ -4,13 +4,57 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
     var title: String?
     var tags: [String]
     var isFavorite: Bool
+    var mediaKind: RecordingMediaKind
+    var screenIntervals: [RecordedScreenInterval]
+    var capturedTeamsWindow: RecordedTeamsWindowIdentity?
+    var recoveryState: RecordingRecoveryState
 
-    init(title: String? = nil, tags: [String] = [], isFavorite: Bool = false) {
+    init(
+        title: String? = nil,
+        tags: [String] = [],
+        isFavorite: Bool = false,
+        mediaKind: RecordingMediaKind = .audio,
+        screenIntervals: [RecordedScreenInterval] = [],
+        capturedTeamsWindow: RecordedTeamsWindowIdentity? = nil,
+        recoveryState: RecordingRecoveryState = .none
+    ) {
         self.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         self.tags = tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         self.isFavorite = isFavorite
+        self.mediaKind = mediaKind
+        self.screenIntervals = screenIntervals
+        self.capturedTeamsWindow = capturedTeamsWindow
+        self.recoveryState = recoveryState
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case title, tags, isFavorite, mediaKind, screenIntervals, capturedTeamsWindow, recoveryState
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            title: (try? container.decodeIfPresent(String.self, forKey: .title)) ?? nil,
+            tags: (try? container.decodeIfPresent([String].self, forKey: .tags)) ?? [],
+            isFavorite: (try? container.decodeIfPresent(Bool.self, forKey: .isFavorite)) ?? false,
+            mediaKind: (try? container.decodeIfPresent(RecordingMediaKind.self, forKey: .mediaKind)) ?? .audio,
+            screenIntervals: (try? container.decodeIfPresent([RecordedScreenInterval].self, forKey: .screenIntervals)) ?? [],
+            capturedTeamsWindow: (try? container.decodeIfPresent(RecordedTeamsWindowIdentity.self, forKey: .capturedTeamsWindow)) ?? nil,
+            recoveryState: (try? container.decodeIfPresent(RecordingRecoveryState.self, forKey: .recoveryState)) ?? .none
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encode(tags, forKey: .tags)
+        try container.encode(isFavorite, forKey: .isFavorite)
+        try container.encode(mediaKind, forKey: .mediaKind)
+        try container.encode(screenIntervals, forKey: .screenIntervals)
+        try container.encodeIfPresent(capturedTeamsWindow, forKey: .capturedTeamsWindow)
+        try container.encode(recoveryState, forKey: .recoveryState)
     }
 }
 

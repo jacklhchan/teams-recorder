@@ -3,6 +3,73 @@ import XCTest
 
 @MainActor
 final class AppModelMuteTests: XCTestCase {
+    func testSaveMetadataPreservesMediaAndRecoveryFields() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let folder = root.appendingPathComponent("meeting-metadata", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = RecordingSessionMetadata(
+            title: "Old",
+            tags: ["old"],
+            isFavorite: false,
+            mediaKind: .video,
+            screenIntervals: [.init(startSeconds: 3, endSeconds: 4)],
+            capturedTeamsWindow: .init(processID: 101, windowID: 202, title: "Teams meeting"),
+            recoveryState: .videoLostAudioPreserved
+        )
+        try RecordingSessionMetadataStore.save(original, in: folder)
+        let session = RecordingSession(
+            id: folder,
+            folderURL: folder,
+            recordingURL: folder.appendingPathComponent("recording.mp4"),
+            createdAt: .now,
+            duration: 0,
+            fileSize: 0,
+            metadata: original
+        )
+        let model = AppModel(inputDevices: { [] }, defaultInputDeviceID: { nil }, performStartupWork: false)
+
+        model.saveMetadata(title: "New", tags: "one, two", isFavorite: true, for: session)
+
+        let saved = RecordingSessionMetadataStore.load(in: folder)
+        XCTAssertEqual(saved.title, "New")
+        XCTAssertEqual(saved.tags, ["one", "two"])
+        XCTAssertTrue(saved.isFavorite)
+        XCTAssertEqual(saved.mediaKind, original.mediaKind)
+        XCTAssertEqual(saved.screenIntervals, original.screenIntervals)
+        XCTAssertEqual(saved.capturedTeamsWindow, original.capturedTeamsWindow)
+        XCTAssertEqual(saved.recoveryState, original.recoveryState)
+    }
+
+    func testLibraryRecoveryRunsOnceOnLibraryQueueBeforeLoad() async {
+        let recoveryCalled = expectation(description: "recovery called")
+        let loaderCalled = expectation(description: "loader called")
+        let order = LockedOrder()
+        let model = AppModel(
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            recordingSessionLoader: { _ in
+                XCTAssertFalse(Thread.isMainThread)
+                let values = order.values
+                XCTAssertEqual(values.first, "recovery")
+                order.append("loader")
+                if !values.contains("loader") { loaderCalled.fulfill() }
+                return []
+            },
+            recordingSessionRecovery: { _ in
+                XCTAssertFalse(Thread.isMainThread)
+                order.append("recovery")
+                recoveryCalled.fulfill()
+            }
+        )
+
+        model.refreshSessions()
+        model.refreshSessions()
+        await fulfillment(of: [recoveryCalled, loaderCalled], timeout: 1)
+        XCTAssertEqual(order.values.filter { $0 == "recovery" }.count, 1)
+    }
+
     func testRefreshSessionsLoadsRecordingLibraryOffMainThread() async {
         let loaderCalled = expectation(description: "recording library loader called")
         let model = AppModel(
@@ -356,6 +423,23 @@ final class AppModelMuteTests: XCTestCase {
             fileSize: 1,
             metadata: .init()
         )
+    }
+}
+
+private final class LockedOrder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ value: String) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
     }
 }
 

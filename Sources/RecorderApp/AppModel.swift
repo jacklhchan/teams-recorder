@@ -63,6 +63,7 @@ final class AppModel: ObservableObject {
     private let teamsMuteRelay: TeamsMuteRelay
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
     private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
+    private let recordingSessionRecovery: @Sendable (URL) -> Void
     private let defaults: UserDefaults
     private let recordingSessionLoadingQueue = DispatchQueue(
         label: "local.meeting.recorder.recording-library",
@@ -74,6 +75,7 @@ final class AppModel: ObservableObject {
     private var inputMuteHandlingInstalled = false
     private var teamsMuteSyncInstalled = false
     private var recordingSessionRefreshGeneration: UInt = 0
+    private var recoveredLibraryFolders: Set<URL> = []
 
     private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
 
@@ -92,6 +94,9 @@ final class AppModel: ObservableObject {
         },
         recordingSessionLoader: @escaping @Sendable (URL) -> [RecordingSession] = {
             RecordingSessionStore.load(from: $0)
+        },
+        recordingSessionRecovery: @escaping @Sendable (URL) -> Void = {
+            IncompleteSessionRecovery().recover(in: $0)
         }
     ) {
         let activeRecorder = recorder ?? RecordingEngine()
@@ -104,6 +109,7 @@ final class AppModel: ObservableObject {
         ) as? Bool ?? true
         self.virtualMicStateProvider = virtualMicStateProvider
         self.recordingSessionLoader = recordingSessionLoader
+        self.recordingSessionRecovery = recordingSessionRecovery
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
@@ -421,8 +427,11 @@ final class AppModel: ObservableObject {
         let generation = recordingSessionRefreshGeneration
         let folder = outputFolder
         let loader = recordingSessionLoader
+        let recovery = recordingSessionRecovery
+        let shouldRecover = recoveredLibraryFolders.insert(folder.standardizedFileURL).inserted
 
         recordingSessionLoadingQueue.async { [weak self] in
+            if shouldRecover { recovery(folder) }
             let loadedSessions = loader(folder)
             let transcriptionStates: [RecordingSession.ID: TranscriptionState] = Dictionary(
                 uniqueKeysWithValues: loadedSessions.compactMap { session in
@@ -912,11 +921,13 @@ final class AppModel: ObservableObject {
 
     func saveMetadata(title: String, tags: String, isFavorite: Bool, for session: RecordingSession) {
         do {
-            let metadata = RecordingSessionMetadata(
-                title: title,
-                tags: tags.split(separator: ",").map(String.init),
-                isFavorite: isFavorite
-            )
+            var metadata = RecordingSessionMetadataStore.load(in: session.folderURL)
+            let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            metadata.title = cleanedTitle.isEmpty ? nil : cleanedTitle
+            metadata.tags = tags.split(separator: ",").map(String.init)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            metadata.isFavorite = isFavorite
             try RecordingSessionMetadataStore.save(metadata, in: session.folderURL)
             refreshSessions()
             statusMessage = "Recording details saved"

@@ -1,4 +1,5 @@
 import AVFoundation
+import Darwin
 import Foundation
 
 struct RecordingSession: Identifiable, Hashable {
@@ -16,6 +17,10 @@ struct RecordingSession: Identifiable, Hashable {
 
     var tags: [String] { metadata.tags }
     var isFavorite: Bool { metadata.isFavorite }
+    var mediaKind: RecordingMediaKind { metadata.mediaKind }
+    var screenIntervals: [RecordedScreenInterval] { metadata.screenIntervals }
+    var capturedTeamsWindow: RecordedTeamsWindowIdentity? { metadata.capturedTeamsWindow }
+    var recoveryState: RecordingRecoveryState { metadata.recoveryState }
 
     var durationText: String {
         let seconds = max(0, Int(duration.rounded()))
@@ -89,7 +94,7 @@ enum RecordingSessionStore {
         }
 
         return folders.compactMap { folder in
-            guard supportedFolderPrefixes.contains(where: { folder.lastPathComponent.hasPrefix($0) }) else {
+            guard isSupportedSessionFolder(folder) else {
                 return nil
             }
             guard let recordingURL = Self.recordingURL(in: folder) else { return nil }
@@ -102,6 +107,14 @@ enum RecordingSessionStore {
         let folderValues = try? folder.resourceValues(forKeys: [.creationDateKey])
         let fileValues = try? recordingURL.resourceValues(forKeys: [.fileSizeKey])
         let duration = Self.duration(for: recordingURL)
+        var metadata = RecordingSessionMetadataStore.load(in: folder)
+        if recordingURL.lastPathComponent == "recording.mp4", !metadata.screenIntervals.isEmpty {
+            metadata.mediaKind = .video
+        } else {
+            metadata.mediaKind = .audio
+            metadata.screenIntervals = []
+            metadata.capturedTeamsWindow = nil
+        }
 
         return RecordingSession(
             id: folder,
@@ -110,7 +123,7 @@ enum RecordingSessionStore {
             createdAt: folderValues?.creationDate ?? Date.distantPast,
             duration: duration,
             fileSize: Int64(fileValues?.fileSize ?? 0),
-            metadata: RecordingSessionMetadataStore.load(in: folder)
+            metadata: metadata
         )
     }
 
@@ -121,15 +134,36 @@ enum RecordingSessionStore {
         return resultingURL != nil
     }
 
-    private static func recordingURL(in folder: URL) -> URL? {
-        let fileManager = FileManager.default
-        for fileExtension in ManualTranscriptionImporter.supportedExtensions.sorted() {
-            let candidate = folder.appendingPathComponent("recording.\(fileExtension)")
-            if fileManager.fileExists(atPath: candidate.path) {
+    static func isSupportedSessionFolder(_ folder: URL) -> Bool {
+        supportedFolderPrefixes.contains { folder.lastPathComponent.hasPrefix($0) }
+            && isRegularFile(folder, directory: true)
+    }
+
+    static func recordingURL(in folder: URL) -> URL? {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+        for fileName in ["recording.mp4", "recording.m4a"] {
+            guard let candidate = contents.first(where: { $0.lastPathComponent == fileName }) else { continue }
+            if isRegularFile(candidate) { return candidate }
+        }
+        for fileExtension in ManualTranscriptionImporter.supportedExtensions.sorted() where fileExtension != "m4a" {
+            let fileName = "recording.\(fileExtension)"
+            guard let candidate = contents.first(where: { $0.lastPathComponent == fileName }) else { continue }
+            if isRegularFile(candidate) {
                 return candidate
             }
         }
         return nil
+    }
+
+    static func isRegularFile(_ url: URL, directory: Bool = false) -> Bool {
+        var attributes = stat()
+        guard url.path.withCString({ lstat($0, &attributes) }) == 0 else { return false }
+        if directory { return (attributes.st_mode & S_IFMT) == S_IFDIR }
+        return (attributes.st_mode & S_IFMT) == S_IFREG
     }
 
     private static func duration(for url: URL) -> TimeInterval {

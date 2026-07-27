@@ -3,6 +3,110 @@ import XCTest
 @testable import RecorderApp
 
 final class RecordingLibraryTests: XCTestCase {
+    func testLegacyMetadataAndIndependentlyMalformedNewFieldsKeepValidLegacyFields() throws {
+        let legacy = """
+        {"title":" Weekly sync ","tags":["sales"],"isFavorite":true,
+         "mediaKind":17,"screenIntervals":"bad","capturedTeamsWindow":42,"recoveryState":false}
+        """.data(using: .utf8)!
+
+        let metadata = try JSONDecoder().decode(RecordingSessionMetadata.self, from: legacy)
+
+        XCTAssertEqual(metadata.title, "Weekly sync")
+        XCTAssertEqual(metadata.tags, ["sales"])
+        XCTAssertTrue(metadata.isFavorite)
+        XCTAssertEqual(metadata.mediaKind, .audio)
+        XCTAssertEqual(metadata.screenIntervals, [])
+        XCTAssertNil(metadata.capturedTeamsWindow)
+        XCTAssertEqual(metadata.recoveryState, .none)
+    }
+
+    func testMetadataEncodingWritesAllScreenAndRecoveryFields() throws {
+        let metadata = RecordingSessionMetadata(
+            title: "Call",
+            tags: ["team"],
+            isFavorite: true,
+            mediaKind: .video,
+            screenIntervals: [.init(startSeconds: 1, endSeconds: 2)],
+            capturedTeamsWindow: .init(processID: 8, windowID: 9, title: "Teams"),
+            recoveryState: .recoveredAfterInterruption
+        )
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(metadata)) as? [String: Any])
+
+        XCTAssertEqual(object["mediaKind"] as? String, "video")
+        XCTAssertNotNil(object["screenIntervals"])
+        XCTAssertNotNil(object["capturedTeamsWindow"])
+        XCTAssertEqual(object["recoveryState"] as? String, "recoveredAfterInterruption")
+    }
+
+    func testExactRegularFilePrecedenceAndMediaProjection() throws {
+        let root = try makeRoot()
+        let folder = try makeEmptySessionFolder(in: root, named: "meeting-2026-07-22-090000")
+        try Data([1]).write(to: folder.appendingPathComponent("recording.m4a"))
+        try Data([2]).write(to: folder.appendingPathComponent("recording.mp4"))
+        try Data([3]).write(to: folder.appendingPathComponent("recording.wav"))
+        try RecordingSessionMetadataStore.save(
+            .init(
+                mediaKind: .video,
+                capturedTeamsWindow: .init(processID: 1, windowID: 2, title: "Stale Teams")
+            ),
+            in: folder
+        )
+
+        var session = try XCTUnwrap(RecordingSessionStore.load(from: root).first)
+        XCTAssertEqual(session.recordingURL.lastPathComponent, "recording.mp4")
+        XCTAssertEqual(session.mediaKind, .audio)
+        XCTAssertNil(session.capturedTeamsWindow)
+
+        try RecordingSessionMetadataStore.save(
+            .init(screenIntervals: [.init(startSeconds: 0, endSeconds: 1)]), in: folder
+        )
+        session = try XCTUnwrap(RecordingSessionStore.load(from: root).first)
+        XCTAssertEqual(session.mediaKind, .video)
+
+        try FileManager.default.removeItem(at: folder.appendingPathComponent("recording.mp4"))
+        try RecordingSessionMetadataStore.save(
+            .init(
+                mediaKind: .video,
+                screenIntervals: [.init(startSeconds: 0, endSeconds: 1)],
+                capturedTeamsWindow: .init(processID: 7, windowID: 8, title: "Teams")
+            ),
+            in: folder
+        )
+        session = try XCTUnwrap(RecordingSessionStore.load(from: root).first)
+        XCTAssertEqual(session.recordingURL.lastPathComponent, "recording.m4a")
+        XCTAssertEqual(session.mediaKind, .audio)
+        XCTAssertEqual(session.screenIntervals, [])
+        XCTAssertNil(session.capturedTeamsWindow)
+
+        try FileManager.default.removeItem(at: folder.appendingPathComponent("recording.m4a"))
+        session = try XCTUnwrap(RecordingSessionStore.load(from: root).first)
+        XCTAssertEqual(session.recordingURL.lastPathComponent, "recording.wav")
+        XCTAssertEqual(session.mediaKind, .audio)
+        XCTAssertEqual(session.screenIntervals, [])
+        XCTAssertNil(session.capturedTeamsWindow)
+    }
+
+    func testIgnoresPartialBackupLookalikeWrongCaseDirectoriesAndSymlinks() throws {
+        let root = try makeRoot()
+        let folder = try makeEmptySessionFolder(in: root, named: "meeting-2026-07-22-090000")
+        let regular = folder.appendingPathComponent("recording.wav")
+        try Data([1]).write(to: regular)
+        try Data([2]).write(to: folder.appendingPathComponent("recording.partial.mp4"))
+        try Data([3]).write(to: folder.appendingPathComponent("recording.audio-backup.m4a"))
+        try Data([4]).write(to: folder.appendingPathComponent("recording.MP4"))
+        try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("recording.m4a"), withDestinationURL: regular)
+
+        let session = try XCTUnwrap(RecordingSessionStore.load(from: root).first)
+        XCTAssertEqual(session.recordingURL.lastPathComponent, "recording.wav")
+
+        let directoryFolder = try makeEmptySessionFolder(in: root, named: "meeting-directory")
+        try Data([5]).write(to: directoryFolder.appendingPathComponent("recording.wav"))
+        try FileManager.default.createDirectory(at: directoryFolder.appendingPathComponent("recording.mp4"), withIntermediateDirectories: true)
+        let directorySession = try XCTUnwrap(RecordingSessionStore.load(from: root).first {
+            $0.folderURL.standardizedFileURL.path == directoryFolder.standardizedFileURL.path
+        })
+        XCTAssertEqual(directorySession.recordingURL.lastPathComponent, "recording.wav")
+    }
     func testMetadataIsPersistedAndLoadedWithSession() throws {
         let root = try makeRoot()
         let folder = try makeSessionFolder(in: root, named: "meeting-2026-07-22-090000")
@@ -64,9 +168,14 @@ final class RecordingLibraryTests: XCTestCase {
     }
 
     private func makeSessionFolder(in root: URL, named name: String) throws -> URL {
+        let folder = try makeEmptySessionFolder(in: root, named: name)
+        try Data([0x52, 0x49, 0x46, 0x46]).write(to: folder.appendingPathComponent("recording.wav"))
+        return folder
+    }
+
+    private func makeEmptySessionFolder(in root: URL, named name: String) throws -> URL {
         let folder = root.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try Data([0x52, 0x49, 0x46, 0x46]).write(to: folder.appendingPathComponent("recording.wav"))
         return folder
     }
 }

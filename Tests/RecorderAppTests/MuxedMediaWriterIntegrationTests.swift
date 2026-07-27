@@ -6,18 +6,24 @@ import XCTest
 final class MuxedMediaWriterIntegrationTests: XCTestCase {
     func testProductionDimensionsFrameRateAndBitratesAreStable() {
         let profile = MuxedMediaProfile.production(pixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
-        XCTAssertEqual(profile.width, 1_600); XCTAssertEqual(profile.height, 900); XCTAssertEqual(profile.maximumFramesPerSecond, 10)
-        XCTAssertEqual(profile.videoBitRate, 1_200_000); XCTAssertEqual(profile.audioBitRate, 128_000)
+        XCTAssertEqual(profile.width, 1_600)
+        XCTAssertEqual(profile.height, 900)
+        XCTAssertEqual(profile.maximumFramesPerSecond, 10)
+        XCTAssertEqual(profile.videoBitRate, 1_200_000)
+        XCTAssertEqual(profile.audioBitRate, 128_000)
         let settings = MuxedMediaWriter.productionSettings(profile: profile)
         XCTAssertEqual(settings.video[AVVideoCodecKey] as? AVVideoCodecType, .hevc)
-        XCTAssertEqual(settings.video[AVVideoWidthKey] as? Int, 1_600); XCTAssertEqual(settings.video[AVVideoHeightKey] as? Int, 900)
+        XCTAssertEqual(settings.video[AVVideoWidthKey] as? Int, 1_600)
+        XCTAssertEqual(settings.video[AVVideoHeightKey] as? Int, 900)
         XCTAssertEqual((settings.video[AVVideoCompressionPropertiesKey] as? [String: Any])?[AVVideoAverageBitRateKey] as? Int, 1_200_000)
         XCTAssertEqual(
             (settings.video[AVVideoCompressionPropertiesKey] as? [String: Any])?[AVVideoExpectedSourceFrameRateKey] as? Int,
             10
         )
-        XCTAssertEqual(settings.audio[AVFormatIDKey] as? UInt32, kAudioFormatMPEG4AAC); XCTAssertEqual(settings.audio[AVSampleRateKey] as? Int, 48_000)
-        XCTAssertEqual(settings.audio[AVNumberOfChannelsKey] as? Int, 2); XCTAssertEqual(settings.audio[AVEncoderBitRateKey] as? Int, 128_000)
+        XCTAssertEqual(settings.audio[AVFormatIDKey] as? UInt32, kAudioFormatMPEG4AAC)
+        XCTAssertEqual(settings.audio[AVSampleRateKey] as? Int, 48_000)
+        XCTAssertEqual(settings.audio[AVNumberOfChannelsKey] as? Int, 2)
+        XCTAssertEqual(settings.audio[AVEncoderBitRateKey] as? Int, 128_000)
     }
 
     func testProductionSettingsPreferButDoNotRequireHardwareHEVC() {
@@ -35,12 +41,15 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         try writer.appendAudio(audioBlock(start: 24_000, frames: 24_000, value: -0.1))
         XCTAssertEqual(backend.audioPTS, [])
         let finish = Task { try await writer.finish(at: time(48_000)) }
-        backend.setReady(false); backend.setReady(false); backend.setReady(true)
+        backend.setReady(false)
+        backend.setReady(false)
+        backend.setReady(true)
         await fulfillAsync { backend.finishCalls == 1 }
         backend.completeFinish()
         try await finish.value
         XCTAssertEqual(backend.audioPTS, [time(0), time(24_000)])
-        XCTAssertEqual(backend.finishCalls, 1); XCTAssertEqual(backend.cancelCalls, 0)
+        XCTAssertEqual(backend.finishCalls, 1)
+        XCTAssertEqual(backend.cancelCalls, 0)
     }
 
     func testAppendFalseRetainsFIFOAndFailedBackendLatchesFirstTerminalError() async throws {
@@ -143,7 +152,8 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         let second = Task { try await writer.finish(at: time(4_800)) }
         await XCTAssertThrowsErrorAsync(try await second.value) { XCTAssertEqual($0 as? MuxedMediaWriterError, .closed) }
         XCTAssertThrowsError(try writer.appendAudio(audioBlock(start: 4_800, frames: 1, value: 0))) { XCTAssertEqual($0 as? MuxedMediaWriterError, .closed) }
-        backend.completeFinish(); try await first.value
+        backend.completeFinish()
+        try await first.value
     }
 
     func testAudioBeforeRealScreenFrameAndSeekableMP4() async throws {
@@ -156,12 +166,23 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         try writer.appendAudio(audioBlock(start: 9_600, frames: 9_600, value: -0.1))
         try await appendVideo(writer, color: 0, at: time(14_400))
         try await writer.finish(at: time(19_200))
-        let inspected = try await inspect(fixture.url, seekAt: time(9_600))
-        XCTAssertEqual(inspected.video.count, 3); XCTAssertEqual(inspected.video.map(\.colorClass), [.black, .real, .black])
+        let requestedSeekStart = time(9_600)
+        XCTAssertGreaterThan(CMTimeCompare(requestedSeekStart, .zero), 0)
+        let inspected = try await inspect(fixture.url, seekAt: requestedSeekStart)
+        XCTAssertEqual(inspected.video.count, 3)
+        XCTAssertEqual(inspected.video.map(\.colorClass), [.black, .real, .black])
+        XCTAssertGreaterThanOrEqual(
+            CMTimeCompare(try XCTUnwrap(inspected.seekVideo.first).pts, requestedSeekStart),
+            0,
+            "AVAssetReader timeRange should trim to the requested nonzero start"
+        )
+        let firstRealVideoPTS = try XCTUnwrap(inspected.video.first { $0.colorClass == .real }).pts
+        XCTAssertLessThan(try XCTUnwrap(inspected.audio.first), firstRealVideoPTS)
     }
 
     func testNeverEnabledScreenRemainsValidMP4() async throws {
-        let fixture = try makeFixture(); defer { try? FileManager.default.removeItem(at: fixture.folder) }
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.folder) }
         let writer = try MuxedMediaWriter(url: fixture.url, profile: fixture.profile)
         try await appendVideo(writer, color: 0, at: .zero)
         try writer.appendAudio(audioBlock(start: 0, frames: 14_400, value: 0.1))
@@ -188,7 +209,8 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
     }
 
     func testTwoIntervalsNormalizedCanvasAndDroppedFrameThenOutput() async throws {
-        let fixture = try makeFixture(); defer { try? FileManager.default.removeItem(at: fixture.folder) }
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.folder) }
         let writer = try MuxedMediaWriter(url: fixture.url, profile: fixture.profile)
         try await appendVideo(writer, color: 0, at: .zero)
         try writer.appendAudio(audioBlock(start: 0, frames: 28_800, value: 0.1))
@@ -223,7 +245,8 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
     private func pixelBuffer(width: Int, height: Int, color: UInt8) throws -> CVPixelBuffer {
         var result: CVPixelBuffer?
         XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &result), kCVReturnSuccess)
-        let buffer = try XCTUnwrap(result); CVPixelBufferLockBaseAddress(buffer, [])
+        let buffer = try XCTUnwrap(result)
+        CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         for plane in 0..<CVPixelBufferGetPlaneCount(buffer) {
             memset(try XCTUnwrap(CVPixelBufferGetBaseAddressOfPlane(buffer, plane)), plane == 0 ? Int32(color) : 128, CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * CVPixelBufferGetHeightOfPlane(buffer, plane))
@@ -234,7 +257,12 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
     private func appendVideo(_ writer: MuxedMediaWriter, color: UInt8, at pts: CMTime) async throws {
         let buffer = try pixelBuffer(width: 1_600, height: 900, color: color)
         for _ in 0..<100 {
-            do { try writer.appendVideo(buffer, at: pts); return } catch MuxedMediaWriterError.videoAppendDropped { try await Task.sleep(nanoseconds: 10_000_000) }
+            do {
+                try writer.appendVideo(buffer, at: pts)
+                return
+            } catch MuxedMediaWriterError.videoAppendDropped {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
         }
         throw MuxedMediaWriterError.videoAppendDropped
     }
@@ -251,6 +279,7 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
 
     private struct Inspection {
         let video: [(pts: CMTime, colorClass: ColorClass)]
+        let seekVideo: [(pts: CMTime, colorClass: ColorClass)]
         let audio: [CMTime]
         let dimensions: CGSize
         let avEndDifference: Double
@@ -260,29 +289,37 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         let asset = AVURLAsset(url: url)
         let playable = try await asset.load(.isPlayable)
         XCTAssertTrue(playable)
-        let videos = try await asset.loadTracks(withMediaType: .video), audios = try await asset.loadTracks(withMediaType: .audio)
-        XCTAssertEqual(videos.count, 1); XCTAssertEqual(audios.count, 1)
-        let video = try XCTUnwrap(videos.first), audio = try XCTUnwrap(audios.first)
+        let videos = try await asset.loadTracks(withMediaType: .video)
+        let audios = try await asset.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(videos.count, 1)
+        XCTAssertEqual(audios.count, 1)
+        let video = try XCTUnwrap(videos.first)
+        let audio = try XCTUnwrap(audios.first)
         let videoFormats = try await video.load(.formatDescriptions)
         let vd = try XCTUnwrap(videoFormats.first)
         XCTAssertEqual(CMFormatDescriptionGetMediaSubType(vd), kCMVideoCodecType_HEVC)
         let audioFormats = try await audio.load(.formatDescriptions)
         let ad = try XCTUnwrap(audioFormats.first)
         XCTAssertEqual(CMFormatDescriptionGetMediaSubType(ad), kAudioFormatMPEG4AAC)
-        let stream = try XCTUnwrap(CMAudioFormatDescriptionGetStreamBasicDescription(ad)?.pointee); XCTAssertEqual(stream.mSampleRate, 48_000, accuracy: 0.01); XCTAssertEqual(stream.mChannelsPerFrame, 2)
+        let stream = try XCTUnwrap(CMAudioFormatDescriptionGetStreamBasicDescription(ad)?.pointee)
+        XCTAssertEqual(stream.mSampleRate, 48_000, accuracy: 0.01)
+        XCTAssertEqual(stream.mChannelsPerFrame, 2)
         let videoSamples = try await readVideo(url: url, timeRange: seekAt.map { CMTimeRange(start: $0, duration: .positiveInfinity) })
         let allVideo = try await readVideo(url: url, timeRange: nil)
         let allAudio = try await readAudio(url: url)
-        XCTAssertFalse(videoSamples.isEmpty); XCTAssertMonotonic(allVideo.map(\.pts))
+        XCTAssertFalse(videoSamples.isEmpty)
+        XCTAssertMonotonic(allVideo.map(\.pts))
         XCTAssertFalse(allAudio.isEmpty)
         XCTAssertMonotonic(allAudio)
         for pair in zip(allVideo, allVideo.dropFirst()) { XCTAssertGreaterThanOrEqual(CMTimeGetSeconds(pair.1.pts - pair.0.pts), 0.1 - 0.000_1) }
-        let audioEnd = (try await audio.load(.timeRange)).end, videoEnd = (try await video.load(.timeRange)).end
+        let audioEnd = (try await audio.load(.timeRange)).end
+        let videoEnd = (try await video.load(.timeRange)).end
         let avEndDifference = abs(CMTimeGetSeconds(videoEnd - audioEnd))
         // AAC encoder priming is permitted up to 30 ms beyond the 100 ms product bound.
         XCTAssertLessThanOrEqual(avEndDifference, 0.13)
         return .init(
             video: allVideo,
+            seekVideo: videoSamples,
             audio: allAudio,
             dimensions: CGSize(width: Int(CMVideoFormatDescriptionGetDimensions(vd).width), height: Int(CMVideoFormatDescriptionGetDimensions(vd).height)),
             avEndDifference: avEndDifference
@@ -314,11 +351,18 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         let freshAsset = AVURLAsset(url: url)
         let tracks = try await freshAsset.loadTracks(withMediaType: .video)
         let track = try XCTUnwrap(tracks.first)
-        let reader = try AVAssetReader(asset: freshAsset); if let timeRange { reader.timeRange = timeRange }
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]); reader.add(output); XCTAssertTrue(reader.startReading())
+        let reader = try AVAssetReader(asset: freshAsset)
+        if let timeRange { reader.timeRange = timeRange }
+        let output = AVAssetReaderTrackOutput(
+            track: track,
+            outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        )
+        reader.add(output)
+        XCTAssertTrue(reader.startReading())
         var result: [(CMTime, ColorClass)] = []
         while let sample = output.copyNextSampleBuffer() {
-            let pixel = try XCTUnwrap(CMSampleBufferGetImageBuffer(sample)); CVPixelBufferLockBaseAddress(pixel, .readOnly)
+            let pixel = try XCTUnwrap(CMSampleBufferGetImageBuffer(sample))
+            CVPixelBufferLockBaseAddress(pixel, .readOnly)
             let centerX = CVPixelBufferGetWidth(pixel) / 2
             let centerY = CVPixelBufferGetHeight(pixel) / 2
             let value = CVPixelBufferGetBaseAddress(pixel).map {
@@ -351,9 +395,34 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         return presentationTimes
     }
 
-    private func XCTAssertMonotonic(_ values: [CMTime], file: StaticString = #filePath, line: UInt = #line) { for pair in zip(values, values.dropFirst()) { XCTAssertGreaterThanOrEqual(CMTimeCompare(pair.1, pair.0), 0, file: file, line: line) } }
-    private func fulfillAsync(_ predicate: @escaping () -> Bool) async { for _ in 0..<100 where !predicate() { try? await Task.sleep(nanoseconds: 2_000_000) }; XCTAssertTrue(predicate()) }
-    private func XCTAssertThrowsErrorAsync(_ expression: @autoclosure () async throws -> Void, _ handler: (Error) -> Void) async { do { try await expression(); XCTFail("expected error") } catch { handler(error) } }
+    private func XCTAssertMonotonic(
+        _ values: [CMTime],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for pair in zip(values, values.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(CMTimeCompare(pair.1, pair.0), 0, file: file, line: line)
+        }
+    }
+
+    private func fulfillAsync(_ predicate: @escaping () -> Bool) async {
+        for _ in 0..<100 where !predicate() {
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertTrue(predicate())
+    }
+
+    private func XCTAssertThrowsErrorAsync(
+        _ expression: @autoclosure () async throws -> Void,
+        _ handler: (Error) -> Void
+    ) async {
+        do {
+            try await expression()
+            XCTFail("expected error")
+        } catch {
+            handler(error)
+        }
+    }
 }
 
 private final class FakeBackend: MuxedMediaWriterBackend, @unchecked Sendable {
@@ -466,7 +535,11 @@ private final class ManualTimeoutScheduler: MuxedMediaWriterTimeoutScheduling {
     private let lock = NSLock()
     private var entries: [Entry?] = []
 
-    var count: Int { lock.lock(); defer { lock.unlock() }; return entries.compactMap { $0 }.count }
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.compactMap { $0 }.count
+    }
     func schedule(on queue: DispatchQueue, after: TimeInterval, _ action: @escaping () -> Void) -> MuxedMediaWriterTimeoutToken {
         lock.lock()
         entries.append(Entry(queue: queue, action: action))
@@ -489,4 +562,14 @@ private final class ManualTimeoutScheduler: MuxedMediaWriterTimeoutScheduling {
         lock.unlock()
     }
 }
-private final class ManualToken: MuxedMediaWriterTimeoutToken { private let action: () -> Void; init(_ action: @escaping () -> Void) { self.action = action }; func cancel() { action() } }
+private final class ManualToken: MuxedMediaWriterTimeoutToken {
+    private let action: () -> Void
+
+    init(_ action: @escaping () -> Void) {
+        self.action = action
+    }
+
+    func cancel() {
+        action()
+    }
+}

@@ -513,18 +513,37 @@ enum TeamsCaptureViabilityQueuePlan {
 }
 
 struct TeamsCaptureViabilityWindow: Identifiable, Hashable {
-    let id: UInt32
-    let title: String
+    let descriptor: TeamsCaptureWindowDescriptor
+    let includesWindowID: Bool
     fileprivate let window: SCWindow
 
+    var id: UInt32 { descriptor.windowID }
+
     var displayName: String {
-        title.isEmpty ? "Teams window \(id)" : "\(title) (\(id))"
+        TeamsCaptureWindowPickerModel.displayName(
+            for: descriptor,
+            includesWindowID: includesWindowID
+        )
+    }
+
+    func presented(includesWindowID: Bool) -> Self {
+        Self(
+            descriptor: descriptor,
+            includesWindowID: includesWindowID,
+            window: window
+        )
     }
 }
 
 final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
     @Published private(set) var windows: [TeamsCaptureViabilityWindow] = []
     @Published var selectedWindowID: UInt32?
+    @Published var showsAllTeamsWindows = false {
+        didSet {
+            guard oldValue != showsAllTeamsWindows else { return }
+            rebuildWindowPicker()
+        }
+    }
     @Published private(set) var isCapturing = false
     @Published private(set) var status = "Refresh Teams windows before starting the probe."
     @Published private(set) var systemRMS: Double = 0
@@ -575,6 +594,7 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
     private var lifecycle = TeamsCaptureViabilityLifecycleCoordinator()
     private var evidenceFinalization =
         TeamsCaptureViabilityEvidenceFinalizationCoordinator()
+    private var discoveredWindows: [TeamsCaptureViabilityWindow] = []
 
     func refreshWindows() {
         Task {
@@ -588,24 +608,23 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
                     guard window.owningApplication?.bundleIdentifier == "com.microsoft.teams2" else {
                         return nil
                     }
-                    return TeamsCaptureViabilityWindow(
-                        id: window.windowID,
+                    let descriptor = TeamsCaptureWindowDescriptor(
+                        windowID: window.windowID,
                         title: window.title ?? "",
+                        width: Int(window.frame.width.rounded()),
+                        height: Int(window.frame.height.rounded()),
+                        isOnScreen: window.isOnScreen,
+                        windowLayer: window.windowLayer
+                    )
+                    return TeamsCaptureViabilityWindow(
+                        descriptor: descriptor,
+                        includesWindowID: false,
                         window: window
                     )
                 }
-                .sorted {
-                    $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
-                        == .orderedAscending
-                }
                 publish {
-                    self.windows = teamsWindows
-                    if !teamsWindows.contains(where: { $0.id == self.selectedWindowID }) {
-                        self.selectedWindowID = teamsWindows.first?.id
-                    }
-                    self.status = teamsWindows.isEmpty
-                        ? "No windows owned by com.microsoft.teams2 were found."
-                        : "Select a Teams window, then start the standalone probe."
+                    self.discoveredWindows = teamsWindows
+                    self.rebuildWindowPicker()
                 }
             } catch {
                 publish {
@@ -613,6 +632,25 @@ final class TeamsCaptureViabilityProbe: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    private func rebuildWindowPicker() {
+        let result = TeamsCaptureWindowPickerModel.makeResult(
+            descriptors: discoveredWindows.map(\.descriptor),
+            showAll: showsAllTeamsWindows,
+            selectedWindowID: selectedWindowID
+        )
+        let byID = Dictionary(
+            uniqueKeysWithValues: discoveredWindows.map { ($0.id, $0) }
+        )
+        let includesWindowID =
+            showsAllTeamsWindows || result.isUsingAllWindowsFallback
+
+        windows = result.windowIDs.compactMap {
+            byID[$0]?.presented(includesWindowID: includesWindowID)
+        }
+        selectedWindowID = result.selectedWindowID
+        status = result.status
     }
 
     func start() {

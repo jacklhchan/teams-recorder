@@ -12,6 +12,11 @@ struct TeamsCaptureViabilityProbeView: View {
                     Text(window.displayName).tag(Optional(window.id))
                 }
             }
+            Toggle(
+                "Show all Teams windows",
+                isOn: $probe.showsAllTeamsWindows
+            )
+            .disabled(probe.isCapturing)
             HStack {
                 Button("Refresh Windows") { probe.refreshWindows() }
                 Button("Start") { probe.start() }

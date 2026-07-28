@@ -171,6 +171,7 @@ final class AppModel: ObservableObject {
     private var testRecordingStopTask: Task<Void, Never>?
     private var teamsScreenRefreshTask: Task<Void, Never>?
     private var teamsScreenRefreshGeneration: UInt64 = 0
+    private var teamsScreenCaptureIntentGeneration: UInt64 = 0
     private var teamsMeetingActive = false
 
     private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
@@ -495,18 +496,60 @@ final class AppModel: ObservableObject {
     }
 
     func setTeamsScreenCaptureRequested(_ requested: Bool) async {
+        teamsScreenCaptureIntentGeneration &+= 1
+        let intentGeneration = teamsScreenCaptureIntentGeneration
         guard recorder.isRecording,
               !isCaptureLifecycleWorking else { return }
         if requested {
             guard isScreenCaptureAllowedByStorage,
-                  selectedTeamsApplication != nil else { return }
-        }
-        isTeamsScreenCaptureRequested = requested
-        if requested {
+                  let selectedTeamsApplication,
+                  isTeamsScreenCaptureActionAvailable else { return }
+            let selectedProcessID = selectedTeamsApplication.processID
+            isTeamsScreenCaptureRequested = true
             await refreshTeamsScreenCaptureNow()
+            guard acceptsTeamsScreenCaptureOnIntent(
+                generation: intentGeneration,
+                selectedProcessID: selectedProcessID
+            ) else { return }
+            await recorder.setScreenCaptureRequested(true)
+            guard acceptsTeamsScreenCaptureOnIntent(
+                generation: intentGeneration,
+                selectedProcessID: selectedProcessID
+            ) else { return }
+        } else {
+            isTeamsScreenCaptureRequested = false
+            await recorder.setScreenCaptureRequested(false)
+            guard intentGeneration == teamsScreenCaptureIntentGeneration else {
+                return
+            }
         }
-        await recorder.setScreenCaptureRequested(requested)
         restartTeamsScreenRefreshIfNeeded()
+    }
+
+    private var isTeamsScreenCaptureActionAvailable: Bool {
+        switch recorder.meetingScreenCaptureState {
+        case .unavailable, .failed:
+            return false
+        default:
+            return true
+        }
+    }
+
+    private func acceptsTeamsScreenCaptureOnIntent(
+        generation: UInt64,
+        selectedProcessID: pid_t
+    ) -> Bool {
+        generation == teamsScreenCaptureIntentGeneration
+            && isTeamsScreenCaptureRequested
+            && recorder.isRecording
+            && !isCaptureLifecycleWorking
+            && isScreenCaptureAllowedByStorage
+            && selectedTeamsApplication?.processID == selectedProcessID
+            && isTeamsScreenCaptureActionAvailable
+    }
+
+    private func invalidateTeamsScreenCaptureIntent() {
+        teamsScreenCaptureIntentGeneration &+= 1
     }
 
     func selectTeamsScreenCaptureWindow(_ identity: TeamsWindowIdentity?) async {
@@ -543,6 +586,7 @@ final class AppModel: ObservableObject {
 
     private func handleTeamsScreenSourceChange() {
         invalidateTeamsScreenRefresh()
+        invalidateTeamsScreenCaptureIntent()
         isTeamsScreenCaptureRequested = false
         teamsMeetingActive = false
         teamsManualWindowIdentity = nil
@@ -618,11 +662,11 @@ final class AppModel: ObservableObject {
     }
 
     func startOrStop() {
-        if takeOverPendingAutomaticRecordingStart() {
-            return
-        }
         if recorder.isRecording {
             stopCaptureLifecycle(playAfterStop: false)
+            return
+        }
+        if takeOverPendingAutomaticRecordingStart() {
             return
         }
 
@@ -756,6 +800,7 @@ final class AppModel: ObservableObject {
                 await finalizeLateRecordingStart(attempt)
                 return
             }
+            invalidateTeamsScreenCaptureIntent()
             isTeamsScreenCaptureRequested = false
             await refreshTeamsScreenCaptureNow()
             guard acceptsRecordingAttempt(attempt), recorder.isRecording else {
@@ -904,6 +949,7 @@ final class AppModel: ObservableObject {
                     clearTestRecordingRuntimeState()
                     return
                 }
+                invalidateTeamsScreenCaptureIntent()
                 isTeamsScreenCaptureRequested = false
                 await refreshTeamsScreenCaptureNow()
                 guard testRecordingContinues(token) else {
@@ -2073,7 +2119,8 @@ final class AppModel: ObservableObject {
         automaticMeetingEnd: Bool = false
     ) {
         if let pendingAttempt = pendingRecordingAttempt,
-           pendingAttempt.ownership == .teamsAutomatic {
+           pendingAttempt.ownership == .teamsAutomatic,
+           !recorder.isRecording {
             if !automaticMeetingEnd {
                 teamsAutoMeetingCoordinator.suppressUntilMeetingEnd()
             }
@@ -2084,6 +2131,8 @@ final class AppModel: ObservableObject {
             return
         }
         let endingOwnership = recordingOwnership
+            ?? pendingRecordingAttempt?.ownership
+        pendingRecordingAttempt = nil
         let automaticStopToken: CaptureLifecycleToken?
         if automaticMeetingEnd, endingOwnership == .teamsAutomatic {
             automaticStopIntentToken = token
@@ -2097,6 +2146,7 @@ final class AppModel: ObservableObject {
         recordingOwnership = nil
         invalidateStorageMonitoring()
         invalidateTeamsScreenRefresh()
+        invalidateTeamsScreenCaptureIntent()
         isTeamsScreenCaptureRequested = false
         testRecordingStopTask?.cancel()
         testRecordingStopTask = nil
@@ -2151,6 +2201,7 @@ final class AppModel: ObservableObject {
                 guard let self, !isRecording else { return }
                 self.invalidateStorageMonitoring()
                 self.invalidateTeamsScreenRefresh()
+                self.invalidateTeamsScreenCaptureIntent()
                 self.isTeamsScreenCaptureRequested = false
                 self.clearTestRecordingRuntimeState()
                 self.completeAutomaticStopIntent()
@@ -2219,6 +2270,7 @@ final class AppModel: ObservableObject {
             isScreenCaptureAllowedByStorage = false
             screenCaptureStorageRestrictionReason = reason
             storageWarningMessage = reason
+            invalidateTeamsScreenCaptureIntent()
             isTeamsScreenCaptureRequested = false
             await recorder.setScreenCaptureRequested(false)
             guard generation == storageMonitorGeneration, recorder.isRecording else { return }

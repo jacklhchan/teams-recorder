@@ -721,7 +721,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
-    func testManualStartTakesOverAutomaticPostStartOwnershipGap() async {
+    func testManualStopDuringAutomaticPostStartOwnershipGapFinalizesOnce() async {
         let fixture = makeRecordingFixture()
         let teamsApplication = CaptureApplication(
             processID: 42,
@@ -746,23 +746,25 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertNil(fixture.model.recordingOwnership)
 
         fixture.model.startOrStop()
-        fixture.source.resumeTeamsRefresh()
-        await waitUntil {
-            fixture.engine.isRecording
-                && fixture.model.recordingOwnership == .manual
-                && !fixture.model.isCaptureLifecycleWorking
-        }
-
+        XCTAssertTrue(fixture.model.isFinalizingRecording)
         XCTAssertEqual(
             fixture.model.teamsAutoMeetingState,
             .suppressedUntilMeetingEnd
         )
-        XCTAssertEqual(fixture.source.startCount, 1)
-        XCTAssertEqual(fixture.source.stopCount, 0)
-        XCTAssertEqual(fixture.writer.closeCount, 0)
+        fixture.source.resumeTeamsRefresh()
+        await waitUntil {
+            !fixture.engine.isRecording
+                && !fixture.model.isCaptureLifecycleWorking
+        }
 
-        fixture.model.startOrStop()
-        await waitUntil { !fixture.engine.isRecording }
+        emitMeeting(true, in: fixture)
+        await settle()
+
+        XCTAssertFalse(fixture.engine.isRecording)
+        XCTAssertNil(fixture.model.recordingOwnership)
+        XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(fixture.source.stopCount, 1)
+        XCTAssertEqual(fixture.writer.closeCount, 1)
     }
 
     func testDisableDuringSourceStartFinalizesLateRecordingWithoutStoppingTransferredWork() async {

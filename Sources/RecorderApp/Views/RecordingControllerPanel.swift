@@ -2,6 +2,15 @@ import AppKit
 import Combine
 import SwiftUI
 
+enum RecordingControllerAccessibility {
+    static let stopLabel = "Stop recording"
+    static let screenCaptureLabel = "Capture Teams screen"
+
+    static func screenCaptureValue(isOn: Bool) -> String {
+        isOn ? "On" : "Off"
+    }
+}
+
 enum RecordingControllerPanelCommand: Equatable {
     case none
     case present
@@ -208,6 +217,9 @@ struct RecordingControllerView: View {
                     .controlSize(.small)
                     .disabled(presentation.stopDisabled)
                     .help("Stop recording")
+                    .accessibilityLabel(
+                        RecordingControllerAccessibility.stopLabel
+                    )
                     .accessibilityIdentifier(
                         "recording-controller-stop"
                     )
@@ -248,6 +260,14 @@ struct RecordingControllerView: View {
                             presentation.stopDisabled
                     )
                     .help("Capture Teams screen")
+                    .accessibilityLabel(
+                        RecordingControllerAccessibility.screenCaptureLabel
+                    )
+                    .accessibilityValue(
+                        RecordingControllerAccessibility.screenCaptureValue(
+                            isOn: presentation.screenRequested
+                        )
+                    )
                     .accessibilityIdentifier(
                         "recording-controller-screen-toggle"
                     )

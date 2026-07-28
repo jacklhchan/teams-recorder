@@ -4,6 +4,25 @@ import XCTest
 
 @MainActor
 final class RecordingControllerPanelTests: XCTestCase {
+    func testAccessibilityLabelsAndToggleValuesAreExplicit() {
+        XCTAssertEqual(
+            RecordingControllerAccessibility.stopLabel,
+            "Stop recording"
+        )
+        XCTAssertEqual(
+            RecordingControllerAccessibility.screenCaptureLabel,
+            "Capture Teams screen"
+        )
+        XCTAssertEqual(
+            RecordingControllerAccessibility.screenCaptureValue(isOn: true),
+            "On"
+        )
+        XCTAssertEqual(
+            RecordingControllerAccessibility.screenCaptureValue(isOn: false),
+            "Off"
+        )
+    }
+
     func testEpisodeEmitsOneCommandPerRecordingTransition() {
         var episode = RecordingControllerPanelEpisode()
 

@@ -288,6 +288,66 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
+    func testStaleOnCannotReenableCaptureAfterNewerOff() async throws {
+        let window = teamsWindow(
+            id: 37,
+            title: "Shared content | Customer presentation"
+        )
+        let fixture = makeFixture(provider: .normal, windows: [window])
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        fixture.source.pauseNextTeamsRefresh = true
+
+        let staleOn = Task {
+            await fixture.model.setTeamsScreenCaptureRequested(true)
+        }
+        await fixture.source.waitForPausedTeamsRefresh()
+        await fixture.model.setTeamsScreenCaptureRequested(false)
+        fixture.source.resumeTeamsRefresh()
+        await staleOn.value
+
+        XCTAssertFalse(fixture.model.isTeamsScreenCaptureRequested)
+        XCTAssertNil(fixture.source.videoTargets.last ?? nil)
+        XCTAssertTrue(fixture.source.videoTargets.compactMap { $0 }.isEmpty)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testOnRejectsActionTimeUnavailableAndFailedStates() async throws {
+        let fixture = makeFixture(
+            provider: .normal,
+            windows: [teamsWindow(id: 38)]
+        )
+        await selectTeams(in: fixture)
+
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+
+        XCTAssertFalse(fixture.model.isTeamsScreenCaptureRequested)
+        XCTAssertTrue(fixture.source.videoTargets.isEmpty)
+
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        fixture.source.emit(.screenCaptureFailed)
+        await waitUntil {
+            if case .failed = fixture.engine.meetingScreenCaptureState {
+                return true
+            }
+            return false
+        }
+        let targetCount = fixture.source.videoTargets.count
+
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+
+        XCTAssertFalse(fixture.model.isTeamsScreenCaptureRequested)
+        XCTAssertEqual(fixture.source.videoTargets.count, targetCount)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
     func testLostSelectedWindowShowsReconnectingInsteadOfMissingWindow() async throws {
         let window = teamsWindow(id: 29, title: "Shared content | Customer presentation")
         let fixture = makeFixture(provider: .normal, windows: [window])
@@ -837,10 +897,13 @@ final class AppModelScreenCaptureTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<300 {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < deadline {
             if condition() { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(1))
         }
+        if condition() { return }
         XCTFail("Condition was not reached", file: file, line: line)
     }
 
@@ -972,8 +1035,11 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
     var windows: [TeamsWindowSnapshot] = []
     var applications: [CaptureApplication] = []
     var videoTargetErrors: [Int: Error] = [:]
+    var pauseNextTeamsRefresh = false
     private(set) var videoTargets: [TeamsWindowIdentity?] = []
     private var onEvent: ((CaptureEvent) -> Void)?
+    private var teamsRefreshContinuation: CheckedContinuation<Void, Never>?
+    private var teamsRefreshWaiters: [CheckedContinuation<Void, Never>] = []
 
     var lastVideoRevision: CaptureFilterRevision? {
         guard !videoTargets.isEmpty else { return nil }
@@ -983,6 +1049,11 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
     func refreshContent() async throws -> [CaptureApplication] { applications }
     func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] {
         teamsRefreshCount += 1
+        if pauseNextTeamsRefresh {
+            teamsRefreshWaiters.forEach { $0.resume() }
+            teamsRefreshWaiters.removeAll()
+            await withCheckedContinuation { teamsRefreshContinuation = $0 }
+        }
         return windows
     }
     func reconnect(selection _: ResolvedCaptureSelection) async throws {}
@@ -1004,6 +1075,17 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
         self.onEvent = onEvent
     }
     func stop() async { stopCount += 1 }
+
+    func waitForPausedTeamsRefresh() async {
+        if teamsRefreshContinuation != nil { return }
+        await withCheckedContinuation { teamsRefreshWaiters.append($0) }
+    }
+
+    func resumeTeamsRefresh() {
+        pauseNextTeamsRefresh = false
+        teamsRefreshContinuation?.resume()
+        teamsRefreshContinuation = nil
+    }
 
     func emit(_ event: CaptureEvent) {
         onEvent?(event)

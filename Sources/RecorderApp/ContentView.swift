@@ -2,16 +2,18 @@ import AVFoundation
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var model = AppModel()
+    @ObservedObject private var model: AppModel
     @State private var autoMeetingPanel:
         any TeamsAutoMeetingCountdownPresenting
 
     @MainActor
     init(
+        model: AppModel,
         autoMeetingPanelFactory:
             any TeamsAutoMeetingCountdownPresenterFactory =
                 TeamsAutoMeetingCountdownPanelFactory()
     ) {
+        self.model = model
         _autoMeetingPanel = State(
             initialValue: autoMeetingPanelFactory.makePresenter()
         )

@@ -150,47 +150,59 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
         XCTAssertEqual(failed.detail, "Teams connection lost")
     }
 
-    func testCancelActionIsConsumedOnlyOnceAcrossReentrantTriggers() {
-        let action = TeamsAutoMeetingCancelAction()
+    func testSameEpisodeTickCannotRearmConsumedCancelOrReorderPanel() {
+        let episode = TeamsAutoMeetingPresentationEpisode()
         var callCount = 0
 
-        action.replace {
+        let shouldOrderInitialPresentation = episode.present {
             callCount += 1
-            action.consume()
+            episode.consumeCancel()
         }
+        episode.consumeCancel()
+        let shouldOrderSameEpisodeTick = episode.present {
+            callCount += 1
+        }
+        episode.consumeCancel()
 
-        action.consume()
-        action.consume()
-
+        XCTAssertTrue(shouldOrderInitialPresentation)
+        XCTAssertFalse(shouldOrderSameEpisodeTick)
         XCTAssertEqual(callCount, 1)
     }
 
-    func testProgrammaticClearDoesNotConsumeCancelAction() {
-        let action = TeamsAutoMeetingCancelAction()
+    func testProgrammaticDismissClearsWithoutConsumingAndNewEpisodeRearms() {
+        let episode = TeamsAutoMeetingPresentationEpisode()
         var callCount = 0
 
-        action.replace {
+        XCTAssertTrue(episode.present {
             callCount += 1
-        }
-        action.clear()
-        action.consume()
+        })
+        episode.dismiss()
+        episode.consumeCancel()
 
         XCTAssertEqual(callCount, 0)
+
+        let shouldOrderNewEpisode = episode.present {
+            callCount += 1
+        }
+        episode.consumeCancel()
+        episode.consumeCancel()
+
+        XCTAssertTrue(shouldOrderNewEpisode)
+        XCTAssertEqual(callCount, 1)
     }
 
-    func testReplacingCancelActionRearmsConsumeOnceBehavior() {
-        let action = TeamsAutoMeetingCancelAction()
-        var callCount = 0
+    func testSameEpisodeTickRefreshesCancelOnlyWhileStillArmed() {
+        let episode = TeamsAutoMeetingPresentationEpisode()
+        var invokedAction = ""
 
-        action.replace {
-            callCount += 1
-        }
-        action.consume()
-        action.replace {
-            callCount += 1
-        }
-        action.consume()
+        XCTAssertTrue(episode.present {
+            invokedAction = "initial"
+        })
+        XCTAssertFalse(episode.present {
+            invokedAction = "latest"
+        })
+        episode.consumeCancel()
 
-        XCTAssertEqual(callCount, 2)
+        XCTAssertEqual(invokedAction, "latest")
     }
 }

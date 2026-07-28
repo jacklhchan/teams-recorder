@@ -115,21 +115,39 @@ struct TeamsAutoMeetingPresentation: Equatable {
 }
 
 @MainActor
-final class TeamsAutoMeetingCancelAction {
-    private var action: (@MainActor () -> Void)?
-
-    func replace(with action: @escaping @MainActor () -> Void) {
-        self.action = action
+final class TeamsAutoMeetingPresentationEpisode {
+    private enum State {
+        case idle
+        case armed(@MainActor () -> Void)
+        case consumed
     }
 
-    func consume() {
-        guard let action else { return }
-        self.action = nil
+    private var state: State = .idle
+
+    @discardableResult
+    func present(
+        cancel: @escaping @MainActor () -> Void
+    ) -> Bool {
+        switch state {
+        case .idle:
+            state = .armed(cancel)
+            return true
+        case .armed:
+            state = .armed(cancel)
+            return false
+        case .consumed:
+            return false
+        }
+    }
+
+    func consumeCancel() {
+        guard case .armed(let action) = state else { return }
+        state = .consumed
         action()
     }
 
-    func clear() {
-        action = nil
+    func dismiss() {
+        state = .idle
     }
 }
 
@@ -170,7 +188,7 @@ final class TeamsAutoMeetingCountdownPanelController:
     NSWindowDelegate
 {
     private let panel: TeamsAutoMeetingPanel
-    private let cancelAction = TeamsAutoMeetingCancelAction()
+    private let episode = TeamsAutoMeetingPresentationEpisode()
 
     override init() {
         panel = TeamsAutoMeetingPanel(
@@ -194,29 +212,29 @@ final class TeamsAutoMeetingCountdownPanelController:
         seconds: Int,
         cancel: @escaping @MainActor () -> Void
     ) {
-        cancelAction.replace(with: cancel)
+        let shouldOrderPanel = episode.present(cancel: cancel)
         panel.contentView = NSHostingView(
             rootView: TeamsAutoMeetingCountdownView(
                 seconds: seconds,
                 cancel: { [weak self] in
-                    self?.cancelAction.consume()
+                    self?.episode.consumeCancel()
                 }
             )
         )
 
-        if !panel.isVisible {
+        if shouldOrderPanel {
             positionPanel()
             panel.orderFrontRegardless()
         }
     }
 
     func dismiss() {
-        cancelAction.clear()
+        episode.dismiss()
         panel.orderOut(nil)
     }
 
     func windowWillClose(_ notification: Notification) {
-        cancelAction.consume()
+        episode.consumeCancel()
     }
 
     private func positionPanel() {

@@ -6,3 +6,9 @@ DerivedData/
 *.xcuserdata/
 *.xcuserstate
 .DS_Store
+windows/.vs/
+windows/**/bin/
+windows/**/obj/
+windows/out/
+windows/native/out/
+/out/

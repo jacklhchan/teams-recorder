@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "title": "Audio-only Teams call",
+  "tags": [],
+  "isFavorite": false,
+  "mediaKind": "audio",
+  "screenIntervals": [],
+  "recoveryState": "none"
+}

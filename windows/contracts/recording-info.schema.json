@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teams-recorder.local/contracts/recording-info.schema.json",
+  "title": "Teams Recorder session metadata",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "title": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "isFavorite": {
+      "type": "boolean"
+    },
+    "mediaKind": {
+      "enum": [
+        "audio",
+        "video"
+      ]
+    },
+    "screenIntervals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/screenInterval"
+      }
+    },
+    "capturedTeamsWindow": {
+      "$ref": "#/$defs/teamsWindow"
+    },
+    "recoveryState": {
+      "enum": [
+        "none",
+        "videoLostAudioPreserved",
+        "recoveredAfterInterruption"
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "screenInterval": {
+      "type": "object",
+      "required": [
+        "startSeconds",
+        "endSeconds"
+      ],
+      "properties": {
+        "startSeconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "endSeconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "teamsWindow": {
+      "type": "object",
+      "required": [
+        "processID",
+        "windowID",
+        "title"
+      ],
+      "properties": {
+        "processID": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "windowID": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

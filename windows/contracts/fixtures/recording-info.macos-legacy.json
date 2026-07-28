@@ -1,0 +1,21 @@
+{
+  "capturedTeamsWindow": {
+    "processID": 4102,
+    "title": "Weekly sync | Microsoft Teams",
+    "windowID": 77
+  },
+  "isFavorite": true,
+  "mediaKind": "video",
+  "recoveryState": "none",
+  "screenIntervals": [
+    {
+      "endSeconds": 84.25,
+      "startSeconds": 5.5
+    }
+  ],
+  "tags": [
+    "weekly",
+    "cantonese"
+  ],
+  "title": "Weekly sync"
+}

@@ -14,6 +14,15 @@ macOS SwiftUI MVP for recording meeting audio locally:
 - Let the recorder app keep an independent local mic mute when needed.
 - Toggle recorder mic mute with `Option + Shift + M`.
 
+## Windows migration
+
+The Windows-native re-platform has started under [`windows/`](windows/README.md).
+It currently includes the portable recording policy core, cross-platform
+session contracts, and a native audio bridge for WASAPI system, microphone,
+and process-tree loopback capture with canonical 48 kHz WAV output. WinUI,
+video capture, and the virtual microphone driver are not yet implemented; the
+Windows README keeps the current build status explicit.
+
 ## Run
 
 Open `Package.swift` in Xcode, select the `LocalMeetingRecorder` executable scheme, then Run.

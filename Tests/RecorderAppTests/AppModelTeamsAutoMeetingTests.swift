@@ -283,6 +283,92 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         }
     }
 
+    func testEnablingMuteSyncDuringAutoOnlyMutedMeetingFailsClosedAndRefreshesState() async {
+        await withDefaults { defaults in
+            defaults.set(false, forKey: "teamsMuteSyncEnabled")
+            let publisher = AutoMeetingFakePublisher()
+            let recorder = RecordingEngine(virtualMicPublisher: publisher)
+            let client = AutoMeetingFakeTeamsClient()
+            let model = makeModel(
+                defaults: defaults,
+                client: client,
+                recorder: recorder
+            )
+            model.setTeamsAutoMeetingEnabled(true)
+            client.emit(
+                .meetingState(
+                    TeamsMeetingState(
+                        isInMeeting: true,
+                        isMuted: true,
+                        canToggleMute: true,
+                        canPair: false
+                    )
+                )
+            )
+            client.emit(.status(.inMeeting(muted: true)))
+            await settle()
+            XCTAssertFalse(recorder.micMuted)
+            XCTAssertTrue(publisher.muteCalls.isEmpty)
+
+            model.setTeamsMuteSyncEnabled(true)
+
+            XCTAssertEqual(client.reconnectCount, 1)
+            XCTAssertTrue(recorder.micMuted)
+            XCTAssertEqual(publisher.muteCalls, [true])
+            XCTAssertEqual(model.teamsMuteSyncStatus, .connecting)
+            XCTAssertEqual(model.teamsConnectionStatus, .connecting)
+
+            client.emit(
+                .meetingState(
+                    TeamsMeetingState(
+                        isInMeeting: true,
+                        isMuted: false,
+                        canToggleMute: true,
+                        canPair: false
+                    )
+                )
+            )
+            XCTAssertEqual(publisher.muteCalls, [true, false])
+            client.emit(.status(.inMeeting(muted: false)))
+            await settle()
+
+            XCTAssertFalse(recorder.micMuted)
+            XCTAssertEqual(
+                model.teamsMuteSyncStatus,
+                .inMeeting(muted: false)
+            )
+        }
+    }
+
+    func testOrderedIngressRejectsPairWhenSchedulerRunsSecondWorkFirst() {
+        withDefaults { defaults in
+            defaults.set(false, forKey: "teamsMuteSyncEnabled")
+            let scheduler = ControlledTeamsMainActorScheduler()
+            let client = AutoMeetingFakeTeamsClient()
+            let model = AppModel(
+                defaults: defaults,
+                inputDevices: { [] },
+                defaultInputDeviceID: { nil },
+                performStartupWork: false,
+                teamsMuteSyncClient: client,
+                teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator(),
+                teamsIntegrationScheduler: scheduler.schedule
+            )
+            model.setTeamsAutoMeetingEnabled(true)
+
+            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
+            client.emit(.status(.connecting))
+            client.emit(.status(.inMeeting(muted: false)))
+            scheduler.runSecondBeforeFirstThenRemaining()
+
+            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
+            XCTAssertEqual(
+                model.teamsConnectionStatus,
+                .inMeeting(muted: false)
+            )
+        }
+    }
+
     private func makeModel(
         defaults: UserDefaults,
         client: AutoMeetingFakeTeamsClient = AutoMeetingFakeTeamsClient(),
@@ -339,6 +425,7 @@ private final class AutoMeetingFakeTeamsClient: TeamsMuteSyncing {
     private var staleCallbacks: [(TeamsMuteSyncEvent) -> Void] = []
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    private(set) var reconnectCount = 0
 
     func start(onEvent: @escaping (TeamsMuteSyncEvent) -> Void) {
         if let callback {
@@ -353,7 +440,9 @@ private final class AutoMeetingFakeTeamsClient: TeamsMuteSyncing {
         stopCount += 1
     }
 
-    func reconnect() {}
+    func reconnect() {
+        reconnectCount += 1
+    }
 
     func requestPairing() {}
 
@@ -368,6 +457,7 @@ private final class AutoMeetingFakeTeamsClient: TeamsMuteSyncing {
 
 private final class AutoMeetingFakePublisher: VirtualMicPublishing {
     private(set) var state: VirtualMicPublisherState = .stopped
+    private(set) var muteCalls: [Bool] = []
 
     func start() {
         state = .ready
@@ -375,9 +465,41 @@ private final class AutoMeetingFakePublisher: VirtualMicPublishing {
 
     func publishMicrophone(left: [Float], right: [Float]) {}
 
-    func setMuted(_ muted: Bool) {}
+    func setMuted(_ muted: Bool) {
+        muteCalls.append(muted)
+    }
 
     func stop() {
         state = .stopped
+    }
+}
+
+private final class ControlledTeamsMainActorScheduler: @unchecked Sendable {
+    typealias Operation = @MainActor @Sendable () -> Void
+
+    private let lock = NSLock()
+    private var operations: [Operation] = []
+
+    func schedule(_ operation: @escaping Operation) {
+        lock.lock()
+        operations.append(operation)
+        lock.unlock()
+    }
+
+    @MainActor
+    func runSecondBeforeFirstThenRemaining() {
+        lock.lock()
+        let scheduled = operations
+        operations.removeAll()
+        lock.unlock()
+
+        guard scheduled.count >= 2 else {
+            scheduled.forEach { $0() }
+            return
+        }
+
+        scheduled[1]()
+        scheduled[0]()
+        scheduled.dropFirst(2).forEach { $0() }
     }
 }

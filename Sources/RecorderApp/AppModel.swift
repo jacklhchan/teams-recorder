@@ -4,6 +4,50 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
+private final class TeamsIntegrationIngress: @unchecked Sendable {
+    typealias Operation = @MainActor @Sendable () -> Void
+    typealias Scheduler = (@escaping Operation) -> Void
+
+    private let lock = NSLock()
+    private let scheduler: Scheduler
+    private var pending: [Operation] = []
+    private var drainScheduled = false
+
+    init(scheduler: @escaping Scheduler) {
+        self.scheduler = scheduler
+    }
+
+    func enqueue(_ operation: @escaping Operation) {
+        lock.lock()
+        pending.append(operation)
+        let shouldScheduleDrain = !drainScheduled
+        drainScheduled = true
+        lock.unlock()
+
+        guard shouldScheduleDrain else { return }
+        scheduler { @MainActor [weak self] in
+            self?.drain()
+        }
+    }
+
+    @MainActor
+    private func drain() {
+        while true {
+            lock.lock()
+            guard !pending.isEmpty else {
+                drainScheduled = false
+                lock.unlock()
+                return
+            }
+            let batch = pending
+            pending.removeAll(keepingCapacity: true)
+            lock.unlock()
+
+            batch.forEach { $0() }
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var devices: [AudioDevice] = []
@@ -78,6 +122,7 @@ final class AppModel: ObservableObject {
     private let microphoneMuteGate: MicrophoneMuteGate
     private let teamsMuteRelay: TeamsMuteRelay
     private let teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator
+    private let teamsIntegrationIngress: TeamsIntegrationIngress
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
     private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
     private let recordingSessionRecovery: @Sendable (URL) -> Void
@@ -151,13 +196,21 @@ final class AppModel: ObservableObject {
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
         transcriptionScriptURL: URL? = nil,
         playbackCoordinator: (any PlaybackCoordinating)? = nil,
-        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
+        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
+        teamsIntegrationScheduler: @escaping (
+            @escaping @MainActor @Sendable () -> Void
+        ) -> Void = { operation in
+            Task { @MainActor in operation() }
+        }
     ) {
         let activeRecorder = recorder ?? RecordingEngine()
         let autoCoordinator = teamsAutoMeetingCoordinator
             ?? TeamsAutoMeetingCoordinator()
         self.recorder = activeRecorder
         self.teamsAutoMeetingCoordinator = autoCoordinator
+        teamsIntegrationIngress = TeamsIntegrationIngress(
+            scheduler: teamsIntegrationScheduler
+        )
         self.inputDevices = inputDevices
         self.defaultInputDeviceID = defaultInputDeviceID
         self.defaults = defaults
@@ -1173,11 +1226,12 @@ final class AppModel: ObservableObject {
         let integrationGeneration = teamsIntegrationGeneration
         let relayGeneration = teamsMuteRelayGeneration
         let relay = teamsMuteRelay
-        teamsMuteSyncClient.start { [weak self, relay] event in
+        let ingress = teamsIntegrationIngress
+        teamsMuteSyncClient.start { [weak self, relay, ingress] event in
             let relayResult = relayGeneration.flatMap {
                 relay.apply(event, generation: $0)
             }
-            Task { @MainActor [weak self] in
+            ingress.enqueue { @MainActor [weak self] in
                 self?.handleTeamsIntegration(
                     event,
                     relayResult: relayResult,
@@ -1193,10 +1247,36 @@ final class AppModel: ObservableObject {
         teamsMuteSyncEnabled = enabled
         defaults.set(enabled, forKey: Self.teamsMuteSyncEnabledKey)
         if enabled {
+            let needsFreshState = teamsIntegrationInstalled
+            let connectionIsInMeeting: Bool
+            if case .inMeeting = teamsConnectionStatus {
+                connectionIsInMeeting = true
+            } else {
+                connectionIsInMeeting = false
+            }
+            let shouldFailClosed =
+                needsFreshState
+                && connectionIsInMeeting
+                && lastAuthorizedTeamsMeetingState?.isInMeeting == true
             teamsMuteRelayGeneration = teamsMuteRelay.enable()
-            teamsMuteSyncStatus = teamsConnectionStatus
-            if teamsIntegrationInstalled {
+            if shouldFailClosed {
+                let snapshot = microphoneMuteGate.applyTeamsState(
+                    TeamsMeetingState(
+                        isInMeeting: true,
+                        isMuted: true,
+                        canToggleMute: false,
+                        canPair: false
+                    )
+                )
+                publishMicrophoneMuteSnapshot(snapshot)
+            }
+            if needsFreshState {
+                pendingTeamsMeetingState = nil
+                lastAuthorizedTeamsMeetingState = nil
+                teamsConnectionStatus = .connecting
+                teamsMuteSyncStatus = .connecting
                 installCurrentTeamsCallback()
+                teamsMuteSyncClient.reconnect()
             } else {
                 installTeamsIntegrationIfNeeded()
             }

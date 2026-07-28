@@ -642,6 +642,79 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertEqual(fixture.writer.closeCount, 1)
     }
 
+    func testManualStartTakesOverPausedAutomaticSourceStart() async {
+        let fixture = makeRecordingFixture()
+        fixture.source.pauseStart = true
+        fixture.model.setTeamsAutoMeetingEnabled(true)
+        emitMeeting(true, in: fixture)
+        await fire(fixture.ticker, count: 5)
+        await fixture.source.waitForStart()
+        XCTAssertFalse(fixture.engine.isRecording)
+
+        fixture.model.startOrStop()
+        fixture.source.resumeStart()
+        await waitUntil {
+            fixture.engine.isRecording
+                && fixture.model.recordingOwnership == .manual
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .suppressedUntilMeetingEnd
+        )
+        XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(fixture.source.stopCount, 0)
+        XCTAssertEqual(fixture.writer.closeCount, 0)
+
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testManualStartTakesOverAutomaticPostStartOwnershipGap() async {
+        let fixture = makeRecordingFixture()
+        let teamsApplication = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        fixture.model.setTeamsAutoMeetingEnabled(true)
+        emitMeeting(true, in: fixture)
+        await settle()
+        fixture.model.captureSelection = .init(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: teamsApplication.bundleIdentifier
+        )
+        fixture.model.availableCaptureApplications = [teamsApplication]
+        fixture.model.resolvedCaptureSelection = .application(teamsApplication)
+        fixture.source.pauseTeamsRefresh = true
+        await fire(fixture.ticker, count: 5)
+        await waitUntil {
+            fixture.source.teamsRefreshCount >= 1
+                && fixture.engine.isRecording
+        }
+        XCTAssertNil(fixture.model.recordingOwnership)
+
+        fixture.model.startOrStop()
+        fixture.source.resumeTeamsRefresh()
+        await waitUntil {
+            fixture.engine.isRecording
+                && fixture.model.recordingOwnership == .manual
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .suppressedUntilMeetingEnd
+        )
+        XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(fixture.source.stopCount, 0)
+        XCTAssertEqual(fixture.writer.closeCount, 0)
+
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
     func testDisableDuringSourceStartFinalizesLateRecordingWithoutStoppingTransferredWork() async {
         let fixture = makeRecordingFixture()
         fixture.source.pauseStart = true
@@ -742,6 +815,72 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             .suppressedUntilMeetingEnd
         )
         XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(fixture.source.stopCount, 1)
+        XCTAssertEqual(fixture.writer.closeCount, 1)
+    }
+
+    func testTerminalStopWinningAutoStopRaceCompletesMeetingEndOnce() async {
+        let fixture = makeRecordingFixture()
+        await startAutomaticRecording(fixture)
+        emitMeeting(false, in: fixture)
+        await fire(fixture.ticker, count: 9)
+        fixture.source.pauseStop = true
+
+        fixture.source.emit(.streamFailed)
+        await fixture.source.waitForStop()
+        await fire(fixture.ticker)
+        fixture.source.resumeStop()
+        await waitUntil {
+            !fixture.engine.isRecording
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .waitingForMeeting
+        )
+        XCTAssertNil(fixture.model.recordingOwnership)
+        XCTAssertEqual(fixture.source.stopCount, 1)
+        XCTAssertEqual(fixture.writer.closeCount, 1)
+    }
+
+    func testTerminalStopDuringTestRecordingPostStartRefreshClearsStateAndDelay() async {
+        let delay = AutoMeetingManualTicker()
+        let fixture = makeRecordingFixture(testRecordingDelay: {
+            await delay.waitForTick()
+        })
+        let teamsApplication = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        fixture.model.captureSelection = .init(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: teamsApplication.bundleIdentifier
+        )
+        fixture.model.availableCaptureApplications = [teamsApplication]
+        fixture.model.resolvedCaptureSelection = .application(teamsApplication)
+        fixture.source.pauseTeamsRefresh = true
+
+        fixture.model.runTestRecording()
+        await waitUntil {
+            fixture.source.teamsRefreshCount >= 1
+                && fixture.engine.isRecording
+        }
+        XCTAssertTrue(fixture.model.isRunningTestRecording)
+        XCTAssertNil(fixture.model.recordingOwnership)
+
+        fixture.source.emit(.streamFailed)
+        await waitUntil { !fixture.engine.isRecording }
+        await delay.fire()
+        fixture.source.resumeTeamsRefresh()
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await settle()
+        let acknowledgedDelayTicks = await delay.acknowledgedTickCount()
+
+        XCTAssertFalse(fixture.model.isRunningTestRecording)
+        XCTAssertNil(fixture.model.recordingOwnership)
+        XCTAssertEqual(acknowledgedDelayTicks, 0)
         XCTAssertEqual(fixture.source.stopCount, 1)
         XCTAssertEqual(fixture.writer.closeCount, 1)
     }
@@ -1030,12 +1169,15 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
     var pauseStart = false
     var pauseRefresh = false
     var pauseTeamsRefresh = false
+    var pauseStop = false
     private var onEvent: ((CaptureEvent) -> Void)?
     private var startContinuation: CheckedContinuation<Void, Never>?
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var refreshContinuation: CheckedContinuation<Void, Never>?
     private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
     private var teamsRefreshContinuation: CheckedContinuation<Void, Never>?
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var stopWaiters: [CheckedContinuation<Void, Never>] = []
 
     func refreshContent() async throws -> [CaptureApplication] {
         guard pauseRefresh else { return [] }
@@ -1080,6 +1222,11 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
 
     func stop() async {
         stopCount += 1
+        if pauseStop {
+            stopWaiters.forEach { $0.resume() }
+            stopWaiters.removeAll()
+            await withCheckedContinuation { stopContinuation = $0 }
+        }
     }
 
     func waitForStart() async {
@@ -1108,6 +1255,17 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
         pauseTeamsRefresh = false
         teamsRefreshContinuation?.resume()
         teamsRefreshContinuation = nil
+    }
+
+    func waitForStop() async {
+        if stopCount > 0 { return }
+        await withCheckedContinuation { stopWaiters.append($0) }
+    }
+
+    func resumeStop() {
+        pauseStop = false
+        stopContinuation?.resume()
+        stopContinuation = nil
     }
 
     func emit(_ event: CaptureEvent) {
@@ -1225,5 +1383,18 @@ private actor AutoMeetingManualTicker {
                 )
             }
         }
+    }
+
+    func fire() {
+        deliveredTicks += 1
+        if continuations.isEmpty {
+            pendingTicks += 1
+        } else {
+            continuations.removeFirst().resume()
+        }
+    }
+
+    func acknowledgedTickCount() -> Int {
+        acknowledgedTicks
     }
 }

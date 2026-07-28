@@ -244,20 +244,36 @@ final class TeamsAutoMeetingCoordinatorTests: XCTestCase {
     func testExternalStopDuringMeetingEndDebounceSuppressesTransientTrue() async {
         let ticker = ManualAutoMeetingTicker()
         let coordinator = makeCoordinator(ticker: ticker)
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onCommand = { commands.append($0) }
 
         coordinator.setEnabled(true)
         coordinator.handleMeetingState(isInMeeting: true)
         await fire(ticker, count: 5)
         coordinator.automaticStartSucceeded()
         coordinator.handleMeetingState(isInMeeting: false)
+        await fire(ticker, count: 3)
 
         coordinator.suppressUntilMeetingEnd()
         coordinator.handleMeetingState(isInMeeting: true)
 
-        XCTAssertEqual(coordinator.state, .suppressedUntilMeetingEnd)
+        guard coordinator.hasPendingTimer else {
+            return XCTFail("External stop cancelled the only end-epoch timer")
+        }
+        XCTAssertEqual(
+            coordinator.state,
+            .stopCountdown(secondsRemaining: 7)
+        )
+        await fire(ticker, count: 7)
 
-        coordinator.handleMeetingState(isInMeeting: false)
         XCTAssertEqual(coordinator.state, .waitingForMeeting)
+        XCTAssertEqual(commands, [.startRecording])
+
+        coordinator.handleMeetingState(isInMeeting: true)
+        XCTAssertEqual(
+            coordinator.state,
+            .startCountdown(secondsRemaining: 5)
+        )
     }
 
     @MainActor

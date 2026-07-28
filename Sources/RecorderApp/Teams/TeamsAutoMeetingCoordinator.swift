@@ -31,6 +31,7 @@ final class TeamsAutoMeetingCoordinator {
     private var generation: UInt64 = 0
     private var isEnabled = false
     private var isInMeeting = false
+    private var suppressesStopCommandUntilEndDebounce = false
 
     private(set) var state: TeamsAutoMeetingState = .disabled {
         didSet {
@@ -102,7 +103,8 @@ final class TeamsAutoMeetingCoordinator {
             switch state {
             case .waitingForMeeting:
                 beginTimer(.start, seconds: startCountdownSeconds)
-            case .stopCountdown:
+            case .stopCountdown
+                where !suppressesStopCommandUntilEndDebounce:
                 invalidateTimer()
                 state = .automaticRecording
             default:
@@ -145,6 +147,9 @@ final class TeamsAutoMeetingCoordinator {
             invalidateTimer()
             state = .suppressedUntilMeetingEnd
             onCommand?(.cancelAutomaticStart)
+            return
+        case .stopCountdown where !isInMeeting:
+            suppressesStopCommandUntilEndDebounce = true
             return
         case .automaticRecording, .stopCountdown:
             invalidateTimer()
@@ -227,7 +232,12 @@ final class TeamsAutoMeetingCoordinator {
                               self.state == .starting else { return }
                         self.onCommand?(.startRecording)
                     case .stop:
-                        self.onCommand?(.stopRecording)
+                        if self.suppressesStopCommandUntilEndDebounce {
+                            self.suppressesStopCommandUntilEndDebounce = false
+                            self.state = .waitingForMeeting
+                        } else {
+                            self.onCommand?(.stopRecording)
+                        }
                     }
                 }
             }
@@ -237,6 +247,7 @@ final class TeamsAutoMeetingCoordinator {
     private func invalidateTimer() {
         timerTask?.cancel()
         timerTask = nil
+        suppressesStopCommandUntilEndDebounce = false
         generation &+= 1
     }
 }

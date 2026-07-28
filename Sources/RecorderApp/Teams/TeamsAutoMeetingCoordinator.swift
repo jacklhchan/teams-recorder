@@ -193,6 +193,10 @@ final class TeamsAutoMeetingCoordinator {
                     switch kind {
                     case .start:
                         self.state = .starting
+                        guard self.generation == expectedGeneration,
+                              self.isEnabled,
+                              self.isInMeeting,
+                              self.state == .starting else { return }
                         self.onCommand?(.startRecording)
                     case .stop:
                         self.onCommand?(.stopRecording)

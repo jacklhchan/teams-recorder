@@ -533,6 +533,56 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertEqual(fixture.writer.closeCount, 1)
     }
 
+    func testManualStopDuringStopDebounceSuppressesRejoinUntilLaterFalse() async {
+        let fixture = makeRecordingFixture()
+        await startAutomaticRecording(fixture)
+        emitMeeting(false, in: fixture)
+        await fire(fixture.ticker, count: 3)
+
+        fixture.model.startOrStop()
+        await waitUntil {
+            !fixture.engine.isRecording
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+        emitMeeting(true, in: fixture)
+
+        guard fixture.model.teamsAutoMeetingState
+                == .suppressedUntilMeetingEnd else {
+            return XCTFail("Manual stop did not suppress the rejoined meeting")
+        }
+        emitMeeting(true, in: fixture)
+        await fire(fixture.ticker)
+        emitMeeting(true, in: fixture)
+
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .suppressedUntilMeetingEnd
+        )
+        XCTAssertNil(fixture.model.recordingOwnership)
+        XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(fixture.source.stopCount, 1)
+        XCTAssertEqual(fixture.writer.closeCount, 1)
+
+        emitMeeting(false, in: fixture)
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .waitingForMeeting
+        )
+        emitMeeting(true, in: fixture)
+        emitMeeting(true, in: fixture)
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .startCountdown(secondsRemaining: 5)
+        )
+        await fire(fixture.ticker)
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .startCountdown(secondsRemaining: 4)
+        )
+        XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(fixture.source.stopCount, 1)
+    }
+
     func testDisablingAutoTransfersActiveRecordingToManualWithoutStopping() async {
         let fixture = makeRecordingFixture()
         await startAutomaticRecording(fixture)

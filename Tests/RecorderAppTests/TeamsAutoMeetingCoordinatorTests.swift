@@ -257,23 +257,33 @@ final class TeamsAutoMeetingCoordinatorTests: XCTestCase {
         coordinator.suppressUntilMeetingEnd()
         coordinator.handleMeetingState(isInMeeting: true)
 
-        guard coordinator.hasPendingTimer else {
-            return XCTFail("External stop cancelled the only end-epoch timer")
+        guard coordinator.state == .suppressedUntilMeetingEnd else {
+            return XCTFail("Rejoin did not preserve external-stop suppression")
         }
-        XCTAssertEqual(
-            coordinator.state,
-            .stopCountdown(secondsRemaining: 7)
-        )
-        await fire(ticker, count: 7)
+        XCTAssertFalse(coordinator.hasPendingTimer)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await fire(ticker)
+        coordinator.handleMeetingState(isInMeeting: true)
 
-        XCTAssertEqual(coordinator.state, .waitingForMeeting)
+        XCTAssertEqual(coordinator.state, .suppressedUntilMeetingEnd)
         XCTAssertEqual(commands, [.startRecording])
 
+        coordinator.handleMeetingState(isInMeeting: false)
+        XCTAssertEqual(coordinator.state, .waitingForMeeting)
+        coordinator.handleMeetingState(isInMeeting: true)
         coordinator.handleMeetingState(isInMeeting: true)
         XCTAssertEqual(
             coordinator.state,
             .startCountdown(secondsRemaining: 5)
         )
+        XCTAssertTrue(coordinator.hasPendingTimer)
+        XCTAssertEqual(commands, [.startRecording])
+        await fire(ticker)
+        XCTAssertEqual(
+            coordinator.state,
+            .startCountdown(secondsRemaining: 4)
+        )
+        XCTAssertEqual(commands, [.startRecording])
     }
 
     @MainActor

@@ -111,10 +111,13 @@ final class TeamsAutoMeetingCoordinator {
             case .waitingForMeeting:
                 beginTimer(.start, seconds: startCountdownSeconds)
             case .stopCountdown
-                where automaticStopPhase == .countdown
-                    && !suppressesStopCommandUntilEndDebounce:
+                where automaticStopPhase == .countdown:
+                let shouldRemainSuppressed =
+                    suppressesStopCommandUntilEndDebounce
                 invalidateTimer()
-                state = .automaticRecording
+                state = shouldRemainSuppressed
+                    ? .suppressedUntilMeetingEnd
+                    : .automaticRecording
             default:
                 break
             }

@@ -126,6 +126,9 @@ struct CaptureLifecycleGate {
     private var activeToken: CaptureLifecycleToken?
 
     var isWorking: Bool { activeToken != nil }
+    var activeOperation: CaptureLifecycleOperation? {
+        activeToken?.operation
+    }
 
     mutating func begin(
         _ operation: CaptureLifecycleOperation

@@ -254,6 +254,40 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
+    func testRequestedUnavailableScreenCaptureCanBeTurnedOff() async throws {
+        let window = teamsWindow(id: 36, title: "Shared content | Customer presentation")
+        let fixture = makeFixture(provider: .normal, windows: [window])
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.selectTeamsScreenCaptureWindow(window.identity)
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+        XCTAssertTrue(fixture.model.isTeamsScreenCaptureRequested)
+
+        let failingUpdate = fixture.source.videoTargets.count + 1
+        fixture.source.videoTargetErrors[failingUpdate] = StorageTestError.unavailable
+        await fixture.model.refreshTeamsScreenCaptureNow()
+
+        XCTAssertEqual(
+            fixture.model.teamsScreenStatusText,
+            TeamsScreenStatusText.unavailable
+        )
+        XCTAssertFalse(fixture.model.isTeamsScreenCaptureToggleDisabled)
+
+        await fixture.model.setTeamsScreenCaptureRequested(false)
+
+        XCTAssertFalse(fixture.model.isTeamsScreenCaptureRequested)
+        XCTAssertNil(fixture.source.videoTargets.last ?? nil)
+        XCTAssertEqual(
+            fixture.model.teamsScreenStatusText,
+            TeamsScreenStatusText.off
+        )
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
     func testLostSelectedWindowShowsReconnectingInsteadOfMissingWindow() async throws {
         let window = teamsWindow(id: 29, title: "Shared content | Customer presentation")
         let fixture = makeFixture(provider: .normal, windows: [window])

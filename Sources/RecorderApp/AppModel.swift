@@ -457,10 +457,18 @@ final class AppModel: ObservableObject {
         selectedTeamsApplication != nil
     }
 
+    var isFinalizingRecording: Bool {
+        recorder.isRecording &&
+            captureLifecycleGate.activeOperation == .stop
+    }
+
     var isTeamsScreenCaptureToggleDisabled: Bool {
         guard recorder.isRecording,
-              !isCaptureLifecycleWorking,
-              isScreenCaptureAllowedByStorage else { return true }
+              !isCaptureLifecycleWorking else { return true }
+        if isTeamsScreenCaptureRequested {
+            return false
+        }
+        guard isScreenCaptureAllowedByStorage else { return true }
         switch recorder.meetingScreenCaptureState {
         case .unavailable, .failed: return true
         default: return false
@@ -488,9 +496,11 @@ final class AppModel: ObservableObject {
 
     func setTeamsScreenCaptureRequested(_ requested: Bool) async {
         guard recorder.isRecording,
-              !isCaptureLifecycleWorking,
-              isScreenCaptureAllowedByStorage,
-              selectedTeamsApplication != nil else { return }
+              !isCaptureLifecycleWorking else { return }
+        if requested {
+            guard isScreenCaptureAllowedByStorage,
+                  selectedTeamsApplication != nil else { return }
+        }
         isTeamsScreenCaptureRequested = requested
         if requested {
             await refreshTeamsScreenCaptureNow()

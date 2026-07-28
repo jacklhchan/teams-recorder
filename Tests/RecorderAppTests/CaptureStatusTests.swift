@@ -422,6 +422,12 @@ final class CaptureStatusTests: XCTestCase {
             .warning("Teams screen target was closed")
         )
         XCTAssertEqual(
+            CaptureStatusMapper.status(for: .screenFrameUnavailable(
+                CaptureFilterRevision(sessionGeneration: 1, revision: 1)
+            )),
+            .warning("Teams screen frame unavailable")
+        )
+        XCTAssertEqual(
             CaptureStatusMapper.status(for: .screenCaptureFailed),
             .warning("Screen frame capture unavailable")
         )

@@ -762,6 +762,13 @@ final class RecordingEngine: ObservableObject {
 
     private func receive(_ event: CaptureEvent, ticket: RecordingCallbackTicket) {
         guard ticket.sourceSessionID == sourceSessionID else { return }
+        if case let .screenFrameUnavailable(revision) = event,
+           (!isRecording
+            || ticket.recordingEpoch != recordingEpoch
+            || !screenCaptureRequested
+            || activeFilterRevision != revision) {
+            return
+        }
         captureStatus = CaptureStatusMapper.status(for: event)
 
         switch event {
@@ -788,6 +795,14 @@ final class RecordingEngine: ObservableObject {
             break
         case .screenTargetLost:
             if isRecording, ticket.recordingEpoch == recordingEpoch {
+                mediaCoordinator?.markScreenSourceUnavailable()
+                meetingScreenCaptureState = .waiting([])
+            }
+        case let .screenFrameUnavailable(revision):
+            if isRecording,
+               ticket.recordingEpoch == recordingEpoch,
+               screenCaptureRequested,
+               activeFilterRevision == revision {
                 mediaCoordinator?.markScreenSourceUnavailable()
                 meetingScreenCaptureState = .waiting([])
             }

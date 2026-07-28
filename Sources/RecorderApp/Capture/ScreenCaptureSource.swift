@@ -20,6 +20,7 @@ enum CaptureEvent: Error, Equatable {
     case streamStoppedBySystem
     case streamFailed
     case screenTargetLost
+    case screenFrameUnavailable(CaptureFilterRevision)
     case screenCaptureFailed
 }
 
@@ -60,6 +61,8 @@ enum CaptureStatusMapper {
             return .error("Audio capture failed")
         case .screenTargetLost:
             return .warning("Teams screen target was closed")
+        case .screenFrameUnavailable:
+            return .warning("Teams screen frame unavailable")
         case .screenCaptureFailed:
             return .warning("Screen frame capture unavailable")
         }
@@ -1058,6 +1061,7 @@ final class ScreenCaptureSource: NSObject {
                     },
                     onVideo: { [weak self] frame in self?.deliverVideo(frame, for: token) },
                     videoRevision: { [weak self] in self?.currentVideoRevision(for: token) },
+                    screenTargetActive: { [weak self] in self?.hasActiveScreenTarget(for: token) ?? false },
                     videoPixelFormat: { pixelFormat.coreVideoValue },
                     onEvent: onEvent
                 )
@@ -1526,6 +1530,17 @@ final class ScreenCaptureSource: NSObject {
         return session.routingState.videoRevision
     }
 
+    private func hasActiveScreenTarget(for token: CaptureSessionToken) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let session = activeSession,
+              session.token == token,
+              lifecycle.isActive(token) else {
+            return false
+        }
+        return session.committedScreenTarget != nil
+    }
+
     private func cancelStartReservation(
         _ reservation: CaptureStartReservation
     ) {
@@ -1831,11 +1846,13 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
     private let onAudio: (AudioFrameBlock) -> Void
     private let onVideo: (ScreenVideoFrame) -> Void
     private let videoRevision: () -> CaptureFilterRevision?
+    private let screenTargetActive: () -> Bool
     private let videoPixelFormat: () -> OSType
     private let onEvent: (CaptureEvent) -> Void
     private let systemResampler = PersistentAudioResampler(source: .system)
     private let microphoneResampler = PersistentAudioResampler(source: .microphone)
     private var screenFrameContinuity = ScreenVideoFrameContinuity()
+    private var screenSourceUnavailableTracker = ScreenSourceUnavailableTracker()
 
     init(
         token: CaptureSessionToken,
@@ -1843,6 +1860,7 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         onAudio: @escaping (AudioFrameBlock) -> Void,
         onVideo: @escaping (ScreenVideoFrame) -> Void,
         videoRevision: @escaping () -> CaptureFilterRevision?,
+        screenTargetActive: @escaping () -> Bool,
         videoPixelFormat: @escaping () -> OSType,
         onEvent: @escaping (CaptureEvent) -> Void
     ) {
@@ -1856,6 +1874,7 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         self.onAudio = onAudio
         self.onVideo = onVideo
         self.videoRevision = videoRevision
+        self.screenTargetActive = screenTargetActive
         self.videoPixelFormat = videoPixelFormat
         self.onEvent = onEvent
     }
@@ -1936,7 +1955,15 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
             sourcePTS: pts,
             filterRevision: revision,
             expectedPixelFormat: videoPixelFormat()
-        ) else { return }
+        ) else {
+            if status.indicatesUnavailableScreenSource,
+               screenTargetActive(),
+               screenSourceUnavailableTracker.shouldEmitUnavailable(for: revision) {
+                onEvent(.screenFrameUnavailable(revision))
+            }
+            return
+        }
+        screenSourceUnavailableTracker.markAvailable(for: revision)
         onVideo(frame)
     }
 

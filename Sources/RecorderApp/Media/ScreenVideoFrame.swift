@@ -19,6 +19,32 @@ extension ScreenCaptureStartupPixelFormat {
     }
 }
 
+extension SCFrameStatus {
+    var indicatesUnavailableScreenSource: Bool {
+        switch self {
+        case .blank, .suspended, .stopped:
+            true
+        default:
+            false
+        }
+    }
+}
+
+struct ScreenSourceUnavailableTracker {
+    private var unavailableRevision: CaptureFilterRevision?
+
+    mutating func shouldEmitUnavailable(for revision: CaptureFilterRevision) -> Bool {
+        guard unavailableRevision != revision else { return false }
+        unavailableRevision = revision
+        return true
+    }
+
+    mutating func markAvailable(for revision: CaptureFilterRevision) {
+        guard unavailableRevision == revision else { return }
+        unavailableRevision = nil
+    }
+}
+
 /// The pixel buffer is retained before this value leaves the SCStream callback queue.
 struct ScreenVideoFrame: @unchecked Sendable {
     let pixelBuffer: CVPixelBuffer

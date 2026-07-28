@@ -41,6 +41,36 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.mux.audioBlocks.count, 1)
     }
 
+    func testClosingBlackFailureFallsBackWithoutPublishingScreenInterval() async throws {
+        let state = ManualExecutor()
+        let fixture = try makeFixture(
+            criticalVideoErrors: [MuxedMediaWriterError.videoAppendDropped],
+            executor: state
+        )
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: fixture.revision,
+            window: nil
+        )
+        state.runAll()
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 9_600))
+        state.runAll()
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 4_800, timescale: 48_000),
+            revision: fixture.revision
+        ))
+        state.runAll()
+
+        fixture.coordinator.markScreenSourceUnavailable()
+        state.runAll()
+        let outcome = try await finish(fixture.coordinator, using: state)
+
+        XCTAssertEqual(outcome.mediaKind, .audio)
+        XCTAssertEqual(outcome.recoveryState, .videoLostAudioPreserved)
+        XCTAssertTrue(outcome.screenIntervals.isEmpty)
+        XCTAssertEqual(fixture.mux.criticalVideoAppendAttempts, 1)
+    }
+
     func testMuxFailureLatchesOnceAndContinuesSafetyAudio() async throws {
         let fixture = try makeFixture(audioErrors: [TestError.mux, TestError.second])
         fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 480))
@@ -122,22 +152,6 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.mux.audioBlocks.map(\.presentationTime), [.zero])
     }
 
-    func testVideoStallAndRecoveryEmitLiveEvents() async throws {
-        let fixture = try makeFixture()
-        let events = EventCollector()
-        fixture.coordinator.setVideoEventHandler { events.append($0) }
-        fixture.coordinator.setScreenCaptureRequested(true, expectedRevision: fixture.revision, window: nil)
-        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 1))
-        fixture.coordinator.enqueueVideo(try videoFrame(time: .zero, revision: fixture.revision))
-        fixture.coordinator.enqueueAudio(audioBlock(start: 1, frames: 72_000))
-        fixture.coordinator.enqueueVideo(try videoFrame(time: CMTime(value: 72_001, timescale: 48_000), revision: fixture.revision))
-
-        _ = try await fixture.coordinator.finish()
-
-        XCTAssertTrue(events.kinds.contains(.sourceStalled))
-        XCTAssertTrue(events.kinds.contains(.sourceRecovered))
-    }
-
     func testIdleFramesKeepAStaticScreenIntervalAlive() async throws {
         let state = ManualExecutor()
         let fixture = try makeFixture(executor: state)
@@ -165,6 +179,46 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         XCTAssertFalse(events.kinds.contains(.sourceStalled))
         XCTAssertEqual(outcome.screenIntervals.count, 1)
         XCTAssertGreaterThan(outcome.screenIntervals[0].endSeconds, 2)
+    }
+
+    func testStaticScreenWithoutFurtherCallbacksRemainsOpenUntilFinish() async throws {
+        let state = ManualExecutor()
+        let eventExecutor = ManualExecutor()
+        let fixture = try makeFixture(executor: state, eventExecutor: eventExecutor)
+        let events = EventCollector()
+        fixture.coordinator.setVideoEventHandler { events.append($0) }
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: fixture.revision,
+            window: nil
+        )
+        state.runAll()
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 480))
+        state.runAll()
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 4_800, timescale: 48_000),
+            revision: fixture.revision
+        ))
+        state.runAll()
+        for start in stride(from: Int64(480), to: 480_000, by: 480) {
+            fixture.coordinator.enqueueAudio(audioBlock(start: start, frames: 480))
+            state.runAll()
+        }
+
+        let outcome = try await finish(fixture.coordinator, using: state)
+        eventExecutor.runAll()
+
+        XCTAssertFalse(events.kinds.contains(.sourceStalled))
+        XCTAssertEqual(fixture.mux.videoTimes.count, 3)
+        XCTAssertEqual(fixture.mux.videoTimes[1], CMTime(value: 4_800, timescale: 48_000))
+        XCTAssertEqual(fixture.mux.videoTimes.last, CMTime(value: 479_999, timescale: 48_000))
+        XCTAssertEqual(outcome.screenIntervals.count, 1)
+        XCTAssertEqual(outcome.screenIntervals[0].startSeconds, 0.1, accuracy: 0.000_001)
+        XCTAssertEqual(
+            outcome.screenIntervals[0].endSeconds,
+            Double(479_999) / 48_000,
+            accuracy: 0.000_001
+        )
     }
 
     func testCachedIdleFrameOpensScreenIntervalWhenMailboxEvictsCompleteFrame() async throws {
@@ -387,6 +441,41 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         XCTAssertTrue(events.kinds.contains(.sourceRecovered))
     }
 
+    func testDroppedRecoveryFrameDoesNotEmitSourceRecovered() async throws {
+        let state = ManualExecutor()
+        let eventExecutor = ManualExecutor()
+        let fixture = try makeFixture(executor: state, eventExecutor: eventExecutor)
+        let events = EventCollector()
+        fixture.coordinator.setVideoEventHandler { events.append($0) }
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: fixture.revision,
+            window: nil
+        )
+        state.runAll()
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 9_600))
+        state.runAll()
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 4_800, timescale: 48_000),
+            revision: fixture.revision
+        ))
+        state.runAll()
+        fixture.coordinator.markScreenSourceUnavailable()
+        state.runAll()
+
+        fixture.mux.videoErrors = [MuxedMediaWriterError.videoAppendDropped]
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 14_400, timescale: 48_000),
+            revision: fixture.revision
+        ))
+        state.runAll()
+        _ = try await finish(fixture.coordinator, using: state)
+        eventExecutor.runAll()
+
+        XCTAssertTrue(events.kinds.contains(.sourceStalled))
+        XCTAssertFalse(events.kinds.contains(.sourceRecovered))
+    }
+
     func testEscapedOutputURLsAreRejectedBeforeWriterFactories() throws {
         let folder = URL(fileURLWithPath: "/private/tmp/recording-media-coordinator-tests")
         let outputs = RecordingOutputURLs(
@@ -556,11 +645,18 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
             fixture.coordinator.enqueueVideo(try videoFrame(time: CMTime(value: CMTimeValue(value * 1_000), timescale: 48_000), revision: fixture.revision))
             state.runAll()
         }
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 48_000))
+        state.runAll()
         let outcome = try await finish(fixture.coordinator, using: state)
         XCTAssertEqual(fixture.mux.videoTimes.filter { $0 == .zero }.count, 1)
         XCTAssertEqual(fixture.mux.videoDropCount, 1)
         XCTAssertTrue(fixture.mux.videoTimes.contains(CMTime(value: 9_000, timescale: 48_000)))
         XCTAssertEqual(fixture.coordinator.pendingVideoOwnershipCount, 0)
+        XCTAssertEqual(
+            try XCTUnwrap(outcome.screenIntervals.first).startSeconds,
+            Double(9_000) / 48_000,
+            accuracy: 0.000_001
+        )
         XCTAssertEqual(outcome.recoveryState, .none)
     }
 
@@ -714,6 +810,7 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
     private func makeFixture(
         audioErrors: [Error] = [],
         videoErrors: [Error] = [],
+        criticalVideoErrors: [Error] = [],
         safetyCloseError: Error? = nil,
         trace: Trace? = nil,
         executor: ManualExecutor? = nil,
@@ -727,7 +824,14 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         let outputs = RecordingOutputURLs(folder: folder)
         let revision = CaptureFilterRevision(sessionGeneration: 7, revision: 3)
         let safety = FakeSafety(closeError: safetyCloseError, trace: trace)
-        let mux = FakeMux(audioErrors: audioErrors, videoErrors: videoErrors, trace: trace, holdsAudioUntilFinish: muxPendingAudio, enforcesVideoCadence: muxEnforcesVideoCadence)
+        let mux = FakeMux(
+            audioErrors: audioErrors,
+            videoErrors: videoErrors,
+            criticalVideoErrors: criticalVideoErrors,
+            trace: trace,
+            holdsAudioUntilFinish: muxPendingAudio,
+            enforcesVideoCadence: muxEnforcesVideoCadence
+        )
         let files = FakeFiles(present: [outputs.partialMP4, outputs.audioBackup])
         let sessionID = UUID()
         let coordinator = try RecordingMediaCoordinator(
@@ -841,15 +945,25 @@ private final class FakeMux: MuxedMediaWriting {
     var videoTimes: [CMTime] = []
     var audioErrors: [Error]
     var videoErrors: [Error]
+    var criticalVideoErrors: [Error]
     var finishCalls = 0
     private(set) var videoDropCount = 0
+    private(set) var criticalVideoAppendAttempts = 0
     let trace: Trace?
     let holdsAudioUntilFinish: Bool
     let enforcesVideoCadence: Bool
     private var lastAcceptedVideoTime: CMTime?
-    init(audioErrors: [Error], videoErrors: [Error], trace: Trace?, holdsAudioUntilFinish: Bool = false, enforcesVideoCadence: Bool = false) {
+    init(
+        audioErrors: [Error],
+        videoErrors: [Error],
+        criticalVideoErrors: [Error] = [],
+        trace: Trace?,
+        holdsAudioUntilFinish: Bool = false,
+        enforcesVideoCadence: Bool = false
+    ) {
         self.audioErrors = audioErrors
         self.videoErrors = videoErrors
+        self.criticalVideoErrors = criticalVideoErrors
         self.trace = trace
         self.holdsAudioUntilFinish = holdsAudioUntilFinish
         self.enforcesVideoCadence = enforcesVideoCadence
@@ -874,6 +988,17 @@ private final class FakeMux: MuxedMediaWriting {
         }
         videoTimes.append(time)
         lastAcceptedVideoTime = time
+    }
+    func appendCriticalVideo(_ pixelBuffer: CVPixelBuffer, at time: CMTime) throws {
+        criticalVideoAppendAttempts += 1
+        if !criticalVideoErrors.isEmpty {
+            let error = criticalVideoErrors.removeFirst()
+            if error as? MuxedMediaWriterError == .videoAppendDropped {
+                throw MuxedMediaWriterError.criticalVideoAppendFailed
+            }
+            throw error
+        }
+        try appendVideo(pixelBuffer, at: time)
     }
     func finish(at _: CMTime) async throws {
         finishCalls += 1

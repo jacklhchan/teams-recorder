@@ -33,6 +33,24 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         XCTAssertNil(specification?["RequireHardwareAcceleratedVideoEncoder"])
     }
 
+    func testCriticalVideoBypassesCadenceAndTreatsBackpressureAsTerminal() throws {
+        let backend = FakeBackend(readiness: true, videoResults: [true, true])
+        let writer = try MuxedMediaWriter(backend: backend)
+        let frame = try pixelBuffer(width: 1_600, height: 900, color: 0)
+
+        try writer.appendVideo(frame, at: .zero)
+        try writer.appendCriticalVideo(frame, at: time(2_400))
+
+        let rejectedBackend = FakeBackend(readiness: true, videoResults: [false])
+        let rejectedWriter = try MuxedMediaWriter(backend: rejectedBackend)
+        XCTAssertThrowsError(try rejectedWriter.appendCriticalVideo(frame, at: .zero)) {
+            XCTAssertEqual(
+                $0 as? MuxedMediaWriterError,
+                .criticalVideoAppendFailed
+            )
+        }
+    }
+
     func testReadinessRecoveryDrainsFIFOInPTSOrderAndFinishesOnce() async throws {
         let backend = FakeBackend(readiness: false)
         let scheduler = ManualTimeoutScheduler()

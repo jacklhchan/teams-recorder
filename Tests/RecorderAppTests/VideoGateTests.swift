@@ -19,38 +19,13 @@ final class VideoGateTests: XCTestCase {
         var gate = startedGate()
         _ = gate.setScreenIntent(true, at: time(480))
         XCTAssertEqual(gate.submitFrame(at: time(960), isComplete: true, sourceAvailable: true, filterRevision: revision(7)), [.appendReal(time(960))])
-        XCTAssertEqual(gate.setScreenIntent(false, at: time(1_440)), [.appendBlack(time(1_440))])
+        gate.commitRealFrame(at: time(960))
+        XCTAssertEqual(gate.setScreenIntent(false, at: time(1_440)), [.appendClosingBlack(time(1_440))])
+        gate.commitClosingBlack(at: time(1_440))
         _ = gate.setScreenIntent(true, at: time(1_920))
         XCTAssertEqual(gate.submitFrame(at: time(2_400), isComplete: true, sourceAvailable: true, filterRevision: revision(7)), [.appendReal(time(2_400))])
+        gate.commitRealFrame(at: time(2_400))
         XCTAssertEqual(gate.recordedScreenIntervals, [RecordedScreenInterval(startSeconds: 0.02, endSeconds: 0.03)])
-    }
-
-    func testStallClosesIntervalAndHoldsBlackAtExactOnePointFiveSeconds() {
-        var gate = startedGate()
-        _ = gate.setScreenIntent(true, at: time(0))
-        _ = gate.submitFrame(at: time(960), isComplete: true, sourceAvailable: true, filterRevision: revision(7))
-        XCTAssertEqual(gate.checkForStall(at: time(72_959)), [])
-        XCTAssertEqual(gate.checkForStall(at: time(72_960)), [.appendBlack(time(72_960))])
-        XCTAssertEqual(gate.checkForStall(at: time(72_961)), [])
-    }
-
-    func testIdleSourceActivityKeepsTheOpenIntervalAlive() {
-        var gate = startedGate()
-        _ = gate.setScreenIntent(true, at: time(0))
-        _ = gate.submitFrame(
-            at: time(960),
-            isComplete: true,
-            sourceAvailable: true,
-            filterRevision: revision(7)
-        )
-        _ = gate.submitFrame(
-            at: time(48_000),
-            isComplete: false,
-            sourceAvailable: true,
-            filterRevision: revision(7)
-        )
-
-        XCTAssertEqual(gate.checkForStall(at: time(72_960)), [])
     }
 
     func testReusableIdleFrameCanOpenAnIntervalAfterCompleteFrameWasDropped() {
@@ -78,9 +53,11 @@ final class VideoGateTests: XCTestCase {
         var gate = startedGate()
         _ = gate.setScreenIntent(true, at: time(0))
         XCTAssertEqual(gate.submitFrame(at: time(960), isComplete: true, sourceAvailable: true, filterRevision: revision(7)), [.appendReal(time(960))])
+        gate.commitRealFrame(at: time(960))
 
         let staleSession = CaptureFilterRevision(sessionGeneration: 2, revision: 7)
-        XCTAssertEqual(gate.submitFrame(at: time(1_440), isComplete: true, sourceAvailable: true, filterRevision: staleSession), [.appendBlack(time(1_440))])
+        XCTAssertEqual(gate.submitFrame(at: time(1_440), isComplete: true, sourceAvailable: true, filterRevision: staleSession), [.appendClosingBlack(time(1_440))])
+        gate.commitClosingBlack(at: time(1_440))
         XCTAssertEqual(gate.recordedScreenIntervals, [RecordedScreenInterval(startSeconds: 0.02, endSeconds: 0.03)])
     }
 
@@ -88,6 +65,7 @@ final class VideoGateTests: XCTestCase {
         var gate = startedGate()
         _ = gate.setScreenIntent(true, at: time(0))
         _ = gate.submitFrame(at: time(960), isComplete: true, sourceAvailable: true, filterRevision: revision(7))
+        gate.commitRealFrame(at: time(960))
 
         XCTAssertEqual(gate.submitFrame(at: time(959), isComplete: true, sourceAvailable: true, filterRevision: revision(6)), [])
     }
@@ -96,13 +74,16 @@ final class VideoGateTests: XCTestCase {
         var gate = startedGate()
         _ = gate.setScreenIntent(true, at: time(0))
         _ = gate.submitFrame(at: time(4_800), isComplete: true, sourceAvailable: true, filterRevision: revision(7))
-        XCTAssertEqual(gate.finish(atAudioEnd: time(9_600)), [.appendBlack(time(9_599))])
+        gate.commitRealFrame(at: time(4_800))
+        XCTAssertEqual(gate.finish(atAudioEnd: time(9_600)), [.appendClosingBlack(time(9_599))])
+        gate.commitClosingBlack(at: time(9_599))
     }
 
     func testFinishOmitsDegenerateFinalBlack() {
         var gate = startedGate()
         _ = gate.setScreenIntent(true, at: time(0))
         _ = gate.submitFrame(at: time(9_599), isComplete: true, sourceAvailable: true, filterRevision: revision(7))
+        gate.commitRealFrame(at: time(9_599))
         XCTAssertEqual(gate.finish(atAudioEnd: time(9_600)), [])
     }
 

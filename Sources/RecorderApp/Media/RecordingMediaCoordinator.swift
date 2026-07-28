@@ -535,12 +535,6 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
         let timed = timeline.mapAudio(block)
         replayEarlyVideoFrames()
         ensureGateStarted()
-        let stallActions = gate.checkForStall(at: timeline.currentAudioEndTime)
-        if !stallActions.isEmpty, !wasStalled {
-            wasStalled = true
-            emit(.sourceStalled)
-        }
-        appendGateActions(stallActions, realFrame: nil)
         appendMuxAudio(timed)
     }
 
@@ -690,11 +684,11 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
             sourceAvailable: !sourceUnavailable,
             filterRevision: activeFilterRevision
         )
-        if recoversSource || (actions.contains(where: { if case .appendReal = $0 { return true }; return false }) && wasStalled) {
+        let appendedRealFrame = appendGateActions(actions, realFrame: frame.pixelBuffer)
+        if appendedRealFrame, (recoversSource || wasStalled) {
             wasStalled = false
             emit(.sourceRecovered)
         }
-        appendGateActions(actions, realFrame: frame.pixelBuffer)
     }
 
     private func ensureGateStarted() {
@@ -704,16 +698,26 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
         appendGateActions(gate.start(at: timeline.currentAudioEndTime), realFrame: nil)
     }
 
-    private func appendGateActions(_ actions: [VideoGateAction], realFrame: CVPixelBuffer?) {
-        guard firstMuxFailure == nil else { return }
+    @discardableResult
+    private func appendGateActions(
+        _ actions: [VideoGateAction],
+        realFrame: CVPixelBuffer?
+    ) -> Bool {
+        guard firstMuxFailure == nil else { return false }
+        var appendedRealFrame = false
         for action in actions {
             do {
                 switch action {
                 case .appendBlack(let time):
                     try muxWriter.appendVideo(try blackFrameFactory(), at: time)
+                case .appendClosingBlack(let time):
+                    try muxWriter.appendCriticalVideo(try blackFrameFactory(), at: time)
+                    gate.commitClosingBlack(at: time)
                 case .appendReal(let time):
                     guard let realFrame else { continue }
                     try muxWriter.appendVideo(realFrame, at: time)
+                    gate.commitRealFrame(at: time)
+                    appendedRealFrame = true
                 case .drop:
                     continue
                 }
@@ -723,6 +727,7 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
                 latchMuxFailure(error)
             }
         }
+        return appendedRealFrame
     }
 
     private func appendMuxAudio(_ block: TimedMixedAudioBlock) {
@@ -873,5 +878,6 @@ private final class UnavailableMuxWriter: MuxedMediaWriting {
     init(error: Error) { self.error = error }
     func appendAudio(_: TimedMixedAudioBlock) throws { throw error }
     func appendVideo(_: CVPixelBuffer, at _: CMTime) throws { throw error }
+    func appendCriticalVideo(_: CVPixelBuffer, at _: CMTime) throws { throw error }
     func finish(at _: CMTime) async throws { throw error }
 }

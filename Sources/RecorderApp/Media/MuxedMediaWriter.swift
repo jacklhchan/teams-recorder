@@ -28,6 +28,7 @@ struct MuxedMediaProfile: Equatable, Sendable {
 protocol MuxedMediaWriting: AnyObject {
     func appendAudio(_ block: TimedMixedAudioBlock) throws
     func appendVideo(_ pixelBuffer: CVPixelBuffer, at time: CMTime) throws
+    func appendCriticalVideo(_ pixelBuffer: CVPixelBuffer, at time: CMTime) throws
     func finish(at audioEndTime: CMTime) async throws
 }
 
@@ -36,6 +37,7 @@ enum MuxedMediaWriterError: Error, Equatable {
     case invalidPresentationTime
     case writerSetupFailed
     case videoAppendDropped
+    case criticalVideoAppendFailed
     case finishTimedOut
     case outputValidationFailed
     case closed
@@ -163,17 +165,50 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
     }
 
     func appendVideo(_ pixelBuffer: CVPixelBuffer, at time: CMTime) throws {
+        try appendVideoFrame(
+            pixelBuffer,
+            at: time,
+            enforcesCadence: true,
+            failureIsTerminal: false
+        )
+    }
+
+    func appendCriticalVideo(_ pixelBuffer: CVPixelBuffer, at time: CMTime) throws {
+        try appendVideoFrame(
+            pixelBuffer,
+            at: time,
+            enforcesCadence: false,
+            failureIsTerminal: true
+        )
+    }
+
+    private func appendVideoFrame(
+        _ pixelBuffer: CVPixelBuffer,
+        at time: CMTime,
+        enforcesCadence: Bool,
+        failureIsTerminal: Bool
+    ) throws {
         try writerQueue.sync {
             try ensureOpen()
             guard time.isValid, time.isNumeric, CMTimeCompare(time, .zero) >= 0 else {
                 throw MuxedMediaWriterError.invalidPresentationTime
             }
             if let lastVideoPTS,
+               enforcesCadence,
                CMTimeCompare(time - lastVideoPTS, CMTime(value: 1, timescale: 10)) < 0 {
                 throw MuxedMediaWriterError.videoAppendDropped
             }
+            if let lastVideoPTS,
+               CMTimeCompare(time, lastVideoPTS) <= 0 {
+                let error = failureIsTerminal
+                    ? MuxedMediaWriterError.criticalVideoAppendFailed
+                    : MuxedMediaWriterError.videoAppendDropped
+                if failureIsTerminal { throw latch(error) }
+                throw error
+            }
             guard backend.appendVideo(pixelBuffer, at: time) else {
                 if let description = backend.failureDescription { throw latch(.writerFailed(description: description)) }
+                if failureIsTerminal { throw latch(.criticalVideoAppendFailed) }
                 throw MuxedMediaWriterError.videoAppendDropped
             }
             lastVideoPTS = time

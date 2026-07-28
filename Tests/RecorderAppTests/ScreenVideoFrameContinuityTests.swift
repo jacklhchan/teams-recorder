@@ -5,6 +5,31 @@ import XCTest
 @testable import RecorderApp
 
 final class ScreenVideoFrameContinuityTests: XCTestCase {
+    func testUnavailableFrameDeduplicationIsScopedToFilterRevision() {
+        let oldRevision = CaptureFilterRevision(sessionGeneration: 1, revision: 1)
+        let newRevision = CaptureFilterRevision(sessionGeneration: 1, revision: 2)
+        var tracker = ScreenSourceUnavailableTracker()
+
+        XCTAssertTrue(tracker.shouldEmitUnavailable(for: oldRevision))
+        XCTAssertFalse(tracker.shouldEmitUnavailable(for: oldRevision))
+        XCTAssertTrue(tracker.shouldEmitUnavailable(for: newRevision))
+
+        tracker.markAvailable(for: oldRevision)
+        XCTAssertFalse(tracker.shouldEmitUnavailable(for: newRevision))
+
+        tracker.markAvailable(for: newRevision)
+        XCTAssertTrue(tracker.shouldEmitUnavailable(for: newRevision))
+    }
+
+    func testNoncontentStatusesMarkTheScreenSourceUnavailable() {
+        XCTAssertFalse(SCFrameStatus.complete.indicatesUnavailableScreenSource)
+        XCTAssertFalse(SCFrameStatus.started.indicatesUnavailableScreenSource)
+        XCTAssertFalse(SCFrameStatus.idle.indicatesUnavailableScreenSource)
+        XCTAssertTrue(SCFrameStatus.blank.indicatesUnavailableScreenSource)
+        XCTAssertTrue(SCFrameStatus.suspended.indicatesUnavailableScreenSource)
+        XCTAssertTrue(SCFrameStatus.stopped.indicatesUnavailableScreenSource)
+    }
+
     func testIdleFrameReusesTheLastSurfaceForTheSameRevision() throws {
         var continuity = ScreenVideoFrameContinuity()
         let surface = try VideoFrameSurface.makeBlack(format: .nv12).pixelBuffer

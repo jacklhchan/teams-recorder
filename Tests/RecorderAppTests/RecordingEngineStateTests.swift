@@ -119,6 +119,117 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertEqual(result?.health.videoFilterFailures, 1)
     }
 
+    func testScreenTargetLostClosesIntervalAndShowsWaitingWithoutDisconnectingAudio() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 30)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+
+        source.emit(event: .screenTargetLost)
+        await settle()
+
+        XCTAssertEqual(coordinator.screenUnavailableCount, 1)
+        XCTAssertEqual(engine.meetingScreenCaptureState, .waiting([]))
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+        XCTAssertTrue(engine.isMicrophoneCaptureConnected)
+        _ = await engine.stop()
+    }
+
+    func testUnavailableScreenFrameClosesIntervalAndShowsWaitingWithoutDisconnectingAudio() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 31)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+
+        source.emit(event: .screenFrameUnavailable(try XCTUnwrap(source.videoRevisions.last)))
+        await settle()
+
+        XCTAssertEqual(coordinator.screenUnavailableCount, 1)
+        XCTAssertEqual(engine.meetingScreenCaptureState, .waiting([]))
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+        XCTAssertTrue(engine.isMicrophoneCaptureConnected)
+        _ = await engine.stop()
+    }
+
+    func testUnavailableScreenFrameFromDisabledCaptureIsIgnored() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 32)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+        let oldRevision = try XCTUnwrap(source.videoRevisions.last)
+
+        await engine.setScreenCaptureRequested(false)
+        source.emit(event: .screenFrameUnavailable(oldRevision))
+        await settle()
+
+        XCTAssertEqual(coordinator.screenUnavailableCount, 0)
+        XCTAssertEqual(engine.meetingScreenCaptureState, .off)
+        XCTAssertNil(engine.captureStatus)
+        _ = await engine.stop()
+    }
+
+    func testUnavailableScreenFrameFromOldWindowRevisionIsIgnored() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 33)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+        let oldRevision = try XCTUnwrap(source.videoRevisions.last)
+
+        source.windows = [teamsWindow(id: 34)]
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        source.emit(event: .screenFrameUnavailable(oldRevision))
+        await settle()
+
+        XCTAssertEqual(coordinator.screenUnavailableCount, 0)
+        assertScreenState(
+            engine.meetingScreenCaptureState,
+            identity: source.windows[0].identity,
+            capturing: true
+        )
+        XCTAssertNil(engine.captureStatus)
+        _ = await engine.stop()
+    }
+
     func testScreenCaptureFailureRemainsFailedWhenCoordinatorThenStalls() async throws {
         let (engine, coordinator, source) = coordinatorEngine()
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())

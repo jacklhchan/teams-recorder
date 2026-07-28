@@ -20,6 +20,10 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
             (settings.video[AVVideoCompressionPropertiesKey] as? [String: Any])?[AVVideoExpectedSourceFrameRateKey] as? Int,
             10
         )
+        XCTAssertEqual(
+            (settings.video[AVVideoCompressionPropertiesKey] as? [String: Any])?[AVVideoAllowFrameReorderingKey] as? Bool,
+            false
+        )
         XCTAssertEqual(settings.audio[AVFormatIDKey] as? UInt32, kAudioFormatMPEG4AAC)
         XCTAssertEqual(settings.audio[AVSampleRateKey] as? Int, 48_000)
         XCTAssertEqual(settings.audio[AVNumberOfChannelsKey] as? Int, 2)
@@ -247,6 +251,46 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         XCTAssertEqual(inspected.dimensions, CGSize(width: 1_600, height: 900))
     }
 
+    func testSparseStaticIntervalProducesPresentationSafeCompressedTimings() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.folder) }
+
+        let writer = try MuxedMediaWriter(url: fixture.url, profile: fixture.profile)
+        let screenStart: Int64 = 559_839
+        let audioEnd: Int64 = 1_964_001
+
+        try await appendVideo(writer, color: 0, at: .zero)
+        for start in stride(from: Int64(0), to: audioEnd, by: 48_000) {
+            try writer.appendAudio(audioBlock(
+                start: start,
+                frames: Int(min(48_000, audioEnd - start)),
+                value: 0.1
+            ))
+        }
+        try await appendVideo(writer, color: 80, at: time(screenStart))
+        try await appendVideo(writer, color: 80, at: time(screenStart + 4_800))
+        try await appendVideo(writer, color: 80, at: time(screenStart + 9_600))
+        try writer.appendCriticalVideo(
+            try pixelBuffer(width: 1_600, height: 900, color: 0),
+            at: time(audioEnd - 1)
+        )
+        try await writer.finish(at: time(audioEnd))
+
+        let timings = try await readCompressedVideoTimings(url: fixture.url)
+        XCTAssertGreaterThanOrEqual(timings.count, 5)
+        XCTAssertMonotonic(timings.compactMap { $0.pts.isValid && $0.pts.isNumeric ? $0.pts : nil })
+        XCTAssertMonotonic(timings.compactMap { $0.dts.isValid && $0.dts.isNumeric ? $0.dts : nil })
+        for timing in timings
+            where timing.pts.isValid && timing.pts.isNumeric
+                && timing.dts.isValid && timing.dts.isNumeric {
+            XCTAssertGreaterThanOrEqual(
+                CMTimeCompare(timing.pts, timing.dts),
+                0,
+                "compressed HEVC samples must not present before decode time"
+            )
+        }
+    }
+
     private func makeFixture() throws -> (url: URL, folder: URL, profile: MuxedMediaProfile) {
         let root = URL(fileURLWithPath: "/private/tmp/recorder-task5-media", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -411,6 +455,26 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(reader.status, .completed, reader.error?.localizedDescription ?? "reader incomplete")
         return presentationTimes
+    }
+
+    private func readCompressedVideoTimings(url: URL) async throws -> [(pts: CMTime, dts: CMTime)] {
+        let freshAsset = AVURLAsset(url: url)
+        let tracks = try await freshAsset.loadTracks(withMediaType: .video)
+        let track = try XCTUnwrap(tracks.first)
+        let reader = try AVAssetReader(asset: freshAsset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        reader.add(output)
+        XCTAssertTrue(reader.startReading())
+
+        var timings: [(CMTime, CMTime)] = []
+        while let sample = output.copyNextSampleBuffer() {
+            timings.append((
+                CMSampleBufferGetPresentationTimeStamp(sample),
+                CMSampleBufferGetDecodeTimeStamp(sample)
+            ))
+        }
+        XCTAssertEqual(reader.status, .completed, reader.error?.localizedDescription ?? "reader incomplete")
+        return timings
     }
 
     private func XCTAssertMonotonic(

@@ -130,7 +130,8 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
             AVVideoHeightKey: profile.height,
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: profile.videoBitRate,
-                AVVideoExpectedSourceFrameRateKey: profile.maximumFramesPerSecond
+                AVVideoExpectedSourceFrameRateKey: profile.maximumFramesPerSecond,
+                AVVideoAllowFrameReorderingKey: false
             ],
             AVVideoEncoderSpecificationKey: [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true]
         ]

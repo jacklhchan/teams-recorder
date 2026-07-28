@@ -438,7 +438,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./scripts/build-app.sh
 codesign --verify --deep --strict --verbose=2 \
-  .build/app/Local\ Meeting\ Recorder.app
+  build/Local\ Meeting\ Recorder\ Staging.app
 ```
 
 - [ ] Confirm the main checkout remains untouched:

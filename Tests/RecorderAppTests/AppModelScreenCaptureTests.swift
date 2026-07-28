@@ -326,6 +326,54 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
+    func testRejectedOnAfterDisconnectCannotCancelPendingEngineOffCleanup() async throws {
+        let cleanupScheduler = ControlledScreenDisconnectCleanupScheduler()
+        let window = teamsWindow(
+            id: 41,
+            title: "Shared content | Customer presentation"
+        )
+        let fixture = makeFixture(
+            provider: .normal,
+            windows: [window],
+            disconnectCleanupScheduler: cleanupScheduler.schedule
+        )
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+        XCTAssertTrue(fixture.model.isTeamsScreenCaptureRequested)
+        XCTAssertEqual(
+            fixture.source.videoTargets.compactMap { $0 }.last,
+            window.identity
+        )
+
+        fixture.source.emit(
+            .applicationDisconnected(teamsApplication.bundleIdentifier)
+        )
+        await waitUntil {
+            !fixture.model.isTeamsScreenCaptureRequested
+                && cleanupScheduler.pendingCount == 1
+        }
+        XCTAssertEqual(
+            fixture.source.videoTargets.compactMap { $0 }.last,
+            window.identity
+        )
+
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+        XCTAssertFalse(fixture.model.isTeamsScreenCaptureRequested)
+        await cleanupScheduler.runNext()
+
+        XCTAssertNil(fixture.source.videoTargets.last ?? nil)
+        XCTAssertTrue(fixture.engine.isRecording)
+        XCTAssertEqual(fixture.source.stopCount, 0)
+        XCTAssertFalse(fixture.model.isTeamsScreenCaptureRequested)
+
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
     func testStaleOnCannotReenableCaptureAfterNewerOff() async throws {
         let window = teamsWindow(
             id: 37,
@@ -865,7 +913,12 @@ final class AppModelScreenCaptureTests: XCTestCase {
         provider: StorageCapacityTestProvider,
         ticker: StorageTestTicker = StorageTestTicker(),
         teamsTicker: TeamsScreenTestTicker = TeamsScreenTestTicker(),
-        windows: [TeamsWindowSnapshot] = []
+        windows: [TeamsWindowSnapshot] = [],
+        disconnectCleanupScheduler: @escaping (
+            @escaping @MainActor @Sendable () async -> Void
+        ) -> Void = { operation in
+            Task { @MainActor in await operation() }
+        }
     ) -> StorageFixture {
         let source = StorageTestCaptureSource()
         source.windows = windows
@@ -898,7 +951,9 @@ final class AppModelScreenCaptureTests: XCTestCase {
             volumeCapacityProvider: provider,
             storagePolicy: RecordingStoragePolicy(),
             storageMonitorTick: { await ticker.waitForTick() },
-            teamsScreenRefreshTick: { await teamsTicker.waitForTick() }
+            teamsScreenRefreshTick: { await teamsTicker.waitForTick() },
+            teamsScreenDisconnectCleanupScheduler:
+                disconnectCleanupScheduler
         )
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
@@ -988,6 +1043,38 @@ final class AppModelScreenCaptureTests: XCTestCase {
 
     private let gibibyte: Int64 = 1_024 * 1_024 * 1_024
     private let mebibyte: Int64 = 1_024 * 1_024
+}
+
+private final class ControlledScreenDisconnectCleanupScheduler:
+    @unchecked Sendable
+{
+    typealias Operation = @MainActor @Sendable () async -> Void
+
+    private let lock = NSLock()
+    private var operations: [Operation] = []
+
+    var pendingCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return operations.count
+    }
+
+    func schedule(_ operation: @escaping Operation) {
+        lock.lock()
+        operations.append(operation)
+        lock.unlock()
+    }
+
+    @MainActor
+    func runNext() async {
+        await takeNext()?()
+    }
+
+    private func takeNext() -> Operation? {
+        lock.lock()
+        defer { lock.unlock() }
+        return operations.isEmpty ? nil : operations.removeFirst()
+    }
 }
 
 private struct StorageFixture {

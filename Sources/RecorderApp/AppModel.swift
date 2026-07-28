@@ -138,6 +138,9 @@ final class AppModel: ObservableObject {
     private let storageMonitorTick: @Sendable () async -> Void
     private let testRecordingDelay: @Sendable () async -> Void
     private let teamsScreenRefreshTick: @Sendable () async -> Void
+    private let teamsScreenDisconnectCleanupScheduler: (
+        @escaping @MainActor @Sendable () async -> Void
+    ) -> Void
     private let transcriptionAudioPreparer: any TranscriptionAudioPreparing
     private let transcriptionProcessLauncher: any TranscriptionProcessLaunching
     private let transcriptionScriptURL: URL?
@@ -209,6 +212,11 @@ final class AppModel: ObservableObject {
         teamsScreenRefreshTick: @escaping @Sendable () async -> Void = {
             try? await Task.sleep(for: .seconds(1))
         },
+        teamsScreenDisconnectCleanupScheduler: @escaping (
+            @escaping @MainActor @Sendable () async -> Void
+        ) -> Void = { operation in
+            Task { @MainActor in await operation() }
+        },
         transcriptionAudioPreparer: any TranscriptionAudioPreparing = TranscriptionAudioPreparer(),
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
         transcriptionScriptURL: URL? = nil,
@@ -247,6 +255,8 @@ final class AppModel: ObservableObject {
         self.storageMonitorTick = storageMonitorTick
         self.testRecordingDelay = testRecordingDelay
         self.teamsScreenRefreshTick = teamsScreenRefreshTick
+        self.teamsScreenDisconnectCleanupScheduler =
+            teamsScreenDisconnectCleanupScheduler
         self.transcriptionAudioPreparer = transcriptionAudioPreparer
         self.transcriptionProcessLauncher = transcriptionProcessLauncher
         self.transcriptionScriptURL = transcriptionScriptURL
@@ -2208,14 +2218,15 @@ final class AppModel: ObservableObject {
         guard isTeamsScreenCaptureRequested else { return }
         invalidateTeamsScreenRefresh()
         invalidateTeamsScreenCaptureIntent()
-        let intentGeneration = teamsScreenCaptureIntentGeneration
+        let recordingEpoch = recorder.continuitySnapshot.recordingEpoch
         isTeamsScreenCaptureRequested = false
         teamsScreenCaptureCandidates = []
-        Task { @MainActor [weak self] in
+        teamsScreenDisconnectCleanupScheduler { [weak self] in
             guard let self,
-                  self.teamsScreenCaptureIntentGeneration == intentGeneration,
                   !self.isTeamsScreenCaptureRequested,
-                  self.recorder.isRecording else { return }
+                  self.recorder.isRecording,
+                  self.recorder.continuitySnapshot.recordingEpoch
+                    == recordingEpoch else { return }
             await self.recorder.setScreenCaptureRequested(false)
         }
     }

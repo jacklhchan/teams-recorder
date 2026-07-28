@@ -10,6 +10,9 @@ enum VideoGateAction: Equatable {
 
 struct VideoGate {
     private static let timescale: CMTimeScale = 48_000
+    private static let encodedVideoTickFrames =
+        Int64(timescale) / Int64(MuxedMediaProfile.encodedVideoTimescale)
+    private static let preferredFinalBlackLeadFrames = Int64(timescale) / 10
 
     private let activeFilterRevision: CaptureFilterRevision
     private var screenIntent = false
@@ -17,6 +20,7 @@ struct VideoGate {
     private var openIntervalStartFrame: Int64?
     private var lastAppendedFrame: Int64?
     private var closingBlackPending = false
+    private var pendingIntervalEndFrame: Int64?
     private(set) var recordedScreenIntervals: [RecordedScreenInterval] = []
 
     init(activeFilterRevision: CaptureFilterRevision) {
@@ -43,6 +47,7 @@ struct VideoGate {
         filterRevision: CaptureFilterRevision
     ) -> [VideoGateAction] {
         guard let frame = frame(for: audioTime) else { return [.drop] }
+        guard !closingBlackPending else { return [.drop] }
         if filterRevision != activeFilterRevision {
             return openIntervalStartFrame == nil ? [.drop] : closeWithBlack(at: frame)
         }
@@ -69,7 +74,11 @@ struct VideoGate {
         }
         closingBlackPending = false
         self.openIntervalStartFrame = nil
-        closeInterval(startFrame: openIntervalStartFrame, endFrame: frame)
+        closeInterval(
+            startFrame: openIntervalStartFrame,
+            endFrame: pendingIntervalEndFrame ?? frame
+        )
+        pendingIntervalEndFrame = nil
         lastAppendedFrame = frame
     }
 
@@ -79,18 +88,26 @@ struct VideoGate {
               let openIntervalStartFrame else {
             return []
         }
-        let (finalBlackFrame, subtractionOverflow) = audioEndFrame.subtractingReportingOverflow(1)
-        guard !subtractionOverflow else {
+        let (latestBlackFrame, latestOverflow) = audioEndFrame.subtractingReportingOverflow(
+            Self.encodedVideoTickFrames
+        )
+        guard !latestOverflow, let lastAppendedFrame else {
             closeInterval(startFrame: openIntervalStartFrame, endFrame: audioEndFrame)
             self.openIntervalStartFrame = nil
             return []
         }
-        guard let lastAppendedFrame, finalBlackFrame > lastAppendedFrame else {
+        let (earliestBlackFrame, earliestOverflow) = lastAppendedFrame.addingReportingOverflow(
+            Self.encodedVideoTickFrames
+        )
+        guard !earliestOverflow, earliestBlackFrame <= latestBlackFrame else {
             closeInterval(startFrame: openIntervalStartFrame, endFrame: audioEndFrame)
             self.openIntervalStartFrame = nil
             return []
         }
+        let preferredBlackFrame = audioEndFrame - Self.preferredFinalBlackLeadFrames
+        let finalBlackFrame = max(preferredBlackFrame, earliestBlackFrame)
         closingBlackPending = true
+        pendingIntervalEndFrame = audioEndFrame
         return [.appendClosingBlack(time(for: finalBlackFrame))]
     }
 
@@ -99,9 +116,14 @@ struct VideoGate {
               !closingBlackPending else {
             return []
         }
-        guard lastAppendedFrame.map({ frame > $0 }) ?? true else { return [] }
+        guard let lastAppendedFrame, frame >= lastAppendedFrame else { return [] }
+        let (earliestBlackFrame, overflow) = lastAppendedFrame.addingReportingOverflow(
+            Self.encodedVideoTickFrames
+        )
+        guard !overflow else { return [] }
         closingBlackPending = true
-        return [.appendClosingBlack(time(for: frame))]
+        pendingIntervalEndFrame = frame
+        return [.appendClosingBlack(time(for: max(frame, earliestBlackFrame)))]
     }
 
     private mutating func closeInterval(startFrame: Int64, endFrame: Int64) {

@@ -55,6 +55,21 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         }
     }
 
+    func testFinishExtendsSessionPastFutureCriticalFrameByOneEncodedTick() async throws {
+        let backend = FakeBackend(readiness: true, videoResults: [true, true])
+        let writer = try MuxedMediaWriter(backend: backend)
+        let frame = try pixelBuffer(width: 1_600, height: 900, color: 0)
+        try writer.appendVideo(frame, at: time(4_800))
+        try writer.appendCriticalVideo(frame, at: time(4_880))
+
+        let finish = Task { try await writer.finish(at: time(4_801)) }
+        await fulfillAsync { backend.finishCalls == 1 }
+
+        XCTAssertEqual(backend.endSessionTime, time(4_960))
+        backend.completeFinish()
+        try await finish.value
+    }
+
     func testReadinessRecoveryDrainsFIFOInPTSOrderAndFinishesOnce() async throws {
         let backend = FakeBackend(readiness: false)
         let scheduler = ManualTimeoutScheduler()
@@ -272,23 +287,44 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         try await appendVideo(writer, color: 80, at: time(screenStart + 9_600))
         try writer.appendCriticalVideo(
             try pixelBuffer(width: 1_600, height: 900, color: 0),
-            at: time(audioEnd - 1)
+            at: time(audioEnd - 80)
         )
         try await writer.finish(at: time(audioEnd))
 
         let timings = try await readCompressedVideoTimings(url: fixture.url)
         XCTAssertGreaterThanOrEqual(timings.count, 5)
-        XCTAssertMonotonic(timings.compactMap { $0.pts.isValid && $0.pts.isNumeric ? $0.pts : nil })
-        XCTAssertMonotonic(timings.compactMap { $0.dts.isValid && $0.dts.isNumeric ? $0.dts : nil })
-        for timing in timings
-            where timing.pts.isValid && timing.pts.isNumeric
-                && timing.dts.isValid && timing.dts.isNumeric {
+        XCTAssertTrue(timings.allSatisfy { $0.pts.isValid && $0.pts.isNumeric })
+        XCTAssertStrictlyIncreasing(timings.map(\.pts))
+        let invalidDTSIndices = timings.indices.filter {
+            !timings[$0].rawDTS.isValid || !timings[$0].rawDTS.isNumeric
+        }
+        XCTAssertTrue(
+            invalidDTSIndices.isEmpty
+                || invalidDTSIndices == [timings.startIndex]
+                || invalidDTSIndices.count == timings.count
+        )
+        let effectiveDTS = timings.map {
+            $0.rawDTS.isValid && $0.rawDTS.isNumeric ? $0.rawDTS : $0.pts
+        }
+        XCTAssertStrictlyIncreasing(effectiveDTS)
+        for timing in timings {
+            let decodeTime = timing.rawDTS.isValid && timing.rawDTS.isNumeric
+                ? timing.rawDTS
+                : timing.pts
             XCTAssertGreaterThanOrEqual(
-                CMTimeCompare(timing.pts, timing.dts),
+                CMTimeCompare(timing.pts, decodeTime),
                 0,
                 "compressed HEVC samples must not present before decode time"
             )
         }
+        let asset = AVURLAsset(url: fixture.url)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let videoTrack = try XCTUnwrap(videoTracks.first)
+        let videoTimescale = try await videoTrack.load(.naturalTimeScale)
+        XCTAssertEqual(
+            videoTimescale,
+            MuxedMediaProfile.encodedVideoTimescale
+        )
     }
 
     private func makeFixture() throws -> (url: URL, folder: URL, profile: MuxedMediaProfile) {
@@ -457,7 +493,7 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
         return presentationTimes
     }
 
-    private func readCompressedVideoTimings(url: URL) async throws -> [(pts: CMTime, dts: CMTime)] {
+    private func readCompressedVideoTimings(url: URL) async throws -> [(pts: CMTime, rawDTS: CMTime)] {
         let freshAsset = AVURLAsset(url: url)
         let tracks = try await freshAsset.loadTracks(withMediaType: .video)
         let track = try XCTUnwrap(tracks.first)
@@ -468,9 +504,12 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
 
         var timings: [(CMTime, CMTime)] = []
         while let sample = output.copyNextSampleBuffer() {
+            guard CMSampleBufferGetNumSamples(sample) > 0 else { continue }
+            let presentationTime = CMSampleBufferGetPresentationTimeStamp(sample)
+            let decodeTime = CMSampleBufferGetDecodeTimeStamp(sample)
             timings.append((
-                CMSampleBufferGetPresentationTimeStamp(sample),
-                CMSampleBufferGetDecodeTimeStamp(sample)
+                presentationTime,
+                decodeTime
             ))
         }
         XCTAssertEqual(reader.status, .completed, reader.error?.localizedDescription ?? "reader incomplete")
@@ -484,6 +523,17 @@ final class MuxedMediaWriterIntegrationTests: XCTestCase {
     ) {
         for pair in zip(values, values.dropFirst()) {
             XCTAssertGreaterThanOrEqual(CMTimeCompare(pair.1, pair.0), 0, file: file, line: line)
+        }
+    }
+
+    private func XCTAssertStrictlyIncreasing(
+        _ values: [CMTime],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertFalse(values.isEmpty, file: file, line: line)
+        for pair in zip(values, values.dropFirst()) {
+            XCTAssertGreaterThan(CMTimeCompare(pair.1, pair.0), 0, file: file, line: line)
         }
     }
 
@@ -519,6 +569,7 @@ private final class FakeBackend: MuxedMediaWriterBackend, @unchecked Sendable {
     private(set) var audioPTS: [CMTime] = []
     private(set) var finishCalls = 0
     private(set) var cancelCalls = 0
+    private(set) var endSessionTime: CMTime?
     private var completion: (() -> Void)?
 
     init(
@@ -564,7 +615,11 @@ private final class FakeBackend: MuxedMediaWriterBackend, @unchecked Sendable {
         defer { lock.unlock() }
         return videoResults.isEmpty ? true : videoResults.removeFirst()
     }
-    func endSession(at time: CMTime) {}
+    func endSession(at time: CMTime) {
+        lock.lock()
+        endSessionTime = time
+        lock.unlock()
+    }
     func markInputsFinished() {}
     func finish(_ completion: @escaping () -> Void) {
         lock.lock()

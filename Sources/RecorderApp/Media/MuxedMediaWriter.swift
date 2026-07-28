@@ -6,6 +6,8 @@ import Foundation
 import VideoToolbox
 
 struct MuxedMediaProfile: Equatable, Sendable {
+    static let encodedVideoTimescale: CMTimeScale = 600
+
     let width: Int
     let height: Int
     let maximumFramesPerSecond: Int
@@ -86,6 +88,10 @@ private final class DispatchTimeoutScheduler: MuxedMediaWriterTimeoutScheduling 
 final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
     typealias Settings = (video: [String: Any], audio: [String: Any])
     private static let sampleRate: CMTimeScale = 48_000
+    private static let encodedVideoTick = CMTime(
+        value: 1,
+        timescale: MuxedMediaProfile.encodedVideoTimescale
+    )
     static let maximumAudioFIFO = CMTime(value: 240_000, timescale: 48_000)
 
     private let backend: MuxedMediaWriterBackend
@@ -273,7 +279,14 @@ final class MuxedMediaWriter: MuxedMediaWriting, @unchecked Sendable {
     private func completeFinish(at audioEndTime: CMTime) {
         guard finishContinuation != nil, !isCompleting else { return }
         isCompleting = true
-        backend.endSession(at: audioEndTime)
+        var sessionEndTime = audioEndTime
+        if let lastVideoPTS {
+            let minimumVideoEndTime = lastVideoPTS + Self.encodedVideoTick
+            if CMTimeCompare(minimumVideoEndTime, sessionEndTime) > 0 {
+                sessionEndTime = minimumVideoEndTime
+            }
+        }
+        backend.endSession(at: sessionEndTime)
         backend.markInputsFinished()
         backend.finish { [weak self] in
             guard let self else { return }
@@ -404,6 +417,7 @@ private final class AVFoundationMuxedBackend: MuxedMediaWriterBackend, @unchecke
         let settings = MuxedMediaWriter.productionSettings(profile: profile)
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings.video)
         audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: settings.audio)
+        videoInput.mediaTimeScale = MuxedMediaProfile.encodedVideoTimescale
         videoInput.expectsMediaDataInRealTime = true
         audioInput.expectsMediaDataInRealTime = true
         videoAdaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: profile.pixelFormat, kCVPixelBufferWidthKey as String: profile.width, kCVPixelBufferHeightKey as String: profile.height])

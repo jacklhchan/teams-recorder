@@ -894,8 +894,8 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
         return RecordingMediaOutcome(
             finalURL: outputs.recoveredM4A,
             mediaKind: .audio,
-            screenIntervals: snapshot.3,
-            capturedWindow: snapshot.4,
+            screenIntervals: [],
+            capturedWindow: nil,
             recoveryState: .videoLostAudioPreserved,
             videoDroppedFrames: snapshot.5,
             videoFailureDescription: muxDescription,

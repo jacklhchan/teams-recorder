@@ -71,6 +71,37 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.mux.criticalVideoAppendAttempts, 1)
     }
 
+    func testFinalMP4ValidationFailureClearsCommittedVideoMetadataFromAudioFallback() async throws {
+        let state = ManualExecutor()
+        let fixture = try makeFixture(executor: state)
+        let window = RecordedTeamsWindowIdentity(
+            processID: 7_230,
+            windowID: 1_621,
+            title: "Shared content"
+        )
+        fixture.files.failFinalMP4Validation = true
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: fixture.revision,
+            window: window
+        )
+        state.runAll()
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 9_600))
+        state.runAll()
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 4_800, timescale: 48_000),
+            revision: fixture.revision
+        ))
+        state.runAll()
+
+        let outcome = try await finish(fixture.coordinator, using: state)
+
+        XCTAssertEqual(outcome.mediaKind, .audio)
+        XCTAssertEqual(outcome.recoveryState, .videoLostAudioPreserved)
+        XCTAssertTrue(outcome.screenIntervals.isEmpty)
+        XCTAssertNil(outcome.capturedWindow)
+    }
+
     func testMuxFailureLatchesOnceAndContinuesSafetyAudio() async throws {
         let fixture = try makeFixture(audioErrors: [TestError.mux, TestError.second])
         fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 480))
@@ -211,12 +242,12 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         XCTAssertFalse(events.kinds.contains(.sourceStalled))
         XCTAssertEqual(fixture.mux.videoTimes.count, 3)
         XCTAssertEqual(fixture.mux.videoTimes[1], CMTime(value: 4_800, timescale: 48_000))
-        XCTAssertEqual(fixture.mux.videoTimes.last, CMTime(value: 479_999, timescale: 48_000))
+        XCTAssertEqual(fixture.mux.videoTimes.last, CMTime(value: 475_200, timescale: 48_000))
         XCTAssertEqual(outcome.screenIntervals.count, 1)
         XCTAssertEqual(outcome.screenIntervals[0].startSeconds, 0.1, accuracy: 0.000_001)
         XCTAssertEqual(
             outcome.screenIntervals[0].endSeconds,
-            Double(479_999) / 48_000,
+            10,
             accuracy: 0.000_001
         )
     }

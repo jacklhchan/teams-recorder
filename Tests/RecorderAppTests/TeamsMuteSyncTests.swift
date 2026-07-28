@@ -421,6 +421,22 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
         XCTAssertEqual(model.statusMessage, "Recording")
     }
 
+    func testInstallTeamsMuteSyncCompatibilityEntryPointIsIdempotent() {
+        let client = TeamsMuteSyncFakeClient()
+        let model = AppModel(
+            defaults: enabledDefaults,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            teamsMuteSyncClient: client
+        )
+
+        model.installTeamsMuteSync()
+        model.installTeamsMuteSync()
+
+        XCTAssertEqual(client.startCount, 1)
+    }
+
     func testTeamsTransportLossDuringMeetingFailsClosed() async {
         let publisher = TeamsMuteSyncFakePublisher()
         let recorder = RecordingEngine(virtualMicPublisher: publisher)
@@ -664,11 +680,13 @@ final class AppModelTeamsMuteSyncTests: XCTestCase {
 private final class TeamsMuteSyncFakeClient: TeamsMuteSyncing {
     private var onEvent: ((TeamsMuteSyncEvent) -> Void)?
     private var staleOnEvent: ((TeamsMuteSyncEvent) -> Void)?
+    private(set) var startCount = 0
     private(set) var stopCount = 0
 
     func start(onEvent: @escaping (TeamsMuteSyncEvent) -> Void) {
         self.onEvent = onEvent
         staleOnEvent = onEvent
+        startCount += 1
     }
 
     func stop() {

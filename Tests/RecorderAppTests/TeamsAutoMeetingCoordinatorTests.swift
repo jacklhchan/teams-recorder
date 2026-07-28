@@ -528,6 +528,45 @@ final class TeamsAutoMeetingCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testTrueAfterCommittedStopWaitsForCompletionThenStartsOnce() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = makeCoordinator(ticker: ticker)
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onCommand = { commands.append($0) }
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await fire(ticker, count: 5)
+        coordinator.automaticStartSucceeded()
+        coordinator.handleMeetingState(isInMeeting: false)
+        await fire(ticker, count: 10)
+
+        XCTAssertEqual(commands, [.startRecording, .stopRecording])
+        XCTAssertFalse(coordinator.hasPendingTimer)
+        coordinator.handleMeetingState(isInMeeting: true)
+        guard coordinator.state == .stopCountdown(secondsRemaining: 1) else {
+            return XCTFail("Committed stop was revived before completion")
+        }
+
+        coordinator.automaticStopCompleted()
+        coordinator.automaticStopCompleted()
+        coordinator.handleMeetingState(isInMeeting: true)
+        XCTAssertEqual(
+            coordinator.state,
+            .startCountdown(secondsRemaining: 5)
+        )
+        XCTAssertTrue(coordinator.hasPendingTimer)
+
+        await fire(ticker, count: 5)
+
+        XCTAssertEqual(coordinator.state, .starting)
+        XCTAssertEqual(
+            commands,
+            [.startRecording, .stopRecording, .startRecording]
+        )
+    }
+
+    @MainActor
     func testDisablingAutomaticRecordingTransfersToManual() async {
         let ticker = ManualAutoMeetingTicker()
         let coordinator = makeCoordinator(ticker: ticker)

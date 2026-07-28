@@ -844,6 +844,47 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertEqual(fixture.writer.closeCount, 1)
     }
 
+    func testTrueAfterCommittedAutomaticStopStartsOneNewCountdown() async {
+        let fixture = makeRecordingFixture()
+        await startAutomaticRecording(fixture)
+        emitMeeting(false, in: fixture)
+        await fire(fixture.ticker, count: 9)
+        fixture.source.pauseStop = true
+
+        await fire(fixture.ticker)
+        await fixture.source.waitForStop()
+        XCTAssertTrue(fixture.engine.isRecording)
+        XCTAssertNil(fixture.model.recordingOwnership)
+
+        emitMeeting(true, in: fixture)
+        fixture.source.resumeStop()
+        await waitUntil {
+            !fixture.engine.isRecording
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+
+        XCTAssertNil(fixture.model.recordingOwnership)
+        guard fixture.model.teamsAutoMeetingState
+                == .startCountdown(secondsRemaining: 5) else {
+            return XCTFail(
+                "Committed stop did not reconcile the latest true meeting"
+            )
+        }
+        emitMeeting(true, in: fixture)
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .startCountdown(secondsRemaining: 5)
+        )
+        await fire(fixture.ticker)
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .startCountdown(secondsRemaining: 4)
+        )
+        XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(fixture.source.stopCount, 1)
+        XCTAssertEqual(fixture.writer.closeCount, 1)
+    }
+
     func testTerminalStopDuringTestRecordingPostStartRefreshClearsStateAndDelay() async {
         let delay = AutoMeetingManualTicker()
         let fixture = makeRecordingFixture(testRecordingDelay: {

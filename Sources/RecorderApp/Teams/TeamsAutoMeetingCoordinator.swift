@@ -24,6 +24,12 @@ final class TeamsAutoMeetingCoordinator {
         case stop
     }
 
+    private enum AutomaticStopPhase {
+        case idle
+        case countdown
+        case committed
+    }
+
     private let startCountdownSeconds: Int
     private let stopDebounceSeconds: Int
     private let tick: @Sendable () async -> Void
@@ -32,6 +38,7 @@ final class TeamsAutoMeetingCoordinator {
     private var isEnabled = false
     private var isInMeeting = false
     private var suppressesStopCommandUntilEndDebounce = false
+    private var automaticStopPhase = AutomaticStopPhase.idle
 
     private(set) var state: TeamsAutoMeetingState = .disabled {
         didSet {
@@ -104,7 +111,8 @@ final class TeamsAutoMeetingCoordinator {
             case .waitingForMeeting:
                 beginTimer(.start, seconds: startCountdownSeconds)
             case .stopCountdown
-                where !suppressesStopCommandUntilEndDebounce:
+                where automaticStopPhase == .countdown
+                    && !suppressesStopCommandUntilEndDebounce:
                 invalidateTimer()
                 state = .automaticRecording
             default:
@@ -175,9 +183,13 @@ final class TeamsAutoMeetingCoordinator {
     }
 
     func automaticStopCompleted() {
-        guard case .stopCountdown = state else { return }
+        guard automaticStopPhase == .committed else { return }
         invalidateTimer()
-        state = .waitingForMeeting
+        if isInMeeting {
+            beginTimer(.start, seconds: startCountdownSeconds)
+        } else {
+            state = .waitingForMeeting
+        }
     }
 
     func invalidate() {
@@ -199,6 +211,7 @@ final class TeamsAutoMeetingCoordinator {
             expectedState = .startCountdown(secondsRemaining: seconds)
             expectedIsInMeeting = true
         case .stop:
+            automaticStopPhase = .countdown
             expectedState = .stopCountdown(secondsRemaining: seconds)
             expectedIsInMeeting = false
         }
@@ -234,8 +247,10 @@ final class TeamsAutoMeetingCoordinator {
                     case .stop:
                         if self.suppressesStopCommandUntilEndDebounce {
                             self.suppressesStopCommandUntilEndDebounce = false
+                            self.automaticStopPhase = .idle
                             self.state = .waitingForMeeting
                         } else {
+                            self.automaticStopPhase = .committed
                             self.onCommand?(.stopRecording)
                         }
                     }
@@ -248,6 +263,7 @@ final class TeamsAutoMeetingCoordinator {
         timerTask?.cancel()
         timerTask = nil
         suppressesStopCommandUntilEndDebounce = false
+        automaticStopPhase = .idle
         generation &+= 1
     }
 }

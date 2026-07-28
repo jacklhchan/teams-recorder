@@ -46,30 +46,31 @@ final class RecordingControllerPanelTests: XCTestCase {
         withExtendedLifetime(coordinator) {}
     }
 
-    func testCoordinatorDismissesAndStopsObservingOnTeardown() async {
+    func testCoordinatorShutdownDismissesOnceAndStopsObservingImmediately() {
         let fixture = makeFixture()
         let subject = PassthroughSubject<Bool, Never>()
         let presenter = RecordingControllerPresenterSpy()
-        var coordinator: RecordingControllerCoordinator? =
-            RecordingControllerCoordinator(
-                model: fixture.model,
-                presenterFactory: RecordingControllerPresenterFactorySpy(
-                    presenter: presenter
-                ),
-                isRecordingPublisher: subject.eraseToAnyPublisher()
-            )
+        let coordinator = RecordingControllerCoordinator(
+            model: fixture.model,
+            presenterFactory: RecordingControllerPresenterFactorySpy(
+                presenter: presenter
+            ),
+            isRecordingPublisher: subject.eraseToAnyPublisher()
+        )
 
         subject.send(true)
         XCTAssertEqual(presenter.presentedModels.count, 1)
 
-        coordinator = nil
-        await Task.yield()
+        coordinator.shutdown()
+        XCTAssertEqual(presenter.dismissCount, 1)
+
+        coordinator.shutdown()
         XCTAssertEqual(presenter.dismissCount, 1)
 
         subject.send(false)
         subject.send(true)
         XCTAssertEqual(presenter.presentedModels.count, 1)
-        _ = coordinator
+        XCTAssertEqual(presenter.dismissCount, 1)
     }
 
     private func makeFixture() -> (

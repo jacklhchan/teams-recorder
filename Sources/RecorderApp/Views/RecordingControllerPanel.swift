@@ -44,6 +44,7 @@ final class RecordingControllerCoordinator {
     private let presenter: any RecordingControllerPresenting
     private var episode = RecordingControllerPanelEpisode()
     private var observation: AnyCancellable?
+    private var isShutdown = false
 
     convenience init(model: AppModel) {
         self.init(
@@ -72,10 +73,14 @@ final class RecordingControllerCoordinator {
 
     deinit {
         observation?.cancel()
-        let presenter = presenter
-        Task { @MainActor in
-            presenter.dismiss()
-        }
+    }
+
+    func shutdown() {
+        guard !isShutdown else { return }
+        isShutdown = true
+        observation?.cancel()
+        observation = nil
+        presenter.dismiss()
     }
 
     private func handle(isRecording: Bool) {

@@ -55,6 +55,91 @@ final class TeamsAutoMeetingCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testInitialStartCountdownCallbackCanSynchronouslyCancelTimer() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = makeCoordinator(ticker: ticker)
+        let timerResurrected = expectation(description: "timer did not resurrect")
+        timerResurrected.isInverted = true
+        var observedInitialCountdown = false
+        var observedResurrection = false
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onStateChange = { state in
+            if state == .startCountdown(secondsRemaining: 5) {
+                observedInitialCountdown = true
+                coordinator.cancelCountdown()
+            } else if observedInitialCountdown,
+                      !observedResurrection,
+                      state != .suppressedUntilMeetingEnd {
+                observedResurrection = true
+                timerResurrected.fulfill()
+            }
+        }
+        coordinator.onCommand = { commands.append($0) }
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await ticker.fire(count: 5)
+        await fulfillment(of: [timerResurrected], timeout: 0.05)
+
+        XCTAssertEqual(coordinator.state, .suppressedUntilMeetingEnd)
+        XCTAssertEqual(commands, [])
+    }
+
+    @MainActor
+    func testInitialStartCountdownCallbackCanSynchronouslyDisableTimer() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = makeCoordinator(ticker: ticker)
+        let timerResurrected = expectation(description: "timer did not resurrect")
+        timerResurrected.isInverted = true
+        var observedInitialCountdown = false
+        var observedResurrection = false
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onStateChange = { state in
+            if state == .startCountdown(secondsRemaining: 5) {
+                observedInitialCountdown = true
+                coordinator.setEnabled(false)
+            } else if observedInitialCountdown,
+                      !observedResurrection,
+                      state != .disabled {
+                observedResurrection = true
+                timerResurrected.fulfill()
+            }
+        }
+        coordinator.onCommand = { commands.append($0) }
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await ticker.fire(count: 5)
+        await fulfillment(of: [timerResurrected], timeout: 0.05)
+
+        XCTAssertEqual(coordinator.state, .disabled)
+        XCTAssertEqual(commands, [])
+    }
+
+    @MainActor
+    func testInitialStartCountdownCallbackCanSynchronouslyInvalidateTimer() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = makeCoordinator(ticker: ticker)
+        let observationWindow = expectation(description: "stale ticks drained")
+        observationWindow.isInverted = true
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onStateChange = { state in
+            if state == .startCountdown(secondsRemaining: 5) {
+                coordinator.invalidate()
+            }
+        }
+        coordinator.onCommand = { commands.append($0) }
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await ticker.fire(count: 5)
+        await fulfillment(of: [observationWindow], timeout: 0.05)
+
+        XCTAssertEqual(coordinator.state, .disabled)
+        XCTAssertEqual(commands, [])
+    }
+
+    @MainActor
     func testRepeatedTrueDoesNotRestartStartCountdown() async {
         let ticker = ManualAutoMeetingTicker()
         let coordinator = makeCoordinator(ticker: ticker)
@@ -194,6 +279,41 @@ final class TeamsAutoMeetingCoordinatorTests: XCTestCase {
 
         await ticker.fireAndWaitForAcknowledgement()
         coordinator.handleMeetingState(isInMeeting: true)
+
+        XCTAssertEqual(coordinator.state, .automaticRecording)
+        XCTAssertEqual(commands, [.startRecording])
+    }
+
+    @MainActor
+    func testInitialStopCountdownCallbackCanSynchronouslyCancelTimer() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = TeamsAutoMeetingCoordinator(
+            startCountdownSeconds: 1,
+            tick: { await ticker.waitForTick() }
+        )
+        let staleStop = expectation(description: "stale stop was not emitted")
+        staleStop.isInverted = true
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onCommand = { command in
+            commands.append(command)
+            if command == .stopRecording {
+                staleStop.fulfill()
+            }
+        }
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await ticker.fireAndWaitForAcknowledgement()
+        coordinator.automaticStartSucceeded()
+        coordinator.onStateChange = { state in
+            if state == .stopCountdown(secondsRemaining: 10) {
+                coordinator.handleMeetingState(isInMeeting: true)
+            }
+        }
+
+        coordinator.handleMeetingState(isInMeeting: false)
+        await ticker.fire(count: 10)
+        await fulfillment(of: [staleStop], timeout: 0.05)
 
         XCTAssertEqual(coordinator.state, .automaticRecording)
         XCTAssertEqual(commands, [.startRecording])
@@ -351,6 +471,16 @@ private actor ManualAutoMeetingTicker {
                 acknowledgementContinuations.append(
                     (tick: tick, continuation: $0)
                 )
+            }
+        }
+    }
+
+    func fire(count: Int) {
+        for _ in 0..<count {
+            if continuations.isEmpty {
+                pendingTicks += 1
+            } else {
+                continuations.removeFirst().resume()
             }
         }
     }

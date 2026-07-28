@@ -167,13 +167,22 @@ final class TeamsAutoMeetingCoordinator {
 
     private func beginTimer(_ kind: TimerKind, seconds: Int) {
         invalidateTimer()
+        let expectedGeneration = generation
+        let expectedState: TeamsAutoMeetingState
+        let expectedIsInMeeting: Bool
         switch kind {
         case .start:
-            state = .startCountdown(secondsRemaining: seconds)
+            expectedState = .startCountdown(secondsRemaining: seconds)
+            expectedIsInMeeting = true
         case .stop:
-            state = .stopCountdown(secondsRemaining: seconds)
+            expectedState = .stopCountdown(secondsRemaining: seconds)
+            expectedIsInMeeting = false
         }
-        let expectedGeneration = generation
+        state = expectedState
+        guard generation == expectedGeneration,
+              isEnabled,
+              isInMeeting == expectedIsInMeeting,
+              state == expectedState else { return }
         let tick = self.tick
         timerTask = Task { @MainActor [weak self, tick] in
             for remaining in stride(from: seconds - 1, through: 0, by: -1) {

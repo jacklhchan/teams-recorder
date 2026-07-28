@@ -3,6 +3,19 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var model = AppModel()
+    @State private var autoMeetingPanel:
+        any TeamsAutoMeetingCountdownPresenting
+
+    @MainActor
+    init(
+        autoMeetingPanelFactory:
+            any TeamsAutoMeetingCountdownPresenterFactory =
+                TeamsAutoMeetingCountdownPanelFactory()
+    ) {
+        _autoMeetingPanel = State(
+            initialValue: autoMeetingPanelFactory.makePresenter()
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -95,6 +108,29 @@ struct ContentView: View {
         }
         .frame(minWidth: 860, minHeight: 680)
         .background(Color(nsColor: .windowBackgroundColor))
+        .onChange(
+            of: model.teamsAutoMeetingState,
+            initial: true
+        ) { _, state in
+            if case let .startCountdown(secondsRemaining) = state {
+                autoMeetingPanel.present(
+                    seconds: secondsRemaining,
+                    cancel: model.cancelTeamsAutoMeetingCountdown
+                )
+            } else {
+                autoMeetingPanel.dismiss()
+            }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSApplication.willTerminateNotification
+            )
+        ) { _ in
+            autoMeetingPanel.dismiss()
+        }
+        .onDisappear {
+            autoMeetingPanel.dismiss()
+        }
     }
 
     private var permissionRow: some View {
@@ -253,6 +289,22 @@ private struct CaptureControlsView: View {
             }
 
             GridRow {
+                Label("Teams Auto Recording", systemImage: "record.circle")
+                    .font(.headline)
+                TeamsAutoMeetingDetailView(
+                    presentation: autoMeetingPresentation,
+                    isEnabled: Binding(
+                        get: { model.teamsAutoMeetingEnabled },
+                        set: { model.setTeamsAutoMeetingEnabled($0) }
+                    )
+                )
+                TeamsAutoMeetingStateView(
+                    presentation: autoMeetingPresentation,
+                    cancel: model.cancelTeamsAutoMeetingCountdown
+                )
+            }
+
+            GridRow {
                 Label("Teams Mute Sync", systemImage: "person.2.wave.2")
                     .font(.headline)
                 TeamsMuteSyncDetailView(
@@ -281,6 +333,72 @@ private struct CaptureControlsView: View {
     private var selectedApplicationName: String {
         if case .application(let application) = model.resolvedCaptureSelection { return application.name }
         return "Choose an application"
+    }
+
+    private var autoMeetingPresentation: TeamsAutoMeetingPresentation {
+        .make(
+            state: model.teamsAutoMeetingState,
+            connectionStatus: model.teamsConnectionStatus
+        )
+    }
+}
+
+private struct TeamsAutoMeetingDetailView: View {
+    let presentation: TeamsAutoMeetingPresentation
+    @Binding var isEnabled: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(presentation.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Toggle("Teams Auto Recording", isOn: $isEnabled)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .help("Start recording automatically for Teams meetings")
+                .accessibilityIdentifier("teams-auto-recording-toggle")
+        }
+        .frame(minWidth: 380, alignment: .leading)
+    }
+}
+
+private struct TeamsAutoMeetingStateView: View {
+    let presentation: TeamsAutoMeetingPresentation
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Label(
+                presentation.title,
+                systemImage: presentation.systemImage
+            )
+            .foregroundStyle(statusColor)
+            .lineLimit(1)
+            .accessibilityIdentifier("teams-auto-recording-status")
+
+            if presentation.showsCancel {
+                Button(action: cancel) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.bordered)
+                .help("Cancel automatic recording")
+                .accessibilityLabel("Cancel automatic recording")
+                .accessibilityIdentifier("teams-auto-recording-cancel")
+            }
+        }
+    }
+
+    private var statusColor: Color {
+        switch presentation.systemImage {
+        case "record.circle.fill":
+            .red
+        case "exclamationmark.triangle.fill":
+            .orange
+        default:
+            .secondary
+        }
     }
 }
 

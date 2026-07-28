@@ -2223,6 +2223,7 @@ final class AppModel: ObservableObject {
         teamsScreenCaptureCandidates = []
         teamsScreenDisconnectCleanupScheduler { [weak self] in
             guard let self,
+                  self.captureLifecycleGate.activeOperation != .stop,
                   !self.isTeamsScreenCaptureRequested,
                   self.recorder.isRecording,
                   self.recorder.continuitySnapshot.recordingEpoch

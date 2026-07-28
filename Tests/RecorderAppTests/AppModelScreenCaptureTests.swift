@@ -374,6 +374,61 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
+    func testDisconnectCleanupDoesNotReenterCaptureSourceDuringStopFinalization() async throws {
+        let cleanupScheduler = ControlledScreenDisconnectCleanupScheduler()
+        let window = teamsWindow(
+            id: 42,
+            title: "Shared content | Customer presentation"
+        )
+        let fixture = makeFixture(
+            provider: .normal,
+            windows: [window],
+            disconnectCleanupScheduler: cleanupScheduler.schedule
+        )
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+
+        fixture.source.emit(
+            .applicationDisconnected(teamsApplication.bundleIdentifier)
+        )
+        await waitUntil {
+            !fixture.model.isTeamsScreenCaptureRequested
+                && cleanupScheduler.pendingCount == 1
+        }
+        let videoTargetCount = fixture.source.videoTargets.count
+        fixture.source.videoTargetErrors[videoTargetCount + 1] =
+            StorageTestError.unavailable
+        fixture.source.pauseStop = true
+
+        fixture.model.startOrStop()
+        await waitUntil { fixture.source.stopCount == 1 }
+        XCTAssertTrue(fixture.model.isFinalizingRecording)
+        XCTAssertTrue(fixture.model.isCaptureLifecycleWorking)
+
+        await cleanupScheduler.runNext()
+
+        XCTAssertEqual(fixture.source.videoTargets.count, videoTargetCount)
+        if case .failed(let message) =
+            fixture.engine.meetingScreenCaptureState {
+            XCTFail("Disconnect cleanup re-entered capture source: \(message)")
+        }
+        XCTAssertTrue(fixture.model.isFinalizingRecording)
+        XCTAssertTrue(fixture.model.isCaptureLifecycleWorking)
+        XCTAssertTrue(fixture.engine.isRecording)
+        XCTAssertEqual(fixture.source.stopCount, 1)
+
+        fixture.source.resumeStop()
+        await waitUntil {
+            !fixture.engine.isRecording
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+        XCTAssertEqual(fixture.source.stopCount, 1)
+    }
+
     func testStaleOnCannotReenableCaptureAfterNewerOff() async throws {
         let window = teamsWindow(
             id: 37,
@@ -1204,6 +1259,7 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
     var pauseNextTeamsRefresh = false
     var pauseNextVideoTargetUpdate = false
     var pauseReconnect = false
+    var pauseStop = false
     private(set) var videoTargets: [TeamsWindowIdentity?] = []
     private var onEvent: ((CaptureEvent) -> Void)?
     private var teamsRefreshContinuation: CheckedContinuation<Void, Never>?
@@ -1212,6 +1268,7 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
     private var videoTargetWaiters: [CheckedContinuation<Void, Never>] = []
     private var reconnectContinuation: CheckedContinuation<Void, Never>?
     private var reconnectWaiters: [CheckedContinuation<Void, Never>] = []
+    private var stopContinuation: CheckedContinuation<Void, Never>?
 
     var lastVideoRevision: CaptureFilterRevision? {
         guard !videoTargets.isEmpty else { return nil }
@@ -1258,7 +1315,12 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
         startCount += 1
         self.onEvent = onEvent
     }
-    func stop() async { stopCount += 1 }
+    func stop() async {
+        stopCount += 1
+        if pauseStop {
+            await withCheckedContinuation { stopContinuation = $0 }
+        }
+    }
 
     func waitForPausedTeamsRefresh() async {
         if teamsRefreshContinuation != nil { return }
@@ -1290,6 +1352,12 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
         pauseReconnect = false
         reconnectContinuation?.resume()
         reconnectContinuation = nil
+    }
+
+    func resumeStop() {
+        pauseStop = false
+        stopContinuation?.resume()
+        stopContinuation = nil
     }
 
     func emit(_ event: CaptureEvent) {

@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -281,6 +283,51 @@ class CoordinatorTests(unittest.TestCase):
             trad_backups[0].read_text(encoding="utf-8"),
             "old trad",
         )
+
+
+class CliTests(unittest.TestCase):
+    HELPER = ROOT / "scripts" / "qwen_asr_longform.py"
+
+    def test_help_is_available(self):
+        result = subprocess.run(
+            ["/usr/bin/python3", str(self.HELPER), "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--publish-mode", result.stdout)
+
+    def test_missing_api_key_fails_without_traceback(self):
+        environment = os.environ.copy()
+        environment.pop("OMLX_API_KEY", None)
+        result = subprocess.run(
+            [
+                "/usr/bin/python3",
+                str(self.HELPER),
+                "--audio",
+                "missing.mp4",
+                "--output-folder",
+                ".",
+                "--omlx-url",
+                "http://127.0.0.1:8000",
+                "--model",
+                "test-model",
+                "--language",
+                "yue",
+                "--publish-mode",
+                "candidate",
+            ],
+            text=True,
+            capture_output=True,
+            env=environment,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 69)
+        self.assertIn("Missing oMLX API key", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

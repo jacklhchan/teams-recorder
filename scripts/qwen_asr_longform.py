@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -538,3 +540,58 @@ class LongformTranscriber:
         temporary = output.with_name(f".{output.name}.tmp")
         temporary.write_bytes(source.read_bytes())
         os.replace(temporary, output)
+
+
+def _argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Transcribe long recordings through sequential oMLX chunks."
+    )
+    parser.add_argument("--audio", type=Path, required=True)
+    parser.add_argument("--output-folder", type=Path, required=True)
+    parser.add_argument("--omlx-url", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--language", default="yue")
+    parser.add_argument(
+        "--publish-mode",
+        choices=("candidate", "replace"),
+        default="replace",
+    )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = _argument_parser().parse_args(argv)
+    api_key = os.environ.get("OMLX_API_KEY", "")
+    if not api_key:
+        print("Missing oMLX API key", file=sys.stderr)
+        return 69
+
+    config = TranscriptionConfig(
+        audio=args.audio,
+        output_folder=args.output_folder,
+        omlx_url=args.omlx_url,
+        model=args.model,
+        language=args.language,
+        api_key=api_key,
+        publish_mode=args.publish_mode,
+        ffmpeg=os.environ.get("FFMPEG", "ffmpeg"),
+        ffprobe=os.environ.get("FFPROBE", "ffprobe"),
+        curl=os.environ.get("CURL", "curl"),
+    )
+    try:
+        args.output_folder.mkdir(parents=True, exist_ok=True)
+        LongformTranscriber(config).run()
+    except FileNotFoundError as error:
+        print(f"Missing required command: {error.filename}", file=sys.stderr)
+        return 69
+    except TranscriptionError as error:
+        print(str(error), file=sys.stderr)
+        return 70
+    except KeyboardInterrupt:
+        print("Transcription cancelled", file=sys.stderr)
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

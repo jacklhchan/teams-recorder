@@ -97,6 +97,31 @@ Output: transcript_qwen3_asr_1_7b_8bit_yue_trad.txt
 
 The app packages `scripts/transcribe-qwen-asr.sh` into the app bundle and calls it from the recording row. This currently uses direct `mlx_audio.stt.generate` execution, not an OminiX `/v1/audio/transcriptions` server.
 
+## Teams Auto Recording
+
+Teams Auto Recording uses the Microsoft Teams desktop Third-party app API to
+observe authoritative meeting state:
+
+1. Enable `Settings > Privacy > Third-party app API` in Teams and complete the
+   `Local Meeting Recorder` pairing request.
+2. Grant macOS Screen & System Audio Recording and microphone permission before
+   enabling automatic recording.
+3. Enable `Teams Auto Recording` in the recorder.
+4. Joining a meeting shows a silent, cancellable five-second countdown.
+   `Cancel` suppresses automatic recording only for the current meeting, until
+   that meeting ends.
+5. Leaving stops only a recording that was started automatically, and only
+   after Teams reports that the meeting has ended continuously for ten seconds.
+   Rejoining during that debounce keeps the recording running.
+6. A Teams API disconnect never stops an active recording.
+7. Screen capture starts off and remains a manual control. It can be enabled
+   during an active recording.
+8. `Teams Mute Sync` is independent of Teams Auto Recording and may remain
+   disabled.
+9. Manual recordings are never auto-stopped. Manually stopping an
+   automatically started recording suppresses automatic restart for the rest of
+   the same meeting.
+
 ## Mic Mute
 
 The recorder always applies mute to both its local microphone track and

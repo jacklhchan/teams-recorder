@@ -721,7 +721,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
-    func testManualStopDuringAutomaticPostStartOwnershipGapFinalizesOnce() async {
+    func testManualStopDuringAutomaticPostStartOwnershipGapKeepsSingleFinalizationOwner() async {
         let fixture = makeRecordingFixture()
         let teamsApplication = CaptureApplication(
             processID: 42,
@@ -738,6 +738,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         fixture.model.availableCaptureApplications = [teamsApplication]
         fixture.model.resolvedCaptureSelection = .application(teamsApplication)
         fixture.source.pauseTeamsRefresh = true
+        fixture.source.resumeTeamsRefreshOnCancellation = true
         await fire(fixture.ticker, count: 5)
         await waitUntil {
             fixture.source.teamsRefreshCount >= 1
@@ -745,13 +746,23 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         }
         XCTAssertNil(fixture.model.recordingOwnership)
 
+        fixture.source.pauseStop = true
         fixture.model.startOrStop()
+        await fixture.source.waitForStop()
+        await settle()
+
         XCTAssertTrue(fixture.model.isFinalizingRecording)
+        XCTAssertTrue(fixture.model.isCaptureLifecycleWorking)
+        XCTAssertTrue(fixture.engine.isRecording)
+        XCTAssertEqual(fixture.source.stopCount, 1)
+        XCTAssertEqual(fixture.writer.closeCount, 0)
+        XCTAssertNotEqual(fixture.model.statusMessage, "No active recording.")
         XCTAssertEqual(
             fixture.model.teamsAutoMeetingState,
             .suppressedUntilMeetingEnd
         )
-        fixture.source.resumeTeamsRefresh()
+
+        fixture.source.resumeStop()
         await waitUntil {
             !fixture.engine.isRecording
                 && !fixture.model.isCaptureLifecycleWorking
@@ -765,6 +776,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertEqual(fixture.source.startCount, 1)
         XCTAssertEqual(fixture.source.stopCount, 1)
         XCTAssertEqual(fixture.writer.closeCount, 1)
+        XCTAssertNotEqual(fixture.model.statusMessage, "No active recording.")
     }
 
     func testDisableDuringSourceStartFinalizesLateRecordingWithoutStoppingTransferredWork() async {
@@ -1262,6 +1274,7 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
     var pauseStart = false
     var pauseRefresh = false
     var pauseTeamsRefresh = false
+    var resumeTeamsRefreshOnCancellation = false
     var pauseStop = false
     private var onEvent: ((CaptureEvent) -> Void)?
     private var startContinuation: CheckedContinuation<Void, Never>?
@@ -1283,7 +1296,16 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
     func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] {
         teamsRefreshCount += 1
         if pauseTeamsRefresh {
-            await withCheckedContinuation { teamsRefreshContinuation = $0 }
+            await withTaskCancellationHandler {
+                await withCheckedContinuation {
+                    teamsRefreshContinuation = $0
+                }
+            } onCancel: {
+                guard self.resumeTeamsRefreshOnCancellation else { return }
+                Task { @MainActor in
+                    self.resumeTeamsRefresh()
+                }
+            }
         }
         return []
     }

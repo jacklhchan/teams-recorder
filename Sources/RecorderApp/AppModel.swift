@@ -157,6 +157,7 @@ final class AppModel: ObservableObject {
     private var pendingRecordingAttempt: RecordingStartAttempt?
     private var cancelledRecordingAttemptStops:
         [UUID: CaptureLifecycleToken] = [:]
+    private var independentlyFinalizedRecordingAttempts: Set<UUID> = []
     private var automaticStopIntentToken: CaptureLifecycleToken?
     private var inputMuteHandlingInstalled = false
     private var teamsIntegrationInstalled = false
@@ -498,31 +499,34 @@ final class AppModel: ObservableObject {
     func setTeamsScreenCaptureRequested(_ requested: Bool) async {
         teamsScreenCaptureIntentGeneration &+= 1
         let intentGeneration = teamsScreenCaptureIntentGeneration
-        guard recorder.isRecording,
-              !isCaptureLifecycleWorking else { return }
-        if requested {
-            guard isScreenCaptureAllowedByStorage,
-                  let selectedTeamsApplication,
-                  isTeamsScreenCaptureActionAvailable else { return }
-            let selectedProcessID = selectedTeamsApplication.processID
-            isTeamsScreenCaptureRequested = true
-            await refreshTeamsScreenCaptureNow()
-            guard acceptsTeamsScreenCaptureOnIntent(
-                generation: intentGeneration,
-                selectedProcessID: selectedProcessID
-            ) else { return }
-            await recorder.setScreenCaptureRequested(true)
-            guard acceptsTeamsScreenCaptureOnIntent(
-                generation: intentGeneration,
-                selectedProcessID: selectedProcessID
-            ) else { return }
-        } else {
+        guard recorder.isRecording else { return }
+        if !requested {
+            guard captureLifecycleGate.activeOperation != .stop else { return }
             isTeamsScreenCaptureRequested = false
             await recorder.setScreenCaptureRequested(false)
             guard intentGeneration == teamsScreenCaptureIntentGeneration else {
                 return
             }
+            restartTeamsScreenRefreshIfNeeded()
+            return
         }
+
+        guard !isCaptureLifecycleWorking,
+              isScreenCaptureAllowedByStorage,
+              let selectedTeamsApplication,
+              isTeamsScreenCaptureActionAvailable else { return }
+        let selectedProcessID = selectedTeamsApplication.processID
+        isTeamsScreenCaptureRequested = true
+        await refreshTeamsScreenCaptureNow()
+        guard acceptsTeamsScreenCaptureOnIntent(
+            generation: intentGeneration,
+            selectedProcessID: selectedProcessID
+        ) else { return }
+        await recorder.setScreenCaptureRequested(true)
+        guard acceptsTeamsScreenCaptureOnIntent(
+            generation: intentGeneration,
+            selectedProcessID: selectedProcessID
+        ) else { return }
         restartTeamsScreenRefreshIfNeeded()
     }
 
@@ -879,7 +883,8 @@ final class AppModel: ObservableObject {
         let acceptedAttempt = acceptedRecordingAttempt(matching: attempt)
         let stoppedDuringAcceptedStart =
             acceptedAttempt != nil && !recorder.isRecording
-        if recorder.isRecording {
+        if recorder.isRecording,
+           !independentlyFinalizedRecordingAttempts.contains(attempt.id) {
             await finishRecording(
                 playAfterStop: false,
                 automaticStopToken: nil
@@ -897,6 +902,7 @@ final class AppModel: ObservableObject {
     private func completeRecordingStartAttempt(
         _ attempt: RecordingStartAttempt
     ) async {
+        independentlyFinalizedRecordingAttempts.remove(attempt.id)
         if pendingRecordingAttempt?.id == attempt.id {
             pendingRecordingAttempt = nil
         }
@@ -2132,6 +2138,9 @@ final class AppModel: ObservableObject {
         }
         let endingOwnership = recordingOwnership
             ?? pendingRecordingAttempt?.ownership
+        if let pendingAttempt = pendingRecordingAttempt {
+            independentlyFinalizedRecordingAttempts.insert(pendingAttempt.id)
+        }
         pendingRecordingAttempt = nil
         let automaticStopToken: CaptureLifecycleToken?
         if automaticMeetingEnd, endingOwnership == .teamsAutomatic {
@@ -2184,6 +2193,7 @@ final class AppModel: ObservableObject {
                     bundleIdentifier
                 ) = state {
                     self.resolvedCaptureSelection = .disconnected(bundleIdentifier)
+                    self.resetTeamsScreenCaptureAfterApplicationDisconnect()
                 } else if state == .connected {
                     self.resolvedCaptureSelection = CaptureSelectionResolver.resolve(
                         selection: self.captureSelection,
@@ -2192,6 +2202,22 @@ final class AppModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func resetTeamsScreenCaptureAfterApplicationDisconnect() {
+        guard isTeamsScreenCaptureRequested else { return }
+        invalidateTeamsScreenRefresh()
+        invalidateTeamsScreenCaptureIntent()
+        let intentGeneration = teamsScreenCaptureIntentGeneration
+        isTeamsScreenCaptureRequested = false
+        teamsScreenCaptureCandidates = []
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.teamsScreenCaptureIntentGeneration == intentGeneration,
+                  !self.isTeamsScreenCaptureRequested,
+                  self.recorder.isRecording else { return }
+            await self.recorder.setScreenCaptureRequested(false)
+        }
     }
 
     private func observeRecorderRecordingState() {

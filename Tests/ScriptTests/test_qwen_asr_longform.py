@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,12 +9,53 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from qwen_asr_longform import (  # noqa: E402
+    CommandResult,
     Interval,
+    LongformTranscriber,
+    TranscriptionConfig,
+    TranscriptionError,
     merge_transcripts,
     parse_silence_events,
     plan_chunks,
     validate_transcript,
 )
+
+
+class FakeCommandRunner:
+    def __init__(self, model, duration, responses, silence_log=""):
+        self.model = model
+        self.duration = duration
+        self.responses = list(responses)
+        self.silence_log = silence_log
+        self.transcription_requests = []
+
+    def run(self, args):
+        executable = Path(args[0]).name
+        if executable == "ffprobe":
+            return CommandResult(0, f"{self.duration}\n", "")
+        if executable == "ffmpeg" and any(
+            "silencedetect=" in value for value in args
+        ):
+            return CommandResult(0, "", self.silence_log)
+        if executable == "ffmpeg":
+            Path(args[-1]).write_bytes(b"fake wav")
+            return CommandResult(0, "", "")
+        if executable == "curl" and args[-1].endswith("/v1/models"):
+            return CommandResult(
+                0,
+                json.dumps({"data": [{"id": self.model}]}),
+                "",
+            )
+        if executable == "curl":
+            self.transcription_requests.append(list(args))
+            output_index = args.index("-o") + 1
+            output = Path(args[output_index])
+            output.write_text(
+                json.dumps(self.responses.pop(0)),
+                encoding="utf-8",
+            )
+            return CommandResult(0, "200", "")
+        raise AssertionError(f"Unexpected command: {args}")
 
 
 class PlanChunkTests(unittest.TestCase):
@@ -85,6 +128,158 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(
             merged,
             "第一段內容，今日討論address verification。\n以下係第二段詳細內容。\n最後結論。",
+        )
+
+
+class CoordinatorTests(unittest.TestCase):
+    MODEL = "mlx-community--Qwen3-ASR-1.7B-4bit"
+
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.audio = self.root / "recording.mp4"
+        self.audio.write_bytes(b"fake media")
+        self.output_dir = self.root / "output"
+        self.output_dir.mkdir()
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def make_config(self, publish_mode="candidate"):
+        return TranscriptionConfig(
+            audio=self.audio,
+            output_folder=self.output_dir,
+            omlx_url="http://127.0.0.1:8000",
+            model=self.MODEL,
+            language="yue",
+            api_key="secret-test-key",
+            publish_mode=publish_mode,
+            run_id="test-run",
+        )
+
+    def test_transcribes_planned_chunks_sequentially_and_publishes_candidate(self):
+        runner = FakeCommandRunner(
+            self.MODEL,
+            duration=250.0,
+            responses=[
+                {"text": "第一段正常內容。"},
+                {"text": "第二段正常內容。"},
+                {"text": "最後正常內容。"},
+            ],
+        )
+        emitted = []
+
+        output = LongformTranscriber(
+            self.make_config(),
+            runner=runner,
+            emit=emitted.append,
+        ).run()
+
+        self.assertEqual(
+            output.read_text(encoding="utf-8"),
+            "第一段正常內容。\n第二段正常內容。\n最後正常內容。",
+        )
+        self.assertEqual(len(runner.transcription_requests), 3)
+        flattened = [" ".join(request) for request in runner.transcription_requests]
+        self.assertTrue(all("max_tokens=4096" in value for value in flattened))
+        self.assertTrue(all("language=yue" in value for value in flattened))
+        self.assertIn("STATUS=Transcribing chunk 3 of 3", emitted)
+        self.assertTrue(emitted[-1].startswith("TRANSCRIPT_PATH="))
+        self.assertNotIn("secret-test-key", "\n".join(emitted))
+        manifest = json.loads(
+            (
+                self.output_dir
+                / ".transcription-runs"
+                / "test-run"
+                / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["source_duration"], 250.0)
+        self.assertEqual(len(manifest["accepted"]), 3)
+        self.assertEqual(manifest["accepted"][0]["raw_start"], 0.0)
+        self.assertEqual(manifest["accepted"][-1]["raw_end"], 250.0)
+
+    def test_bisects_only_invalid_chunk_and_merges_valid_retries(self):
+        runner = FakeCommandRunner(
+            self.MODEL,
+            duration=120.0,
+            responses=[
+                {"text": "如果有" + "啊" * 30},
+                {"text": "修復後上半段。"},
+                {"text": "修復後下半段。"},
+            ],
+        )
+
+        output = LongformTranscriber(
+            self.make_config(),
+            runner=runner,
+            emit=lambda _: None,
+        ).run()
+
+        self.assertEqual(
+            output.read_text(encoding="utf-8"),
+            "修復後上半段。\n修復後下半段。",
+        )
+        self.assertEqual(len(runner.transcription_requests), 3)
+
+    def test_preserves_existing_final_when_minimum_retry_still_invalid(self):
+        final = (
+            self.output_dir
+            / "transcript_qwen3_asr_1_7b_8bit_yue_trad.txt"
+        )
+        final.write_text("existing", encoding="utf-8")
+        runner = FakeCommandRunner(
+            self.MODEL,
+            duration=30.0,
+            responses=[{"text": "啊" * 30}],
+        )
+
+        with self.assertRaises(TranscriptionError):
+            LongformTranscriber(
+                self.make_config(publish_mode="replace"),
+                runner=runner,
+                emit=lambda _: None,
+            ).run()
+
+        self.assertEqual(final.read_text(encoding="utf-8"), "existing")
+
+    def test_successful_replace_backs_up_existing_outputs(self):
+        raw = self.output_dir / "transcript_qwen3_asr_1_7b_8bit_yue.txt"
+        trad = (
+            self.output_dir
+            / "transcript_qwen3_asr_1_7b_8bit_yue_trad.txt"
+        )
+        raw.write_text("old raw", encoding="utf-8")
+        trad.write_text("old trad", encoding="utf-8")
+        runner = FakeCommandRunner(
+            self.MODEL,
+            duration=30.0,
+            responses=[{"text": "新內容。"}],
+        )
+
+        LongformTranscriber(
+            self.make_config(publish_mode="replace"),
+            runner=runner,
+            emit=lambda _: None,
+        ).run()
+
+        self.assertEqual(raw.read_text(encoding="utf-8"), "新內容。")
+        self.assertEqual(trad.read_text(encoding="utf-8"), "新內容。")
+        raw_backups = list(
+            self.output_dir.glob(f"{raw.name}.previous-*")
+        )
+        trad_backups = list(
+            self.output_dir.glob(f"{trad.name}.previous-*")
+        )
+        self.assertEqual(len(raw_backups), 1)
+        self.assertEqual(len(trad_backups), 1)
+        self.assertEqual(
+            raw_backups[0].read_text(encoding="utf-8"),
+            "old raw",
+        )
+        self.assertEqual(
+            trad_backups[0].read_text(encoding="utf-8"),
+            "old trad",
         )
 
 

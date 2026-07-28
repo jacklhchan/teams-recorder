@@ -16,6 +16,7 @@ from qwen_asr_longform import (  # noqa: E402
     LongformTranscriber,
     TranscriptionConfig,
     TranscriptionError,
+    emit_line,
     merge_transcripts,
     parse_silence_events,
     plan_chunks,
@@ -131,6 +132,44 @@ class MergeTests(unittest.TestCase):
             merged,
             "第一段內容，今日討論address verification。\n以下係第二段詳細內容。\n最後結論。",
         )
+
+    def test_removes_normalized_boundary_overlap(self):
+        merged = merge_transcripts(
+            [
+                "第一段，今日討論 address verification。",
+                "今日討論address verification，第二段。",
+            ]
+        )
+
+        self.assertEqual(
+            merged,
+            "第一段，今日討論 address verification。\n第二段。",
+        )
+
+
+class RecordingStream:
+    def __init__(self):
+        self.value = ""
+        self.flush_count = 0
+
+    def write(self, value):
+        self.value += value
+
+    def flush(self):
+        self.flush_count += 1
+
+
+class ProgressTests(unittest.TestCase):
+    def test_emit_line_flushes_progress_immediately(self):
+        stream = RecordingStream()
+
+        emit_line("STATUS=Transcribing chunk 1 of 17", stream=stream)
+
+        self.assertEqual(
+            stream.value,
+            "STATUS=Transcribing chunk 1 of 17\n",
+        )
+        self.assertEqual(stream.flush_count, 1)
 
 
 class CoordinatorTests(unittest.TestCase):
@@ -283,6 +322,29 @@ class CoordinatorTests(unittest.TestCase):
             trad_backups[0].read_text(encoding="utf-8"),
             "old trad",
         )
+
+    def test_manifest_records_acceptance_immediately_after_chunk(self):
+        runner = FakeCommandRunner(
+            self.MODEL,
+            duration=30.0,
+            responses=[{"text": "正常內容。"}],
+        )
+        transcriber = LongformTranscriber(
+            self.make_config(),
+            runner=runner,
+            emit=lambda _: None,
+        )
+        transcriber.duration = 30.0
+        transcriber.chunks_directory.mkdir(parents=True)
+        transcriber.responses_directory.mkdir(parents=True)
+
+        transcriber._transcribe_interval(Interval(0.0, 30.0))
+
+        manifest = json.loads(
+            transcriber.manifest_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(manifest["attempts"]), 1)
+        self.assertEqual(len(manifest["accepted"]), 1)
 
 
 class CliTests(unittest.TestCase):

@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,10 @@ class TranscriptionConfig:
 
 class TranscriptionError(RuntimeError):
     pass
+
+
+def emit_line(line: str, stream=None) -> None:
+    print(line, file=stream or sys.stdout, flush=True)
 
 
 def parse_silence_events(log: str) -> list[Interval]:
@@ -135,19 +140,54 @@ def merge_transcripts(
     accepted: list[str] = []
     for text in (value.strip() for value in texts if value.strip()):
         if accepted:
-            limit = min(len(accepted[-1]), len(text))
-            overlap = next(
+            previous_normalized, _ = _normalized_characters(accepted[-1])
+            text_normalized, text_positions = _normalized_characters(text)
+            limit = min(
+                len(previous_normalized),
+                len(text_normalized),
+            )
+            overlap_size = next(
                 (
                     size
                     for size in range(limit, minimum_overlap - 1, -1)
-                    if accepted[-1].endswith(text[:size])
+                    if previous_normalized.endswith(
+                        text_normalized[:size]
+                    )
                 ),
                 0,
             )
-            text = text[overlap:].lstrip()
+            if overlap_size:
+                text = text[text_positions[overlap_size - 1] + 1 :]
+                text = _strip_boundary_prefix(text)
         if text:
             accepted.append(text)
     return "\n".join(accepted)
+
+
+def _normalized_characters(text: str) -> tuple[str, list[int]]:
+    characters: list[str] = []
+    positions: list[int] = []
+    for index, character in enumerate(text):
+        category = unicodedata.category(character)
+        if character.isspace() or category.startswith(("P", "Z")):
+            continue
+        characters.append(character.casefold())
+        positions.append(index)
+    return "".join(characters), positions
+
+
+def _strip_boundary_prefix(text: str) -> str:
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if (
+            character.isspace()
+            or unicodedata.category(character).startswith(("P", "Z"))
+        ):
+            index += 1
+            continue
+        break
+    return text[index:]
 
 
 class LongformTranscriber:
@@ -161,7 +201,7 @@ class LongformTranscriber:
         self,
         config: TranscriptionConfig,
         runner: Optional[CommandRunner] = None,
-        emit: Callable[[str], None] = print,
+        emit: Callable[[str], None] = emit_line,
     ):
         self.config = config
         self.runner = runner or CommandRunner()
@@ -399,12 +439,13 @@ class LongformTranscriber:
             "validation": reason,
         }
         self.attempts.append(attempt)
-        self._write_manifest()
 
         if valid and isinstance(text, str):
             self.accepted.append({**attempt, "text": text})
+            self._write_manifest()
             return
 
+        self._write_manifest()
         if (
             raw_interval.end - raw_interval.start
             >= self.MINIMUM_RETRY_DURATION * 2

@@ -42,6 +42,14 @@ final class TeamsAutoMeetingCoordinator {
     var onStateChange: ((TeamsAutoMeetingState) -> Void)?
     var onCommand: ((TeamsAutoMeetingCommand) -> Void)?
 
+    var isAutoMeetingEnabled: Bool {
+        isEnabled
+    }
+
+    var hasPendingTimer: Bool {
+        timerTask != nil
+    }
+
     init(
         startCountdownSeconds: Int = 5,
         stopDebounceSeconds: Int = 10,
@@ -61,20 +69,28 @@ final class TeamsAutoMeetingCoordinator {
         isEnabled = enabled
         invalidateTimer()
         if enabled {
+            let expectedGeneration = generation
             state = .waitingForMeeting
+            guard generation == expectedGeneration,
+                  isEnabled,
+                  state == .waitingForMeeting else { return }
             if isInMeeting {
                 beginTimer(.start, seconds: startCountdownSeconds)
             }
         } else {
+            let command: TeamsAutoMeetingCommand?
             switch state {
             case .starting:
-                onCommand?(.cancelAutomaticStart)
+                command = .cancelAutomaticStart
             case .automaticRecording, .stopCountdown:
-                onCommand?(.transferRecordingToManual)
+                command = .transferRecordingToManual
             default:
-                break
+                command = nil
             }
             state = .disabled
+            if let command {
+                onCommand?(command)
+            }
         }
     }
 
@@ -100,8 +116,8 @@ final class TeamsAutoMeetingCoordinator {
             invalidateTimer()
             state = .waitingForMeeting
         case .starting:
-            onCommand?(.cancelAutomaticStart)
             state = .waitingForMeeting
+            onCommand?(.cancelAutomaticStart)
         case .automaticRecording:
             beginTimer(.stop, seconds: stopDebounceSeconds)
         case .suppressedUntilMeetingEnd, .startBlocked, .startFailed:
@@ -126,7 +142,9 @@ final class TeamsAutoMeetingCoordinator {
         switch state {
         case .starting:
             invalidateTimer()
+            state = .suppressedUntilMeetingEnd
             onCommand?(.cancelAutomaticStart)
+            return
         case .automaticRecording, .stopCountdown:
             return
         default:

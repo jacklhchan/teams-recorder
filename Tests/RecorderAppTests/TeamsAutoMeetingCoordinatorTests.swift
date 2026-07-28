@@ -219,6 +219,48 @@ final class TeamsAutoMeetingCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testExternalStopOfAutomaticRecordingSuppressesRepeatedTrueUntilFalse() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = makeCoordinator(ticker: ticker)
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onCommand = { commands.append($0) }
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await fire(ticker, count: 5)
+        coordinator.automaticStartSucceeded()
+
+        coordinator.suppressUntilMeetingEnd()
+        coordinator.handleMeetingState(isInMeeting: true)
+
+        XCTAssertEqual(coordinator.state, .suppressedUntilMeetingEnd)
+        XCTAssertEqual(commands, [.startRecording])
+
+        coordinator.handleMeetingState(isInMeeting: false)
+        XCTAssertEqual(coordinator.state, .waitingForMeeting)
+    }
+
+    @MainActor
+    func testExternalStopDuringMeetingEndDebounceSuppressesTransientTrue() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = makeCoordinator(ticker: ticker)
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await fire(ticker, count: 5)
+        coordinator.automaticStartSucceeded()
+        coordinator.handleMeetingState(isInMeeting: false)
+
+        coordinator.suppressUntilMeetingEnd()
+        coordinator.handleMeetingState(isInMeeting: true)
+
+        XCTAssertEqual(coordinator.state, .suppressedUntilMeetingEnd)
+
+        coordinator.handleMeetingState(isInMeeting: false)
+        XCTAssertEqual(coordinator.state, .waitingForMeeting)
+    }
+
+    @MainActor
     func testFalseDuringStartCountdownCancelsWithoutStarting() async {
         let ticker = ManualAutoMeetingTicker()
         let coordinator = makeCoordinator(ticker: ticker)

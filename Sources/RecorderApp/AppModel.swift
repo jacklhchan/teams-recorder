@@ -48,6 +48,11 @@ private final class TeamsIntegrationIngress: @unchecked Sendable {
     }
 }
 
+enum RecordingOwnership: Equatable {
+    case manual
+    case teamsAutomatic
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var devices: [AudioDevice] = []
@@ -88,6 +93,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var teamsMuteSyncEnabled: Bool
     @Published private(set) var teamsAutoMeetingEnabled: Bool
     @Published private(set) var teamsAutoMeetingState: TeamsAutoMeetingState
+    @Published private(set) var recordingOwnership: RecordingOwnership?
     @Published private(set) var teamsConnectionStatus: TeamsMuteSyncStatus = .disabled
     @Published private(set) var localMicMuted = false
     @Published private(set) var nativeInputMicMuted = false
@@ -143,6 +149,14 @@ final class AppModel: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var captureLifecycleGate = CaptureLifecycleGate()
     private var captureLifecycleTask: Task<Void, Never>?
+    private struct RecordingStartAttempt: Equatable {
+        let id: UUID
+        let ownership: RecordingOwnership
+        let lifecycleToken: CaptureLifecycleToken
+    }
+    private var pendingRecordingAttempt: RecordingStartAttempt?
+    private var cancelledRecordingAttemptStops:
+        [UUID: CaptureLifecycleToken] = [:]
     private var inputMuteHandlingInstalled = false
     private var teamsIntegrationInstalled = false
     private var teamsIntegrationGeneration: UInt64 = 0
@@ -265,6 +279,30 @@ final class AppModel: ObservableObject {
         }
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
+        }
+        autoCoordinator.onCommand = { [weak self] command in
+            guard let self else { return }
+            switch command {
+            case .startRecording:
+                self.beginRecording(
+                    ownership: .teamsAutomatic,
+                    requestPermissions: false
+                )
+            case .cancelAutomaticStart:
+                self.cancelPendingAutomaticRecordingStart()
+            case .stopRecording:
+                guard self.recordingOwnership == .teamsAutomatic else {
+                    return
+                }
+                self.stopCaptureLifecycle(
+                    playAfterStop: false,
+                    automaticMeetingEnd: true
+                )
+            case .transferRecordingToManual:
+                if self.recordingOwnership == .teamsAutomatic {
+                    self.recordingOwnership = .manual
+                }
+            }
         }
         autoCoordinator.setEnabled(teamsAutoMeetingEnabled)
         observeRecorderConnection()
@@ -564,41 +602,204 @@ final class AppModel: ObservableObject {
             return
         }
 
-        beginCaptureLifecycle(.start) { [self] token in
+        teamsAutoMeetingCoordinator.manualRecordingStarted()
+        beginRecording(ownership: .manual, requestPermissions: true)
+    }
+
+    private func beginRecording(
+        ownership: RecordingOwnership,
+        requestPermissions: Bool
+    ) {
+        guard !recorder.isRecording,
+              let lifecycleToken = captureLifecycleGate.begin(.start) else {
+            if ownership == .teamsAutomatic {
+                let message = "Another capture operation is in progress."
+                statusMessage = message
+                teamsAutoMeetingCoordinator.automaticStartFailed(message)
+            }
+            return
+        }
+
+        let attempt = RecordingStartAttempt(
+            id: UUID(),
+            ownership: ownership,
+            lifecycleToken: lifecycleToken
+        )
+        pendingRecordingAttempt = attempt
+        isCaptureLifecycleWorking = true
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRecordingStart(
+                attempt: attempt,
+                requestPermissions: requestPermissions
+            )
+        }
+        captureLifecycleTask = task
+    }
+
+    private func performRecordingStart(
+        attempt: RecordingStartAttempt,
+        requestPermissions: Bool
+    ) async {
+        if requestPermissions {
             await requestPermissionsFromExplicitAction()
-            guard captureLifecycleGate.accepts(token) else { return }
-            guard captureReadiness == .ready else {
-                statusMessage = readinessMessage
+            guard acceptsRecordingAttempt(attempt) else {
+                await completeRecordingStartAttempt(attempt)
                 return
             }
-            let recordingFolder = outputFolder
-            guard await prepareStorageForNewRecording(in: recordingFolder) else { return }
-            guard captureLifecycleGate.accepts(token) else { return }
-            guard outputFolder == recordingFolder else {
-                statusMessage = "Output folder changed. Start recording again."
-                return
-            }
-            do {
-                try await recorder.start(
-                    selection: resolvedCaptureSelection,
-                    microphoneUID: selectedMicDevice?.uid,
-                    baseFolder: recordingFolder
-                )
-                guard captureLifecycleGate.accepts(token) else { return }
-                isTeamsScreenCaptureRequested = false
-                await refreshTeamsScreenCaptureNow()
-                restartTeamsScreenRefreshIfNeeded()
-                if !isScreenCaptureAllowedByStorage {
-                    await recorder.setScreenCaptureRequested(false)
-                    guard captureLifecycleGate.accepts(token), recorder.isRecording else { return }
+        }
+
+        switch captureReadiness {
+        case .ready:
+            break
+        case .blocked(let message):
+            if acceptsRecordingAttempt(attempt) {
+                statusMessage = message
+                if attempt.ownership == .teamsAutomatic {
+                    teamsAutoMeetingCoordinator.automaticStartBlocked(message)
                 }
-                statusMessage = "Recording"
-                lastHealthReport = nil
-                startStorageMonitoring(folder: recordingFolder)
-            } catch {
-                guard captureLifecycleGate.accepts(token) else { return }
-                statusMessage = error.localizedDescription
             }
+            await completeRecordingStartAttempt(attempt)
+            return
+        case .reconnectRequired:
+            if acceptsRecordingAttempt(attempt) {
+                statusMessage = readinessMessage
+                if attempt.ownership == .teamsAutomatic {
+                    teamsAutoMeetingCoordinator.automaticStartFailed(
+                        readinessMessage
+                    )
+                }
+            }
+            await completeRecordingStartAttempt(attempt)
+            return
+        }
+
+        guard acceptsRecordingAttempt(attempt) else {
+            await completeRecordingStartAttempt(attempt)
+            return
+        }
+        let recordingFolder = outputFolder
+        guard await prepareStorageForNewRecording(in: recordingFolder) else {
+            if acceptsRecordingAttempt(attempt),
+               attempt.ownership == .teamsAutomatic {
+                teamsAutoMeetingCoordinator.automaticStartFailed(statusMessage)
+            }
+            await completeRecordingStartAttempt(attempt)
+            return
+        }
+        guard acceptsRecordingAttempt(attempt) else {
+            await completeRecordingStartAttempt(attempt)
+            return
+        }
+        guard outputFolder == recordingFolder else {
+            if acceptsRecordingAttempt(attempt) {
+                statusMessage = "Output folder changed. Start recording again."
+                if attempt.ownership == .teamsAutomatic {
+                    teamsAutoMeetingCoordinator.automaticStartFailed(
+                        statusMessage
+                    )
+                }
+            }
+            await completeRecordingStartAttempt(attempt)
+            return
+        }
+
+        do {
+            try await recorder.start(
+                selection: resolvedCaptureSelection,
+                microphoneUID: selectedMicDevice?.uid,
+                baseFolder: recordingFolder
+            )
+            guard acceptsRecordingAttempt(attempt) else {
+                await finalizeLateRecordingStart(attempt)
+                return
+            }
+            isTeamsScreenCaptureRequested = false
+            await refreshTeamsScreenCaptureNow()
+            guard acceptsRecordingAttempt(attempt), recorder.isRecording else {
+                await finalizeLateRecordingStart(attempt)
+                return
+            }
+            restartTeamsScreenRefreshIfNeeded()
+            if !isScreenCaptureAllowedByStorage {
+                await recorder.setScreenCaptureRequested(false)
+                guard acceptsRecordingAttempt(attempt), recorder.isRecording else {
+                    await finalizeLateRecordingStart(attempt)
+                    return
+                }
+            }
+            recordingOwnership = attempt.ownership
+            pendingRecordingAttempt = nil
+            statusMessage = "Recording"
+            lastHealthReport = nil
+            startStorageMonitoring(folder: recordingFolder)
+            if attempt.ownership == .teamsAutomatic {
+                teamsAutoMeetingCoordinator.automaticStartSucceeded()
+            }
+        } catch {
+            if acceptsRecordingAttempt(attempt) {
+                statusMessage = error.localizedDescription
+                if attempt.ownership == .teamsAutomatic {
+                    teamsAutoMeetingCoordinator.automaticStartFailed(
+                        error.localizedDescription
+                    )
+                }
+            }
+        }
+        await completeRecordingStartAttempt(attempt)
+    }
+
+    private func acceptsRecordingAttempt(
+        _ attempt: RecordingStartAttempt
+    ) -> Bool {
+        pendingRecordingAttempt?.id == attempt.id
+            && captureLifecycleGate.accepts(attempt.lifecycleToken)
+    }
+
+    private func cancelPendingAutomaticRecordingStart() {
+        guard let attempt = pendingRecordingAttempt,
+              attempt.ownership == .teamsAutomatic else { return }
+        pendingRecordingAttempt = nil
+        guard let stopToken = captureLifecycleGate.cancelAndBeginStop() else {
+            return
+        }
+        cancelledRecordingAttemptStops[attempt.id] = stopToken
+        isCaptureLifecycleWorking = true
+    }
+
+    private func finalizeLateRecordingStart(
+        _ attempt: RecordingStartAttempt
+    ) async {
+        let stoppedDuringAcceptedStart =
+            acceptsRecordingAttempt(attempt) && !recorder.isRecording
+        if recorder.isRecording {
+            await finishRecording(
+                playAfterStop: false,
+                endingOwnership: nil,
+                automaticMeetingEnd: false
+            )
+        }
+        if stoppedDuringAcceptedStart,
+           attempt.ownership == .teamsAutomatic {
+            let message = "Capture stopped during automatic startup."
+            statusMessage = message
+            teamsAutoMeetingCoordinator.automaticStartFailed(message)
+        }
+        await completeRecordingStartAttempt(attempt)
+    }
+
+    private func completeRecordingStartAttempt(
+        _ attempt: RecordingStartAttempt
+    ) async {
+        if pendingRecordingAttempt?.id == attempt.id {
+            pendingRecordingAttempt = nil
+        }
+        if let stopToken = cancelledRecordingAttemptStops.removeValue(
+            forKey: attempt.id
+        ) {
+            finishCaptureLifecycle(stopToken)
+        } else {
+            finishCaptureLifecycle(attempt.lifecycleToken)
         }
     }
 
@@ -609,6 +810,7 @@ final class AppModel: ObservableObject {
             return
         }
 
+        teamsAutoMeetingCoordinator.manualRecordingStarted()
         beginCaptureLifecycle(.test) { [self] token in
             isRunningTestRecording = true
             lastHealthReport = nil
@@ -645,6 +847,7 @@ final class AppModel: ObservableObject {
                     await recorder.setScreenCaptureRequested(false)
                     guard captureLifecycleGate.accepts(token), recorder.isRecording else { return }
                 }
+                recordingOwnership = .manual
                 statusMessage = "Test recording: 10 seconds"
                 startStorageMonitoring(folder: recordingFolder)
             } catch {
@@ -1307,6 +1510,7 @@ final class AppModel: ObservableObject {
                 teamsAutoMeetingCoordinator.handleMeetingState(
                     isInMeeting: true
                 )
+                suppressAutomationForActiveManualRecording()
             }
         } else {
             stopTeamsIntegrationIfUnused()
@@ -1402,6 +1606,15 @@ final class AppModel: ObservableObject {
         teamsAutoMeetingCoordinator.handleMeetingState(
             isInMeeting: state.isInMeeting
         )
+        if state.isInMeeting {
+            suppressAutomationForActiveManualRecording()
+        }
+    }
+
+    private func suppressAutomationForActiveManualRecording() {
+        guard recorder.isRecording,
+              recordingOwnership == .manual else { return }
+        teamsAutoMeetingCoordinator.manualRecordingStarted()
     }
 
     private func publishMicrophoneMuteSnapshot(
@@ -1483,7 +1696,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func finishRecording(playAfterStop: Bool) async {
+    private func finishRecording(
+        playAfterStop: Bool,
+        endingOwnership: RecordingOwnership? = nil,
+        automaticMeetingEnd: Bool = false
+    ) async {
         guard let result = await recorder.stop() else {
             statusMessage = "No active recording."
             return
@@ -1503,6 +1720,9 @@ final class AppModel: ObservableObject {
                 session: session,
                 successStatus: "Test saved and playing: \(result.health.summary)"
             )
+        }
+        if endingOwnership == .teamsAutomatic, automaticMeetingEnd {
+            teamsAutoMeetingCoordinator.automaticStopCompleted()
         }
     }
 
@@ -1747,10 +1967,26 @@ final class AppModel: ObservableObject {
         captureLifecycleTask = task
     }
 
-    private func stopCaptureLifecycle(playAfterStop: Bool) {
+    private func stopCaptureLifecycle(
+        playAfterStop: Bool,
+        automaticMeetingEnd: Bool = false
+    ) {
+        if let pendingAttempt = pendingRecordingAttempt,
+           pendingAttempt.ownership == .teamsAutomatic {
+            if !automaticMeetingEnd {
+                teamsAutoMeetingCoordinator.suppressUntilMeetingEnd()
+            }
+            cancelPendingAutomaticRecordingStart()
+            return
+        }
         guard let token = captureLifecycleGate.cancelAndBeginStop() else {
             return
         }
+        let endingOwnership = recordingOwnership
+        if endingOwnership == .teamsAutomatic, !automaticMeetingEnd {
+            teamsAutoMeetingCoordinator.suppressUntilMeetingEnd()
+        }
+        recordingOwnership = nil
         invalidateStorageMonitoring()
         invalidateTeamsScreenRefresh()
         isTeamsScreenCaptureRequested = false
@@ -1760,7 +1996,11 @@ final class AppModel: ObservableObject {
         isCaptureLifecycleWorking = true
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.finishRecording(playAfterStop: playAfterStop)
+            await self.finishRecording(
+                playAfterStop: playAfterStop,
+                endingOwnership: endingOwnership,
+                automaticMeetingEnd: automaticMeetingEnd
+            )
             self.finishCaptureLifecycle(token)
         }
         captureLifecycleTask = task
@@ -1805,6 +2045,11 @@ final class AppModel: ObservableObject {
                 self.invalidateStorageMonitoring()
                 self.invalidateTeamsScreenRefresh()
                 self.isTeamsScreenCaptureRequested = false
+                guard let ownership = self.recordingOwnership else { return }
+                self.recordingOwnership = nil
+                if ownership == .teamsAutomatic {
+                    self.teamsAutoMeetingCoordinator.suppressUntilMeetingEnd()
+                }
             }
             .store(in: &cancellables)
     }

@@ -134,11 +134,12 @@ final class TeamsAutoMeetingCoordinator {
     }
 
     func manualRecordingStarted() {
+        guard isInMeeting else { return }
         suppressUntilMeetingEnd()
     }
 
     func suppressUntilMeetingEnd() {
-        guard isEnabled, isInMeeting else { return }
+        guard isEnabled else { return }
         switch state {
         case .starting:
             invalidateTimer()
@@ -146,7 +147,7 @@ final class TeamsAutoMeetingCoordinator {
             onCommand?(.cancelAutomaticStart)
             return
         case .automaticRecording, .stopCountdown:
-            return
+            invalidateTimer()
         default:
             invalidateTimer()
         }

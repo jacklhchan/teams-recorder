@@ -16,6 +16,8 @@ OMLX_SETTINGS="${OMLX_SETTINGS:-${HOME}/.omlx/settings.json}"
 OMLX_URL="${OMLX_URL:-http://127.0.0.1:8000}"
 OMLX_ASR_MODEL="${OMLX_ASR_MODEL:-mlx-community--Qwen3-ASR-1.7B-4bit}"
 LANGUAGE="${LANGUAGE:-yue}"
+OMLX_ASR_CONTEXT="${OMLX_ASR_CONTEXT:-香港粵語商務會議，可能夾雜英文、人名、公司名、產品名及技術縮寫。請忠實轉錄錄音內容，不要翻譯或補寫沒有說出的內容。}"
+OMLX_ASR_ROLLING_CONTEXT_CHARACTERS="${OMLX_ASR_ROLLING_CONTEXT_CHARACTERS:-120}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LONGFORM_HELPER="${LONGFORM_HELPER:-${SCRIPT_DIR}/qwen_asr_longform.py}"
 PUBLISH_MODE="${TRANSCRIPTION_PUBLISH_MODE:-replace}"
@@ -68,6 +70,8 @@ OMLX_API_KEY="$API_KEY" "$PYTHON" "$LONGFORM_HELPER" \
     --omlx-url "$OMLX_URL" \
     --model "$OMLX_ASR_MODEL" \
     --language "$LANGUAGE" \
+    --context "$OMLX_ASR_CONTEXT" \
+    --rolling-context-characters "$OMLX_ASR_ROLLING_CONTEXT_CHARACTERS" \
     --publish-mode "$PUBLISH_MODE" \
     2>&1 | tee -a "$LOG_OUTPUT"
 HELPER_STATUS="${PIPESTATUS[0]}"

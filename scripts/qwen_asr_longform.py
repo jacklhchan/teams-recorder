@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 
+DEFAULT_CONTEXT = (
+    "香港粵語商務會議，可能夾雜英文、人名、公司名、產品名及技術縮寫。"
+    "請忠實轉錄錄音內容，不要翻譯或補寫沒有說出的內容。"
+)
+
+
 @dataclass(frozen=True)
 class Interval:
     start: float
@@ -57,6 +63,8 @@ class TranscriptionConfig:
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     curl: str = "curl"
+    context: str = DEFAULT_CONTEXT
+    rolling_context_characters: int = 120
 
 
 class TranscriptionError(RuntimeError):
@@ -65,6 +73,24 @@ class TranscriptionError(RuntimeError):
 
 def emit_line(line: str, stream=None) -> None:
     print(line, file=stream or sys.stdout, flush=True)
+
+
+def build_transcription_prompt(
+    global_context: str,
+    previous_text: str,
+    rolling_context_characters: int,
+) -> str:
+    sections = []
+    if global_context.strip():
+        sections.append(global_context.strip())
+    if previous_text.strip() and rolling_context_characters > 0:
+        tail = previous_text.strip()[-rolling_context_characters:]
+        sections.append(
+            "上一段錄音的轉錄結尾，只用作延續語境及專有名詞參考，"
+            "不要在本段重複輸出：\n"
+            f"{tail}"
+        )
+    return "\n\n".join(sections)
 
 
 def parse_silence_events(log: str) -> list[Interval]:
@@ -121,7 +147,11 @@ def plan_chunks(
     ]
 
 
-def validate_transcript(text: object) -> tuple[bool, str]:
+def validate_transcript(
+    text: object,
+    audio_duration: Optional[float] = None,
+    previous_text: str = "",
+) -> tuple[bool, str]:
     if not isinstance(text, str) or not text.strip():
         return False, "empty-text"
 
@@ -130,6 +160,16 @@ def validate_transcript(text: object) -> tuple[bool, str]:
         return False, "repeated-character-tail"
     if re.search(r"(.{2,8})\1{9,}$", compact):
         return False, "repeated-pattern-tail"
+    if audio_duration and len(compact) / audio_duration > 20.0:
+        return False, "excessive-output-density"
+    if audio_duration and audio_duration >= 30.0 and previous_text.strip():
+        previous_normalized, _ = _normalized_characters(previous_text)
+        current_normalized, _ = _normalized_characters(text)
+        if (
+            len(current_normalized) >= 8
+            and previous_normalized.endswith(current_normalized)
+        ):
+            return False, "prompt-echo-only"
     return True, "ok"
 
 
@@ -375,8 +415,26 @@ class LongformTranscriber:
             min(self.duration, interval.end + self.PADDING),
         )
 
-    def _transcribe_interval(self, raw_interval: Interval) -> None:
+    def _transcribe_interval(
+        self,
+        raw_interval: Interval,
+        use_rolling_context: bool = True,
+    ) -> None:
         request_interval = self._with_padding(raw_interval)
+        previous_text = (
+            self.accepted[-1]["text"]
+            if self.accepted and use_rolling_context
+            else ""
+        )
+        prompt = build_transcription_prompt(
+            self.config.context,
+            previous_text,
+            self.config.rolling_context_characters,
+        )
+        rolling_context_used = bool(
+            previous_text.strip()
+            and self.config.rolling_context_characters > 0
+        )
         self.request_number += 1
         request_id = f"{self.request_number:04d}"
         chunk_path = self.chunks_directory / f"{request_id}.wav"
@@ -406,6 +464,8 @@ class LongformTranscriber:
                 "response_format=json",
                 "-F",
                 f"max_tokens={self.MAX_TOKENS}",
+                "-F",
+                f"prompt={prompt}",
             ]
         )
         http_status = result.stdout.strip()
@@ -424,7 +484,12 @@ class LongformTranscriber:
             )
 
         valid, reason = (
-            validate_transcript(text)
+            validate_transcript(
+                text,
+                audio_duration=request_interval.end
+                - request_interval.start,
+                previous_text=previous_text,
+            )
             if not response_error
             else (False, response_error)
         )
@@ -436,6 +501,8 @@ class LongformTranscriber:
             "request_end": request_interval.end,
             "response": str(response_path),
             "character_count": len(text) if isinstance(text, str) else 0,
+            "prompt_character_count": len(prompt),
+            "rolling_context_used": rolling_context_used,
             "validation": reason,
         }
         self.attempts.append(attempt)
@@ -446,6 +513,15 @@ class LongformTranscriber:
             return
 
         self._write_manifest()
+        if rolling_context_used:
+            self.emit(
+                "STATUS=Retrying failed chunk without previous transcript context"
+            )
+            self._transcribe_interval(
+                raw_interval,
+                use_rolling_context=False,
+            )
+            return
         if (
             raw_interval.end - raw_interval.start
             >= self.MINIMUM_RETRY_DURATION * 2
@@ -592,6 +668,12 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--omlx-url", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--language", default="yue")
+    parser.add_argument("--context", default=DEFAULT_CONTEXT)
+    parser.add_argument(
+        "--rolling-context-characters",
+        type=int,
+        default=120,
+    )
     parser.add_argument(
         "--publish-mode",
         choices=("candidate", "replace"),
@@ -615,6 +697,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         language=args.language,
         api_key=api_key,
         publish_mode=args.publish_mode,
+        context=args.context,
+        rolling_context_characters=args.rolling_context_characters,
         ffmpeg=os.environ.get("FFMPEG", "ffmpeg"),
         ffprobe=os.environ.get("FFPROBE", "ffprobe"),
         curl=os.environ.get("CURL", "curl"),

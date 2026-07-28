@@ -42,6 +42,8 @@ class TranscriptionEntrypointTests(unittest.TestCase):
                 parser.add_argument("--model")
                 parser.add_argument("--language")
                 parser.add_argument("--publish-mode")
+                parser.add_argument("--context")
+                parser.add_argument("--rolling-context-characters")
                 args = parser.parse_args()
                 Path(os.environ["CAPTURE_PATH"]).write_text(
                     json.dumps({
@@ -79,6 +81,8 @@ class TranscriptionEntrypointTests(unittest.TestCase):
                 "FAKE_HELPER_EXIT": str(helper_exit),
                 "TRANSCRIPTION_PUBLISH_MODE": "candidate",
                 "OMLX_LAUNCH_APP": "0",
+                "OMLX_ASR_CONTEXT": "會議術語：oMLX、Qwen3-ASR。",
+                "OMLX_ASR_ROLLING_CONTEXT_CHARACTERS": "320",
             }
         )
         return subprocess.run(
@@ -99,6 +103,11 @@ class TranscriptionEntrypointTests(unittest.TestCase):
         self.assertEqual(invocation["model"], "test-model")
         self.assertEqual(invocation["language"], "yue")
         self.assertEqual(invocation["publish_mode"], "candidate")
+        self.assertEqual(
+            invocation["context"],
+            "會議術語：oMLX、Qwen3-ASR。",
+        )
+        self.assertEqual(invocation["rolling_context_characters"], "320")
         self.assertEqual(invocation["api_key"], "secret-test-key")
         self.assertNotIn(
             "secret-test-key",

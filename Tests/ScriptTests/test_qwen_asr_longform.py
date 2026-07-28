@@ -17,6 +17,7 @@ from qwen_asr_longform import (  # noqa: E402
     TranscriptionConfig,
     TranscriptionError,
     emit_line,
+    build_transcription_prompt,
     merge_transcripts,
     parse_silence_events,
     plan_chunks,
@@ -117,6 +118,47 @@ class ValidationTests(unittest.TestCase):
 
         self.assertEqual((valid, reason), (False, "repeated-pattern-tail"))
 
+    def test_rejects_abnormally_dense_output_for_audio_duration(self):
+        valid, reason = validate_transcript(
+            "".join(f"地址驗證內容{index}。" for index in range(1000)),
+            audio_duration=120.0,
+        )
+
+        self.assertEqual((valid, reason), (False, "excessive-output-density"))
+
+    def test_rejects_output_that_only_echoes_previous_context(self):
+        previous = "較早內容。" + "上一段錄音最後一句重要內容。"
+        valid, reason = validate_transcript(
+            "上一段錄音最後一句重要內容。",
+            audio_duration=120.0,
+            previous_text=previous,
+        )
+
+        self.assertEqual((valid, reason), (False, "prompt-echo-only"))
+
+
+class PromptTests(unittest.TestCase):
+    def test_combines_global_context_with_bounded_previous_transcript_tail(self):
+        prompt = build_transcription_prompt(
+            "香港粵語會議。術語：oMLX、Qwen3-ASR。",
+            "較早內容不應保留。" + "上一段重要內容" * 20,
+            rolling_context_characters=40,
+        )
+
+        self.assertIn("香港粵語會議。術語：oMLX、Qwen3-ASR。", prompt)
+        self.assertIn("上一段錄音的轉錄結尾", prompt)
+        self.assertNotIn("較早內容不應保留", prompt)
+        self.assertTrue(prompt.endswith(("上一段重要內容" * 20)[-40:]))
+
+    def test_omits_previous_segment_label_for_first_chunk(self):
+        prompt = build_transcription_prompt(
+            "香港粵語會議。",
+            "",
+            rolling_context_characters=240,
+        )
+
+        self.assertEqual(prompt, "香港粵語會議。")
+
 
 class MergeTests(unittest.TestCase):
     def test_removes_only_boundary_overlap(self):
@@ -186,7 +228,12 @@ class CoordinatorTests(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
-    def make_config(self, publish_mode="candidate"):
+    def make_config(
+        self,
+        publish_mode="candidate",
+        context="香港粵語會議。術語：oMLX。",
+        rolling_context_characters=240,
+    ):
         return TranscriptionConfig(
             audio=self.audio,
             output_folder=self.output_dir,
@@ -196,6 +243,8 @@ class CoordinatorTests(unittest.TestCase):
             api_key="secret-test-key",
             publish_mode=publish_mode,
             run_id="test-run",
+            context=context,
+            rolling_context_characters=rolling_context_characters,
         )
 
     def test_transcribes_planned_chunks_sequentially_and_publishes_candidate(self):
@@ -224,6 +273,18 @@ class CoordinatorTests(unittest.TestCase):
         flattened = [" ".join(request) for request in runner.transcription_requests]
         self.assertTrue(all("max_tokens=4096" in value for value in flattened))
         self.assertTrue(all("language=yue" in value for value in flattened))
+        prompts = [
+            next(
+                value.removeprefix("prompt=")
+                for value in request
+                if value.startswith("prompt=")
+            )
+            for request in runner.transcription_requests
+        ]
+        self.assertEqual(prompts[0], "香港粵語會議。術語：oMLX。")
+        self.assertIn("第一段正常內容。", prompts[1])
+        self.assertNotIn("第一段正常內容。", prompts[2])
+        self.assertIn("第二段正常內容。", prompts[2])
         self.assertIn("STATUS=Transcribing chunk 3 of 3", emitted)
         self.assertTrue(emitted[-1].startswith("TRANSCRIPT_PATH="))
         self.assertNotIn("secret-test-key", "\n".join(emitted))
@@ -239,6 +300,9 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(len(manifest["accepted"]), 3)
         self.assertEqual(manifest["accepted"][0]["raw_start"], 0.0)
         self.assertEqual(manifest["accepted"][-1]["raw_end"], 250.0)
+        self.assertFalse(manifest["attempts"][0]["rolling_context_used"])
+        self.assertTrue(manifest["attempts"][1]["rolling_context_used"])
+        self.assertGreater(manifest["attempts"][1]["prompt_character_count"], 0)
 
     def test_bisects_only_invalid_chunk_and_merges_valid_retries(self):
         runner = FakeCommandRunner(
@@ -262,6 +326,43 @@ class CoordinatorTests(unittest.TestCase):
             "修復後上半段。\n修復後下半段。",
         )
         self.assertEqual(len(runner.transcription_requests), 3)
+
+    def test_retries_prompt_biased_failure_without_rolling_context_first(self):
+        runner = FakeCommandRunner(
+            self.MODEL,
+            duration=240.0,
+            responses=[
+                {"text": "第一段正常內容。"},
+                {
+                    "text": "".join(
+                        f"異常內容{index}。"
+                        for index in range(1000)
+                    )
+                },
+                {"text": "移除上一段提示後恢復正常。"},
+            ],
+        )
+
+        output = LongformTranscriber(
+            self.make_config(),
+            runner=runner,
+            emit=lambda _: None,
+        ).run()
+
+        self.assertEqual(
+            output.read_text(encoding="utf-8"),
+            "第一段正常內容。\n移除上一段提示後恢復正常。",
+        )
+        prompts = [
+            next(
+                value.removeprefix("prompt=")
+                for value in request
+                if value.startswith("prompt=")
+            )
+            for request in runner.transcription_requests
+        ]
+        self.assertIn("上一段錄音的轉錄結尾", prompts[1])
+        self.assertEqual(prompts[2], "香港粵語會議。術語：oMLX。")
 
     def test_preserves_existing_final_when_minimum_retry_still_invalid(self):
         final = (

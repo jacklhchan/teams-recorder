@@ -19,7 +19,7 @@ enum CaptureEvent: Error, Equatable {
     case streamStoppedByUser
     case streamStoppedBySystem
     case streamFailed
-    case screenTargetLost
+    case screenTargetLost(CaptureFilterRevision)
     case screenFrameUnavailable(CaptureFilterRevision)
     case screenCaptureFailed
 }
@@ -1463,7 +1463,7 @@ final class ScreenCaptureSource: NSObject {
             return
         }
         guard let update = requestWindowFallback(session, snapshot: snapshot) else { return }
-        session.output.enqueue(event: .screenTargetLost)
+        session.output.enqueue(event: .screenTargetLost(snapshot.revision))
         _ = try? await applyFilterUpdate(update, to: session)
     }
 

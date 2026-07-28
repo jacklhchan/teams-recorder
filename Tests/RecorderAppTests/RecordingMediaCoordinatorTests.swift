@@ -425,6 +425,142 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         XCTAssertTrue(fixture.mux.videoTimes.contains(CMTime(value: 14_400, timescale: 48_000)))
     }
 
+    func testAcceptedFrameIsAnnouncedOnceForExpectedRevisionAfterRealAppend() throws {
+        let state = ManualExecutor()
+        let eventExecutor = ManualExecutor()
+        let fixture = try makeFixture(executor: state, eventExecutor: eventExecutor)
+        let events = EventCollector()
+        fixture.coordinator.setVideoEventHandler { events.append($0) }
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: fixture.revision,
+            window: nil
+        )
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 19_200))
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 4_800, timescale: 48_000),
+            revision: fixture.revision
+        ))
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 9_600, timescale: 48_000),
+            revision: fixture.revision
+        ))
+
+        state.runAll()
+        eventExecutor.runAll()
+
+        XCTAssertEqual(events.acceptedFrameRevisions, [fixture.revision])
+        XCTAssertEqual(
+            events.events.filter { $0.acceptedFrameRevision != nil }.first?.filterRevision,
+            fixture.revision
+        )
+    }
+
+    func testReplacementRevisionResetsAcceptedAnnouncementAndStaleFrameCannotAnnounce() throws {
+        let state = ManualExecutor()
+        let eventExecutor = ManualExecutor()
+        let fixture = try makeFixture(executor: state, eventExecutor: eventExecutor)
+        let replacement = CaptureFilterRevision(sessionGeneration: 7, revision: 4)
+        let events = EventCollector()
+        fixture.coordinator.setVideoEventHandler { events.append($0) }
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: fixture.revision,
+            window: nil
+        )
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 28_800))
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 4_800, timescale: 48_000),
+            revision: fixture.revision
+        ))
+        state.runAll()
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: replacement,
+            window: nil
+        )
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 9_600, timescale: 48_000),
+            revision: fixture.revision
+        ))
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 14_400, timescale: 48_000),
+            revision: replacement
+        ))
+
+        state.runAll()
+        eventExecutor.runAll()
+
+        XCTAssertEqual(events.acceptedFrameRevisions, [fixture.revision, replacement])
+    }
+
+    func testDroppedRealFrameDoesNotAnnounceAcceptedFrame() throws {
+        let state = ManualExecutor()
+        let eventExecutor = ManualExecutor()
+        let fixture = try makeFixture(executor: state, eventExecutor: eventExecutor)
+        let events = EventCollector()
+        fixture.coordinator.setVideoEventHandler { events.append($0) }
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: fixture.revision,
+            window: nil
+        )
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 9_600))
+        state.runAll()
+        fixture.mux.videoErrors = [MuxedMediaWriterError.videoAppendDropped]
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: CMTime(value: 4_800, timescale: 48_000),
+            revision: fixture.revision
+        ))
+
+        state.runAll()
+        eventExecutor.runAll()
+
+        XCTAssertTrue(events.acceptedFrameRevisions.isEmpty)
+    }
+
+    func testBlackAndInvalidFramesDoNotAnnounceAcceptedFrame() throws {
+        let state = ManualExecutor()
+        let eventExecutor = ManualExecutor()
+        let fixture = try makeFixture(executor: state, eventExecutor: eventExecutor)
+        let events = EventCollector()
+        fixture.coordinator.setVideoEventHandler { events.append($0) }
+        fixture.coordinator.setScreenCaptureRequested(
+            true,
+            expectedRevision: fixture.revision,
+            window: nil
+        )
+        fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 9_600))
+        fixture.coordinator.enqueueVideo(try videoFrame(
+            time: .invalid,
+            revision: fixture.revision
+        ))
+
+        state.runAll()
+        eventExecutor.runAll()
+
+        XCTAssertTrue(events.acceptedFrameRevisions.isEmpty)
+    }
+
+    func testUnavailableSourceWithoutExpectedRevisionDoesNotEmitStall() throws {
+        let state = ManualExecutor()
+        let eventExecutor = ManualExecutor()
+        let fixture = try makeFixture(executor: state, eventExecutor: eventExecutor)
+        let events = EventCollector()
+        fixture.coordinator.setVideoEventHandler { events.append($0) }
+        fixture.coordinator.setScreenCaptureRequested(
+            false,
+            expectedRevision: nil,
+            window: nil
+        )
+        fixture.coordinator.markScreenSourceUnavailable()
+
+        state.runAll()
+        eventExecutor.runAll()
+
+        XCTAssertFalse(events.kinds.contains(.sourceStalled))
+    }
+
     func testUnavailableSourceClosesThenMatchingFrameRecovers() async throws {
         let fixture = try makeFixture()
         let events = EventCollector()
@@ -439,6 +575,14 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
 
         XCTAssertTrue(events.kinds.contains(.sourceStalled))
         XCTAssertTrue(events.kinds.contains(.sourceRecovered))
+        XCTAssertEqual(
+            events.events.filter { $0.kind == .sourceStalled }.first?.filterRevision,
+            fixture.revision
+        )
+        XCTAssertEqual(
+            events.events.filter { $0.kind == .sourceRecovered }.last?.filterRevision,
+            fixture.revision
+        )
     }
 
     func testDroppedRecoveryFrameDoesNotEmitSourceRecovered() async throws {
@@ -473,7 +617,9 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
         eventExecutor.runAll()
 
         XCTAssertTrue(events.kinds.contains(.sourceStalled))
-        XCTAssertFalse(events.kinds.contains(.sourceRecovered))
+        XCTAssertFalse(events.events.contains {
+            $0.kind == .sourceRecovered && $0.acceptedFrameRevision == nil
+        })
     }
 
     func testEscapedOutputURLsAreRejectedBeforeWriterFactories() throws {
@@ -1041,6 +1187,11 @@ private final class EventCollector: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var events: [RecordingVideoEvent] = []
     var kinds: [RecordingVideoEventKind] { lock.lock(); defer { lock.unlock() }; return events.map(\.kind) }
+    var acceptedFrameRevisions: [CaptureFilterRevision] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events.compactMap(\.acceptedFrameRevision)
+    }
     func append(_ event: RecordingVideoEvent) { lock.lock(); events.append(event); lock.unlock() }
 }
 

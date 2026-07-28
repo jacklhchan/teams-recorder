@@ -104,7 +104,9 @@ final class RecordingEngine: ObservableObject {
     private var teamsManualWindowOverride: TeamsWindowIdentity?
     private var screenCaptureRequested = false
     private var screenTarget: TeamsWindowDescriptor?
+    private(set) var resolvedTeamsManualWindowIdentity: TeamsWindowIdentity?
     private var activeFilterRevision = CaptureFilterRevision(sessionGeneration: 0, revision: 0)
+    private var activeScreenFilterRevision: CaptureFilterRevision?
     private var screenToggleGeneration: UInt64 = 0
     private var hasHardScreenFailure = false
     private var hasCountedMuxFallback = false
@@ -569,9 +571,13 @@ final class RecordingEngine: ObservableObject {
     ) async {
         screenToggleGeneration &+= 1
         let generation = screenToggleGeneration
+        let previousManualOverride = teamsManualWindowOverride
         teamsSourceProcessID = selectedTeamsProcessID
         teamsMeetingActive = meetingActive
         teamsManualWindowOverride = manualOverride
+        if manualOverride == nil || manualOverride != previousManualOverride {
+            resolvedTeamsManualWindowIdentity = nil
+        }
         teamsWindowResolver.selectManualOverride(manualOverride)
         do {
             let windows = try await captureSource.refreshTeamsWindows().filter {
@@ -589,12 +595,23 @@ final class RecordingEngine: ObservableObject {
                     firstSeenAt: now, lastSurfacedAt: window.isOnScreen ? now : nil
                 )
             }
+            let previousState = meetingScreenCaptureState
+            let previousTarget = screenTarget
             switch teamsWindowResolver.observe(windows, meetingActive: meetingActive, now: now) {
             case let .ready(match):
+                if manualOverride != nil {
+                    teamsManualWindowOverride = match.window.identity
+                    resolvedTeamsManualWindowIdentity = match.window.identity
+                }
                 screenTarget = match.window
-                meetingScreenCaptureState = .ready(match.window)
                 if screenCaptureRequested {
-                    await applyScreenTarget(match.window, generation: generation)
+                    await applyScreenTarget(
+                        match.window,
+                        generation: generation,
+                        previousState: previousState
+                    )
+                } else {
+                    meetingScreenCaptureState = .ready(match.window)
                 }
             case let .ambiguous(descriptors):
                 screenTarget = nil
@@ -604,7 +621,18 @@ final class RecordingEngine: ObservableObject {
                 }
             case .waiting:
                 screenTarget = nil
-                meetingScreenCaptureState = .waiting([])
+                let previousLostTarget: TeamsWindowDescriptor?
+                if case let .targetLost(target) = previousState {
+                    previousLostTarget = target
+                } else {
+                    previousLostTarget = nil
+                }
+                if screenCaptureRequested,
+                   previousTarget != nil || previousLostTarget != nil {
+                    meetingScreenCaptureState = .targetLost(previousLostTarget ?? previousTarget)
+                } else {
+                    meetingScreenCaptureState = .waiting([])
+                }
                 if screenCaptureRequested {
                     await applyWaitingScreenTarget(generation: generation)
                 }
@@ -622,8 +650,10 @@ final class RecordingEngine: ObservableObject {
         teamsSourceProcessID = nil
         teamsMeetingActive = false
         teamsManualWindowOverride = nil
+        resolvedTeamsManualWindowIdentity = nil
         teamsWindowCandidates = []
         screenTarget = nil
+        activeScreenFilterRevision = nil
         if !isRecording {
             meetingScreenCaptureState = .off
         }
@@ -637,8 +667,10 @@ final class RecordingEngine: ObservableObject {
         if !requested {
             coordinator.setScreenCaptureRequested(false, expectedRevision: nil, window: nil)
             do {
-                _ = try await captureSource.updateVideoTarget(nil)
+                let revision = try await captureSource.updateVideoTarget(nil)
                 guard generation == screenToggleGeneration else { return }
+                activeFilterRevision = revision
+                activeScreenFilterRevision = nil
                 screenTarget = nil
                 meetingScreenCaptureState = .off
             } catch {
@@ -665,17 +697,23 @@ final class RecordingEngine: ObservableObject {
         }
     }
 
-    private func applyScreenTarget(_ target: TeamsWindowDescriptor, generation: UInt64) async {
+    private func applyScreenTarget(
+        _ target: TeamsWindowDescriptor,
+        generation: UInt64,
+        previousState: MeetingScreenCaptureState? = nil
+    ) async {
         guard let coordinator = mediaCoordinator,
               isRecording,
               !isStopping else { return }
         do {
+            let previousRevision = activeFilterRevision
             let revision = try await captureSource.updateVideoTarget(target.identity)
             guard generation == screenToggleGeneration,
                   screenCaptureRequested,
                   isRecording,
                   !isStopping else { return }
             activeFilterRevision = revision
+            activeScreenFilterRevision = revision
             coordinator.setScreenCaptureRequested(
                 true,
                 expectedRevision: revision,
@@ -685,7 +723,23 @@ final class RecordingEngine: ObservableObject {
                     title: target.title
                 )
             )
-            meetingScreenCaptureState = .capturing(target)
+            if revision == previousRevision {
+                switch previousState {
+                case let .frameUnavailable(previousTarget)
+                    where previousTarget.identity == target.identity:
+                    meetingScreenCaptureState = .frameUnavailable(target)
+                case let .capturing(previousTarget)
+                    where previousTarget.identity == target.identity:
+                    meetingScreenCaptureState = .capturing(target)
+                case let .awaitingFrames(previousTarget)
+                    where previousTarget.identity == target.identity:
+                    meetingScreenCaptureState = .awaitingFrames(target)
+                default:
+                    meetingScreenCaptureState = .awaitingFrames(target)
+                }
+            } else {
+                meetingScreenCaptureState = .awaitingFrames(target)
+            }
         } catch {
             guard generation == screenToggleGeneration else { return }
             meetingScreenCaptureState = .failed(error.localizedDescription)
@@ -697,12 +751,14 @@ final class RecordingEngine: ObservableObject {
         guard let coordinator = mediaCoordinator,
               isRecording,
               !isStopping else { return }
+        activeScreenFilterRevision = nil
         do {
-            _ = try await captureSource.updateVideoTarget(nil)
+            let revision = try await captureSource.updateVideoTarget(nil)
             guard generation == screenToggleGeneration,
                   screenCaptureRequested,
                   isRecording,
                   !isStopping else { return }
+            activeFilterRevision = revision
             coordinator.setScreenCaptureRequested(true, expectedRevision: nil, window: nil)
         } catch {
             guard generation == screenToggleGeneration else { return }
@@ -762,12 +818,16 @@ final class RecordingEngine: ObservableObject {
 
     private func receive(_ event: CaptureEvent, ticket: RecordingCallbackTicket) {
         guard ticket.sourceSessionID == sourceSessionID else { return }
-        if case let .screenFrameUnavailable(revision) = event,
-           (!isRecording
-            || ticket.recordingEpoch != recordingEpoch
-            || !screenCaptureRequested
-            || activeFilterRevision != revision) {
-            return
+        switch event {
+        case let .screenTargetLost(revision), let .screenFrameUnavailable(revision):
+            guard isRecording,
+                  ticket.recordingEpoch == recordingEpoch,
+                  screenCaptureRequested,
+                  activeScreenFilterRevision == revision else {
+                return
+            }
+        default:
+            break
         }
         captureStatus = CaptureStatusMapper.status(for: event)
 
@@ -793,10 +853,13 @@ final class RecordingEngine: ObservableObject {
             terminateSourceSession(sessionID: ticket.sourceSessionID)
         case .microphoneSilence:
             break
-        case .screenTargetLost:
-            if isRecording, ticket.recordingEpoch == recordingEpoch {
+        case let .screenTargetLost(revision):
+            if isRecording,
+               ticket.recordingEpoch == recordingEpoch,
+               screenCaptureRequested,
+               activeFilterRevision == revision {
                 mediaCoordinator?.markScreenSourceUnavailable()
-                meetingScreenCaptureState = .waiting([])
+                meetingScreenCaptureState = .targetLost(screenTarget)
             }
         case let .screenFrameUnavailable(revision):
             if isRecording,
@@ -804,7 +867,11 @@ final class RecordingEngine: ObservableObject {
                screenCaptureRequested,
                activeFilterRevision == revision {
                 mediaCoordinator?.markScreenSourceUnavailable()
-                meetingScreenCaptureState = .waiting([])
+                if let screenTarget {
+                    meetingScreenCaptureState = .frameUnavailable(screenTarget)
+                } else {
+                    meetingScreenCaptureState = .waiting([])
+                }
             }
         case .screenCaptureFailed:
             if isRecording, ticket.recordingEpoch == recordingEpoch {
@@ -822,10 +889,22 @@ final class RecordingEngine: ObservableObject {
               videoEvent.recordingEpoch == recordingEpoch,
               isRecording else { return }
         switch videoEvent.kind {
+        case .sourceStalled, .sourceRecovered:
+            guard screenCaptureRequested,
+                  let revision = videoEvent.filterRevision,
+                  revision == activeScreenFilterRevision,
+                  videoEvent.acceptedFrameRevision == nil
+                    || videoEvent.acceptedFrameRevision == revision else {
+                return
+            }
+        case .droppedFrames, .muxFailed:
+            break
+        }
+        switch videoEvent.kind {
         case .sourceStalled:
             currentHealth.videoStallEvents += 1
-            if !hasHardScreenFailure {
-                meetingScreenCaptureState = .waiting(screenTarget.map { [$0] } ?? [])
+            if !hasHardScreenFailure, let screenTarget {
+                meetingScreenCaptureState = .frameUnavailable(screenTarget)
             }
         case .sourceRecovered:
             if !hasHardScreenFailure, let screenTarget {

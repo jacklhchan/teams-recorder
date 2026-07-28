@@ -119,7 +119,189 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await fixture.model.setTeamsScreenCaptureRequested(true)
 
         XCTAssertEqual(fixture.model.teamsManualWindowIdentity, candidate.identity)
-        XCTAssertEqual(fixture.model.teamsScreenStatusText, TeamsScreenStatusText.capturing)
+        XCTAssertEqual(fixture.model.teamsScreenStatusText, TeamsScreenStatusText.awaitingFrames)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testManualSelectionFollowsRecreatedWindowOnNextRefresh() async throws {
+        let title = "Shared content | Customer presentation"
+        let original = teamsWindow(id: 6, title: title)
+        let replacement = teamsWindow(id: 27, title: title)
+        let fixture = makeFixture(provider: .normal, windows: [original])
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.selectTeamsScreenCaptureWindow(original.identity)
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+
+        fixture.source.windows = [replacement]
+        await fixture.model.refreshTeamsScreenCaptureNow()
+
+        XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(
+            fixture.source.videoTargets.compactMap { $0 }.last,
+            replacement.identity
+        )
+        XCTAssertEqual(fixture.model.teamsManualWindowIdentity, replacement.identity)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testManualSelectionKeepsReplacementIdentityAcrossFilterFailures() async throws {
+        let title = "Shared content | Customer presentation"
+        let original = teamsWindow(id: 32, title: title)
+        let replacement = teamsWindow(id: 33, title: title)
+        let fixture = makeFixture(provider: .normal, windows: [original])
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.selectTeamsScreenCaptureWindow(original.identity)
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+        fixture.source.videoTargetErrors[2] = StorageTestError.unavailable
+        fixture.source.videoTargetErrors[3] = StorageTestError.unavailable
+
+        fixture.source.windows = [replacement]
+        await fixture.model.refreshTeamsScreenCaptureNow()
+
+        XCTAssertEqual(fixture.model.teamsManualWindowIdentity, replacement.identity)
+        XCTAssertEqual(fixture.model.teamsScreenStatusText, TeamsScreenStatusText.unavailable)
+
+        await fixture.model.refreshTeamsScreenCaptureNow()
+
+        XCTAssertEqual(fixture.source.videoTargets.compactMap { $0 }.last, replacement.identity)
+        XCTAssertEqual(fixture.model.teamsManualWindowIdentity, replacement.identity)
+        XCTAssertEqual(fixture.model.teamsScreenStatusText, TeamsScreenStatusText.unavailable)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testUnresolvedManualSelectionCannotRevertToPriorResolvedIdentity() async throws {
+        let original = teamsWindow(id: 34, title: "Shared content | Presentation A")
+        let requested = teamsWindow(id: 35, title: "Shared content | Presentation B")
+        let fixture = makeFixture(provider: .normal, windows: [original])
+        await selectTeams(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.selectTeamsScreenCaptureWindow(original.identity)
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+        XCTAssertEqual(fixture.model.teamsManualWindowIdentity, original.identity)
+
+        fixture.source.windows = [requested]
+        await fixture.model.refreshTeamsScreenCaptureNow()
+        XCTAssertTrue(fixture.model.teamsScreenCaptureCandidates.contains {
+            $0.identity == requested.identity
+        })
+        fixture.source.windows = []
+        await fixture.model.selectTeamsScreenCaptureWindow(requested.identity)
+
+        XCTAssertEqual(fixture.model.teamsManualWindowIdentity, requested.identity)
+        XCTAssertEqual(fixture.model.teamsScreenStatusText, TeamsScreenStatusText.reconnecting)
+
+        fixture.source.windows = [original]
+        await fixture.model.refreshTeamsScreenCaptureNow()
+
+        XCTAssertEqual(fixture.model.teamsManualWindowIdentity, requested.identity)
+        XCTAssertNil(fixture.source.videoTargets.last ?? nil)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testManualSelectionDoesNotRequireTeamsMeetingAPIState() async throws {
+        let window = teamsWindow(id: 31, title: "Shared content | Customer presentation")
+        let fixture = makeFixture(provider: .normal, windows: [window])
+        await selectTeams(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+
+        await fixture.model.selectTeamsScreenCaptureWindow(window.identity)
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+
+        XCTAssertEqual(fixture.source.videoTargets.compactMap { $0 }.last, window.identity)
+        XCTAssertEqual(fixture.model.teamsScreenStatusText, "Waiting for Teams screen frames")
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testUnavailableSelectedWindowShowsFramesUnavailableInsteadOfMissingWindow() async throws {
+        let window = teamsWindow(id: 28, title: "Shared content | Customer presentation")
+        let fixture = makeFixture(provider: .normal, windows: [window])
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.selectTeamsScreenCaptureWindow(window.identity)
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+        let revision = try XCTUnwrap(fixture.source.lastVideoRevision)
+
+        fixture.source.emit(.screenFrameUnavailable(revision))
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(
+            fixture.model.teamsScreenStatusText,
+            "Teams window found - frames unavailable"
+        )
+        XCTAssertTrue(fixture.engine.isSystemCaptureConnected)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testLostSelectedWindowShowsReconnectingInsteadOfMissingWindow() async throws {
+        let window = teamsWindow(id: 29, title: "Shared content | Customer presentation")
+        let fixture = makeFixture(provider: .normal, windows: [window])
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.selectTeamsScreenCaptureWindow(window.identity)
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+        let revision = try XCTUnwrap(fixture.source.lastVideoRevision)
+
+        fixture.source.emit(.screenTargetLost(revision))
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(
+            fixture.model.teamsScreenStatusText,
+            "Teams screen changed - reconnecting"
+        )
+        XCTAssertTrue(fixture.engine.isSystemCaptureConnected)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testLostManualWindowKeepsReconnectingStatusAcrossRefresh() async throws {
+        let window = teamsWindow(id: 30, title: "Shared content | Customer presentation")
+        let fixture = makeFixture(provider: .normal, windows: [window])
+        await selectTeams(in: fixture)
+        await setMeetingActive(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+        await fixture.model.selectTeamsScreenCaptureWindow(window.identity)
+        await fixture.model.setTeamsScreenCaptureRequested(true)
+        let revision = try XCTUnwrap(fixture.source.lastVideoRevision)
+
+        fixture.source.emit(.screenTargetLost(revision))
+        await Task.yield()
+        await Task.yield()
+        fixture.source.windows = []
+        await fixture.model.refreshTeamsScreenCaptureNow()
+
+        XCTAssertEqual(
+            fixture.model.teamsScreenStatusText,
+            "Teams screen changed - reconnecting"
+        )
+        XCTAssertTrue(fixture.engine.isSystemCaptureConnected)
         fixture.model.startOrStop()
         await waitUntil { !fixture.engine.isRecording }
     }
@@ -235,7 +417,7 @@ final class AppModelScreenCaptureTests: XCTestCase {
         )))
         await waitUntil {
             fixture.source.teamsRefreshCount > refreshBaseline &&
-                fixture.model.teamsScreenStatusText == TeamsScreenStatusText.capturing
+                fixture.model.teamsScreenStatusText == TeamsScreenStatusText.awaitingFrames
         }
 
         XCTAssertEqual(
@@ -567,11 +749,12 @@ final class AppModelScreenCaptureTests: XCTestCase {
 
     private func teamsWindow(
         id: CGWindowID,
-        processID: pid_t = 42
+        processID: pid_t = 42,
+        title: String? = nil
     ) -> TeamsWindowSnapshot {
         TeamsWindowSnapshot(
             identity: .init(processID: processID, windowID: id),
-            title: "Teams call \(id)",
+            title: title ?? "Teams call \(id)",
             frame: CGRect(x: 0, y: 0, width: 1280, height: 720),
             isOnScreen: true,
             layer: 0
@@ -754,7 +937,14 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
     private(set) var teamsRefreshCount = 0
     var windows: [TeamsWindowSnapshot] = []
     var applications: [CaptureApplication] = []
+    var videoTargetErrors: [Int: Error] = [:]
     private(set) var videoTargets: [TeamsWindowIdentity?] = []
+    private var onEvent: ((CaptureEvent) -> Void)?
+
+    var lastVideoRevision: CaptureFilterRevision? {
+        guard !videoTargets.isEmpty else { return nil }
+        return .init(sessionGeneration: 0, revision: UInt64(videoTargets.count))
+    }
 
     func refreshContent() async throws -> [CaptureApplication] { applications }
     func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] {
@@ -764,6 +954,9 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
     func reconnect(selection _: ResolvedCaptureSelection) async throws {}
     func updateVideoTarget(_ target: TeamsWindowIdentity?) async throws -> CaptureFilterRevision {
         videoTargets.append(target)
+        if let error = videoTargetErrors[videoTargets.count] {
+            throw error
+        }
         return .init(sessionGeneration: 0, revision: UInt64(videoTargets.count))
     }
     func start(
@@ -771,11 +964,16 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
         microphoneUID _: String?,
         onAudio _: @escaping (AudioFrameBlock) -> Void,
         onVideo _: @escaping (ScreenVideoFrame) -> Void,
-        onEvent _: @escaping (CaptureEvent) -> Void
+        onEvent: @escaping (CaptureEvent) -> Void
     ) async throws {
         startCount += 1
+        self.onEvent = onEvent
     }
     func stop() async { stopCount += 1 }
+
+    func emit(_ event: CaptureEvent) {
+        onEvent?(event)
+    }
 }
 
 private final class ScreenTestTeamsClient: TeamsMuteSyncing {

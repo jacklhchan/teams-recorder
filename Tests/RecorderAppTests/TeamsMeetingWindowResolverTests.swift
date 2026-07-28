@@ -44,6 +44,201 @@ final class TeamsMeetingWindowResolverTests: XCTestCase {
         assertReady(resolver.observe([snapshot(identity: first), snapshot(identity: manual, width: 1_000, height: 700)], meetingActive: true, now: meetingStarted.addingTimeInterval(1)), identity: manual)
     }
 
+    func testManualOverrideResolvesVisibleWindowWithoutMeetingAPIState() {
+        var resolver = TeamsMeetingWindowResolver()
+        let manual = TeamsWindowIdentity(processID: 7, windowID: 11)
+        let window = snapshot(
+            identity: manual,
+            title: "Shared content | Customer presentation",
+            width: 1_600,
+            height: 900
+        )
+
+        _ = resolver.observe([window], meetingActive: false, now: beforeMeeting)
+        resolver.selectManualOverride(manual)
+
+        assertReady(
+            resolver.observe(
+                [window],
+                meetingActive: false,
+                now: beforeMeeting.addingTimeInterval(1)
+            ),
+            identity: manual
+        )
+    }
+
+    func testManualSharedContentOverrideRebindsReplacementWindowWithSameTitle() {
+        var resolver = TeamsMeetingWindowResolver()
+        let original = TeamsWindowIdentity(processID: 7, windowID: 11)
+        let replacement = TeamsWindowIdentity(processID: 7, windowID: 27)
+        let title = "Shared content | Customer presentation"
+
+        _ = resolver.observe(
+            [snapshot(identity: original, title: title, width: 1_600, height: 900)],
+            meetingActive: true,
+            now: meetingStarted
+        )
+        resolver.selectManualOverride(original)
+
+        assertReady(
+            resolver.observe(
+                [snapshot(identity: replacement, title: title, width: 1_600, height: 900)],
+                meetingActive: true,
+                now: meetingStarted.addingTimeInterval(1)
+            ),
+            identity: replacement
+        )
+    }
+
+    func testExactManualMatchRefreshesTitleBeforeReplacementRebind() {
+        var resolver = TeamsMeetingWindowResolver()
+        let original = TeamsWindowIdentity(processID: 7, windowID: 11)
+        let replacement = TeamsWindowIdentity(processID: 7, windowID: 27)
+
+        _ = resolver.observe(
+            [snapshot(identity: original, title: "Shared content | Presentation A")],
+            meetingActive: true,
+            now: meetingStarted
+        )
+        resolver.selectManualOverride(original)
+        assertReady(
+            resolver.observe(
+                [snapshot(identity: original, title: "Shared content | Presentation B")],
+                meetingActive: true,
+                now: meetingStarted.addingTimeInterval(1)
+            ),
+            identity: original
+        )
+
+        assertReady(
+            resolver.observe(
+                [snapshot(identity: replacement, title: "Shared content | Presentation B")],
+                meetingActive: true,
+                now: meetingStarted.addingTimeInterval(2)
+            ),
+            identity: replacement
+        )
+    }
+
+    func testManualOverrideDoesNotRebindSameTitleFromDifferentProcess() {
+        var resolver = TeamsMeetingWindowResolver()
+        let original = TeamsWindowIdentity(processID: 7, windowID: 11)
+        let otherProcess = TeamsWindowIdentity(processID: 8, windowID: 27)
+        let title = "Shared content | Customer presentation"
+
+        _ = resolver.observe(
+            [snapshot(identity: original, title: title)],
+            meetingActive: true,
+            now: meetingStarted
+        )
+        resolver.selectManualOverride(original)
+
+        XCTAssertEqual(
+            resolver.observe(
+                [snapshot(identity: otherProcess, title: title)],
+                meetingActive: true,
+                now: meetingStarted.addingTimeInterval(1)
+            ),
+            .waiting
+        )
+    }
+
+    func testManualOverrideNormalizesCaseAndSurroundingWhitespaceForReplacement() {
+        var resolver = TeamsMeetingWindowResolver()
+        let original = TeamsWindowIdentity(processID: 7, windowID: 11)
+        let replacement = TeamsWindowIdentity(processID: 7, windowID: 27)
+
+        _ = resolver.observe(
+            [snapshot(identity: original, title: "  Shared Content | Customer Presentation  ")],
+            meetingActive: true,
+            now: meetingStarted
+        )
+        resolver.selectManualOverride(original)
+
+        assertReady(
+            resolver.observe(
+                [snapshot(identity: replacement, title: "shared content | customer presentation")],
+                meetingActive: true,
+                now: meetingStarted.addingTimeInterval(1)
+            ),
+            identity: replacement
+        )
+    }
+
+    func testManualOverrideLearnsTitleWhenSelectedBeforeFirstObservation() {
+        var resolver = TeamsMeetingWindowResolver()
+        let original = TeamsWindowIdentity(processID: 7, windowID: 11)
+        let replacement = TeamsWindowIdentity(processID: 7, windowID: 27)
+        let title = "Shared content | Customer presentation"
+        resolver.selectManualOverride(original)
+
+        assertReady(
+            resolver.observe(
+                [snapshot(identity: original, title: title, width: 1_600, height: 900)],
+                meetingActive: false,
+                now: beforeMeeting
+            ),
+            identity: original
+        )
+        assertReady(
+            resolver.observe(
+                [snapshot(identity: replacement, title: title, width: 1_600, height: 900)],
+                meetingActive: false,
+                now: beforeMeeting.addingTimeInterval(1)
+            ),
+            identity: replacement
+        )
+    }
+
+    func testManualOverrideDoesNotRebindAmbiguousSameTitleReplacements() {
+        var resolver = TeamsMeetingWindowResolver()
+        let original = TeamsWindowIdentity(processID: 7, windowID: 11)
+        let firstReplacement = TeamsWindowIdentity(processID: 7, windowID: 27)
+        let secondReplacement = TeamsWindowIdentity(processID: 7, windowID: 28)
+        let title = "Shared content | Customer presentation"
+
+        _ = resolver.observe(
+            [snapshot(identity: original, title: title)],
+            meetingActive: true,
+            now: meetingStarted
+        )
+        resolver.selectManualOverride(original)
+
+        XCTAssertEqual(
+            resolver.observe(
+                [
+                    snapshot(identity: firstReplacement, title: title),
+                    snapshot(identity: secondReplacement, title: title)
+                ],
+                meetingActive: true,
+                now: meetingStarted.addingTimeInterval(1)
+            ),
+            .waiting
+        )
+    }
+
+    func testManualOverrideDoesNotRebindDifferentWindowTitle() {
+        var resolver = TeamsMeetingWindowResolver()
+        let original = TeamsWindowIdentity(processID: 7, windowID: 11)
+        let unrelated = TeamsWindowIdentity(processID: 7, windowID: 27)
+
+        _ = resolver.observe(
+            [snapshot(identity: original, title: "Shared content | Customer presentation")],
+            meetingActive: true,
+            now: meetingStarted
+        )
+        resolver.selectManualOverride(original)
+
+        XCTAssertEqual(
+            resolver.observe(
+                [snapshot(identity: unrelated, title: "Microsoft Teams")],
+                meetingActive: true,
+                now: meetingStarted.addingTimeInterval(1)
+            ),
+            .waiting
+        )
+    }
+
     func testPrefersWindowFirstSeenAfterMeetingBegan() {
         var resolver = TeamsMeetingWindowResolver()
         let existing = TeamsWindowIdentity(processID: 7, windowID: 10)

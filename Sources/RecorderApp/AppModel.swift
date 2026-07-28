@@ -477,6 +477,9 @@ final class AppModel: ObservableObject {
         case .off: return TeamsScreenStatusText.off
         case .ready: return TeamsScreenStatusText.ready
         case .capturing: return TeamsScreenStatusText.capturing
+        case .awaitingFrames: return TeamsScreenStatusText.awaitingFrames
+        case .frameUnavailable: return TeamsScreenStatusText.framesUnavailable
+        case .targetLost: return TeamsScreenStatusText.reconnecting
         case .waiting:
             return recorder.isRecording && !isTeamsScreenCaptureRequested
                 ? TeamsScreenStatusText.off : TeamsScreenStatusText.waiting
@@ -512,7 +515,14 @@ final class AppModel: ObservableObject {
             manualOverride: teamsManualWindowIdentity
         )
         guard generation == teamsScreenRefreshGeneration else { return }
+        reconcileTeamsManualWindowIdentity()
         refreshTeamsScreenCandidateProjection()
+    }
+
+    private func reconcileTeamsManualWindowIdentity() {
+        guard teamsManualWindowIdentity != nil,
+              let resolvedIdentity = recorder.resolvedTeamsManualWindowIdentity else { return }
+        teamsManualWindowIdentity = resolvedIdentity
     }
 
     private var selectedTeamsApplication: CaptureApplication? {

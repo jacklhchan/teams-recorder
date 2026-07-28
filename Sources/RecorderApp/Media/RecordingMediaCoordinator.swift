@@ -51,6 +51,22 @@ struct RecordingVideoEvent: Equatable, Sendable {
     let sourceSessionID: UUID
     let recordingEpoch: UInt64
     let kind: RecordingVideoEventKind
+    let filterRevision: CaptureFilterRevision?
+    let acceptedFrameRevision: CaptureFilterRevision?
+
+    init(
+        sourceSessionID: UUID,
+        recordingEpoch: UInt64,
+        kind: RecordingVideoEventKind,
+        filterRevision: CaptureFilterRevision? = nil,
+        acceptedFrameRevision: CaptureFilterRevision? = nil
+    ) {
+        self.sourceSessionID = sourceSessionID
+        self.recordingEpoch = recordingEpoch
+        self.kind = kind
+        self.filterRevision = filterRevision
+        self.acceptedFrameRevision = acceptedFrameRevision
+    }
 }
 
 protocol RecordingMediaCoordinating: AnyObject {
@@ -285,8 +301,9 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
     private var firstMuxFailure: Error?
     private var safetyFailure: Error?
     private var videoDroppedFrames = 0
-    private var wasStalled = false
+    private var stalledRevision: CaptureFilterRevision?
     private var expectedRevision: CaptureFilterRevision?
+    private var announcedAcceptedFrameRevision: CaptureFilterRevision?
     private var initialMuxSetupFailure: Error?
     private var priorScreenIntervals: [RecordedScreenInterval] = []
     private var retainedEarlyVideoReservation: EarlyVideoReservation?
@@ -439,9 +456,10 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
         admitAndEnqueueState { [weak self] in
             guard let self else { return }
             self.sourceUnavailable = true
-            if !self.wasStalled {
-                self.wasStalled = true
-                self.emit(.sourceStalled)
+            if let expectedRevision,
+               self.stalledRevision != expectedRevision {
+                self.stalledRevision = expectedRevision
+                self.emit(.sourceStalled, filterRevision: expectedRevision)
             }
             self.appendGateActions(
                 self.gate.submitFrame(
@@ -527,6 +545,8 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
         guard expectedRevision != revision else { return }
         appendGateActions(gate.setScreenIntent(false, at: timeline.currentAudioEndTime), realFrame: nil)
         expectedRevision = revision
+        announcedAcceptedFrameRevision = nil
+        stalledRevision = nil
     }
 
     private func processAudio(_ block: MixedAudioBlock) {
@@ -677,7 +697,9 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
         if sourceUnavailable, frame.status == .complete {
             sourceUnavailable = false
         }
-        let recoversSource = wasStalled && frame.status == .complete && !sourceUnavailable
+        let recoversSource = stalledRevision == frame.filterRevision
+            && frame.status == .complete
+            && !sourceUnavailable
         let actions = gate.submitFrame(
             at: timestamp,
             isComplete: frame.status == .complete,
@@ -685,9 +707,22 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
             filterRevision: activeFilterRevision
         )
         let appendedRealFrame = appendGateActions(actions, realFrame: frame.pixelBuffer)
-        if appendedRealFrame, (recoversSource || wasStalled) {
-            wasStalled = false
-            emit(.sourceRecovered)
+        guard appendedRealFrame else { return }
+
+        let announcesAcceptedFrame = announcedAcceptedFrameRevision != frame.filterRevision
+        if announcesAcceptedFrame {
+            announcedAcceptedFrameRevision = frame.filterRevision
+            emit(
+                .sourceRecovered,
+                filterRevision: frame.filterRevision,
+                acceptedFrameRevision: frame.filterRevision
+            )
+        }
+        if recoversSource {
+            stalledRevision = nil
+            if !announcesAcceptedFrame {
+                emit(.sourceRecovered, filterRevision: frame.filterRevision)
+            }
         }
     }
 
@@ -746,11 +781,21 @@ final class RecordingMediaCoordinator: RecordingMediaCoordinating, @unchecked Se
         emit(.muxFailed(String(describing: error)))
     }
 
-    private func emit(_ kind: RecordingVideoEventKind) {
+    private func emit(
+        _ kind: RecordingVideoEventKind,
+        filterRevision: CaptureFilterRevision? = nil,
+        acceptedFrameRevision: CaptureFilterRevision? = nil
+    ) {
         handlerLock.lock()
         let generation = eventGeneration
         handlerLock.unlock()
-        let event = RecordingVideoEvent(sourceSessionID: sourceSessionID, recordingEpoch: recordingEpoch, kind: kind)
+        let event = RecordingVideoEvent(
+            sourceSessionID: sourceSessionID,
+            recordingEpoch: recordingEpoch,
+            kind: kind,
+            filterRevision: filterRevision,
+            acceptedFrameRevision: acceptedFrameRevision
+        )
         eventEnqueue { [weak self] in
             guard let self else { return }
             self.handlerLock.lock()

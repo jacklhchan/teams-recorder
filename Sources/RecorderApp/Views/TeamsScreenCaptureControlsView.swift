@@ -67,6 +67,9 @@ struct TeamsScreenCaptureControlsView: View {
         switch model.teamsScreenStatusText {
         case TeamsScreenStatusText.ready: "checkmark.circle.fill"
         case TeamsScreenStatusText.capturing: "record.circle.fill"
+        case TeamsScreenStatusText.awaitingFrames: "hourglass.circle"
+        case TeamsScreenStatusText.framesUnavailable: "video.slash.fill"
+        case TeamsScreenStatusText.reconnecting: "arrow.triangle.2.circlepath"
         case TeamsScreenStatusText.waiting: "hourglass.circle"
         case TeamsScreenStatusText.unavailable: "exclamationmark.triangle.fill"
         default: "rectangle.slash"
@@ -77,6 +80,8 @@ struct TeamsScreenCaptureControlsView: View {
         switch model.teamsScreenStatusText {
         case TeamsScreenStatusText.ready: .green
         case TeamsScreenStatusText.capturing: .red
+        case TeamsScreenStatusText.awaitingFrames: .orange
+        case TeamsScreenStatusText.framesUnavailable, TeamsScreenStatusText.reconnecting: .orange
         case TeamsScreenStatusText.waiting: .orange
         case TeamsScreenStatusText.unavailable: .orange
         default: .secondary

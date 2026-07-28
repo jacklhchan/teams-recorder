@@ -63,6 +63,9 @@ enum MeetingScreenCaptureState: Equatable {
     case off
     case ready(TeamsWindowDescriptor)
     case waiting([TeamsWindowDescriptor])
+    case awaitingFrames(TeamsWindowDescriptor)
+    case frameUnavailable(TeamsWindowDescriptor)
+    case targetLost(TeamsWindowDescriptor?)
     case capturing(TeamsWindowDescriptor)
     case failed(String)
 }
@@ -72,6 +75,9 @@ enum TeamsScreenStatusText {
     static let ready = "Teams window ready"
     static let capturing = "Capturing Teams window"
     static let waiting = "Waiting for Teams window"
+    static let awaitingFrames = "Waiting for Teams screen frames"
+    static let framesUnavailable = "Teams window found - frames unavailable"
+    static let reconnecting = "Teams screen changed - reconnecting"
     static let unavailable = "Screen capture unavailable"
 }
 

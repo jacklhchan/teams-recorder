@@ -20,7 +20,7 @@ final class RecordingEngineStateTests: XCTestCase {
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
         await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
-        assertScreenState(engine.meetingScreenCaptureState, identity: source.windows[0].identity, capturing: true)
+        assertAwaitingFrames(engine.meetingScreenCaptureState, identity: source.windows[0].identity)
         _ = await engine.stop()
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
         XCTAssertEqual(engine.meetingScreenCaptureState, .off)
@@ -71,6 +71,38 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertEqual(source.videoTargets.last, source.windows[0].identity)
         XCTAssertEqual(coordinator.screenRequests.last?.requested, true)
         XCTAssertEqual(engine.continuitySnapshot.recordingEpoch, session.recordingEpoch)
+        _ = await engine.stop()
+    }
+
+    func testSuccessfulFilterUpdateWaitsForAcceptedFrameBeforeCapturing() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 13)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+        let revision = try XCTUnwrap(source.videoRevisions.last)
+
+        assertAwaitingFrames(engine.meetingScreenCaptureState, identity: source.windows[0].identity)
+        coordinator.emitCurrent(
+            .sourceRecovered,
+            filterRevision: revision,
+            acceptedFrameRevision: revision
+        )
+        await settle()
+
+        assertScreenState(
+            engine.meetingScreenCaptureState,
+            identity: source.windows[0].identity,
+            capturing: true
+        )
         _ = await engine.stop()
     }
 
@@ -134,13 +166,50 @@ final class RecordingEngineStateTests: XCTestCase {
         )
         await engine.setScreenCaptureRequested(true)
 
-        source.emit(event: .screenTargetLost)
+        source.emit(event: .screenTargetLost(try XCTUnwrap(source.videoRevisions.last)))
         await settle()
 
         XCTAssertEqual(coordinator.screenUnavailableCount, 1)
-        XCTAssertEqual(engine.meetingScreenCaptureState, .waiting([]))
+        assertTargetLost(
+            engine.meetingScreenCaptureState,
+            identity: source.windows[0].identity
+        )
+        source.emit(try block(.system, frame: 0, samples: [1, 1, 1, 1]))
+        source.emit(try block(.microphone, frame: 0, samples: [1, 1, 1, 1]))
+        await settle()
         XCTAssertTrue(engine.isSystemCaptureConnected)
         XCTAssertTrue(engine.isMicrophoneCaptureConnected)
+        XCTAssertFalse(coordinator.audioBlocks.isEmpty)
+        _ = await engine.stop()
+    }
+
+    func testAutomaticTargetLossKeepsReconnectingAcrossEmptyRefresh() async throws {
+        let (engine, _, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 37)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+        let revision = try XCTUnwrap(source.videoRevisions.last)
+        source.emit(event: .screenTargetLost(revision))
+        await settle()
+
+        source.windows = []
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+
+        assertTargetLost(engine.meetingScreenCaptureState, identity: teamsWindow(id: 37).identity)
+        XCTAssertTrue(engine.isSystemCaptureConnected)
         _ = await engine.stop()
     }
 
@@ -163,9 +232,86 @@ final class RecordingEngineStateTests: XCTestCase {
         await settle()
 
         XCTAssertEqual(coordinator.screenUnavailableCount, 1)
-        XCTAssertEqual(engine.meetingScreenCaptureState, .waiting([]))
+        assertFrameUnavailable(
+            engine.meetingScreenCaptureState,
+            identity: source.windows[0].identity
+        )
         XCTAssertTrue(engine.isSystemCaptureConnected)
         XCTAssertTrue(engine.isMicrophoneCaptureConnected)
+        _ = await engine.stop()
+    }
+
+    func testStaleTargetLostFromOldRevisionCannotDemoteReplacement() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 35)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+        let oldRevision = try XCTUnwrap(source.videoRevisions.last)
+
+        source.windows = [teamsWindow(id: 36)]
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        source.emit(event: .screenTargetLost(oldRevision))
+        await settle()
+
+        XCTAssertEqual(coordinator.screenUnavailableCount, 0)
+        assertAwaitingFrames(
+            engine.meetingScreenCaptureState,
+            identity: source.windows[0].identity
+        )
+        XCTAssertNil(engine.captureStatus)
+        XCTAssertTrue(engine.isSystemCaptureConnected)
+        _ = await engine.stop()
+    }
+
+    func testOldTargetLossAfterFallbackCannotOverrideAmbiguousWaiting() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 40)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+        let oldRevision = try XCTUnwrap(source.videoRevisions.last)
+
+        source.windows = [
+            teamsWindow(id: 41),
+            teamsWindow(id: 42)
+        ]
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        guard case let .waiting(candidates) = engine.meetingScreenCaptureState else {
+            return XCTFail("Expected ambiguous waiting state")
+        }
+        XCTAssertEqual(candidates.count, 2)
+
+        source.emit(event: .screenTargetLost(oldRevision))
+        await settle()
+
+        XCTAssertEqual(engine.meetingScreenCaptureState, .waiting(candidates))
+        XCTAssertEqual(coordinator.screenUnavailableCount, 0)
+        XCTAssertNil(engine.captureStatus)
         _ = await engine.stop()
     }
 
@@ -221,10 +367,9 @@ final class RecordingEngineStateTests: XCTestCase {
         await settle()
 
         XCTAssertEqual(coordinator.screenUnavailableCount, 0)
-        assertScreenState(
+        assertAwaitingFrames(
             engine.meetingScreenCaptureState,
-            identity: source.windows[0].identity,
-            capturing: true
+            identity: source.windows[0].identity
         )
         XCTAssertNil(engine.captureStatus)
         _ = await engine.stop()
@@ -250,9 +395,15 @@ final class RecordingEngineStateTests: XCTestCase {
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
         await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
-        coordinator.emitCurrent(.sourceStalled)
+        coordinator.emitCurrent(
+            .sourceStalled,
+            filterRevision: try XCTUnwrap(source.videoRevisions.last)
+        )
         await settle()
-        assertScreenState(engine.meetingScreenCaptureState, identity: source.windows[0].identity, capturing: false)
+        assertFrameUnavailable(
+            engine.meetingScreenCaptureState,
+            identity: source.windows[0].identity
+        )
         XCTAssertTrue(engine.isSystemCaptureConnected)
         _ = await engine.stop()
     }
@@ -263,10 +414,51 @@ final class RecordingEngineStateTests: XCTestCase {
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
         await engine.refreshTeamsWindows(selectedTeamsProcessID: teamsProcessID, meetingActive: true, manualOverride: nil)
         await engine.setScreenCaptureRequested(true)
-        coordinator.emitCurrent(.sourceStalled)
-        coordinator.emitCurrent(.sourceRecovered)
+        let revision = try XCTUnwrap(source.videoRevisions.last)
+        coordinator.emitCurrent(.sourceStalled, filterRevision: revision)
+        coordinator.emitCurrent(
+            .sourceRecovered,
+            filterRevision: revision,
+            acceptedFrameRevision: revision
+        )
         await settle()
         assertScreenState(engine.meetingScreenCaptureState, identity: source.windows[0].identity, capturing: true)
+        _ = await engine.stop()
+    }
+
+    func testStaleRecoveryFromOldRevisionCannotCaptureReplacement() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 38)]
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        await engine.setScreenCaptureRequested(true)
+        let oldRevision = try XCTUnwrap(source.videoRevisions.last)
+
+        source.windows = [teamsWindow(id: 39)]
+        await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            meetingActive: true,
+            manualOverride: nil
+        )
+        coordinator.emitCurrent(
+            .sourceRecovered,
+            filterRevision: oldRevision,
+            acceptedFrameRevision: oldRevision
+        )
+        await settle()
+
+        assertAwaitingFrames(
+            engine.meetingScreenCaptureState,
+            identity: source.windows[0].identity
+        )
         _ = await engine.stop()
     }
 
@@ -1503,6 +1695,42 @@ final class RecordingEngineStateTests: XCTestCase {
         }
     }
 
+    private func assertFrameUnavailable(
+        _ state: MeetingScreenCaptureState,
+        identity: TeamsWindowIdentity,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard case let .frameUnavailable(descriptor) = state else {
+            return XCTFail("Unexpected screen state: \(state)", file: file, line: line)
+        }
+        XCTAssertEqual(descriptor.identity, identity, file: file, line: line)
+    }
+
+    private func assertAwaitingFrames(
+        _ state: MeetingScreenCaptureState,
+        identity: TeamsWindowIdentity,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard case let .awaitingFrames(descriptor) = state else {
+            return XCTFail("Unexpected screen state: \(state)", file: file, line: line)
+        }
+        XCTAssertEqual(descriptor.identity, identity, file: file, line: line)
+    }
+
+    private func assertTargetLost(
+        _ state: MeetingScreenCaptureState,
+        identity: TeamsWindowIdentity,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard case let .targetLost(descriptor) = state else {
+            return XCTFail("Unexpected screen state: \(state)", file: file, line: line)
+        }
+        XCTAssertEqual(descriptor?.identity, identity, file: file, line: line)
+    }
+
     private func videoFrame(seconds: Int64, valid: Bool = true) throws -> ScreenVideoFrame {
         var buffer: CVPixelBuffer?
         XCTAssertEqual(CVPixelBufferCreate(
@@ -1846,9 +2074,19 @@ private final class FakeMediaCoordinator: RecordingMediaCoordinating, @unchecked
     }
     func markScreenSourceUnavailable() { screenUnavailableCount += 1 }
     func finish() async throws -> RecordingMediaOutcome { finishCount += 1; events.append("finish"); return outcome }
-    func emitCurrent(_ kind: RecordingVideoEventKind) {
+    func emitCurrent(
+        _ kind: RecordingVideoEventKind,
+        filterRevision: CaptureFilterRevision? = nil,
+        acceptedFrameRevision: CaptureFilterRevision? = nil
+    ) {
         guard let sourceSessionID, let epoch else { return }
-        handler?(RecordingVideoEvent(sourceSessionID: sourceSessionID, recordingEpoch: epoch, kind: kind))
+        handler?(RecordingVideoEvent(
+            sourceSessionID: sourceSessionID,
+            recordingEpoch: epoch,
+            kind: kind,
+            filterRevision: filterRevision,
+            acceptedFrameRevision: acceptedFrameRevision
+        ))
     }
 }
 

@@ -418,7 +418,10 @@ final class CaptureStatusTests: XCTestCase {
 
     func testScreenTargetLossMapsToScreenOnlyWarning() {
         XCTAssertEqual(
-            CaptureStatusMapper.status(for: .screenTargetLost),
+            CaptureStatusMapper.status(for: .screenTargetLost(.init(
+                sessionGeneration: 1,
+                revision: 1
+            ))),
             .warning("Teams screen target was closed")
         )
         XCTAssertEqual(

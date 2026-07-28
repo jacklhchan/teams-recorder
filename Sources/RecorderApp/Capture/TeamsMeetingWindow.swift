@@ -75,6 +75,8 @@ struct TeamsMeetingWindowResolver {
     private var trackedWindows: [TeamsWindowIdentity: TrackedWindow] = [:]
     private var currentIdentity: TeamsWindowIdentity?
     private var manualOverride: TeamsWindowIdentity?
+    private var manualOverrideTitle: String?
+    private var lastObservedTitles: [TeamsWindowIdentity: String] = [:]
     private var meetingWasActive = false
     private var meetingGeneration = 0
 
@@ -109,6 +111,11 @@ struct TeamsMeetingWindowResolver {
         meetingWasActive = meetingActive
 
         var descriptors: [TeamsWindowIdentity: TeamsWindowDescriptor] = [:]
+        lastObservedTitles = Dictionary(
+            uniqueKeysWithValues: windows.map {
+                ($0.identity, Self.normalizedTitle($0.title))
+            }
+        )
         for window in windows {
             var tracked = trackedWindows[window.identity] ?? TrackedWindow(
                 firstSeenAt: now,
@@ -131,12 +138,32 @@ struct TeamsMeetingWindowResolver {
             descriptors[window.identity] = descriptor(for: window, tracked: tracked)
         }
 
-        guard meetingActive else {
+        if let manualOverride {
+            let exactResolution = resolution(
+                for: manualOverride,
+                descriptors: descriptors,
+                windows: windows,
+                manual: true
+            )
+            if case let .ready(match) = exactResolution {
+                manualOverrideTitle = Self.normalizedTitle(match.window.title)
+                return exactResolution
+            }
+            if let replacement = manualReplacement(
+                for: manualOverride,
+                descriptors: descriptors,
+                windows: windows
+            ) {
+                self.manualOverride = replacement.identity
+                manualOverrideTitle = Self.normalizedTitle(replacement.title)
+                currentIdentity = replacement.identity
+                return .ready(TeamsWindowMatch(window: replacement, confidence: .high))
+            }
             return .waiting
         }
 
-        if let manualOverride {
-            return resolution(for: manualOverride, descriptors: descriptors, windows: windows, manual: true)
+        guard meetingActive else {
+            return .waiting
         }
 
         if let currentIdentity, descriptors[currentIdentity] != nil {
@@ -168,14 +195,18 @@ struct TeamsMeetingWindowResolver {
     }
 
     mutating func selectManualOverride(_ identity: TeamsWindowIdentity?) {
+        guard identity != manualOverride else { return }
         manualOverride = identity
         currentIdentity = identity
+        manualOverrideTitle = identity.flatMap { lastObservedTitles[$0] }
     }
 
     mutating func resetForApplicationRestart() {
         trackedWindows.removeAll()
         currentIdentity = nil
         manualOverride = nil
+        manualOverrideTitle = nil
+        lastObservedTitles.removeAll()
         meetingWasActive = false
         meetingGeneration = 0
     }
@@ -225,6 +256,29 @@ struct TeamsMeetingWindowResolver {
 
     private func confidence(for score: Int) -> TeamsWindowConfidence {
         score > 0 ? .high : .medium
+    }
+
+    private func manualReplacement(
+        for identity: TeamsWindowIdentity,
+        descriptors: [TeamsWindowIdentity: TeamsWindowDescriptor],
+        windows: [TeamsWindowSnapshot]
+    ) -> TeamsWindowDescriptor? {
+        guard let manualOverrideTitle, !manualOverrideTitle.isEmpty else { return nil }
+        let replacements = windows.compactMap { window -> TeamsWindowDescriptor? in
+            guard window.identity != identity,
+                  window.identity.processID == identity.processID,
+                  window.isOnScreen,
+                  Self.rejectionReasons(for: window).isEmpty,
+                  Self.normalizedTitle(window.title) == manualOverrideTitle else {
+                return nil
+            }
+            return descriptors[window.identity]
+        }
+        return replacements.count == 1 ? replacements[0] : nil
+    }
+
+    private static func normalizedTitle(_ title: String) -> String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private static func isPreferred(_ lhs: Candidate, _ rhs: Candidate) -> Bool {

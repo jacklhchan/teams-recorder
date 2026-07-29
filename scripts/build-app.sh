@@ -121,14 +121,8 @@ if [[ "$CONFIGURATION" == "release" ]]; then
   "$STRIP_BIN" -S "$MACOS_DIR/$APP_EXECUTABLE"
 fi
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
-cp "$ROOT_DIR/scripts/transcribe-openai-compatible.sh" "$RESOURCES_DIR/transcribe-openai-compatible.sh"
-cp "$ROOT_DIR/scripts/transcribe-qwen-asr.sh" "$RESOURCES_DIR/transcribe-qwen-asr.sh"
-cp "$ROOT_DIR/scripts/openai_asr_longform.py" "$RESOURCES_DIR/openai_asr_longform.py"
 cp "$ROOT_DIR/LICENSE" "$RESOURCES_DIR/LICENSE"
 cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
-chmod +x "$RESOURCES_DIR/transcribe-openai-compatible.sh"
-chmod +x "$RESOURCES_DIR/transcribe-qwen-asr.sh"
-chmod +x "$RESOURCES_DIR/openai_asr_longform.py"
 
 PLIST="$CONTENTS_DIR/Info.plist"
 /usr/bin/python3 - "$PLIST" "$BUNDLE_ID" "$BUNDLE_NAME" "$VERSION" "$BUILD_NUMBER" <<'PY'

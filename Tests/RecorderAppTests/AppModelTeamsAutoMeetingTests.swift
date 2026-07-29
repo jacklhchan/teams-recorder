@@ -382,6 +382,36 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
+    func testAutomaticRecordingPersistsTeamsAutomaticSourceMetadata() async throws {
+        let fixture = makeRecordingFixture()
+        let outputFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: outputFolder,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: outputFolder) }
+        fixture.model.outputFolder = outputFolder
+
+        await startAutomaticRecording(fixture)
+        fixture.model.startOrStop()
+        await waitUntil {
+            !fixture.engine.isRecording
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+
+        let sessionFolder = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: outputFolder,
+                includingPropertiesForKeys: nil
+            ).first
+        )
+        XCTAssertEqual(
+            RecordingSessionMetadataStore.load(in: sessionFolder).source,
+            .teamsAutomatic
+        )
+    }
+
     func testManualStartDuringCountdownOwnsRecordingAndMeetingEndDoesNotStopIt() async {
         let fixture = makeRecordingFixture()
         fixture.model.setTeamsAutoMeetingEnabled(true)

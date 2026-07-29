@@ -70,6 +70,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
     private var body = Data()
     private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
     private var isFinished = false
+    private var currentRequestURL: URL?
 
     init(
         configuration: URLSessionConfiguration,
@@ -88,6 +89,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 self.continuation = continuation
+                currentRequestURL = request.url
                 if Task.isCancelled {
                     lock.unlock()
                     finish(.failure(CancellationError()))
@@ -184,6 +186,40 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         finish(.success(result))
     }
 
+    func urlSession(
+        _: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection _: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        lock.lock()
+        let source = task.currentRequest?.url ?? currentRequestURL
+        let destination = request.url
+        let allowed = source.flatMap { source in
+            destination.map {
+                ProviderRedirectPolicy.allows(
+                    from: source,
+                    to: $0
+                )
+            }
+        } ?? false
+        if allowed {
+            currentRequestURL = destination
+        }
+        lock.unlock()
+
+        guard allowed else {
+            completionHandler(nil)
+            task.cancel()
+            finish(
+                .failure(ProviderHTTPTransportError.redirectRejected)
+            )
+            return
+        }
+        completionHandler(request)
+    }
+
     private func cancel() {
         lock.lock()
         let task = self.task
@@ -205,6 +241,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         self.session = nil
         body.removeAll(keepingCapacity: false)
         response = nil
+        currentRequestURL = nil
         lock.unlock()
         session?.finishTasksAndInvalidate()
         lifecycle.markReleased()

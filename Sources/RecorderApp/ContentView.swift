@@ -889,8 +889,8 @@ private struct SessionListView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
             } else {
-                VStack(spacing: 0) {
-                    ForEach(filteredSessions.prefix(12)) { session in
+                LazyVStack(spacing: 0) {
+                    ForEach(filteredSessions) { session in
                         VStack(spacing: 8) {
                             HStack(spacing: 12) {
                                 VStack(alignment: .leading, spacing: 3) {
@@ -904,6 +904,13 @@ private struct SessionListView: View {
                                             .font(.caption)
                                             .foregroundStyle(.tint)
                                             .lineLimit(1)
+                                    }
+                                    if let snippet = currentQuery
+                                        .transcriptSnippet(for: session) {
+                                        Text(snippet)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
                                     }
                                 }
                                 Spacer()
@@ -1014,7 +1021,7 @@ private struct SessionListView: View {
                             }
                         }
                         .padding(.vertical, 8)
-                        if session.id != filteredSessions.prefix(12).last?.id {
+                        if session.id != filteredSessions.last?.id {
                             Divider()
                         }
                     }
@@ -1057,13 +1064,14 @@ private struct SessionListView: View {
     }
 
     private var filteredSessions: [RecordingSession] {
-        sessions.filter { session in
-            guard !favoritesOnly || session.isFavorite else { return false }
-            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !query.isEmpty else { return true }
-            return session.displayName.localizedCaseInsensitiveContains(query)
-                || session.tags.contains { $0.localizedCaseInsensitiveContains(query) }
-        }
+        currentQuery.filter(sessions)
+    }
+
+    private var currentQuery: RecordingLibraryQuery {
+        RecordingLibraryQuery(
+            text: searchText,
+            favoritesOnly: favoritesOnly
+        )
     }
 
     private func hasTranscript(for session: RecordingSession) -> Bool {

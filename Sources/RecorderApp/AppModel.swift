@@ -53,47 +53,6 @@ enum RecordingOwnership: Equatable {
     case teamsAutomatic
 }
 
-struct OpenAICompatibleTranscriptionLaunchPayload: Codable, Equatable, Sendable {
-    let schemaVersion: Int
-    let baseURL: String
-    let asrModel: String
-    let language: String
-    let prompt: String
-    let apiKey: String?
-
-    init(snapshot: OpenAICompatibleProviderSnapshot) {
-        schemaVersion = 1
-        baseURL = snapshot.profile.baseURL.absoluteString
-        asrModel = snapshot.profile.asrModel
-        language = snapshot.profile.language
-        prompt = snapshot.profile.prompt
-        apiKey = snapshot.apiKey
-    }
-}
-
-private struct TranscriptionProtocolSnapshot {
-    var status: String?
-    var transcriptPath: String?
-    var logPath: String?
-    var error: String?
-
-    init(lines: [String]) {
-        for rawLine in lines {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
-            if line.hasPrefix("STATUS=") {
-                status = String(line.dropFirst("STATUS=".count))
-            } else if line.hasPrefix("TRANSCRIPT_PATH=") {
-                transcriptPath = String(line.dropFirst("TRANSCRIPT_PATH=".count))
-            } else if line.hasPrefix("LOG_PATH=") {
-                logPath = String(line.dropFirst("LOG_PATH=".count))
-            } else if line.hasPrefix("ERROR=") {
-                error = String(line.dropFirst("ERROR=".count))
-            }
-        }
-    }
-}
-
 @MainActor
 final class AppModel: ObservableObject {
     @Published var devices: [AudioDevice] = []
@@ -105,7 +64,6 @@ final class AppModel: ObservableObject {
     @Published var systemAudioPermission: CapturePermissionState = .notDetermined
     @Published var microphonePermission: CapturePermissionState = .notDetermined
     @Published private(set) var captureConnectionState: CaptureConnectionState = .connected
-    @Published var isCaptureLifecycleWorking = false
     @Published var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published var statusMessage = "Ready"
     @Published var sessions: [RecordingSession] = []
@@ -116,21 +74,12 @@ final class AppModel: ObservableObject {
     @Published var playbackProgress: TimeInterval = 0
     @Published var playbackDuration: TimeInterval = 0
     @Published var isPlaybackActive = false
-    @Published var transcribingSessionID: RecordingSession.ID?
-    @Published var transcriptionStatus: String = ""
-    @Published var lastTranscriptionSessionID: RecordingSession.ID?
-    @Published var lastTranscriptionStatus: String = ""
-    @Published var lastTranscriptionDidFail = false
-    @Published var transcriptURLsBySessionID: [RecordingSession.ID: URL] = [:]
-    @Published var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] = [:]
-    @Published var transcriptionStatesBySessionID: [RecordingSession.ID: TranscriptionState] = [:]
     @Published private(set) var inputMuteControlAvailable = false
     @Published private(set) var virtualMicInstallationState: VirtualMicInstallationState = .absent
     @Published private(set) var teamsMuteSyncStatus: TeamsMuteSyncStatus = .disabled
     @Published private(set) var teamsMuteSyncEnabled: Bool
     @Published private(set) var teamsAutoMeetingEnabled: Bool
     @Published private(set) var teamsAutoMeetingState: TeamsAutoMeetingState
-    @Published private(set) var recordingOwnership: RecordingOwnership?
     @Published private(set) var teamsConnectionStatus: TeamsMuteSyncStatus = .disabled
     @Published private(set) var localMicMuted = false
     @Published private(set) var nativeInputMicMuted = false
@@ -144,6 +93,66 @@ final class AppModel: ObservableObject {
 
     let recorder: RecordingEngine
     let aiProviderSettingsModel: AIProviderSettingsModel
+    private let recordingSessionCoordinator:
+        RecordingSessionCoordinator
+    private let transcriptionCoordinator: TranscriptionJobCoordinator
+
+    var isCaptureLifecycleWorking: Bool {
+        recordingSessionCoordinator.isWorking
+    }
+
+    private(set) var recordingOwnership: RecordingOwnership? {
+        get { recordingSessionCoordinator.ownership }
+        set { recordingSessionCoordinator.ownership = newValue }
+    }
+
+    var transcribingSessionID: RecordingSession.ID? {
+        get { transcriptionCoordinator.transcribingSessionID }
+        set { transcriptionCoordinator.transcribingSessionID = newValue }
+    }
+
+    var transcriptionStatus: String {
+        get { transcriptionCoordinator.transcriptionStatus }
+        set { transcriptionCoordinator.transcriptionStatus = newValue }
+    }
+
+    var lastTranscriptionSessionID: RecordingSession.ID? {
+        get { transcriptionCoordinator.lastTranscriptionSessionID }
+        set { transcriptionCoordinator.lastTranscriptionSessionID = newValue }
+    }
+
+    var lastTranscriptionStatus: String {
+        get { transcriptionCoordinator.lastTranscriptionStatus }
+        set { transcriptionCoordinator.lastTranscriptionStatus = newValue }
+    }
+
+    var lastTranscriptionDidFail: Bool {
+        get { transcriptionCoordinator.lastTranscriptionDidFail }
+        set { transcriptionCoordinator.lastTranscriptionDidFail = newValue }
+    }
+
+    var transcriptURLsBySessionID: [RecordingSession.ID: URL] {
+        get { transcriptionCoordinator.transcriptURLsBySessionID }
+        set { transcriptionCoordinator.transcriptURLsBySessionID = newValue }
+    }
+
+    var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] {
+        get { transcriptionCoordinator.transcriptLogURLsBySessionID }
+        set {
+            transcriptionCoordinator.transcriptLogURLsBySessionID =
+                newValue
+        }
+    }
+
+    var transcriptionStatesBySessionID:
+        [RecordingSession.ID: TranscriptionState] {
+        get { transcriptionCoordinator.transcriptionStatesBySessionID }
+        set {
+            transcriptionCoordinator.transcriptionStatesBySessionID =
+                newValue
+        }
+    }
+
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
@@ -151,13 +160,6 @@ final class AppModel: ObservableObject {
     private var playbackLoadTask: Task<Void, Never>?
     private var playbackGeneration: UInt64 = 0
     private var playbackSessionID: RecordingSession.ID?
-    private var transcriptionProcess: (any TranscriptionProcessing)?
-    private var transcriptionTask: Task<Void, Never>?
-    private var transcriptionGeneration: UInt64 = 0
-    private var activeTranscriptionAttempt: UUID?
-    private var activeTranscriptionSession: RecordingSession?
-    private var transcriptionCancellationRequested = false
-    private let providerRepository: any OpenAICompatibleProviderManaging
     private let appPaths: AppPaths
     private let capturePersistence: CaptureSelectionPersistence
     private let inputDevices: () -> [AudioDevice]
@@ -180,27 +182,45 @@ final class AppModel: ObservableObject {
     private let teamsScreenDisconnectCleanupScheduler: (
         @escaping @MainActor @Sendable () async -> Void
     ) -> Void
-    private let transcriptionAudioPreparer: any TranscriptionAudioPreparing
-    private let transcriptionProcessLauncher: any TranscriptionProcessLaunching
-    private let transcriptionScriptURL: URL?
     private let defaults: UserDefaults
     private let recordingSessionLoadingQueue = DispatchQueue(
         label: "local.meeting.recorder.recording-library",
         qos: .userInitiated
     )
     private var cancellables: Set<AnyCancellable> = []
-    private var captureLifecycleGate = CaptureLifecycleGate()
-    private var captureLifecycleTask: Task<Void, Never>?
-    private struct RecordingStartAttempt: Equatable {
-        let id: UUID
-        var ownership: RecordingOwnership
-        let lifecycleToken: CaptureLifecycleToken
+    private var captureLifecycleTask: Task<Void, Never>? {
+        get { recordingSessionCoordinator.task }
+        set { recordingSessionCoordinator.task = newValue }
     }
-    private var pendingRecordingAttempt: RecordingStartAttempt?
+    private var pendingRecordingAttempt: RecordingStartAttempt? {
+        get { recordingSessionCoordinator.pendingAttempt }
+        set { recordingSessionCoordinator.pendingAttempt = newValue }
+    }
     private var cancelledRecordingAttemptStops:
-        [UUID: CaptureLifecycleToken] = [:]
-    private var independentlyFinalizedRecordingAttempts: Set<UUID> = []
-    private var automaticStopIntentToken: CaptureLifecycleToken?
+        [UUID: CaptureLifecycleToken] {
+        get { recordingSessionCoordinator.cancelledAttemptStops }
+        set {
+            recordingSessionCoordinator.cancelledAttemptStops =
+                newValue
+        }
+    }
+    private var independentlyFinalizedRecordingAttempts: Set<UUID> {
+        get {
+            recordingSessionCoordinator
+                .independentlyFinalizedAttempts
+        }
+        set {
+            recordingSessionCoordinator
+                .independentlyFinalizedAttempts = newValue
+        }
+    }
+    private var automaticStopIntentToken: CaptureLifecycleToken? {
+        get { recordingSessionCoordinator.automaticStopIntentToken }
+        set {
+            recordingSessionCoordinator.automaticStopIntentToken =
+                newValue
+        }
+    }
     private var inputMuteHandlingInstalled = false
     private var teamsIntegrationInstalled = false
     private var teamsIntegrationGeneration: UInt64 = 0
@@ -261,6 +281,7 @@ final class AppModel: ObservableObject {
         transcriptionAudioPreparer: any TranscriptionAudioPreparing = TranscriptionAudioPreparer(),
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
         transcriptionScriptURL: URL? = nil,
+        transcriptionService: (any TranscriptionServicing)? = nil,
         playbackCoordinator: (any PlaybackCoordinating)? = nil,
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
         teamsIntegrationScheduler: @escaping (
@@ -273,6 +294,7 @@ final class AppModel: ObservableObject {
         let autoCoordinator = teamsAutoMeetingCoordinator
             ?? TeamsAutoMeetingCoordinator()
         self.recorder = activeRecorder
+        recordingSessionCoordinator = RecordingSessionCoordinator()
         self.teamsAutoMeetingCoordinator = autoCoordinator
         teamsIntegrationIngress = TeamsIntegrationIngress(
             scheduler: teamsIntegrationScheduler
@@ -285,10 +307,28 @@ final class AppModel: ObservableObject {
                 profiles: OpenAICompatibleProviderProfileStore(defaults: defaults),
                 secureStore: KeychainSecureValueStore()
             )
-        self.providerRepository = activeProviderRepository
         aiProviderSettingsModel = AIProviderSettingsModel(
             repository: activeProviderRepository,
             loadImmediately: false
+        )
+        let activeTranscriptionService:
+            any TranscriptionServicing
+        if let transcriptionService {
+            activeTranscriptionService = transcriptionService
+        } else if let transcriptionScriptURL {
+            activeTranscriptionService =
+                LegacyProcessTranscriptionService(
+                    launcher: transcriptionProcessLauncher,
+                    scriptURL: transcriptionScriptURL
+                )
+        } else {
+            activeTranscriptionService =
+                NativeOpenAICompatibleTranscriptionService()
+        }
+        transcriptionCoordinator = TranscriptionJobCoordinator(
+            providerRepository: activeProviderRepository,
+            audioPreparer: transcriptionAudioPreparer,
+            service: activeTranscriptionService
         )
         self.appPaths = appPaths
         teamsMuteSyncEnabled = defaults.object(
@@ -309,9 +349,6 @@ final class AppModel: ObservableObject {
         self.teamsScreenRefreshTick = teamsScreenRefreshTick
         self.teamsScreenDisconnectCleanupScheduler =
             teamsScreenDisconnectCleanupScheduler
-        self.transcriptionAudioPreparer = transcriptionAudioPreparer
-        self.transcriptionProcessLauncher = transcriptionProcessLauncher
-        self.transcriptionScriptURL = transcriptionScriptURL
         self.playbackCoordinator = playbackCoordinator ?? PlaybackCoordinator()
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
@@ -341,6 +378,19 @@ final class AppModel: ObservableObject {
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
         self.playbackCoordinator.onSnapshot = { [weak self] snapshot in
             self?.handlePlaybackSnapshot(snapshot)
+        }
+        transcriptionCoordinator.objectWillChange
+            .sink { [weak self] in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+        recordingSessionCoordinator.objectWillChange
+            .sink { [weak self] in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+        transcriptionCoordinator.onStatusMessage = { [weak self] message in
+            self?.statusMessage = message
         }
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
@@ -391,9 +441,7 @@ final class AppModel: ObservableObject {
         storageMonitorTask?.cancel()
         testRecordingStopTask?.cancel()
         playbackLoadTask?.cancel()
-        transcriptionTask?.cancel()
         teamsScreenRefreshTask?.cancel()
-        transcriptionProcess?.terminate()
         teamsMuteRelay.invalidate()
         teamsMuteSyncClient.stop()
         inputMuteController.uninstall()
@@ -421,7 +469,7 @@ final class AppModel: ObservableObject {
             guard systemAudioPermission == .granted else { return }
             do {
                 let applications = try await recorder.refreshCaptureApplications()
-                guard captureLifecycleGate.accepts(token) else { return }
+                guard recordingSessionCoordinator.accepts(token) else { return }
                 let previousTeamsProcessID = selectedTeamsApplication?.processID
                 availableCaptureApplications = applications
                 resolvedCaptureSelection = CaptureConnectionProjection.resolveAfterRefresh(
@@ -436,7 +484,7 @@ final class AppModel: ObservableObject {
                     await startMonitoringIfReady()
                 }
             } catch {
-                guard captureLifecycleGate.accepts(token) else { return }
+                guard recordingSessionCoordinator.accepts(token) else { return }
                 statusMessage = error.localizedDescription
             }
         }
@@ -524,7 +572,7 @@ final class AppModel: ObservableObject {
 
     var isFinalizingRecording: Bool {
         recorder.isRecording &&
-            captureLifecycleGate.activeOperation == .stop
+            recordingSessionCoordinator.activeOperation == .stop
     }
 
     var isTeamsScreenCaptureToggleDisabled: Bool {
@@ -564,7 +612,7 @@ final class AppModel: ObservableObject {
         let intentGeneration = teamsScreenCaptureIntentGeneration
         guard recorder.isRecording else { return }
         if !requested {
-            guard captureLifecycleGate.activeOperation != .stop else { return }
+            guard recordingSessionCoordinator.activeOperation != .stop else { return }
             isTeamsScreenCaptureRequested = false
             await recorder.setScreenCaptureRequested(false)
             guard intentGeneration == teamsScreenCaptureIntentGeneration else {
@@ -702,7 +750,7 @@ final class AppModel: ObservableObject {
         beginCaptureLifecycle(.reconnect, allowedWhileRecording: true) { [self] token in
             do {
                 let applications = try await recorder.refreshCaptureApplications()
-                guard captureLifecycleGate.accepts(token) else { return }
+                guard recordingSessionCoordinator.accepts(token) else { return }
                 availableCaptureApplications = applications
                 let resolved = CaptureSelectionResolver.resolve(
                     selection: captureSelection,
@@ -716,12 +764,12 @@ final class AppModel: ObservableObject {
                     return
                 }
                 try await recorder.reconnect(selection: resolved)
-                guard captureLifecycleGate.accepts(token) else { return }
+                guard recordingSessionCoordinator.accepts(token) else { return }
                 resolvedCaptureSelection = resolved
                 captureConnectionState = .connected
                 statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
             } catch {
-                guard captureLifecycleGate.accepts(token) else { return }
+                guard recordingSessionCoordinator.accepts(token) else { return }
                 resolvedCaptureSelection = .disconnected(captureSelection.selectedBundleIdentifier ?? "")
                 statusMessage = error.localizedDescription
             }
@@ -744,7 +792,7 @@ final class AppModel: ObservableObject {
     private func takeOverPendingAutomaticRecordingStart() -> Bool {
         guard var attempt = pendingRecordingAttempt,
               attempt.ownership == .teamsAutomatic,
-              captureLifecycleGate.accepts(attempt.lifecycleToken) else {
+              recordingSessionCoordinator.accepts(attempt.lifecycleToken) else {
             return false
         }
         attempt.ownership = .manual
@@ -758,7 +806,7 @@ final class AppModel: ObservableObject {
         requestPermissions: Bool
     ) {
         guard !recorder.isRecording,
-              let lifecycleToken = captureLifecycleGate.begin(.start) else {
+              let lifecycleToken = recordingSessionCoordinator.begin(.start) else {
             if ownership == .teamsAutomatic {
                 let message = "Another capture operation is in progress."
                 statusMessage = message
@@ -773,7 +821,6 @@ final class AppModel: ObservableObject {
             lifecycleToken: lifecycleToken
         )
         pendingRecordingAttempt = attempt
-        isCaptureLifecycleWorking = true
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.performRecordingStart(
@@ -923,7 +970,7 @@ final class AppModel: ObservableObject {
         guard let currentAttempt = pendingRecordingAttempt,
               currentAttempt.id == attempt.id,
               currentAttempt.lifecycleToken == attempt.lifecycleToken,
-              captureLifecycleGate.accepts(attempt.lifecycleToken) else {
+              recordingSessionCoordinator.accepts(attempt.lifecycleToken) else {
             return nil
         }
         return currentAttempt
@@ -933,11 +980,10 @@ final class AppModel: ObservableObject {
         guard let attempt = pendingRecordingAttempt,
               attempt.ownership == .teamsAutomatic else { return }
         pendingRecordingAttempt = nil
-        guard let stopToken = captureLifecycleGate.cancelAndBeginStop() else {
+        guard let stopToken = recordingSessionCoordinator.cancelAndBeginStop() else {
             return
         }
         cancelledRecordingAttemptStops[attempt.id] = stopToken
-        isCaptureLifecycleWorking = true
     }
 
     private func finalizeLateRecordingStart(
@@ -950,7 +996,10 @@ final class AppModel: ObservableObject {
            !independentlyFinalizedRecordingAttempts.contains(attempt.id) {
             await finishRecording(
                 playAfterStop: false,
-                automaticStopToken: nil
+                automaticStopToken: nil,
+                recordingSource: attempt.ownership == .teamsAutomatic
+                    ? .teamsAutomatic
+                    : .manual
             )
         }
         if stoppedDuringAcceptedStart,
@@ -990,7 +1039,7 @@ final class AppModel: ObservableObject {
             isRunningTestRecording = true
             lastHealthReport = nil
             await requestPermissionsFromExplicitAction()
-            guard captureLifecycleGate.accepts(token) else { return }
+            guard recordingSessionCoordinator.accepts(token) else { return }
             guard captureReadiness == .ready else {
                 isRunningTestRecording = false
                 statusMessage = readinessMessage
@@ -1001,7 +1050,7 @@ final class AppModel: ObservableObject {
                 isRunningTestRecording = false
                 return
             }
-            guard captureLifecycleGate.accepts(token) else { return }
+            guard recordingSessionCoordinator.accepts(token) else { return }
             guard outputFolder == recordingFolder else {
                 isRunningTestRecording = false
                 statusMessage = "Output folder changed. Start recording again."
@@ -1042,7 +1091,7 @@ final class AppModel: ObservableObject {
                 startStorageMonitoring(folder: recordingFolder)
             } catch {
                 clearTestRecordingRuntimeState()
-                guard captureLifecycleGate.accepts(token) else { return }
+                guard recordingSessionCoordinator.accepts(token) else { return }
                 statusMessage = error.localizedDescription
                 return
             }
@@ -1061,7 +1110,7 @@ final class AppModel: ObservableObject {
     private func testRecordingContinues(
         _ token: CaptureLifecycleToken
     ) -> Bool {
-        captureLifecycleGate.accepts(token) && recorder.isRecording
+        recordingSessionCoordinator.accepts(token) && recorder.isRecording
     }
 
     private func clearTestRecordingRuntimeState() {
@@ -1230,245 +1279,17 @@ final class AppModel: ObservableObject {
     }
 
     func transcribe(session: RecordingSession) {
-        guard transcriptionTask == nil, transcribingSessionID == nil else {
-            statusMessage = "A transcription is already running."
-            return
-        }
         guard aiProviderSettingsModel.hasSavedProfile else {
-            statusMessage = "Configure and save an AI provider before starting transcription."
+            statusMessage =
+                "Configure and save an AI provider before starting transcription."
             return
         }
-
-        let configurationInput: Data
-        do {
-            configurationInput = try JSONEncoder().encode(
-                OpenAICompatibleTranscriptionLaunchPayload(
-                    snapshot: providerRepository.snapshot()
-                )
-            )
-        } catch {
-            lastTranscriptionSessionID = session.id
-            lastTranscriptionStatus = error.localizedDescription
-            lastTranscriptionDidFail = true
-            statusMessage = error.localizedDescription
-            return
-        }
-
-        guard let scriptURL = transcriptionScriptURL
-            ?? Bundle.main.resourceURL?.appendingPathComponent("transcribe-openai-compatible.sh")
-        else {
-            statusMessage = "Missing transcription launcher."
-            return
-        }
-        guard FileManager.default.isExecutableFile(atPath: scriptURL.path) else {
-            statusMessage = "Missing transcription launcher: \(scriptURL.path)"
-            return
-        }
-
-        transcribingSessionID = session.id
-        activeTranscriptionSession = session
-        transcriptionCancellationRequested = false
-        transcriptionGeneration &+= 1
-        let generation = transcriptionGeneration
-        let attempt = UUID()
-        activeTranscriptionAttempt = attempt
-        lastTranscriptionSessionID = session.id
-        lastTranscriptionStatus = "Preparing transcription"
-        lastTranscriptionDidFail = false
-        transcriptionStatus = "Preparing transcription"
-        statusMessage = "Preparing transcription"
-        updateTranscriptionState(
-            .init(phase: .queued, message: transcriptionStatus, startedAt: Date()),
-            for: session
-        )
-
-        let audioPreparer = transcriptionAudioPreparer
-        let processLauncher = transcriptionProcessLauncher
-        transcriptionTask = Task { @MainActor [weak self, audioPreparer, processLauncher] in
-            var prepared: PreparedTranscriptionAudio?
-            defer {
-                if let prepared {
-                    audioPreparer.cleanup(prepared)
-                }
-            }
-
-            do {
-                try Task.checkCancellation()
-                let audio = try await audioPreparer.prepare(for: session)
-                prepared = audio
-                try Task.checkCancellation()
-                guard self?.isActiveTranscription(generation: generation, attempt: attempt) == true else {
-                    return
-                }
-
-                let process = try processLauncher.makeProcess(
-                    request: .init(
-                        scriptURL: scriptURL,
-                        audioURL: audio.audioURL,
-                        folderURL: session.folderURL,
-                        configurationInput: configurationInput
-                    ),
-                    onOutput: { [weak self] output in
-                        Task { @MainActor [weak self] in
-                            self?.handleTranscriptionOutput(
-                                output,
-                                session: session,
-                                generation: generation,
-                                attempt: attempt
-                            )
-                        }
-                    }
-                )
-                guard self?.isActiveTranscription(generation: generation, attempt: attempt) == true else {
-                    return
-                }
-                self?.transcriptionProcess = process
-                try Task.checkCancellation()
-                try process.run()
-                let result = await process.waitForExit()
-                guard self?.isActiveTranscription(generation: generation, attempt: attempt) == true else {
-                    return
-                }
-
-                if Task.isCancelled || self?.transcriptionCancellationRequested == true {
-                    self?.finishTranscriptionCancellation(
-                        session: session,
-                        generation: generation,
-                        attempt: attempt
-                    )
-                } else if let failure = self?.applyFinalTranscriptionProtocol(
-                    result.protocolLines,
-                    session: session,
-                    generation: generation,
-                    attempt: attempt,
-                    requireTranscript: result.exitStatus == 0
-                ) {
-                    self?.finishTranscriptionFailure(
-                        session: session,
-                        message: failure,
-                        generation: generation,
-                        attempt: attempt
-                    )
-                } else if result.exitStatus == 0 {
-                    self?.finishTranscriptionSuccess(
-                        session: session,
-                        generation: generation,
-                        attempt: attempt
-                    )
-                } else {
-                    self?.finishTranscriptionFailure(
-                        session: session,
-                        message: "Transcription failed with exit code \(result.exitStatus). Open the ASR log for details.",
-                        generation: generation,
-                        attempt: attempt
-                    )
-                }
-            } catch is CancellationError {
-                self?.finishTranscriptionCancellation(
-                    session: session,
-                    generation: generation,
-                    attempt: attempt
-                )
-            } catch {
-                if Task.isCancelled || self?.transcriptionCancellationRequested == true {
-                    self?.finishTranscriptionCancellation(
-                        session: session,
-                        generation: generation,
-                        attempt: attempt
-                    )
-                } else {
-                    let prefix = prepared == nil
-                        ? "Transcription preparation failed"
-                        : "Transcription launch failed"
-                    self?.finishTranscriptionFailure(
-                        session: session,
-                        message: "\(prefix): \(error.localizedDescription)",
-                        generation: generation,
-                        attempt: attempt
-                    )
-                }
-            }
-        }
+        transcriptionCoordinator.start(session: session)
     }
 
     func cancelTranscription() {
-        guard let session = activeTranscriptionSession, transcriptionTask != nil else { return }
-        transcriptionCancellationRequested = true
-        transcriptionTask?.cancel()
-        transcriptionProcess?.terminate()
-        transcriptionStatus = "Cancelling transcription..."
-        lastTranscriptionStatus = transcriptionStatus
-        updateTranscriptionState(
-            .init(phase: .cancelled, message: transcriptionStatus, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
-            for: session
-        )
+        transcriptionCoordinator.cancel()
     }
-
-    private func isActiveTranscription(generation: UInt64, attempt: UUID) -> Bool {
-        transcriptionGeneration == generation && activeTranscriptionAttempt == attempt
-    }
-
-    private func clearActiveTranscription(generation: UInt64, attempt: UUID) {
-        guard isActiveTranscription(generation: generation, attempt: attempt) else { return }
-        transcriptionProcess = nil
-        transcriptionTask = nil
-        transcribingSessionID = nil
-        activeTranscriptionAttempt = nil
-        activeTranscriptionSession = nil
-    }
-
-    private func finishTranscriptionCancellation(
-        session: RecordingSession,
-        generation: UInt64,
-        attempt: UUID
-    ) {
-        guard isActiveTranscription(generation: generation, attempt: attempt) else { return }
-        transcriptionStatus = "Transcription cancelled"
-        lastTranscriptionStatus = "Transcription cancelled"
-        lastTranscriptionDidFail = false
-        updateTranscriptionState(
-            .init(phase: .cancelled, message: transcriptionStatus, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
-            for: session
-        )
-        statusMessage = "Transcription cancelled"
-        clearActiveTranscription(generation: generation, attempt: attempt)
-    }
-
-    private func finishTranscriptionSuccess(
-        session: RecordingSession,
-        generation: UInt64,
-        attempt: UUID
-    ) {
-        guard isActiveTranscription(generation: generation, attempt: attempt) else { return }
-        transcriptionStatus = "Transcription complete"
-        lastTranscriptionStatus = "Transcription complete"
-        lastTranscriptionDidFail = false
-        updateTranscriptionState(
-            .init(phase: .completed, message: transcriptionStatus, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
-            for: session
-        )
-        statusMessage = transcriptionStatus
-        clearActiveTranscription(generation: generation, attempt: attempt)
-    }
-
-    private func finishTranscriptionFailure(
-        session: RecordingSession,
-        message: String,
-        generation: UInt64,
-        attempt: UUID
-    ) {
-        guard isActiveTranscription(generation: generation, attempt: attempt) else { return }
-        transcriptionStatus = "Transcription failed"
-        lastTranscriptionStatus = message
-        lastTranscriptionDidFail = true
-        updateTranscriptionState(
-            .init(phase: .failed, message: message, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(), finishedAt: Date()),
-            for: session
-        )
-        statusMessage = message
-        clearActiveTranscription(generation: generation, attempt: attempt)
-    }
-
     func openTranscript(for session: RecordingSession) {
         if let url = currentTranscriptURL(for: session) {
             NSWorkspace.shared.open(url)
@@ -1845,7 +1666,8 @@ final class AppModel: ObservableObject {
 
     private func finishRecording(
         playAfterStop: Bool,
-        automaticStopToken: CaptureLifecycleToken? = nil
+        automaticStopToken: CaptureLifecycleToken? = nil,
+        recordingSource: RecordingSource = .manual
     ) async {
         let result = await recorder.stop()
         isRunningTestRecording = false
@@ -1853,8 +1675,27 @@ final class AppModel: ObservableObject {
             lastHealthReport = result.health
             lastRecordingSavedAsM4A =
                 result.recordingURL.lastPathComponent == "recording.m4a"
+            var metadataSaveError: Error?
+            do {
+                var metadata = RecordingSessionMetadataStore.load(
+                    in: result.folderURL
+                )
+                metadata.source = recordingSource
+                try RecordingSessionMetadataStore.save(
+                    metadata,
+                    in: result.folderURL
+                )
+            } catch {
+                metadataSaveError = error
+            }
             refreshSessions()
-            statusMessage = "Recording saved: \(result.health.summary)"
+            if let metadataSaveError {
+                statusMessage =
+                    "Recording saved, but source metadata could not be written: "
+                    + metadataSaveError.localizedDescription
+            } else {
+                statusMessage = "Recording saved: \(result.health.summary)"
+            }
 
             if playAfterStop {
                 let session = RecordingSessionStore.session(
@@ -1927,86 +1768,6 @@ final class AppModel: ObservableObject {
         playbackProgress = snapshot.progress
         playbackDuration = snapshot.duration
         isPlaybackActive = snapshot.isPlaying
-    }
-
-    private func handleTranscriptionOutput(
-        _ text: String,
-        session: RecordingSession,
-        generation: UInt64,
-        attempt: UUID
-    ) {
-        guard isActiveTranscription(generation: generation, attempt: attempt),
-              !transcriptionCancellationRequested else { return }
-        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
-        for line in lines where line.hasPrefix("STATUS=") {
-            let message = String(line.dropFirst("STATUS=".count))
-            transcriptionStatus = message
-            lastTranscriptionStatus = message
-            let phase: TranscriptionState.Phase = message.localizedCaseInsensitiveContains("upload") ? .uploading : .transcribing
-            updateTranscriptionState(
-                .init(phase: phase, message: message, startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date()),
-                for: session
-            )
-        }
-
-    }
-
-    private func applyFinalTranscriptionProtocol(
-        _ lines: [String],
-        session: RecordingSession,
-        generation: UInt64,
-        attempt: UUID,
-        requireTranscript: Bool
-    ) -> String? {
-        guard isActiveTranscription(generation: generation, attempt: attempt) else {
-            return nil
-        }
-        let snapshot = TranscriptionProtocolSnapshot(lines: lines)
-        if requireTranscript, snapshot.transcriptPath == nil {
-            return "Transcription completed without a valid transcript file."
-        }
-        if let transcriptPath = snapshot.transcriptPath,
-           validatedTranscriptionArtifact(path: transcriptPath, in: session.folderURL) == nil {
-            return "Transcription reported an invalid artifact path."
-        }
-        if let logPath = snapshot.logPath,
-           validatedTranscriptionArtifact(path: logPath, in: session.folderURL) == nil {
-            return "Transcription reported an invalid artifact path."
-        }
-        if let transcriptPath = snapshot.transcriptPath,
-           let transcriptURL = validatedTranscriptionArtifact(
-                path: transcriptPath,
-                in: session.folderURL
-           ) {
-            transcriptURLsBySessionID[session.id] = transcriptURL
-            statusMessage = "Transcript saved: \(transcriptURL.lastPathComponent)"
-        }
-        if let logPath = snapshot.logPath,
-           let logURL = validatedTranscriptionArtifact(path: logPath, in: session.folderURL) {
-            transcriptLogURLsBySessionID[session.id] = logURL
-        }
-        if let status = snapshot.status {
-            transcriptionStatus = status
-            lastTranscriptionStatus = status
-        }
-        return nil
-    }
-
-    private func validatedTranscriptionArtifact(path: String, in sessionFolder: URL) -> URL? {
-        guard path.hasPrefix("/") else { return nil }
-        let expectedParent = sessionFolder.resolvingSymlinksInPath().standardizedFileURL
-        let candidate = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
-        guard candidate.deletingLastPathComponent() == expectedParent,
-              let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey]),
-              values.isRegularFile == true else {
-            return nil
-        }
-        return candidate
-    }
-
-    private func updateTranscriptionState(_ state: TranscriptionState, for session: RecordingSession) {
-        transcriptionStatesBySessionID[session.id] = state
-        try? TranscriptionStateStore.save(state, in: session.folderURL)
     }
 
     func requestSystemAudioPermission() {
@@ -2109,10 +1870,9 @@ final class AppModel: ObservableObject {
         _ work: @escaping (CaptureLifecycleToken) async -> Void
     ) {
         guard allowedWhileRecording || !recorder.isRecording,
-              let token = captureLifecycleGate.begin(operation) else {
+              let token = recordingSessionCoordinator.begin(operation) else {
             return
         }
-        isCaptureLifecycleWorking = true
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             await work(token)
@@ -2134,7 +1894,7 @@ final class AppModel: ObservableObject {
             cancelPendingAutomaticRecordingStart()
             return
         }
-        guard let token = captureLifecycleGate.cancelAndBeginStop() else {
+        guard let token = recordingSessionCoordinator.cancelAndBeginStop() else {
             return
         }
         let endingOwnership = recordingOwnership
@@ -2161,12 +1921,14 @@ final class AppModel: ObservableObject {
         testRecordingStopTask?.cancel()
         testRecordingStopTask = nil
         captureLifecycleTask?.cancel()
-        isCaptureLifecycleWorking = true
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.finishRecording(
                 playAfterStop: playAfterStop,
-                automaticStopToken: automaticStopToken
+                automaticStopToken: automaticStopToken,
+                recordingSource: endingOwnership == .teamsAutomatic
+                    ? .teamsAutomatic
+                    : .manual
             )
             self.finishCaptureLifecycle(token)
         }
@@ -2174,9 +1936,7 @@ final class AppModel: ObservableObject {
     }
 
     private func finishCaptureLifecycle(_ token: CaptureLifecycleToken) {
-        guard captureLifecycleGate.finish(token) else { return }
-        captureLifecycleTask = nil
-        isCaptureLifecycleWorking = false
+        _ = recordingSessionCoordinator.finish(token)
     }
 
     private func observeRecorderConnection() {
@@ -2214,7 +1974,7 @@ final class AppModel: ObservableObject {
         teamsScreenCaptureCandidates = []
         teamsScreenDisconnectCleanupScheduler { [weak self] in
             guard let self,
-                  self.captureLifecycleGate.activeOperation != .stop,
+                  self.recordingSessionCoordinator.activeOperation != .stop,
                   !self.isTeamsScreenCaptureRequested,
                   self.recorder.isRecording,
                   self.recorder.continuitySnapshot.recordingEpoch

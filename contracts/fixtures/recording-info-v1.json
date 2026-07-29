@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "title": "Customer migration workshop",
+  "tags": [
+    "customer",
+    "clearpass"
+  ],
+  "isFavorite": true,
+  "mediaKind": "video",
+  "screenIntervals": [
+    {
+      "startSeconds": 5.25,
+      "endSeconds": 1800.5
+    }
+  ],
+  "capturedTeamsWindow": {
+    "processID": 1200,
+    "windowID": 44,
+    "title": "Microsoft Teams"
+  },
+  "recoveryState": "none",
+  "source": "teamsAutomatic",
+  "meetingType": "Technical Workshop",
+  "participants": [
+    "Alex Chan",
+    "Sam Lee"
+  ],
+  "windowsCapture": {
+    "endpointId": "default"
+  }
+}

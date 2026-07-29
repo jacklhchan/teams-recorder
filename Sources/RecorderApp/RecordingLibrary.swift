@@ -1,6 +1,64 @@
 import Foundation
 
+enum RecordingSource: String, Codable, Equatable, Hashable, Sendable {
+    case manual
+    case teamsAutomatic
+    case imported
+}
+
+enum JSONValue: Codable, Equatable, Hashable, Sendable {
+    case null
+    case bool(Bool)
+    case integer(Int64)
+    case number(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Int64.self) {
+            self = .integer(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([JSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: JSONValue].self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null:
+            try container.encodeNil()
+        case .bool(let value):
+            try container.encode(value)
+        case .integer(let value):
+            try container.encode(value)
+        case .number(let value):
+            try container.encode(value)
+        case .string(let value):
+            try container.encode(value)
+        case .array(let value):
+            try container.encode(value)
+        case .object(let value):
+            try container.encode(value)
+        }
+    }
+}
+
 struct RecordingSessionMetadata: Codable, Equatable, Hashable {
+    static let currentSchemaVersion = 1
+
+    var schemaVersion: Int
     var title: String?
     var tags: [String]
     var isFavorite: Bool
@@ -8,16 +66,26 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
     var screenIntervals: [RecordedScreenInterval]
     var capturedTeamsWindow: RecordedTeamsWindowIdentity?
     var recoveryState: RecordingRecoveryState
+    var source: RecordingSource
+    var meetingType: String?
+    var participants: [String]
+    var extensionFields: [String: JSONValue]
 
     init(
+        schemaVersion: Int = currentSchemaVersion,
         title: String? = nil,
         tags: [String] = [],
         isFavorite: Bool = false,
         mediaKind: RecordingMediaKind = .audio,
         screenIntervals: [RecordedScreenInterval] = [],
         capturedTeamsWindow: RecordedTeamsWindowIdentity? = nil,
-        recoveryState: RecordingRecoveryState = .none
+        recoveryState: RecordingRecoveryState = .none,
+        source: RecordingSource = .manual,
+        meetingType: String? = nil,
+        participants: [String] = [],
+        extensionFields: [String: JSONValue] = [:]
     ) {
+        self.schemaVersion = schemaVersion
         self.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         self.tags = tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -27,27 +95,70 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
         self.screenIntervals = screenIntervals
         self.capturedTeamsWindow = capturedTeamsWindow
         self.recoveryState = recoveryState
+        self.source = source
+        self.meetingType = meetingType?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+        self.participants = participants
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        self.extensionFields = extensionFields.filter {
+            !Self.knownKeyNames.contains($0.key)
+        }
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case title, tags, isFavorite, mediaKind, screenIntervals, capturedTeamsWindow, recoveryState
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case schemaVersion
+        case title
+        case tags
+        case isFavorite
+        case mediaKind
+        case screenIntervals
+        case capturedTeamsWindow
+        case recoveryState
+        case source
+        case meetingType
+        case participants
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let dynamicContainer = try decoder.container(
+            keyedBy: DynamicCodingKey.self
+        )
+        var extensionFields: [String: JSONValue] = [:]
+        for key in dynamicContainer.allKeys
+            where !Self.knownKeyNames.contains(key.stringValue) {
+            if let value = try? dynamicContainer.decode(
+                JSONValue.self,
+                forKey: key
+            ) {
+                extensionFields[key.stringValue] = value
+            }
+        }
         self.init(
+            schemaVersion:
+                (try? container.decodeIfPresent(
+                    Int.self,
+                    forKey: .schemaVersion
+                )) ?? Self.currentSchemaVersion,
             title: (try? container.decodeIfPresent(String.self, forKey: .title)) ?? nil,
             tags: (try? container.decodeIfPresent([String].self, forKey: .tags)) ?? [],
             isFavorite: (try? container.decodeIfPresent(Bool.self, forKey: .isFavorite)) ?? false,
             mediaKind: (try? container.decodeIfPresent(RecordingMediaKind.self, forKey: .mediaKind)) ?? .audio,
             screenIntervals: (try? container.decodeIfPresent([RecordedScreenInterval].self, forKey: .screenIntervals)) ?? [],
             capturedTeamsWindow: (try? container.decodeIfPresent(RecordedTeamsWindowIdentity.self, forKey: .capturedTeamsWindow)) ?? nil,
-            recoveryState: (try? container.decodeIfPresent(RecordingRecoveryState.self, forKey: .recoveryState)) ?? .none
+            recoveryState: (try? container.decodeIfPresent(RecordingRecoveryState.self, forKey: .recoveryState)) ?? .none,
+            source: (try? container.decodeIfPresent(RecordingSource.self, forKey: .source)) ?? .manual,
+            meetingType: (try? container.decodeIfPresent(String.self, forKey: .meetingType)) ?? nil,
+            participants: (try? container.decodeIfPresent([String].self, forKey: .participants)) ?? [],
+            extensionFields: extensionFields
         )
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encodeIfPresent(title, forKey: .title)
         try container.encode(tags, forKey: .tags)
         try container.encode(isFavorite, forKey: .isFavorite)
@@ -55,6 +166,39 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
         try container.encode(screenIntervals, forKey: .screenIntervals)
         try container.encodeIfPresent(capturedTeamsWindow, forKey: .capturedTeamsWindow)
         try container.encode(recoveryState, forKey: .recoveryState)
+        try container.encode(source, forKey: .source)
+        try container.encodeIfPresent(meetingType, forKey: .meetingType)
+        try container.encode(participants, forKey: .participants)
+
+        var dynamicContainer = encoder.container(
+            keyedBy: DynamicCodingKey.self
+        )
+        for (name, value) in extensionFields
+            where !Self.knownKeyNames.contains(name) {
+            try dynamicContainer.encode(
+                value,
+                forKey: DynamicCodingKey(stringValue: name)
+            )
+        }
+    }
+
+    private static let knownKeyNames = Set(
+        CodingKeys.allCases.map(\.rawValue)
+    )
+}
+
+private struct DynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
     }
 }
 

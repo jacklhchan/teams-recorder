@@ -5,9 +5,9 @@ macOS SwiftUI MVP for recording meeting audio locally:
 - Capture all system audio or one selected app with ScreenCaptureKit.
 - Capture a selected physical microphone in the same native capture session.
 - Show live RMS/peak meters, rolling waveform, silence warnings, and clipping warnings.
-- Write one combined `recording.m4a` file per session.
+- Write a validated `recording.mp4` file, with an audio-only recovery fallback.
 - Run a 10-second test recording and play it back immediately.
-- Review recent recordings from inside the app.
+- Browse and search the complete recording library from inside the app.
 - Transcribe recordings with an OpenAI-compatible provider.
 - Publish microphone PCM to `Local Recorder Virtual Mic` for Teams.
 - Follow Microsoft Teams' absolute mute state after local API pairing.
@@ -132,9 +132,11 @@ signed microphone acceptance gate with the exact notarized workflow artifact:
 2. Expand the ZIP into a temporary QA folder, not /Applications.
 3. Run codesign --verify --deep --strict and spctl --assess --type execute.
 4. Launch that exact candidate, grant Microphone permission when macOS asks,
-   choose Mic Only mode, and record 10 seconds of speech.
-5. Confirm the in-app mic waveform moves and the saved M4A is non-empty and
-   audible, then quit and remove the temporary QA copy.
+   choose All System Audio or Selected App, select the test microphone, and
+   record 10 seconds of speech.
+5. Confirm the in-app mic waveform moves and the saved MP4 is non-empty and
+   audible. If media recovery was required, validate the M4A fallback instead,
+   then quit and remove the temporary QA copy.
 ```
 
 Record the tested commit SHA, artifact SHA-256, macOS version, input device,
@@ -154,8 +156,20 @@ Each session creates a folder under the selected output folder:
 
 ```text
 meeting-YYYY-MM-DD-HHMMSS/
-└── recording.m4a
+├── recording.mp4
+├── recording.m4a             # audio-only recovery fallback, when required
+└── recording-info.json
 ```
+
+`recording.mp4` is the primary completed media file. `recording.m4a` is the
+`recording.m4a` audio-only recovery fallback and is not created for every
+successful recording.
+
+`recording-info.json` follows
+`contracts/recording-session.schema.json`. It includes a `schemaVersion`,
+recording source (`manual`, `teamsAutomatic`, or `imported`), media and recovery
+details, and optional meeting metadata. Unknown metadata fields are preserved
+when an older app edits and saves a newer or cross-platform file.
 
 ## Test Recording
 
@@ -168,7 +182,13 @@ Use `Test 10s` before joining or recording an important meeting. The app records
 
 ## Session List
 
-The Recordings section scans the selected output folder for `meeting-*` and `test-*` folders with a `recording.m4a` file. You can play recent recordings, drag the playback slider to seek, stop playback, transcribe with the configured provider, or open their folder directly from the app.
+The Recordings section scans the selected output folder for `meeting-*`,
+`test-*`, and imported session folders containing supported completed media.
+There is no fixed 12-session display cap. Search covers title, tags, transcript,
+date, meeting type, participants, and recording source; transcript matches show
+a bounded snippet. You can filter favorites, play recordings, drag the playback
+slider to seek, stop playback, transcribe with the configured provider, or open
+their folder directly from the app.
 
 ## OpenAI-Compatible Transcription
 
@@ -188,8 +208,15 @@ The app sends post-call audio chunks to:
 POST <API Base URL>/audio/transcriptions
 ```
 
-Long recordings use silence-aware bounded chunks, rolling context, validation,
-and retry. New output files are:
+Production transcription is implemented in Swift. Native `AVFoundation`
+performs duration probing and bounded M4A chunk export, while `URLSession`
+performs multipart upload with response-size limits, redirect validation, and
+typed cancellation. The packaged app does not require Python, FFmpeg, or FFprobe.
+
+Long recordings use bounded fixed-duration chunks, rolling context, validation,
+and retry. HTTP 408, 429, and 5xx responses use bounded backoff and honor
+`Retry-After`; other 4xx configuration errors stop immediately. Providers that
+reject `verbose_json` are retried once with `json`. New output files are:
 
 ```text
 transcript.txt
@@ -197,6 +224,12 @@ transcript.raw.txt
 transcription.json
 transcription.log
 ```
+
+Transient chunk and response files are isolated under `.transcription-runs`.
+On success, successful runs keep only the four canonical artifacts above plus
+bounded previous transcript backups; expired diagnostic run directories are
+removed automatically. Logs and provider responses are capped, and credentials
+are not written to transcript artifacts.
 
 The optional provider API key and Teams pairing token are stored in macOS Keychain.
 Existing local oMLX settings are read only for a one-time migration; oMLX is

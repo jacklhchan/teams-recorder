@@ -41,6 +41,12 @@ class HTTPResult:
 
 
 @dataclass(frozen=True)
+class ProviderResponse:
+    payload: dict
+    raw_body: bytes
+
+
+@dataclass(frozen=True)
 class LaunchPayload:
     schema_version: int
     base_url: str
@@ -105,7 +111,14 @@ class OpenAICompatibleTranscriptionClient:
         self.api_key = api_key
         self.transport = transport or URLTransport()
 
-    def transcribe(self, *, audio: Path, model: str, language: str, prompt: str) -> dict:
+    def transcribe(
+        self,
+        *,
+        audio: Path,
+        model: str,
+        language: str,
+        prompt: str,
+    ) -> ProviderResponse:
         fields = {"model": model, "response_format": "json"}
         if language:
             fields["language"] = language
@@ -129,7 +142,7 @@ class OpenAICompatibleTranscriptionClient:
             raise TranscriptionError("Provider returned malformed transcription JSON") from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
             raise TranscriptionError("Provider response did not contain string text")
-        return payload
+        return ProviderResponse(payload=payload, raw_body=result.body)
 
 
 def read_launch_payload(stream) -> LaunchPayload:
@@ -179,6 +192,17 @@ def _normalized_characters(text: str) -> tuple[str, list[int]]:
     return "".join(chars), positions
 
 
+def _strip_boundary_prefix(text: str) -> str:
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character.isspace() or unicodedata.category(character).startswith(("P", "Z")):
+            index += 1
+            continue
+        break
+    return text[index:]
+
+
 def merge_transcripts(texts: Sequence[str], minimum_overlap: int = 8) -> str:
     accepted = []
     for text in (value.strip() for value in texts if value.strip()):
@@ -186,7 +210,7 @@ def merge_transcripts(texts: Sequence[str], minimum_overlap: int = 8) -> str:
             old, _ = _normalized_characters(accepted[-1]); new, positions = _normalized_characters(text)
             overlap = next((size for size in range(min(len(old), len(new)), minimum_overlap - 1, -1) if old.endswith(new[:size])), 0)
             if overlap:
-                text = text[positions[overlap - 1] + 1:].lstrip(" \t\r\n，。！？、")
+                text = _strip_boundary_prefix(text[positions[overlap - 1] + 1:])
         if text:
             accepted.append(text)
     return "\n".join(accepted)
@@ -255,13 +279,20 @@ class LongformTranscriber:
     def _transcribe_interval(self, raw_interval: Interval, use_rolling_context: bool = True) -> None:
         interval = self._with_padding(raw_interval); previous = self.accepted[-1]["text"] if self.accepted and use_rolling_context else ""; prompt = build_transcription_prompt(self.config.context, previous, self.config.rolling_context_characters)
         self.request_number += 1; request_id = f"{self.request_number:04d}"; chunk = self.chunks_directory / f"{request_id}.wav"; response = self.responses_directory / f"{request_id}.json"; self._extract_audio(interval, chunk)
-        try: payload = self.client.transcribe(audio=chunk, model=self.config.model, language=self.config.language, prompt=prompt); response.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"); text = payload["text"]; response_error = ""
+        rolling_context_used = bool(
+            previous.strip() and self.config.rolling_context_characters > 0
+        )
+        try:
+            provider_response = self.client.transcribe(audio=chunk, model=self.config.model, language=self.config.language, prompt=prompt)
+            response.write_bytes(provider_response.raw_body)
+            text = provider_response.payload["text"]
+            response_error = ""
         except TranscriptionError as exc: text, response_error = "", str(exc)
         valid, reason = validate_transcript(text, interval.end - interval.start, previous) if not response_error else (False, response_error)
-        attempt = {"request_id": request_id, "raw_start": raw_interval.start, "raw_end": raw_interval.end, "request_start": interval.start, "request_end": interval.end, "response": str(response), "character_count": len(text) if isinstance(text, str) else 0, "prompt_character_count": len(prompt), "rolling_context_used": bool(previous.strip() and self.config.rolling_context_characters > 0), "validation": reason}; self.attempts.append(attempt)
+        attempt = {"request_id": request_id, "raw_start": raw_interval.start, "raw_end": raw_interval.end, "request_start": interval.start, "request_end": interval.end, "response": str(response), "character_count": len(text) if isinstance(text, str) else 0, "prompt_character_count": len(prompt), "rolling_context_used": rolling_context_used, "validation": reason}; self.attempts.append(attempt)
         if valid and isinstance(text, str): self.accepted.append({**attempt, "text": text}); self._write_manifest(); return
         self._write_manifest()
-        if previous: self.emit("STATUS=Retrying failed chunk without previous transcript context"); return self._transcribe_interval(raw_interval, False)
+        if rolling_context_used: self.emit("STATUS=Retrying failed chunk without previous transcript context"); return self._transcribe_interval(raw_interval, False)
         if raw_interval.end - raw_interval.start >= self.MINIMUM_RETRY_DURATION * 2:
             self.emit("STATUS=Retrying failed chunk with shorter intervals"); split = self._split_point(raw_interval); self._transcribe_interval(Interval(raw_interval.start, split)); return self._transcribe_interval(Interval(split, raw_interval.end))
         raise TranscriptionError(f"Chunk {request_id} failed validation: {reason}")
@@ -297,7 +328,15 @@ def _argument_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = _argument_parser().parse_args(argv); args.output_folder.mkdir(parents=True, exist_ok=True); backup_existing(args.log); emitter = StatusEmitter(args.log); emitter.emit(f"LOG_PATH={args.log.resolve()}")
+    args = _argument_parser().parse_args(argv)
+    try:
+        args.output_folder.mkdir(parents=True, exist_ok=True)
+        backup_existing(args.log)
+        emitter = StatusEmitter(args.log)
+    except Exception as exc:
+        print(f"ERROR=Unexpected {type(exc).__name__}", flush=True)
+        return 70
+    emitter.emit(f"LOG_PATH={args.log.resolve()}")
     try:
         payload = read_launch_payload(sys.stdin); config = TranscriptionConfig(audio=args.audio, output_folder=args.output_folder, base_url=payload.base_url, model=payload.asr_model, language=payload.language, publish_mode=args.publish_mode, context=payload.prompt, rolling_context_characters=args.rolling_context_characters, ffmpeg=os.environ.get("FFMPEG", "ffmpeg"), ffprobe=os.environ.get("FFPROBE", "ffprobe")); LongformTranscriber(config, client=OpenAICompatibleTranscriptionClient(base_url=payload.base_url, api_key=payload.api_key), emit=emitter.emit).run()
     except FileNotFoundError: emitter.emit("ERROR=Missing required command"); return 69

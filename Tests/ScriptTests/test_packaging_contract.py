@@ -83,7 +83,7 @@ class PackagingContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertNotIn(phrase, readme)
         self.assertIsNone(
-            re.search(r"\\bQwen[^\\n`]*(?:4-bit|8-bit|8bit|bf16)\\b", readme),
+            re.search(r"\bQwen[^\n`]*(?:4-bit|8-bit|8bit|bf16)\b", readme),
         )
 
     def test_app_build_packages_license_and_notices(self):

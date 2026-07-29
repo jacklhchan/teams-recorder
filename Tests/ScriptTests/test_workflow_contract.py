@@ -8,6 +8,17 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 CHECKOUT_SHA = "34e114876b0b11c390a56381ad16ebd13914f8d5"
 REQUIRED_JOBS = {"swift-tests", "script-tests", "packaging", "policy"}
+FORBIDDEN_WORKFLOW_TERMS = (
+    "install",
+    "launch",
+    "provider",
+    "network",
+    "tcc",
+    "teams",
+    "curl",
+    "wget",
+    "brew",
+)
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -34,6 +45,14 @@ class WorkflowContractTests(unittest.TestCase):
             rf"(?m)^      - name: {re.escape(name)}\n"
             rf"        run: {re.escape(command)}$",
         )
+
+    def assert_no_forbidden_workflow_terms(self, workflow):
+        for forbidden in FORBIDDEN_WORKFLOW_TERMS:
+            self.assertNotIn(
+                forbidden,
+                workflow,
+                f"Forbidden workflow term found: {forbidden}",
+            )
 
     def test_ci_yaml_is_syntax_valid_with_ruby_stdlib(self):
         self.assertTrue(WORKFLOW.is_file(), f"Missing workflow: {WORKFLOW}")
@@ -134,17 +153,19 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_ci_does_not_install_launch_or_contact_external_services(self):
         workflow = self.read_workflow().lower()
-        for forbidden in (
-            "install",
-            "launch",
-            "provider",
-            "network",
-            "curl",
-            "wget",
-            "brew",
-        ):
+        self.assert_no_forbidden_workflow_terms(workflow)
+
+    def test_forbidden_term_guard_rejects_tcc_and_teams(self):
+        workflow = self.read_workflow().lower()
+        for forbidden in ("tcc", "teams"):
             with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, workflow)
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    rf"Forbidden workflow term found: {forbidden}",
+                ):
+                    self.assert_no_forbidden_workflow_terms(
+                        f"{workflow}\n# injected review fixture: {forbidden}\n"
+                    )
 
 
 if __name__ == "__main__":

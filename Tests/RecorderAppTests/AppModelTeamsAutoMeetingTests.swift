@@ -646,7 +646,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         let fixture = makeRecordingFixture()
         fixture.source.pauseRefresh = true
         fixture.model.refreshCaptureApplications()
-        await fixture.source.waitForRefresh()
+        await waitUntil { fixture.source.hasPausedRefresh }
         fixture.model.setTeamsAutoMeetingEnabled(true)
         emitMeeting(true, in: fixture)
         await fire(fixture.ticker, count: 5)
@@ -687,7 +687,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         fixture.model.setTeamsAutoMeetingEnabled(true)
         emitMeeting(true, in: fixture)
         await fire(fixture.ticker, count: 5)
-        await fixture.source.waitForStart()
+        await waitUntil { fixture.source.hasPausedStart }
 
         emitMeeting(false, in: fixture)
         fixture.source.resumeStart()
@@ -708,7 +708,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         fixture.model.setTeamsAutoMeetingEnabled(true)
         emitMeeting(true, in: fixture)
         await fire(fixture.ticker, count: 5)
-        await fixture.source.waitForStart()
+        await waitUntil { fixture.source.hasPausedStart }
         XCTAssertFalse(fixture.engine.isRecording)
 
         fixture.model.startOrStop()
@@ -795,7 +795,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         fixture.model.setTeamsAutoMeetingEnabled(true)
         emitMeeting(true, in: fixture)
         await fire(fixture.ticker, count: 5)
-        await fixture.source.waitForStart()
+        await waitUntil { fixture.source.hasPausedStart }
 
         fixture.model.setTeamsAutoMeetingEnabled(false)
         fixture.source.resumeStart()
@@ -904,6 +904,38 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         await stopped.value
 
         XCTAssertEqual(source.stopCount, 1)
+    }
+
+    func testPausedStartSignalsBeforeItCanBeResumed() async throws {
+        let source = AutoMeetingRecordingCaptureSource()
+        source.pauseStart = true
+
+        let started = Task {
+            try await source.start(
+                selection: .allSystemAudio,
+                microphoneUID: nil,
+                onAudio: { _ in },
+                onVideo: { _ in },
+                onEvent: { _ in }
+            )
+        }
+        await waitUntil { source.hasPausedStart }
+
+        source.resumeStart()
+        try await started.value
+
+        XCTAssertEqual(source.startCount, 1)
+    }
+
+    func testPausedRefreshSignalsBeforeItCanBeResumed() async throws {
+        let source = AutoMeetingRecordingCaptureSource()
+        source.pauseRefresh = true
+
+        let refresh = Task { try await source.refreshContent() }
+        await waitUntil { source.hasPausedRefresh }
+
+        source.resumeRefresh()
+        _ = try await refresh.value
     }
 
     func testTerminalStopWinningAutoStopRaceCompletesMeetingEndOnce() async {
@@ -1293,11 +1325,40 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
         height: 900,
         pixelFormat: 0
     )
-    private(set) var startCount = 0
     private(set) var teamsRefreshCount = 0
     var startError: Error?
-    var pauseStart = false
-    var pauseRefresh = false
+    var pauseStart: Bool {
+        get { startLock.withLock { startPauseRequested } }
+        set {
+            let continuation = startLock.withLock { () -> CheckedContinuation<Void, Never>? in
+                startPauseRequested = newValue
+                if newValue {
+                    hasPausedStartStorage = false
+                    return nil
+                }
+                let continuation = startContinuation
+                startContinuation = nil
+                return continuation
+            }
+            continuation?.resume()
+        }
+    }
+    var pauseRefresh: Bool {
+        get { refreshLock.withLock { refreshPauseRequested } }
+        set {
+            let continuation = refreshLock.withLock { () -> CheckedContinuation<Void, Never>? in
+                refreshPauseRequested = newValue
+                if newValue {
+                    hasPausedRefreshStorage = false
+                    return nil
+                }
+                let continuation = refreshContinuation
+                refreshContinuation = nil
+                return continuation
+            }
+            continuation?.resume()
+        }
+    }
     var pauseTeamsRefresh = false
     var resumeTeamsRefreshOnCancellation = false
     var pauseStop: Bool {
@@ -1316,13 +1377,21 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
             continuation?.resume()
         }
     }
+    var startCount: Int { startLock.withLock { startCountStorage } }
+    var hasPausedStart: Bool { startLock.withLock { hasPausedStartStorage } }
+    var hasPausedRefresh: Bool { refreshLock.withLock { hasPausedRefreshStorage } }
     var stopCount: Int { stopLock.withLock { stopCountStorage } }
     var hasPausedStop: Bool { stopLock.withLock { hasPausedStopStorage } }
     private var onEvent: ((CaptureEvent) -> Void)?
+    private let startLock = NSLock()
+    private var startCountStorage = 0
+    private var startPauseRequested = false
+    private var hasPausedStartStorage = false
     private var startContinuation: CheckedContinuation<Void, Never>?
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private let refreshLock = NSLock()
+    private var refreshPauseRequested = false
+    private var hasPausedRefreshStorage = false
     private var refreshContinuation: CheckedContinuation<Void, Never>?
-    private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
     private var teamsRefreshContinuation: CheckedContinuation<Void, Never>?
     private let stopLock = NSLock()
     private var stopCountStorage = 0
@@ -1331,10 +1400,23 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
     private var stopContinuation: CheckedContinuation<Void, Never>?
 
     func refreshContent() async throws -> [CaptureApplication] {
-        guard pauseRefresh else { return [] }
-        refreshWaiters.forEach { $0.resume() }
-        refreshWaiters.removeAll()
-        await withCheckedContinuation { refreshContinuation = $0 }
+        let shouldPause = refreshLock.withLock {
+            guard refreshPauseRequested else { return false }
+            hasPausedRefreshStorage = true
+            return true
+        }
+        guard shouldPause else { return [] }
+
+        await withCheckedContinuation { continuation in
+            let shouldResumeImmediately = refreshLock.withLock {
+                guard refreshPauseRequested else { return true }
+                refreshContinuation = continuation
+                return false
+            }
+            if shouldResumeImmediately {
+                continuation.resume()
+            }
+        }
         return []
     }
 
@@ -1370,12 +1452,24 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
         onVideo _: @escaping (ScreenVideoFrame) -> Void,
         onEvent: @escaping (CaptureEvent) -> Void
     ) async throws {
-        startCount += 1
         self.onEvent = onEvent
-        if pauseStart {
-            startWaiters.forEach { $0.resume() }
-            startWaiters.removeAll()
-            await withCheckedContinuation { startContinuation = $0 }
+        let shouldPause = startLock.withLock {
+            startCountStorage += 1
+            guard startPauseRequested else { return false }
+            hasPausedStartStorage = true
+            return true
+        }
+        if shouldPause {
+            await withCheckedContinuation { continuation in
+                let shouldResumeImmediately = startLock.withLock {
+                    guard startPauseRequested else { return true }
+                    startContinuation = continuation
+                    return false
+                }
+                if shouldResumeImmediately {
+                    continuation.resume()
+                }
+            }
         }
         if let startError { throw startError }
     }
@@ -1401,26 +1495,12 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
         }
     }
 
-    func waitForStart() async {
-        if startCount > 0 { return }
-        await withCheckedContinuation { startWaiters.append($0) }
-    }
-
     func resumeStart() {
         pauseStart = false
-        startContinuation?.resume()
-        startContinuation = nil
-    }
-
-    func waitForRefresh() async {
-        if refreshContinuation != nil { return }
-        await withCheckedContinuation { refreshWaiters.append($0) }
     }
 
     func resumeRefresh() {
         pauseRefresh = false
-        refreshContinuation?.resume()
-        refreshContinuation = nil
     }
 
     func resumeTeamsRefresh() {

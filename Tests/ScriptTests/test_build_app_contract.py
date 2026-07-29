@@ -140,6 +140,33 @@ esac
         self.write_executable(shim, "#!/usr/bin/env bash\nprintf '%s: arm64\\n' \"$1\"\n")
         return shim
 
+    def make_xcrun_and_strip_shims(self, directory):
+        strip = directory / "strip-shim"
+        self.write_executable(
+            strip,
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$STRIP_LOG"
+/usr/bin/python3 - "$2" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_bytes(path.read_bytes().replace(b"/Users/apple/checkout", b"/stripped-checkout  "))
+PY
+""",
+        )
+        xcrun = directory / "xcrun"
+        self.write_executable(
+            xcrun,
+            """#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "--find" && "$2" == "strip" ]]
+printf '%s\\n' "$STRIP_SHIM"
+""",
+        )
+        return xcrun, strip
+
     def make_app_fixture(self, root):
         app = root / "Fixture.app"
         macos = app / "Contents/MacOS"
@@ -288,6 +315,57 @@ esac
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(f"-c {configuration}", swift_log.read_text(encoding="utf-8"))
+
+    def test_release_strips_checkout_paths_but_debug_keeps_them(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            binary_directory = root / "bin"
+            binary_directory.mkdir()
+            binary = binary_directory / "LocalMeetingRecorder"
+            binary.write_bytes(b"binary /Users/apple/checkout marker")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            swift = self.make_swift_shim(root, binary_directory)
+            codesign = self.make_codesign_shim(root)
+            _, strip = self.make_xcrun_and_strip_shims(root)
+            strip_log = root / "strip.log"
+            environment = {
+                **os.environ,
+                "PATH": f"{root}:/usr/bin:/bin:/usr/sbin:/sbin",
+                "SWIFT_BIN": str(swift),
+                "SWIFT_BIN_DIR": str(binary_directory),
+                "SWIFT_LOG": str(root / "swift.log"),
+                "CODESIGN_BIN": str(codesign),
+                "CODESIGN_DV_EXIT": "1",
+                "STRIP_SHIM": str(strip),
+                "STRIP_LOG": str(strip_log),
+            }
+            for configuration in ("release", "debug"):
+                with self.subTest(configuration=configuration):
+                    output = root / f"{configuration}.app"
+                    result = subprocess.run(
+                        [
+                            "/bin/bash", str(BUILD_APP),
+                            "--configuration", configuration,
+                            "--output", str(output),
+                            "--sign", "none",
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env=environment,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    executable = output / "Contents/MacOS/LocalMeetingRecorder"
+                    if configuration == "release":
+                        self.assertNotIn(b"/Users/apple/checkout", executable.read_bytes())
+                    else:
+                        self.assertIn(b"/Users/apple/checkout", executable.read_bytes())
+            strip_calls = strip_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(strip_calls), 1)
+            self.assertTrue(strip_calls[0].startswith("-S "))
+            self.assertTrue(
+                strip_calls[0].endswith("release.app/Contents/MacOS/LocalMeetingRecorder")
+            )
 
     def test_owned_output_is_replaced_by_successful_build(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:

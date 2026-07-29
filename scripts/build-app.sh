@@ -112,6 +112,10 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 printf '%s' "$OWNER_MARKER_VALUE" > "$RESOURCES_DIR/$OWNER_MARKER_NAME"
 
 cp "$BINARY_PATH" "$MACOS_DIR/$APP_EXECUTABLE"
+if [[ "$CONFIGURATION" == "release" ]]; then
+  STRIP_BIN="$(xcrun --find strip)"
+  "$STRIP_BIN" -S "$MACOS_DIR/$APP_EXECUTABLE"
+fi
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 cp "$ROOT_DIR/scripts/transcribe-openai-compatible.sh" "$RESOURCES_DIR/transcribe-openai-compatible.sh"
 cp "$ROOT_DIR/scripts/transcribe-qwen-asr.sh" "$RESOURCES_DIR/transcribe-qwen-asr.sh"

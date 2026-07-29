@@ -532,7 +532,10 @@ final class TeamsMuteSyncClient: TeamsMuteSyncing, @unchecked Sendable {
                         ) {
                             emit(.status(.waitingForTeamsAPI), generation: generation)
                         } else {
-                            emit(.status(.failed(message)), generation: generation)
+                            emit(
+                                .status(.failed("Teams API reported an error.")),
+                                generation: generation
+                            )
                         }
 
                     case .response(let requestID, let message):

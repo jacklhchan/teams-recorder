@@ -209,6 +209,33 @@ final class TeamsMuteSyncClientTests: XCTestCase {
         client.stop()
     }
 
+    func testGenericServerErrorRedactsServerControlledMessage() async {
+        let socket = ScriptedTeamsWebSocketConnection()
+        let factory = ScriptedTeamsWebSocketFactory([socket])
+        let sleeper = ManualTeamsSleeper()
+        let tokenStore = InMemoryTeamsPairingTokenStore(token: "paired-token")
+        let events = TeamsEventRecorder()
+        let client = makeClient(
+            tokenStore: tokenStore,
+            factory: factory,
+            sleeper: sleeper
+        )
+        let sentinel = "C3_SECRET_SENTINEL_6E41A9"
+
+        client.start(onEvent: events.record)
+        await assertEventually { socket.sentActions == ["query-state"] }
+
+        socket.pushIncoming(#"{"errorMsg":"generic failure: C3_SECRET_SENTINEL_6E41A9"}"#)
+        await assertEventually {
+            events.events.contains(
+                .status(.failed("Teams API reported an error."))
+            )
+        }
+
+        XCTAssertFalse(events.events.description.contains(sentinel))
+        client.stop()
+    }
+
     func testDeviceAlreadyPairedEmitsRecoverableStatusAndAllowsOneExplicitRetry() async {
         let socket = ScriptedTeamsWebSocketConnection()
         let factory = ScriptedTeamsWebSocketFactory([socket])

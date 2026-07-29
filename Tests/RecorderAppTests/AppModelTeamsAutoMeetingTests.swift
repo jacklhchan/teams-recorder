@@ -693,7 +693,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
 
     func testFalseDuringBlockedStoragePreflightCannotLeaveLateRecording() async {
         let provider = AutoMeetingStorageProvider(results: [
-            .blocked(6 * 1_024 * 1_024 * 1_024)
+            .blocked(Int64(6) * 1_024 * 1_024 * 1_024)
         ])
         let fixture = makeRecordingFixture(storageProvider: provider)
         fixture.model.setTeamsAutoMeetingEnabled(true)
@@ -880,8 +880,8 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
     func testStorageForcedStopClearsOwnershipAndSuppressesRestart() async {
         let storageTicker = AutoMeetingManualTicker()
         let provider = AutoMeetingStorageProvider(results: [
-            .value(6 * 1_024 * 1_024 * 1_024),
-            .value((256 * 1_024 * 1_024) - 1)
+            .value(Int64(6) * 1_024 * 1_024 * 1_024),
+            .value((Int64(256) * 1_024 * 1_024) - 1)
         ])
         let fixture = makeRecordingFixture(
             storageProvider: provider,
@@ -1684,7 +1684,7 @@ private final class AutoMeetingStorageProvider:
     static var normal: AutoMeetingStorageProvider {
         AutoMeetingStorageProvider(
             results: Array(
-                repeating: .value(6 * 1_024 * 1_024 * 1_024),
+                repeating: .value(Int64(6) * 1_024 * 1_024 * 1_024),
                 count: 20
             )
         )

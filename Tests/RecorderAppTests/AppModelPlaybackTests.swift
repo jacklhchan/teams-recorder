@@ -169,7 +169,7 @@ final class AppModelPlaybackTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertTrue(delayIsWaiting, "The test-recording delay did not start")
-        weak let weakModel = model
+        weak var weakModel = model
         model = nil
 
         let released = await eventually { weakModel == nil }

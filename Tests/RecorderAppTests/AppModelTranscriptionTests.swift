@@ -96,7 +96,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             preparer: preparer,
             launcher: launcher
         )
-        weak let weakModel = model
+        weak var weakModel = model
 
         model?.transcribe(session: fixture.session)
         await fulfillment(of: [started], timeout: 1)

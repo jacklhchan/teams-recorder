@@ -42,17 +42,105 @@ This installs:
 /Applications/Local Meeting Recorder.app
 ```
 
-For build-only checks:
-
-```bash
-swift build
-```
-
 If your global `xcode-select` points to Command Line Tools but Xcode is installed:
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./scripts/run-app.sh
 ```
+
+## Build and Release
+
+The commands in this section are build-only checks. They create local `.build`
+or `build` artifacts but do not install or launch the app. Use the commands in
+`Run` to launch or install a staging bundle.
+
+Local staging build:
+
+```bash
+./scripts/build-app.sh
+```
+
+Repeatable release-configuration staging build:
+
+```bash
+./scripts/build-app.sh \
+  --configuration release \
+  --version 0.2.0 \
+  --build-number 2 \
+  --sign ad-hoc
+```
+
+Validate a staging bundle:
+
+```bash
+./Tests/PackagingTests/run-tests.sh
+```
+
+An ad-hoc staging build is never a production release.
+
+Preview a signed release candidate without building:
+
+```bash
+./scripts/build-release.sh \
+  --version 1.0.0 \
+  --build-number 100 \
+  --signing-identity "Developer ID Application: Name (TEAMID)" \
+  --signed-only \
+  --dry-run
+```
+
+This dry-run previews the signed-release-candidate plan only. It performs no
+identity preflight, build, signing, output creation, deletion, notarization, or
+network activity.
+
+Production release requires a real Developer ID Application identity and a
+configured `notarytool` Keychain profile:
+
+```bash
+./scripts/build-release.sh \
+  --version 1.0.0 \
+  --build-number 100 \
+  --signing-identity "Developer ID Application: Name (TEAMID)" \
+  --notary-profile lmr-production \
+  --notary-keychain "/absolute/path/to/release.keychain-db"
+```
+
+The protected manual production workflow requires a GitHub `production`
+environment with required reviewers and a main-only deployment. Configure these
+six repository secrets before dispatching it:
+
+```text
+MACOS_CERTIFICATE_P12_BASE64
+MACOS_CERTIFICATE_PASSWORD
+MACOS_SIGNING_IDENTITY
+MACOS_NOTARY_KEY_ID
+MACOS_NOTARY_ISSUER_ID
+MACOS_NOTARY_PRIVATE_KEY_BASE64
+```
+
+The workflow uploads a verified notarized workflow artifact only. It does not
+create a GitHub Release. This repository documents local YAML and contract
+validation only; the protected workflow has not been remotely dispatched or
+accepted here.
+
+Before creating a public GitHub Release, an authorized QA user must pass the
+signed microphone acceptance gate with the exact notarized workflow artifact:
+
+```text
+1. Download the workflow artifact and verify its SHA-256 with:
+   /usr/bin/shasum -a 256 -c <checksum-file>
+2. Expand the ZIP into a temporary QA folder, not /Applications.
+3. Run codesign --verify --deep --strict and spctl --assess --type execute.
+4. Launch that exact candidate, grant Microphone permission when macOS asks,
+   choose Mic Only mode, and record 10 seconds of speech.
+5. Confirm the in-app mic waveform moves and the saved M4A is non-empty and
+   audible, then quit and remove the temporary QA copy.
+```
+
+Record the tested commit SHA, artifact SHA-256, macOS version, input device,
+and pass/fail in the release notes. This gate is not satisfied and cannot
+currently be claimed without a real Developer ID identity and an authorized QA
+run.
 
 ## Native Audio Capture
 

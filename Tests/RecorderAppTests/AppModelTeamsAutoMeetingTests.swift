@@ -632,6 +632,16 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertFalse(fixture.engine.isRecording)
     }
 
+    func testWaitUntilAllowsDelayedMainActorCompletion() async {
+        var didFinish = false
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(100))
+            didFinish = true
+        }
+
+        await waitUntil { didFinish }
+    }
+
     func testLifecycleBusyMovesAutomaticStartToFailedWithoutRetry() async {
         let fixture = makeRecordingFixture()
         fixture.source.pauseRefresh = true
@@ -1098,10 +1108,13 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<500 {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while clock.now < deadline {
             if condition() { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
         }
+        if condition() { return }
         XCTFail("Condition was not reached", file: file, line: line)
     }
 

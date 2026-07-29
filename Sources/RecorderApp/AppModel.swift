@@ -1356,13 +1356,9 @@ final class AppModel: ObservableObject {
                         attempt: attempt
                     )
                 } else {
-                    let protocolSnapshot = TranscriptionProtocolSnapshot(
-                        lines: result.protocolLines
-                    )
                     self?.finishTranscriptionFailure(
                         session: session,
-                        message: protocolSnapshot.error.map(Self.boundedTranscriptionError)
-                            ?? "Transcription failed with exit code \(result.exitStatus). Open the ASR log for details.",
+                        message: "Transcription failed with exit code \(result.exitStatus). Open the ASR log for details.",
                         generation: generation,
                         attempt: attempt
                     )
@@ -2019,10 +2015,6 @@ final class AppModel: ObservableObject {
             return nil
         }
         return candidate
-    }
-
-    private static func boundedTranscriptionError(_ error: String) -> String {
-        String(error.prefix(500))
     }
 
     private func updateTranscriptionState(_ state: TranscriptionState, for session: RecordingSession) {

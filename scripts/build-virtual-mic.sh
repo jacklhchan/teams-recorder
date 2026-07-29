@@ -15,9 +15,11 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 
 rm -rf "$BUNDLE"
 mkdir -p "$CONTENTS/MacOS"
+mkdir -p "$CONTENTS/Resources"
 mkdir -p "$OBJECT_DIR"
 
 cp "$DRIVER_DIR/Info.plist" "$CONTENTS/Info.plist"
+cp "$DRIVER_DIR/LICENSE-Apple-Sample.txt" "$CONTENTS/Resources/LICENSE-Apple-Sample.txt"
 plutil -lint "$CONTENTS/Info.plist"
 
 xcrun clang \

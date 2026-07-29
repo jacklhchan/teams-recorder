@@ -44,6 +44,30 @@ Mentioning compatibility does not change or grant those licenses.
 
 
 class PackagingContractTests(unittest.TestCase):
+    def test_app_build_packages_license_and_notices(self):
+        script = (
+            ROOT / "scripts/build-app.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'cp "$ROOT_DIR/LICENSE" "$RESOURCES_DIR/LICENSE"',
+            script,
+        )
+        self.assertIn(
+            'cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" '
+            '"$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"',
+            script,
+        )
+
+    def test_driver_build_packages_apple_sample_license(self):
+        script = (
+            ROOT / "scripts/build-virtual-mic.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'cp "$DRIVER_DIR/LICENSE-Apple-Sample.txt" '
+            '"$CONTENTS/Resources/LICENSE-Apple-Sample.txt"',
+            script,
+        )
+
     def test_repository_declares_apache_2_0(self):
         license_bytes = (ROOT / "LICENSE").read_bytes()
         license_text = license_bytes.decode("utf-8")

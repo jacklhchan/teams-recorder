@@ -78,8 +78,9 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { fixture.source.teamsRefreshCount >= 1 }
         fixture.model.startOrStop()
         await waitUntil { fixture.engine.isRecording }
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
         let baseline = fixture.source.teamsRefreshCount
-        await ticker.fire()
+        await ticker.fireAndWaitForConsumption()
         await waitUntil { fixture.source.teamsRefreshCount == baseline + 1 }
         fixture.model.startOrStop()
         await waitUntil { !fixture.engine.isRecording }
@@ -1229,14 +1230,17 @@ private actor StorageTestTicker {
 
 private actor TeamsScreenTestTicker {
     private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var consumptionAcknowledgements: [CheckedContinuation<Void, Never>] = []
     private var pendingTicks = 0
 
     func waitForTick() async {
         if pendingTicks > 0 {
             pendingTicks -= 1
+            acknowledgeConsumption()
             return
         }
         await withCheckedContinuation { continuations.append($0) }
+        acknowledgeConsumption()
     }
 
     func fire() {
@@ -1245,6 +1249,18 @@ private actor TeamsScreenTestTicker {
         } else {
             continuations.removeFirst().resume()
         }
+    }
+
+    func fireAndWaitForConsumption() async {
+        await withCheckedContinuation { acknowledgement in
+            consumptionAcknowledgements.append(acknowledgement)
+            fire()
+        }
+    }
+
+    private func acknowledgeConsumption() {
+        guard !consumptionAcknowledgements.isEmpty else { return }
+        consumptionAcknowledgements.removeFirst().resume()
     }
 }
 

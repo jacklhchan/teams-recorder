@@ -243,6 +243,39 @@ class BuildReleaseContractTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertTrue((destination / "artifact.zip").is_file())
 
+    def test_atomic_publish_preserves_exact_release_set(self):
+        module = load_atomic_publish_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "staged"
+            destination = root / "release"
+            source.mkdir()
+            expected = {
+                "Local-Meeting-Recorder.zip": b"PK\x03\x04release-zip",
+                "Local-Meeting-Recorder.zip.sha256": (
+                    b"0123456789abcdef  Local-Meeting-Recorder.zip\n"
+                ),
+                "LICENSE": b"release license\n",
+                "THIRD_PARTY_NOTICES.md": b"# Notices\nExact bytes.\n",
+            }
+            for name, contents in expected.items():
+                (source / name).write_bytes(contents)
+
+            module.publish_directory(source, destination)
+
+            self.assertFalse(source.exists())
+            self.assertEqual(
+                {entry.name for entry in destination.iterdir()},
+                set(expected),
+            )
+            self.assertEqual(
+                {
+                    name: (destination / name).read_bytes()
+                    for name in expected
+                },
+                expected,
+            )
+
     def test_atomic_publish_refuses_competing_destination(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -331,6 +364,40 @@ class BuildReleaseContractTests(unittest.TestCase):
                     module.publish_directory(source, root / "output/release")
             self.assertEqual(raised.exception.status, 73)
             self.assertFalse((root / "output/release").exists())
+
+    def test_atomic_publish_rejects_staging_entry_replacement_before_rename(self):
+        module = load_atomic_publish_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "source"
+            destination_parent = root / "output"
+            destination = destination_parent / "release"
+            source.mkdir()
+            destination_parent.mkdir()
+            (source / "artifact.zip").write_bytes(b"trusted release")
+            real_copy = module.copy_directory
+
+            def copy_then_replace_staging(source_fd, destination_fd):
+                real_copy(source_fd, destination_fd)
+                staging = next(
+                    entry
+                    for entry in destination_parent.iterdir()
+                    if entry.name.startswith(".lmr-release-publish.")
+                )
+                staging.rename(destination_parent / "detached-staging")
+                staging.mkdir()
+                (staging / "artifact.zip").write_bytes(b"malicious replacement")
+
+            with mock.patch.object(
+                module,
+                "copy_directory",
+                copy_then_replace_staging,
+            ):
+                with self.assertRaises(module.PublishError) as raised:
+                    module.publish_directory(source, destination)
+
+            self.assertEqual(raised.exception.status, 73)
+            self.assertFalse(destination.exists())
 
     def test_atomic_publish_rejects_bad_inputs_and_maps_cross_device_failure(self):
         with tempfile.TemporaryDirectory() as temporary:

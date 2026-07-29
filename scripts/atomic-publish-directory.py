@@ -97,17 +97,20 @@ def ensure_directory_identity(path: Path, expected_fd: int) -> None:
         os.close(current_fd)
 
 
-def ensure_entry_identity(parent_fd: int, name: str, expected_fd: int) -> None:
+def ensure_entry_identity(
+    parent_fd: int,
+    name: str,
+    expected_fd: int,
+    *,
+    changed_message: str = "Publication source changed during staging.",
+) -> None:
     try:
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except OSError as error:
-        raise PublishError(
-            73,
-            "Publication source changed during staging.",
-        ) from error
+        raise PublishError(73, changed_message) from error
     expected = os.fstat(expected_fd)
     if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
-        raise PublishError(73, "Publication source changed during staging.")
+        raise PublishError(73, changed_message)
 
 
 def copy_file(source_fd: int, destination_fd: int, name: str) -> None:
@@ -336,6 +339,12 @@ def publish_directory(
         ensure_directory_identity(
             destination.parent,
             destination_parent_fd,
+        )
+        ensure_entry_identity(
+            destination_parent_fd,
+            staging_name,
+            staging_fd,
+            changed_message="Publication staging changed before publication.",
         )
 
         operation = rename_exclusive or rename_directory_exclusive

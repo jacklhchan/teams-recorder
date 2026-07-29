@@ -751,7 +751,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         fixture.source.resumeTeamsRefreshOnCancellation = true
         await fire(fixture.ticker, count: 5)
         await waitUntil {
-            fixture.source.teamsRefreshCount >= 1
+            fixture.source.hasPausedTeamsRefresh
                 && fixture.engine.isRecording
         }
         XCTAssertNil(fixture.model.recordingOwnership)
@@ -829,7 +829,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         fixture.source.pauseTeamsRefresh = true
         await fire(fixture.ticker, count: 5)
         await waitUntil {
-            fixture.source.teamsRefreshCount >= 1
+            fixture.source.hasPausedTeamsRefresh
                 && fixture.engine.isRecording
         }
         XCTAssertNil(fixture.model.recordingOwnership)
@@ -893,22 +893,28 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertEqual(fixture.writer.closeCount, 1)
     }
 
-    func testPausedStopSignalsBeforeItCanBeResumed() async {
+    func testPausedStopCanResumeBeforeContinuationInstallation() async {
         let source = AutoMeetingRecordingCaptureSource()
+        let barrier = AutoMeetingPauseInstallationBarrier()
         source.pauseStop = true
+        source.stopPauseInstallationBarrier = barrier
 
         let stopped = Task { await source.stop() }
-        await waitUntil { source.hasPausedStop }
+        await barrier.waitForArrival()
+        XCTAssertTrue(source.hasPausedStop)
 
         source.resumeStop()
+        await barrier.release()
         await stopped.value
 
         XCTAssertEqual(source.stopCount, 1)
     }
 
-    func testPausedStartSignalsBeforeItCanBeResumed() async throws {
+    func testPausedStartCanResumeBeforeContinuationInstallation() async throws {
         let source = AutoMeetingRecordingCaptureSource()
+        let barrier = AutoMeetingPauseInstallationBarrier()
         source.pauseStart = true
+        source.startPauseInstallationBarrier = barrier
 
         let started = Task {
             try await source.start(
@@ -919,23 +925,46 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
                 onEvent: { _ in }
             )
         }
-        await waitUntil { source.hasPausedStart }
+        await barrier.waitForArrival()
+        XCTAssertTrue(source.hasPausedStart)
 
         source.resumeStart()
+        await barrier.release()
         try await started.value
 
         XCTAssertEqual(source.startCount, 1)
     }
 
-    func testPausedRefreshSignalsBeforeItCanBeResumed() async throws {
+    func testPausedRefreshCanResumeBeforeContinuationInstallation() async throws {
         let source = AutoMeetingRecordingCaptureSource()
+        let barrier = AutoMeetingPauseInstallationBarrier()
         source.pauseRefresh = true
+        source.refreshPauseInstallationBarrier = barrier
 
         let refresh = Task { try await source.refreshContent() }
-        await waitUntil { source.hasPausedRefresh }
+        await barrier.waitForArrival()
+        XCTAssertTrue(source.hasPausedRefresh)
 
         source.resumeRefresh()
+        await barrier.release()
         _ = try await refresh.value
+    }
+
+    func testPausedTeamsRefreshCanResumeBeforeContinuationInstallation() async throws {
+        let source = AutoMeetingRecordingCaptureSource()
+        let barrier = AutoMeetingPauseInstallationBarrier()
+        source.pauseTeamsRefresh = true
+        source.teamsRefreshPauseInstallationBarrier = barrier
+
+        let refresh = Task { try await source.refreshTeamsWindows() }
+        await barrier.waitForArrival()
+        XCTAssertTrue(source.hasPausedTeamsRefresh)
+
+        source.resumeTeamsRefresh()
+        await barrier.release()
+        _ = try await refresh.value
+
+        XCTAssertEqual(source.teamsRefreshCount, 1)
     }
 
     func testTerminalStopWinningAutoStopRaceCompletesMeetingEndOnce() async {
@@ -1024,7 +1053,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
 
         fixture.model.runTestRecording()
         await waitUntil {
-            fixture.source.teamsRefreshCount >= 1
+            fixture.source.hasPausedTeamsRefresh
                 && fixture.engine.isRecording
         }
         XCTAssertTrue(fixture.model.isRunningTestRecording)
@@ -1319,119 +1348,175 @@ private enum AutoMeetingRecordingError: LocalizedError {
     var errorDescription: String? { "automatic source start failed" }
 }
 
-private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
-    let screenVideoFormat = ScreenVideoFormat(
-        width: 1_600,
-        height: 900,
-        pixelFormat: 0
-    )
-    private(set) var teamsRefreshCount = 0
-    var startError: Error?
-    var pauseStart: Bool {
-        get { startLock.withLock { startPauseRequested } }
-        set {
-            let continuation = startLock.withLock { () -> CheckedContinuation<Void, Never>? in
-                startPauseRequested = newValue
-                if newValue {
-                    hasPausedStartStorage = false
-                    return nil
-                }
-                let continuation = startContinuation
-                startContinuation = nil
-                return continuation
-            }
-            continuation?.resume()
-        }
-    }
-    var pauseRefresh: Bool {
-        get { refreshLock.withLock { refreshPauseRequested } }
-        set {
-            let continuation = refreshLock.withLock { () -> CheckedContinuation<Void, Never>? in
-                refreshPauseRequested = newValue
-                if newValue {
-                    hasPausedRefreshStorage = false
-                    return nil
-                }
-                let continuation = refreshContinuation
-                refreshContinuation = nil
-                return continuation
-            }
-            continuation?.resume()
-        }
-    }
-    var pauseTeamsRefresh = false
-    var resumeTeamsRefreshOnCancellation = false
-    var pauseStop: Bool {
-        get { stopLock.withLock { stopPauseRequested } }
-        set {
-            let continuation = stopLock.withLock { () -> CheckedContinuation<Void, Never>? in
-                stopPauseRequested = newValue
-                if newValue {
-                    hasPausedStopStorage = false
-                    return nil
-                }
-                let continuation = stopContinuation
-                stopContinuation = nil
-                return continuation
-            }
-            continuation?.resume()
-        }
-    }
-    var startCount: Int { startLock.withLock { startCountStorage } }
-    var hasPausedStart: Bool { startLock.withLock { hasPausedStartStorage } }
-    var hasPausedRefresh: Bool { refreshLock.withLock { hasPausedRefreshStorage } }
-    var stopCount: Int { stopLock.withLock { stopCountStorage } }
-    var hasPausedStop: Bool { stopLock.withLock { hasPausedStopStorage } }
-    private var onEvent: ((CaptureEvent) -> Void)?
-    private let startLock = NSLock()
-    private var startCountStorage = 0
-    private var startPauseRequested = false
-    private var hasPausedStartStorage = false
-    private var startContinuation: CheckedContinuation<Void, Never>?
-    private let refreshLock = NSLock()
-    private var refreshPauseRequested = false
-    private var hasPausedRefreshStorage = false
-    private var refreshContinuation: CheckedContinuation<Void, Never>?
-    private var teamsRefreshContinuation: CheckedContinuation<Void, Never>?
-    private let stopLock = NSLock()
-    private var stopCountStorage = 0
-    private var stopPauseRequested = false
-    private var hasPausedStopStorage = false
-    private var stopContinuation: CheckedContinuation<Void, Never>?
+private actor AutoMeetingPauseInstallationBarrier {
+    private var arrived = false
+    private var released = false
+    private var arrivalContinuations: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuations: [CheckedContinuation<Void, Never>] = []
 
-    func refreshContent() async throws -> [CaptureApplication] {
-        let shouldPause = refreshLock.withLock {
-            guard refreshPauseRequested else { return false }
-            hasPausedRefreshStorage = true
-            return true
+    func waitForArrival() async {
+        guard !arrived else { return }
+        await withCheckedContinuation { arrivalContinuations.append($0) }
+    }
+
+    func arriveAndWaitForRelease() async {
+        arrived = true
+        let arrivals = arrivalContinuations
+        arrivalContinuations.removeAll()
+        arrivals.forEach { $0.resume() }
+
+        guard !released else { return }
+        await withCheckedContinuation { releaseContinuations.append($0) }
+    }
+
+    func release() {
+        released = true
+        let releases = releaseContinuations
+        releaseContinuations.removeAll()
+        releases.forEach { $0.resume() }
+    }
+}
+
+private final class AutoMeetingPauseGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pauseRequested = false
+    private var paused = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var installationBarrier: AutoMeetingPauseInstallationBarrier?
+
+    var isPauseRequested: Bool {
+        lock.withLock { pauseRequested }
+    }
+
+    var hasPaused: Bool {
+        lock.withLock { paused }
+    }
+
+    var currentInstallationBarrier: AutoMeetingPauseInstallationBarrier? {
+        lock.withLock { installationBarrier }
+    }
+
+    func setPauseRequested(_ requested: Bool) {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            pauseRequested = requested
+            if requested {
+                paused = false
+                return nil
+            }
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
         }
-        guard shouldPause else { return [] }
+        continuation?.resume()
+    }
+
+    func setInstallationBarrier(_ barrier: AutoMeetingPauseInstallationBarrier?) {
+        lock.withLock { installationBarrier = barrier }
+    }
+
+    func waitIfRequested() async -> Bool {
+        let pause = lock.withLock { () -> (Bool, AutoMeetingPauseInstallationBarrier?) in
+            guard pauseRequested else { return (false, nil) }
+            paused = true
+            return (true, installationBarrier)
+        }
+        guard pause.0 else { return false }
+
+        if let barrier = pause.1 {
+            await barrier.arriveAndWaitForRelease()
+        }
 
         await withCheckedContinuation { continuation in
-            let shouldResumeImmediately = refreshLock.withLock {
-                guard refreshPauseRequested else { return true }
-                refreshContinuation = continuation
+            let shouldResumeImmediately = lock.withLock {
+                guard pauseRequested else { return true }
+                self.continuation = continuation
                 return false
             }
             if shouldResumeImmediately {
                 continuation.resume()
             }
         }
+        return true
+    }
+}
+
+private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
+    let screenVideoFormat = ScreenVideoFormat(
+        width: 1_600,
+        height: 900,
+        pixelFormat: 0
+    )
+    var startError: Error?
+    var pauseStart: Bool {
+        get { startPauseGate.isPauseRequested }
+        set { startPauseGate.setPauseRequested(newValue) }
+    }
+    var pauseRefresh: Bool {
+        get { refreshPauseGate.isPauseRequested }
+        set { refreshPauseGate.setPauseRequested(newValue) }
+    }
+    var pauseTeamsRefresh: Bool {
+        get { teamsRefreshPauseGate.isPauseRequested }
+        set { teamsRefreshPauseGate.setPauseRequested(newValue) }
+    }
+    var resumeTeamsRefreshOnCancellation: Bool {
+        get { teamsRefreshConfigurationLock.withLock { resumeTeamsRefreshOnCancellationStorage } }
+        set { teamsRefreshConfigurationLock.withLock { resumeTeamsRefreshOnCancellationStorage = newValue } }
+    }
+    var pauseStop: Bool {
+        get { stopPauseGate.isPauseRequested }
+        set { stopPauseGate.setPauseRequested(newValue) }
+    }
+    var startCount: Int { startLock.withLock { startCountStorage } }
+    var hasPausedStart: Bool { startPauseGate.hasPaused }
+    var hasPausedRefresh: Bool { refreshPauseGate.hasPaused }
+    var hasPausedTeamsRefresh: Bool { teamsRefreshPauseGate.hasPaused }
+    var stopCount: Int { stopLock.withLock { stopCountStorage } }
+    var hasPausedStop: Bool { stopPauseGate.hasPaused }
+    var teamsRefreshCount: Int { teamsRefreshCountLock.withLock { teamsRefreshCountStorage } }
+    var startPauseInstallationBarrier: AutoMeetingPauseInstallationBarrier? {
+        get { startPauseGate.currentInstallationBarrier }
+        set { startPauseGate.setInstallationBarrier(newValue) }
+    }
+    var refreshPauseInstallationBarrier: AutoMeetingPauseInstallationBarrier? {
+        get { refreshPauseGate.currentInstallationBarrier }
+        set { refreshPauseGate.setInstallationBarrier(newValue) }
+    }
+    var teamsRefreshPauseInstallationBarrier: AutoMeetingPauseInstallationBarrier? {
+        get { teamsRefreshPauseGate.currentInstallationBarrier }
+        set { teamsRefreshPauseGate.setInstallationBarrier(newValue) }
+    }
+    var stopPauseInstallationBarrier: AutoMeetingPauseInstallationBarrier? {
+        get { stopPauseGate.currentInstallationBarrier }
+        set { stopPauseGate.setInstallationBarrier(newValue) }
+    }
+    private var onEvent: ((CaptureEvent) -> Void)?
+    private let startPauseGate = AutoMeetingPauseGate()
+    private let refreshPauseGate = AutoMeetingPauseGate()
+    private let teamsRefreshPauseGate = AutoMeetingPauseGate()
+    private let stopPauseGate = AutoMeetingPauseGate()
+    private let startLock = NSLock()
+    private var startCountStorage = 0
+    private let teamsRefreshCountLock = NSLock()
+    private var teamsRefreshCountStorage = 0
+    private let teamsRefreshConfigurationLock = NSLock()
+    private var resumeTeamsRefreshOnCancellationStorage = false
+    private let stopLock = NSLock()
+    private var stopCountStorage = 0
+
+    func refreshContent() async throws -> [CaptureApplication] {
+        _ = await refreshPauseGate.waitIfRequested()
         return []
     }
 
     func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] {
-        teamsRefreshCount += 1
-        if pauseTeamsRefresh {
+        teamsRefreshCountLock.withLock { teamsRefreshCountStorage += 1 }
+        if teamsRefreshPauseGate.isPauseRequested {
             await withTaskCancellationHandler {
-                await withCheckedContinuation {
-                    teamsRefreshContinuation = $0
-                }
+                _ = await teamsRefreshPauseGate.waitIfRequested()
             } onCancel: {
                 guard self.resumeTeamsRefreshOnCancellation else { return }
-                Task { @MainActor in
-                    self.resumeTeamsRefresh()
-                }
+                self.resumeTeamsRefresh()
             }
         }
         return []
@@ -1453,46 +1538,14 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
         onEvent: @escaping (CaptureEvent) -> Void
     ) async throws {
         self.onEvent = onEvent
-        let shouldPause = startLock.withLock {
-            startCountStorage += 1
-            guard startPauseRequested else { return false }
-            hasPausedStartStorage = true
-            return true
-        }
-        if shouldPause {
-            await withCheckedContinuation { continuation in
-                let shouldResumeImmediately = startLock.withLock {
-                    guard startPauseRequested else { return true }
-                    startContinuation = continuation
-                    return false
-                }
-                if shouldResumeImmediately {
-                    continuation.resume()
-                }
-            }
-        }
+        startLock.withLock { startCountStorage += 1 }
+        _ = await startPauseGate.waitIfRequested()
         if let startError { throw startError }
     }
 
     func stop() async {
-        let shouldPause = stopLock.withLock {
-            stopCountStorage += 1
-            guard stopPauseRequested else { return false }
-            hasPausedStopStorage = true
-            return true
-        }
-        guard shouldPause else { return }
-
-        await withCheckedContinuation { continuation in
-            let shouldResumeImmediately = stopLock.withLock {
-                guard stopPauseRequested else { return true }
-                stopContinuation = continuation
-                return false
-            }
-            if shouldResumeImmediately {
-                continuation.resume()
-            }
-        }
+        stopLock.withLock { stopCountStorage += 1 }
+        _ = await stopPauseGate.waitIfRequested()
     }
 
     func resumeStart() {
@@ -1505,8 +1558,6 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
 
     func resumeTeamsRefresh() {
         pauseTeamsRefresh = false
-        teamsRefreshContinuation?.resume()
-        teamsRefreshContinuation = nil
     }
 
     func resumeStop() {

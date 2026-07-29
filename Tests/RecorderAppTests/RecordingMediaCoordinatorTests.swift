@@ -441,16 +441,19 @@ final class RecordingMediaCoordinatorTests: XCTestCase {
     }
 
     func testRevisionReplacementDropsOldFramesAndKeepsSessionIdentity() async throws {
-        let fixture = try makeFixture()
+        let state = ManualExecutor()
+        let fixture = try makeFixture(executor: state)
         let next = CaptureFilterRevision(sessionGeneration: 7, revision: 4)
         fixture.coordinator.setScreenCaptureRequested(true, expectedRevision: fixture.revision, window: nil)
         fixture.coordinator.enqueueAudio(audioBlock(start: 0, frames: 9_600))
         fixture.coordinator.enqueueVideo(try videoFrame(time: CMTime(value: 4_800, timescale: 48_000), revision: fixture.revision))
+        state.runAll()
         fixture.coordinator.setScreenCaptureRequested(true, expectedRevision: next, window: nil)
         fixture.coordinator.enqueueVideo(try videoFrame(time: CMTime(value: 9_600, timescale: 48_000), revision: fixture.revision))
         fixture.coordinator.enqueueVideo(try videoFrame(time: CMTime(value: 14_400, timescale: 48_000), revision: next))
+        state.runAll()
 
-        let outcome = try await fixture.coordinator.finish()
+        let outcome = try await finish(fixture.coordinator, using: state)
 
         XCTAssertEqual(outcome.capturedWindow, nil)
         XCTAssertTrue(fixture.mux.videoTimes.contains(CMTime(value: 14_400, timescale: 48_000)))

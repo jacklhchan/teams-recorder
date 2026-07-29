@@ -11,6 +11,8 @@ final class AppPathsTests: XCTestCase {
         XCTAssertEqual(paths.recordingsDirectory.path, "/Users/colleague/Downloads")
         XCTAssertEqual(paths.appSupportDirectory.path, "/Users/colleague/Library/Application Support/Local Meeting Recorder")
         XCTAssertEqual(paths.setupLogURL.lastPathComponent, "setup.log")
+        XCTAssertEqual(paths.omlxSettingsURL.path, "/Users/colleague/.omlx/settings.json")
+        XCTAssertFalse(paths.omlxSettingsURL.path.contains("/Users/apple"))
         XCTAssertFalse(paths.appSupportDirectory.path.contains("/Users/apple"))
     }
 }

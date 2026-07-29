@@ -28,8 +28,4 @@ struct AppPaths: Sendable {
     var omlxSettingsURL: URL {
         homeDirectory.appendingPathComponent(".omlx/settings.json")
     }
-
-    var defaultOMLXModelDirectory: URL {
-        homeDirectory.appendingPathComponent(".omlx/models", isDirectory: true)
-    }
 }

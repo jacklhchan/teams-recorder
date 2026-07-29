@@ -130,47 +130,59 @@ enum PCMByteDecoder {
         guard bytes.count == encoding.storageByteCount else {
             throw SampleBufferConverterError.invalidPCMLayout
         }
-        return try decode(encoding: encoding) { offset in
-            bytes[offset]
-        }
+        return try decode(
+            byte0: bytes[0],
+            byte1: bytes.count > 1 ? bytes[1] : 0,
+            byte2: bytes.count > 2 ? bytes[2] : 0,
+            byte3: bytes.count > 3 ? bytes[3] : 0,
+            encoding: encoding
+        )
     }
 
     static func decode(
         _ pointer: UnsafeRawPointer,
         encoding: PCMEncoding
     ) throws -> Float {
-        try decode(encoding: encoding) { offset in
-            pointer.load(fromByteOffset: offset, as: UInt8.self)
-        }
+        let count = encoding.storageByteCount
+        return try decode(
+            byte0: pointer.load(fromByteOffset: 0, as: UInt8.self),
+            byte1: count > 1 ? pointer.load(fromByteOffset: 1, as: UInt8.self) : 0,
+            byte2: count > 2 ? pointer.load(fromByteOffset: 2, as: UInt8.self) : 0,
+            byte3: count > 3 ? pointer.load(fromByteOffset: 3, as: UInt8.self) : 0,
+            encoding: encoding
+        )
     }
 
     private static func decode(
-        encoding: PCMEncoding,
-        byteAt: (Int) -> UInt8
+        byte0: UInt8,
+        byte1: UInt8,
+        byte2: UInt8,
+        byte3: UInt8,
+        encoding: PCMEncoding
     ) throws -> Float {
         let value: Float
         switch encoding {
         case .float32:
-            let bitPattern = UInt32(byteAt(0))
-                | (UInt32(byteAt(1)) << 8)
-                | (UInt32(byteAt(2)) << 16)
-                | (UInt32(byteAt(3)) << 24)
+            let bitPattern = UInt32(byte0)
+                | (UInt32(byte1) << 8)
+                | (UInt32(byte2) << 16)
+                | (UInt32(byte3) << 24)
             value = Float(bitPattern: bitPattern)
         case .signedInt16:
-            let bitPattern = UInt16(byteAt(0)) | (UInt16(byteAt(1)) << 8)
+            let bitPattern = UInt16(byte0) | (UInt16(byte1) << 8)
             let integer = Int16(bitPattern: bitPattern)
             value = Float(Double(integer) / 32_768.0)
         case .signedInt24Packed:
-            let unsigned = Int32(byteAt(0))
-                | (Int32(byteAt(1)) << 8)
-                | (Int32(byteAt(2)) << 16)
+            let unsigned = Int32(byte0)
+                | (Int32(byte1) << 8)
+                | (Int32(byte2) << 16)
             let integer = unsigned & 0x80_0000 == 0 ? unsigned : unsigned | ~0xFF_FFFF
             value = Float(Double(integer) / 8_388_608.0)
         case .signedInt32:
-            let bitPattern = UInt32(byteAt(0))
-                | (UInt32(byteAt(1)) << 8)
-                | (UInt32(byteAt(2)) << 16)
-                | (UInt32(byteAt(3)) << 24)
+            let bitPattern = UInt32(byte0)
+                | (UInt32(byte1) << 8)
+                | (UInt32(byte2) << 16)
+                | (UInt32(byte3) << 24)
             let integer = Int32(bitPattern: bitPattern)
             value = Float(Double(integer) / 2_147_483_648.0)
         }

@@ -126,19 +126,6 @@ enum PCMLayoutValidator {
 }
 
 enum PCMByteDecoder {
-    static func decode(_ bytes: [UInt8], encoding: PCMEncoding) throws -> Float {
-        guard bytes.count == encoding.storageByteCount else {
-            throw SampleBufferConverterError.invalidPCMLayout
-        }
-        return try decode(
-            byte0: bytes[0],
-            byte1: bytes.count > 1 ? bytes[1] : 0,
-            byte2: bytes.count > 2 ? bytes[2] : 0,
-            byte3: bytes.count > 3 ? bytes[3] : 0,
-            encoding: encoding
-        )
-    }
-
     static func decode(
         _ pointer: UnsafeRawPointer,
         encoding: PCMEncoding
@@ -153,7 +140,7 @@ enum PCMByteDecoder {
         )
     }
 
-    private static func decode(
+    static func decode(
         byte0: UInt8,
         byte1: UInt8,
         byte2: UInt8,

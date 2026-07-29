@@ -1,5 +1,9 @@
+import json
+import os
 import re
 import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -178,6 +182,51 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         return RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
+    def step_run(self, workflow, step_name):
+        marker = f"      - name: {step_name}\n"
+        self.assertIn(marker, workflow)
+        step = workflow.split(marker, 1)[1].split("\n      - ", 1)[0]
+        match = re.search(r"(?ms)^        run: \|\n(?P<body>.*)\Z", step)
+        self.assertIsNotNone(match, f"Missing run block for step: {step_name}")
+        return textwrap.dedent(match.group("body"))
+
+    def shell_function(self, script, function_name):
+        lines = script.splitlines()
+        signature = f"{function_name}() {{"
+        self.assertIn(signature, lines)
+        start = lines.index(signature)
+        for end in range(start + 1, len(lines)):
+            if lines[end] == "}":
+                return "\n".join(lines[start : end + 1])
+        self.fail(f"Unterminated shell function: {function_name}")
+
+    def make_fake_cleanup_tools(self, directory):
+        tool_source = """#!/usr/bin/python3
+import json
+import os
+import sys
+
+kind = os.path.basename(sys.argv[0])
+arguments = sys.argv[1:]
+with open(os.environ["CALL_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps([kind, *arguments]) + "\\n")
+if kind == "security" and arguments[:4] == [
+    "list-keychains", "-d", "user", "-s"
+]:
+    raise SystemExit(int(os.environ.get("FAKE_RESTORE_EXIT", "0")))
+if kind == "security" and arguments[:1] == ["delete-keychain"]:
+    raise SystemExit(int(os.environ.get("FAKE_DELETE_EXIT", "0")))
+if kind == "rm":
+    raise SystemExit(int(os.environ.get("FAKE_RM_EXIT", "0")))
+"""
+        paths = {}
+        for name in ("security", "rm"):
+            path = directory / name
+            path.write_text(tool_source, encoding="utf-8")
+            path.chmod(0o700)
+            paths[name] = path
+        return paths
+
     def test_release_yaml_is_syntax_valid_with_ruby_stdlib(self):
         result = subprocess.run(
             [
@@ -229,15 +278,20 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("${{ runner.temp }}/release/*.sha256", workflow)
         self.assertIn("${{ runner.temp }}/release/LICENSE", workflow)
         self.assertIn("${{ runner.temp }}/release/THIRD_PARTY_NOTICES.md", workflow)
+        self.assertIn(
+            "name: Local-Meeting-Recorder-${{ env.RELEASE_VERSION }}-"
+            "${{ env.RELEASE_BUILD_NUMBER }}",
+            workflow,
+        )
 
     def test_release_inputs_are_validated_through_step_environment(self):
         workflow = self.read_workflow()
         self.assertRegex(
             workflow,
-            r"(?ms)- name: Validate release inputs\n"
-            r"        env:\n"
-            r"          RELEASE_VERSION: \$\{\{ inputs\.version \}\}\n"
-            r"          RELEASE_BUILD_NUMBER: \$\{\{ inputs\.build_number \}\}",
+            r"(?ms)^  release:\n"
+            r".*?^    env:\n"
+            r"      RELEASE_VERSION: \$\{\{ inputs\.version \}\}\n"
+            r"      RELEASE_BUILD_NUMBER: \$\{\{ inputs\.build_number \}\}",
         )
         self.assertIn('[[ "$RELEASE_VERSION" =~ ^[0-9]+(\\.[0-9]+){1,2}$ ]]', workflow)
         self.assertIn('[[ "$RELEASE_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]', workflow)
@@ -282,9 +336,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_release_preserves_keychain_search_list_and_cleans_up(self):
         workflow = self.read_workflow()
         self.assertIn("umask 077", workflow)
-        self.assertIn('security list-keychains -d user > "$ORIGINAL_KEYCHAINS"', workflow)
         self.assertIn(
-            'security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS_ARRAY[@]}"',
+            '/usr/bin/security list-keychains -d user > "$ORIGINAL_KEYCHAINS"',
+            workflow,
+        )
+        self.assertIn(
+            '/usr/bin/security list-keychains -d user -s "$KEYCHAIN" '
+            '"${ORIGINAL_KEYCHAINS_ARRAY[@]}"',
             workflow,
         )
         self.assertLess(
@@ -295,8 +353,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("if: always()", cleanup)
         self.assertIn('KEYCHAIN="${LMR_KEYCHAIN:-$RUNNER_TEMP/lmr-signing.keychain-db}"', cleanup)
         self.assertLess(
-            cleanup.index('security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"'),
-            cleanup.index('security delete-keychain "$KEYCHAIN"'),
+            cleanup.index(
+                '/usr/bin/security list-keychains -d user -s '
+                '"${ORIGINAL_KEYCHAINS_ARRAY[@]}"'
+            ),
+            cleanup.index('/usr/bin/security delete-keychain "$KEYCHAIN"'),
         )
         self.assertIn("$RUNNER_TEMP/signing.p12", cleanup)
         self.assertIn("$RUNNER_TEMP/AuthKey.p8", cleanup)
@@ -328,14 +389,270 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         mutation_index = configure.index('security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"')
         self.assertLess(trap_index, mutation_index)
         self.assertIn(
-            'security list-keychains -d user -s "${ORIGINAL_KEYCHAINS_ARRAY[@]}"',
+            '/usr/bin/security list-keychains -d user -s '
+            '"${ORIGINAL_KEYCHAINS_ARRAY[@]}"',
             configure,
         )
-        self.assertIn('security delete-keychain "$KEYCHAIN" || true', configure)
+        self.assertIn('/usr/bin/security delete-keychain "$KEYCHAIN"', configure)
         self.assertNotIn("mapfile", workflow)
         self.assertNotIn("readarray", workflow)
         self.assertNotIn("eval", workflow)
         self.assertNotRegex(workflow, r"\$\([^)]*security list-keychains")
+
+    def test_release_keychain_parser_preserves_exact_indented_paths(self):
+        workflow = self.read_workflow()
+        configure = self.step_run(workflow, "Configure temporary signing keychain")
+        parser = self.shell_function(configure, "load_original_keychains")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            capture = Path(temporary_directory) / "captured-keychains"
+            expected = [
+                "/Users/runner/Library/Keychains/login.keychain-db",
+                "/Users/runner/Library/Keychains/Team Signing.keychain-db",
+            ]
+            capture.write_text(
+                f'    "{expected[0]}"\n\t"{expected[1]}"\n',
+                encoding="utf-8",
+            )
+            fixture = (
+                "set -euo pipefail\n"
+                f"{parser}\n"
+                "load_original_keychains\n"
+                "set +u\n"
+                'for keychain in "${ORIGINAL_KEYCHAINS_ARRAY[@]}"; do\n'
+                "  printf '%s\\0' \"$keychain\"\n"
+                "done\n"
+            )
+            environment = os.environ.copy()
+            environment["ORIGINAL_KEYCHAINS"] = str(capture)
+            result = subprocess.run(
+                ["/bin/bash", "-c", fixture],
+                env=environment,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout.split(b"\0")[:-1], [p.encode() for p in expected])
+
+    def test_release_keychain_parser_and_restore_support_empty_list(self):
+        workflow = self.read_workflow()
+        configure = self.step_run(workflow, "Configure temporary signing keychain")
+        parser = self.shell_function(configure, "load_original_keychains")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            capture = Path(temporary_directory) / "captured-keychains"
+            capture.write_text("", encoding="utf-8")
+            fixture = (
+                "set -euo pipefail\n"
+                f"{parser}\n"
+                "load_original_keychains\n"
+                "set +u\n"
+                'for keychain in "${ORIGINAL_KEYCHAINS_ARRAY[@]}"; do\n'
+                "  printf '%s\\0' \"$keychain\"\n"
+                "done\n"
+            )
+            environment = os.environ.copy()
+            environment["ORIGINAL_KEYCHAINS"] = str(capture)
+            result = subprocess.run(
+                ["/bin/bash", "-c", fixture],
+                env=environment,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout, b"")
+
+        cleanup = self.step_run(workflow, "Remove temporary credentials")
+        self.assertNotIn('if [[ -s "$ORIGINAL_KEYCHAINS_FILE" ]]', cleanup)
+        self.assertIn(
+            '/usr/bin/security list-keychains -d user -s '
+            '"${ORIGINAL_KEYCHAINS_ARRAY[@]}"',
+            cleanup,
+        )
+
+    def test_release_cleanup_paths_attempt_every_operation_after_failures(self):
+        workflow = self.read_workflow()
+        configure = self.step_run(workflow, "Configure temporary signing keychain")
+        parser = self.shell_function(configure, "load_original_keychains")
+        configure_cleanup = self.shell_function(configure, "configure_cleanup")
+        final_cleanup = self.step_run(workflow, "Remove temporary credentials")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            fake_tools = self.make_fake_cleanup_tools(root)
+            call_log = root / "calls.jsonl"
+            original = root / "original-keychains"
+            keychain = root / "temporary keychain.keychain-db"
+            signing_p12 = root / "signing.p12"
+            notary_key = root / "AuthKey.p8"
+            original_paths = [
+                "/Users/runner/Library/Keychains/login.keychain-db",
+                "/Users/runner/Library/Keychains/Team Signing.keychain-db",
+            ]
+            original.write_text(
+                "".join(f'    "{path}"\n' for path in original_paths),
+                encoding="utf-8",
+            )
+            for credential in (keychain, signing_p12, notary_key):
+                credential.write_text("fixture", encoding="utf-8")
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "CALL_LOG": str(call_log),
+                    "FAKE_SECURITY": str(fake_tools["security"]),
+                    "FAKE_RM": str(fake_tools["rm"]),
+                    "FAKE_RESTORE_EXIT": "23",
+                    "FAKE_DELETE_EXIT": "0",
+                    "FAKE_RM_EXIT": "0",
+                    "ORIGINAL_KEYCHAINS": str(original),
+                    "KEYCHAIN": str(keychain),
+                    "SIGNING_P12": str(signing_p12),
+                    "NOTARY_KEY": str(notary_key),
+                }
+            )
+            trap_fixture = (
+                "set -euo pipefail\n"
+                f"{parser}\n"
+                f"{configure_cleanup}\n"
+                "trap configure_cleanup ERR\n"
+                "false\n"
+            ).replace("/usr/bin/security", '"$FAKE_SECURITY"').replace(
+                "/bin/rm", '"$FAKE_RM"'
+            )
+            trap_result = subprocess.run(
+                ["/bin/bash", "-c", trap_fixture],
+                env=environment,
+                capture_output=True,
+                check=False,
+            )
+            trap_calls = [
+                json.loads(line)
+                for line in call_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(trap_result.returncode, 1)
+            self.assertEqual(
+                trap_calls,
+                [
+                    [
+                        "security",
+                        "list-keychains",
+                        "-d",
+                        "user",
+                        "-s",
+                        *original_paths,
+                    ],
+                    ["security", "delete-keychain", str(keychain)],
+                    [
+                        "rm",
+                        "-f",
+                        str(signing_p12),
+                        str(notary_key),
+                        str(original),
+                    ],
+                ],
+            )
+
+            call_log.write_text("", encoding="utf-8")
+            original.write_text("", encoding="utf-8")
+            environment.update(
+                {
+                    "RUNNER_TEMP": str(root),
+                    "LMR_KEYCHAIN": str(keychain),
+                    "LMR_ORIGINAL_KEYCHAINS": str(original),
+                    "LMR_SIGNING_P12": str(signing_p12),
+                    "LMR_NOTARY_KEY": str(notary_key),
+                    "FAKE_DELETE_EXIT": "24",
+                    "FAKE_RM_EXIT": "25",
+                }
+            )
+            final_fixture = final_cleanup.replace(
+                "/usr/bin/security", '"$FAKE_SECURITY"'
+            ).replace("/bin/rm", '"$FAKE_RM"')
+            final_result = subprocess.run(
+                ["/bin/bash", "-c", final_fixture],
+                env=environment,
+                capture_output=True,
+                check=False,
+            )
+            final_calls = [
+                json.loads(line)
+                for line in call_log.read_text(encoding="utf-8").splitlines()
+            ]
+        self.assertEqual(final_result.returncode, 25)
+        self.assertEqual(
+            final_calls,
+            [
+                ["security", "list-keychains", "-d", "user", "-s"],
+                ["security", "delete-keychain", str(keychain)],
+                [
+                    "rm",
+                    "-f",
+                    str(signing_p12),
+                    str(notary_key),
+                    str(original),
+                ],
+            ],
+        )
+
+    def test_release_final_cleanup_skips_restore_without_a_capture(self):
+        workflow = self.read_workflow()
+        final_cleanup = self.step_run(workflow, "Remove temporary credentials")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            fake_tools = self.make_fake_cleanup_tools(root)
+            call_log = root / "calls.jsonl"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "CALL_LOG": str(call_log),
+                    "FAKE_SECURITY": str(fake_tools["security"]),
+                    "FAKE_RM": str(fake_tools["rm"]),
+                    "RUNNER_TEMP": str(root),
+                }
+            )
+            fixture = final_cleanup.replace(
+                "/usr/bin/security", '"$FAKE_SECURITY"'
+            ).replace("/bin/rm", '"$FAKE_RM"')
+            result = subprocess.run(
+                ["/bin/bash", "-c", fixture],
+                env=environment,
+                capture_output=True,
+                check=False,
+            )
+            calls = [
+                json.loads(line)
+                for line in call_log.read_text(encoding="utf-8").splitlines()
+            ]
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "rm",
+                    "-f",
+                    str(root / "signing.p12"),
+                    str(root / "AuthKey.p8"),
+                    str(root / "lmr-original-keychains"),
+                ]
+            ],
+        )
+
+    def test_release_credential_commands_use_fixed_system_paths(self):
+        workflow = self.read_workflow()
+        configure = self.step_run(workflow, "Configure temporary signing keychain")
+        cleanup = self.step_run(workflow, "Remove temporary credentials")
+        for command in (
+            "/usr/bin/security",
+            "/usr/bin/xcrun",
+            "/usr/bin/openssl",
+            "/usr/bin/base64",
+            "/bin/rm",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, f"{configure}\n{cleanup}")
+        self.assertNotRegex(
+            f"{configure}\n{cleanup}",
+            r"(?m)^\s*(?:security|xcrun|openssl|base64|rm)\b",
+        )
 
     def test_release_builds_notarized_artifacts_without_operational_side_effects(self):
         workflow = self.read_workflow().lower()

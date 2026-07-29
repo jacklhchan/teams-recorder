@@ -164,6 +164,68 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.discoveredModels, ["new"])
     }
 
+    func testEditingDraftClearsCompletedDiscoveryAndConnectionStatus() async {
+        let client = DeferredProviderClient()
+        let model = makeModel(client: client)
+        let testTask = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["found"]))
+        )
+        await testTask.value
+
+        model.prompt = "updated prompt"
+
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+        XCTAssertEqual(model.status, "Not configured")
+        XCTAssertFalse(model.statusIsError)
+    }
+
+    func testSaveAndRemoveKeyClearCompletedDiscoveryAndConnectionStatus() async {
+        let client = DeferredProviderClient()
+        let model = makeModel(client: client)
+
+        let firstTest = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["found"]))
+        )
+        await firstTest.value
+        model.save()
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+        XCTAssertEqual(model.status, "Provider settings saved")
+
+        let secondTest = Task { await model.testConnection() }
+        await client.waitForRequestCount(2)
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["found"]))
+        )
+        await secondTest.value
+        model.removeAPIKey()
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+        XCTAssertEqual(model.status, "API key removed")
+    }
+
+    func testNewFailedConnectionClearsPreviousDiscoveryBeforeAndAfterFailure() async {
+        let client = DeferredProviderClient()
+        let model = makeModel(client: client)
+        let successfulTest = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["old"]))
+        )
+        await successfulTest.value
+
+        let failedTest = Task { await model.testConnection() }
+        await client.waitForRequestCount(2)
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+        await client.completeNext(with: .failure(TestError.failed))
+        await failedTest.value
+
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+        XCTAssertTrue(model.statusIsError)
+    }
+
     private func makeModel(
         client: any ProviderConnectionTesting = StubProviderClient()
     ) -> AIProviderSettingsModel {

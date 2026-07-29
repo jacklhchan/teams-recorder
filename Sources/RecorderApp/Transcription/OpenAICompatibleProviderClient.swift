@@ -1,26 +1,156 @@
 import Foundation
 
-protocol ProviderHTTPDataLoading: Sendable {
-    func data(
-        for request: URLRequest
+protocol ProviderHTTPTransport: Sendable {
+    func response(
+        for request: URLRequest,
+        maximumBodyBytes: Int
     ) async throws -> (Data, HTTPURLResponse)
 }
 
-struct URLSessionProviderHTTPDataLoader: ProviderHTTPDataLoading {
-    let session: URLSession
+struct URLSessionProviderHTTPTransport: ProviderHTTPTransport {
+    private let configuration: URLSessionConfiguration
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init(configuration: URLSessionConfiguration = .default) {
+        self.configuration = configuration
     }
 
-    func data(
-        for request: URLRequest
+    func response(
+        for request: URLRequest,
+        maximumBodyBytes: Int
     ) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await session.data(for: request)
+        let collector = CappedHTTPResponseCollector(
+            configuration: configuration,
+            maximumBodyBytes: maximumBodyBytes
+        )
+        return try await collector.load(request: request)
+    }
+}
+
+private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let configuration: URLSessionConfiguration
+    private let maximumBodyBytes: Int
+    private let lock = NSLock()
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var response: HTTPURLResponse?
+    private var body = Data()
+    private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+    private var isFinished = false
+
+    init(configuration: URLSessionConfiguration, maximumBodyBytes: Int) {
+        self.configuration = configuration
+        self.maximumBodyBytes = maximumBodyBytes
+    }
+
+    func load(request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                self.continuation = continuation
+                if Task.isCancelled {
+                    lock.unlock()
+                    finish(.failure(CancellationError()))
+                    return
+                }
+                let session = URLSession(
+                    configuration: configuration,
+                    delegate: self,
+                    delegateQueue: nil
+                )
+                self.session = session
+                let task = session.dataTask(with: request)
+                self.task = task
+                lock.unlock()
+                task.resume()
+            }
+        }, onCancel: {
+            self.cancel()
+        })
+    }
+
+    func urlSession(
+        _: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
         guard let response = response as? HTTPURLResponse else {
-            throw ProviderConnectionError.invalidResponse
+            completionHandler(.cancel)
+            finish(.failure(ProviderConnectionError.invalidResponse))
+            return
         }
-        return (data, response)
+        guard response.expectedContentLength <= maximumBodyBytes
+                || response.expectedContentLength == NSURLSessionTransferSizeUnknown else {
+            completionHandler(.cancel)
+            dataTask.cancel()
+            finish(.failure(ProviderConnectionError.modelDiscoveryResponseTooLarge))
+            return
+        }
+        lock.lock()
+        self.response = response
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        lock.lock()
+        let exceedsLimit = data.count > maximumBodyBytes - body.count
+        if !exceedsLimit {
+            body.append(data)
+        }
+        lock.unlock()
+
+        if exceedsLimit {
+            dataTask.cancel()
+            finish(.failure(ProviderConnectionError.modelDiscoveryResponseTooLarge))
+        }
+    }
+
+    func urlSession(
+        _: URLSession,
+        task _: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error {
+            finish(.failure(error))
+            return
+        }
+        lock.lock()
+        let result = response.map { (body, $0) }
+        lock.unlock()
+        guard let result else {
+            finish(.failure(ProviderConnectionError.invalidResponse))
+            return
+        }
+        finish(.success(result))
+    }
+
+    private func cancel() {
+        lock.lock()
+        let task = self.task
+        lock.unlock()
+        task?.cancel()
+        finish(.failure(CancellationError()))
+    }
+
+    private func finish(_ result: Result<(Data, HTTPURLResponse), Error>) {
+        lock.lock()
+        guard !isFinished, let continuation else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        self.continuation = nil
+        task = nil
+        let session = self.session
+        self.session = nil
+        lock.unlock()
+        session?.finishTasksAndInvalidate()
+        continuation.resume(with: result)
     }
 }
 
@@ -63,13 +193,12 @@ struct OpenAICompatibleProviderClient: ProviderConnectionTesting {
     static let maximumModelDiscoveryResponseBytes = 1_048_576
     static let maximumDiscoveredModelCount = 1_000
 
-    private let loader: any ProviderHTTPDataLoading
+    private let transport: any ProviderHTTPTransport
 
     init(
-        loader: any ProviderHTTPDataLoading =
-            URLSessionProviderHTTPDataLoader()
+        transport: any ProviderHTTPTransport = URLSessionProviderHTTPTransport()
     ) {
-        self.loader = loader
+        self.transport = transport
     }
 
     func testConnection(
@@ -86,12 +215,12 @@ struct OpenAICompatibleProviderClient: ProviderConnectionTesting {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
 
-        let (data, response) = try await loader.data(for: request)
+        let (data, response) = try await transport.response(
+            for: request,
+            maximumBodyBytes: Self.maximumModelDiscoveryResponseBytes
+        )
         switch response.statusCode {
         case 200..<300:
-            guard data.count <= Self.maximumModelDiscoveryResponseBytes else {
-                throw ProviderConnectionError.modelDiscoveryResponseTooLarge
-            }
             let decoded = try? JSONDecoder().decode(ModelList.self, from: data)
             if let decoded,
                decoded.data.count > Self.maximumDiscoveredModelCount {
@@ -99,7 +228,7 @@ struct OpenAICompatibleProviderClient: ProviderConnectionTesting {
             }
             return ProviderConnectionReport(
                 supportsModelDiscovery: decoded != nil,
-                models: decoded?.data.map(\.id).sorted() ?? []
+                models: decoded.map { Array(Set($0.data.map(\.id))).sorted() } ?? []
             )
         case 404, 405:
             return ProviderConnectionReport(

@@ -18,7 +18,10 @@ struct AIProviderSettingsView: View {
             modelField("LLM Model", text: $model.llmModel)
             TextField("Language", text: $model.language)
                 .textFieldStyle(.roundedBorder)
+            Text("Prompt")
+                .font(.subheadline)
             TextEditor(text: $model.prompt)
+                .accessibilityLabel("Prompt")
                 .frame(minHeight: 58, maxHeight: 96)
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
@@ -70,6 +73,7 @@ struct AIProviderSettingsView: View {
                     Image(systemName: "chevron.up.chevron.down")
                 }
                 .help("Choose a discovered model")
+                .accessibilityLabel("Choose discovered \(title) model")
             }
         }
     }

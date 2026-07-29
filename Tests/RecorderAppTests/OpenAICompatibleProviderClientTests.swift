@@ -4,42 +4,42 @@ import XCTest
 
 final class OpenAICompatibleProviderClientTests: XCTestCase {
     func testListsModelsWithOptionalBearerHeader() async throws {
-        let loader = RecordingProviderDataLoader(
+        let transport = RecordingProviderTransport(
             response: .success(.init(
                 status: 200,
                 body: #"{"data":[{"id":"asr-a"},{"id":"llm-b"}]}"#
             ))
         )
 
-        let report = try await OpenAICompatibleProviderClient(loader: loader)
+        let report = try await OpenAICompatibleProviderClient(transport: transport)
             .testConnection(profile: try makeProfile(), apiKey: "secret")
 
         XCTAssertEqual(report.models, ["asr-a", "llm-b"])
         XCTAssertEqual(
-            loader.lastRequest?.value(forHTTPHeaderField: "Authorization"),
+            transport.lastRequest?.value(forHTTPHeaderField: "Authorization"),
             "Bearer secret"
         )
-        XCTAssertEqual(loader.lastRequest?.timeoutInterval, 15)
-        XCTAssertEqual(loader.lastRequest?.url?.absoluteString, "https://api.example.com/v1/models")
+        XCTAssertEqual(transport.lastRequest?.timeoutInterval, 15)
+        XCTAssertEqual(transport.lastRequest?.url?.absoluteString, "https://api.example.com/v1/models")
     }
 
     func testNoAuthOmitsAuthorizationHeader() async throws {
-        let loader = RecordingProviderDataLoader(
+        let transport = RecordingProviderTransport(
             response: .success(.init(status: 200, body: #"{"data":[]}"#))
         )
 
-        _ = try await OpenAICompatibleProviderClient(loader: loader)
+        _ = try await OpenAICompatibleProviderClient(transport: transport)
             .testConnection(profile: try makeProfile(), apiKey: nil)
 
-        XCTAssertNil(loader.lastRequest?.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertNil(transport.lastRequest?.value(forHTTPHeaderField: "Authorization"))
     }
 
     func testUnsupportedModelDiscoveryStillReportsReachable() async throws {
-        let loader = RecordingProviderDataLoader(
+        let transport = RecordingProviderTransport(
             response: .success(.init(status: 404, body: ""))
         )
 
-        let report = try await OpenAICompatibleProviderClient(loader: loader)
+        let report = try await OpenAICompatibleProviderClient(transport: transport)
             .testConnection(profile: try makeProfile(), apiKey: nil)
 
         XCTAssertFalse(report.supportsModelDiscovery)
@@ -47,12 +47,12 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
     }
 
     func testAuthenticationFailureIsTypedAndRedacted() async throws {
-        let loader = RecordingProviderDataLoader(
+        let transport = RecordingProviderTransport(
             response: .success(.init(status: 401, body: "response-secret"))
         )
 
         do {
-            _ = try await OpenAICompatibleProviderClient(loader: loader)
+            _ = try await OpenAICompatibleProviderClient(transport: transport)
                 .testConnection(profile: try makeProfile(), apiKey: "never-log")
             XCTFail("Expected failure")
         } catch {
@@ -62,29 +62,25 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         }
     }
 
-    func testOversizedModelDiscoveryResponseIsRejectedBeforeDecode() async throws {
-        let loader = RecordingProviderDataLoader(
-            response: .success(.init(
-                status: 200,
-                body: String(
-                    repeating: "x",
-                    count: OpenAICompatibleProviderClient
-                        .maximumModelDiscoveryResponseBytes + 1
-                )
-            ))
+    func testTransportReceivesResponseCapBeforeAnyStatusHandling() async throws {
+        let transport = RecordingProviderTransport(
+            response: .failure(ProviderConnectionError.modelDiscoveryResponseTooLarge)
         )
 
         do {
-            _ = try await OpenAICompatibleProviderClient(loader: loader)
+            _ = try await OpenAICompatibleProviderClient(transport: transport)
                 .testConnection(profile: try makeProfile(), apiKey: nil)
-            XCTFail("Expected oversized response failure")
+            XCTFail("Expected capped transport failure")
         } catch {
             XCTAssertEqual(
                 error as? ProviderConnectionError,
                 .modelDiscoveryResponseTooLarge
             )
-            XCTAssertFalse(error.localizedDescription.contains("xxxxx"))
         }
+        XCTAssertEqual(
+            transport.lastMaximumBodyBytes,
+            OpenAICompatibleProviderClient.maximumModelDiscoveryResponseBytes
+        )
     }
 
     func testExcessiveModelDiscoveryItemsAreRejectedBeforeRender() async throws {
@@ -94,12 +90,12 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
             + Array(repeating: #"{"id":"any/provider:model"}"#, count: itemCount)
                 .joined(separator: ",")
             + "]}"
-        let loader = RecordingProviderDataLoader(
+        let transport = RecordingProviderTransport(
             response: .success(.init(status: 200, body: body))
         )
 
         do {
-            _ = try await OpenAICompatibleProviderClient(loader: loader)
+            _ = try await OpenAICompatibleProviderClient(transport: transport)
                 .testConnection(profile: try makeProfile(), apiKey: nil)
             XCTFail("Expected excessive model item failure")
         } catch {
@@ -109,6 +105,20 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
             )
             XCTAssertFalse(error.localizedDescription.contains("any/provider:model"))
         }
+    }
+
+    func testDeduplicatesExactModelIDsBeforeSorting() async throws {
+        let transport = RecordingProviderTransport(
+            response: .success(.init(
+                status: 200,
+                body: #"{"data":[{"id":"z"},{"id":"a"},{"id":"z"},{"id":"A"}]}"#
+            ))
+        )
+
+        let report = try await OpenAICompatibleProviderClient(transport: transport)
+            .testConnection(profile: try makeProfile(), apiKey: nil)
+
+        XCTAssertEqual(report.models, ["A", "a", "z"])
     }
 
     private func makeProfile() throws -> OpenAICompatibleProviderProfile {
@@ -122,7 +132,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
     }
 }
 
-private final class RecordingProviderDataLoader: ProviderHTTPDataLoading, @unchecked Sendable {
+private final class RecordingProviderTransport: ProviderHTTPTransport, @unchecked Sendable {
     struct Response {
         let status: Int
         let body: String
@@ -130,13 +140,18 @@ private final class RecordingProviderDataLoader: ProviderHTTPDataLoading, @unche
 
     let response: Result<Response, Error>
     private(set) var lastRequest: URLRequest?
+    private(set) var lastMaximumBodyBytes: Int?
 
     init(response: Result<Response, Error>) {
         self.response = response
     }
 
-    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    func response(
+        for request: URLRequest,
+        maximumBodyBytes: Int
+    ) async throws -> (Data, HTTPURLResponse) {
         lastRequest = request
+        lastMaximumBodyBytes = maximumBodyBytes
         let response = try response.get()
         return (
             Data(response.body.utf8),

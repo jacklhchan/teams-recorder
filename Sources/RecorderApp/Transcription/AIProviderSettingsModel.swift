@@ -144,7 +144,7 @@ final class AIProviderSettingsModel: ObservableObject {
     }
 
     private func beginConnectionTest() -> UInt64 {
-        connectionTestGeneration &+= 1
+        invalidateConnectionTest()
         isTesting = true
         return connectionTestGeneration
     }
@@ -152,5 +152,8 @@ final class AIProviderSettingsModel: ObservableObject {
     private func invalidateConnectionTest() {
         connectionTestGeneration &+= 1
         isTesting = false
+        discoveredModels = []
+        status = "Not configured"
+        statusIsError = false
     }
 }

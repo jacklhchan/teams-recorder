@@ -1,5 +1,10 @@
 # Local Meeting Recorder Self-Service Installer Implementation Plan
 
+> **Superseded on 2026-07-28. Do not execute this plan.**
+> Local Meeting Recorder now uses native ScreenCaptureKit capture and a
+> user-configured OpenAI-compatible provider. The application does not install
+> BlackHole, oMLX, provider binaries, or models.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship one ad-hoc-signed arm64 DMG whose Local Meeting Recorder app guides an M1/macOS 15+ administrator through BlackHole, oMLX, Qwen ASR, audio routing, permissions, and an end-to-end test without Terminal.

@@ -1,5 +1,10 @@
 # Local Meeting Recorder Self-Service Distribution Design
 
+> **Superseded on 2026-07-28. Do not execute this plan.**
+> Local Meeting Recorder now uses native ScreenCaptureKit capture and a
+> user-configured OpenAI-compatible provider. The application does not install
+> BlackHole, oMLX, provider binaries, or models.
+
 Date: 2026-07-20
 Status: Approved for implementation planning
 

@@ -18,9 +18,6 @@ let package = Package(
         .executableTarget(
             name: "RecorderApp",
             dependencies: ["VirtualMicBridge"],
-            resources: [
-                .process("Resources/release-manifest.json")
-            ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AudioToolbox"),

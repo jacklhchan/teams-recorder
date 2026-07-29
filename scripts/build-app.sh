@@ -19,12 +19,12 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BINARY_PATH" "$MACOS_DIR/$APP_NAME"
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 cp "$ROOT_DIR/Sources/RecorderApp/Resources/release-manifest.json" "$RESOURCES_DIR/release-manifest.json"
+cp "$ROOT_DIR/scripts/transcribe-openai-compatible.sh" "$RESOURCES_DIR/transcribe-openai-compatible.sh"
 cp "$ROOT_DIR/scripts/transcribe-qwen-asr.sh" "$RESOURCES_DIR/transcribe-qwen-asr.sh"
-cp "$ROOT_DIR/scripts/qwen_asr_longform.py" "$RESOURCES_DIR/qwen_asr_longform.py"
-cp "$ROOT_DIR/scripts/prepare-qwen-asr.sh" "$RESOURCES_DIR/prepare-qwen-asr.sh"
+cp "$ROOT_DIR/scripts/openai_asr_longform.py" "$RESOURCES_DIR/openai_asr_longform.py"
+chmod +x "$RESOURCES_DIR/transcribe-openai-compatible.sh"
 chmod +x "$RESOURCES_DIR/transcribe-qwen-asr.sh"
-chmod +x "$RESOURCES_DIR/qwen_asr_longform.py"
-chmod +x "$RESOURCES_DIR/prepare-qwen-asr.sh"
+chmod +x "$RESOURCES_DIR/openai_asr_longform.py"
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

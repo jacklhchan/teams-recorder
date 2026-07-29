@@ -1,5 +1,22 @@
 import Foundation
 
+protocol OpenAICompatibleProviderManaging: AnyObject {
+    func loadProfile() throws -> OpenAICompatibleProviderProfile?
+    func save(
+        profile: OpenAICompatibleProviderProfile,
+        replacementAPIKey: String?
+    ) throws
+    func snapshot() throws -> OpenAICompatibleProviderSnapshot
+    func snapshot(
+        overriding profile: OpenAICompatibleProviderProfile
+    ) throws -> OpenAICompatibleProviderSnapshot
+    func hasAPIKey() throws -> Bool
+    func removeAPIKey() throws
+    func migrateLegacyIfNeeded(
+        settingsURL: URL
+    ) throws -> LegacyProviderMigrationOutcome
+}
+
 struct OpenAICompatibleProviderSnapshot: Codable, Equatable, Sendable {
     let profile: OpenAICompatibleProviderProfile
     let apiKey: String?
@@ -39,7 +56,7 @@ enum LegacyProviderMigrationOutcome: Equatable {
     case migrated
 }
 
-final class OpenAICompatibleProviderRepository: @unchecked Sendable {
+final class OpenAICompatibleProviderRepository: OpenAICompatibleProviderManaging, @unchecked Sendable {
     private let profiles: any ProviderProfileStoring
     private let secureStore: any SecureValueStoring
     private let lock = NSLock()

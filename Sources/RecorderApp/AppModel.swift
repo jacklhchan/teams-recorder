@@ -83,10 +83,6 @@ final class AppModel: ObservableObject {
     @Published var transcriptURLsBySessionID: [RecordingSession.ID: URL] = [:]
     @Published var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] = [:]
     @Published var transcriptionStatesBySessionID: [RecordingSession.ID: TranscriptionState] = [:]
-    @Published var isPreparingASRModel = false
-    @Published var asrModelReady = false
-    @Published var asrModelStatus = "Checking oMLX ASR server..."
-    @Published var asrModelLogURL: URL?
     @Published private(set) var inputMuteControlAvailable = false
     @Published private(set) var virtualMicInstallationState: VirtualMicInstallationState = .absent
     @Published private(set) var teamsMuteSyncStatus: TeamsMuteSyncStatus = .disabled
@@ -106,6 +102,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var teamsScreenCaptureCandidates: [TeamsWindowDescriptor] = []
 
     let recorder: RecordingEngine
+    let aiProviderSettingsModel: AIProviderSettingsModel
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
@@ -119,7 +116,8 @@ final class AppModel: ObservableObject {
     private var activeTranscriptionAttempt: UUID?
     private var activeTranscriptionSession: RecordingSession?
     private var transcriptionCancellationRequested = false
-    private var asrPrepareProcess: Process?
+    private let providerRepository: any OpenAICompatibleProviderManaging
+    private let appPaths: AppPaths
     private let capturePersistence: CaptureSelectionPersistence
     private let inputDevices: () -> [AudioDevice]
     private let defaultInputDeviceID: () -> AudioDeviceID?
@@ -183,6 +181,8 @@ final class AppModel: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
+        providerRepository: (any OpenAICompatibleProviderManaging)? = nil,
+        appPaths: AppPaths = .live,
         recorder: RecordingEngine? = nil,
         inputDevices: @escaping () -> [AudioDevice] = AudioDeviceManager.inputDevices,
         defaultInputDeviceID: @escaping () -> AudioDeviceID? = AudioDeviceManager.defaultInputDeviceID,
@@ -239,6 +239,17 @@ final class AppModel: ObservableObject {
         self.inputDevices = inputDevices
         self.defaultInputDeviceID = defaultInputDeviceID
         self.defaults = defaults
+        let activeProviderRepository = providerRepository
+            ?? OpenAICompatibleProviderRepository(
+                profiles: OpenAICompatibleProviderProfileStore(defaults: defaults),
+                secureStore: KeychainSecureValueStore()
+            )
+        self.providerRepository = activeProviderRepository
+        aiProviderSettingsModel = AIProviderSettingsModel(
+            repository: activeProviderRepository,
+            loadImmediately: false
+        )
+        self.appPaths = appPaths
         teamsMuteSyncEnabled = defaults.object(
             forKey: Self.teamsMuteSyncEnabledKey
         ) as? Bool ?? true
@@ -330,8 +341,9 @@ final class AppModel: ObservableObject {
         refreshPermissionPreflight()
         refreshCaptureApplications()
         refreshSessions()
-        refreshASRModelStatus()
-        prepareASRModelIfNeeded()
+        aiProviderSettingsModel.performStartupMigration(
+            settingsURL: appPaths.omlxSettingsURL
+        )
     }
 
     deinit {
@@ -1181,9 +1193,8 @@ final class AppModel: ObservableObject {
             statusMessage = "A transcription is already running."
             return
         }
-        guard asrModelReady else {
-            prepareASRModelIfNeeded()
-            statusMessage = "oMLX ASR server is still preparing. Wait until it is ready, then transcribe again."
+        guard aiProviderSettingsModel.hasSavedProfile else {
+            statusMessage = "Configure and save an AI provider before starting transcription."
             return
         }
 
@@ -1390,80 +1401,6 @@ final class AppModel: ObservableObject {
         )
         statusMessage = message
         clearActiveTranscription(generation: generation, attempt: attempt)
-    }
-
-    func prepareASRModelIfNeeded() {
-        refreshASRModelStatus()
-        guard !asrModelReady else { return }
-        guard !isPreparingASRModel else { return }
-
-        let scriptURL = Bundle.main.resourceURL?.appendingPathComponent("prepare-qwen-asr.sh")
-            ?? URL(fileURLWithPath: "/Users/apple/Documents/recorder/scripts/prepare-qwen-asr.sh")
-        guard FileManager.default.isExecutableFile(atPath: scriptURL.path) else {
-            asrModelStatus = "Missing ASR model preparation script: \(scriptURL.path)"
-            return
-        }
-
-        isPreparingASRModel = true
-        asrModelStatus = "Checking oMLX ASR server in the background..."
-        statusMessage = "Checking oMLX ASR server"
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [scriptURL.path]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        asrPrepareProcess = process
-
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in
-                self?.handleASRModelOutput(text)
-            }
-        }
-
-        process.terminationHandler = { [weak self] process in
-            Task { @MainActor in
-                pipe.fileHandleForReading.readabilityHandler = nil
-                self?.asrPrepareProcess = nil
-                self?.isPreparingASRModel = false
-                if process.terminationStatus == 0 {
-                    self?.asrModelReady = true
-                    self?.asrModelStatus = "oMLX ASR server ready"
-                    self?.statusMessage = "oMLX ASR server ready"
-                } else {
-                    self?.asrModelReady = false
-                    self?.asrModelStatus = "oMLX ASR server check failed with exit code \(process.terminationStatus)"
-                    self?.statusMessage = "oMLX ASR server check failed. Open the ASR log for details."
-                }
-            }
-        }
-
-        do {
-            try process.run()
-        } catch {
-            isPreparingASRModel = false
-            asrPrepareProcess = nil
-            asrModelStatus = "oMLX ASR server check failed: \(error.localizedDescription)"
-        }
-    }
-
-    func openASRModelLog() {
-        if let asrModelLogURL {
-            NSWorkspace.shared.open(asrModelLogURL)
-            return
-        }
-
-        let expected = URL(fileURLWithPath: "/Users/apple/Documents/AIA ASR/qwen_asr_model_prepare.log")
-        if FileManager.default.fileExists(atPath: expected.path) {
-            asrModelLogURL = expected
-            NSWorkspace.shared.open(expected)
-        } else {
-            statusMessage = "No oMLX ASR server log found."
-        }
     }
 
     func openTranscript(for session: RecordingSession) {
@@ -1975,47 +1912,6 @@ final class AppModel: ObservableObject {
     private func updateTranscriptionState(_ state: TranscriptionState, for session: RecordingSession) {
         transcriptionStatesBySessionID[session.id] = state
         try? TranscriptionStateStore.save(state, in: session.folderURL)
-    }
-
-    private func refreshASRModelStatus() {
-        if !asrModelReady && !isPreparingASRModel {
-            asrModelStatus = "oMLX ASR server not checked yet"
-        }
-
-        let logURL = URL(fileURLWithPath: "/Users/apple/Documents/AIA ASR/qwen_asr_model_prepare.log")
-        if FileManager.default.fileExists(atPath: logURL.path) {
-            asrModelLogURL = logURL
-        }
-    }
-
-    private func handleASRModelOutput(_ text: String) {
-        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
-        if let lastUsefulLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            asrModelStatus = friendlyASRModelStatus(for: lastUsefulLine)
-        }
-
-        for line in lines where line.hasPrefix("LOG_PATH=") {
-            let path = String(line.dropFirst("LOG_PATH=".count))
-            asrModelLogURL = URL(fileURLWithPath: path)
-        }
-
-        for line in lines where line.hasPrefix("MODEL_READY=") {
-            asrModelReady = true
-            asrModelStatus = "oMLX ASR server ready"
-        }
-    }
-
-    private func friendlyASRModelStatus(for line: String) -> String {
-        if line.contains("Checking oMLX ASR server") {
-            return "Checking oMLX ASR server..."
-        }
-        if line.contains("Waiting for oMLX ASR model") {
-            return "Waiting for oMLX ASR model..."
-        }
-        if line.hasPrefix("LOG_PATH=") {
-            return isPreparingASRModel ? "Checking oMLX ASR server in the background..." : asrModelStatus
-        }
-        return line
     }
 
     func requestSystemAudioPermission() {

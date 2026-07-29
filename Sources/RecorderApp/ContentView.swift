@@ -56,14 +56,7 @@ struct ContentView: View {
                     if let report = model.lastHealthReport {
                         HealthSummaryView(report: report)
                     }
-                    ASRModelView(
-                        isPreparing: model.isPreparingASRModel,
-                        isReady: model.asrModelReady,
-                        status: model.asrModelStatus,
-                        hasLog: model.asrModelLogURL != nil,
-                        prepare: model.prepareASRModelIfNeeded,
-                        openLog: model.openASRModelLog
-                    )
+                    AIProviderSettingsView(model: model.aiProviderSettingsModel)
                     SessionListView(
                         sessions: model.sessions,
                         playingSessionID: model.playingSessionID,
@@ -76,7 +69,7 @@ struct ContentView: View {
                         lastTranscriptionSessionID: model.lastTranscriptionSessionID,
                         lastTranscriptionStatus: model.lastTranscriptionStatus,
                         lastTranscriptionDidFail: model.lastTranscriptionDidFail,
-                        asrModelReady: model.asrModelReady,
+                        hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
                         transcriptURLsBySessionID: model.transcriptURLsBySessionID,
                         transcriptLogURLsBySessionID: model.transcriptLogURLsBySessionID,
                         transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
@@ -834,63 +827,6 @@ private struct LiveAudioHealthView: View {
     }
 }
 
-private struct ASRModelView: View {
-    let isPreparing: Bool
-    let isReady: Bool
-    let status: String
-    let hasLog: Bool
-    let prepare: () -> Void
-    let openLog: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            if isPreparing {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Image(systemName: isReady ? "checkmark.circle.fill" : "arrow.down.circle.fill")
-                    .foregroundStyle(isReady ? .green : .orange)
-                    .frame(width: 18)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("oMLX ASR Server")
-                    .font(.callout.weight(.medium))
-                Text(status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-            }
-
-            Spacer()
-
-            Button {
-                prepare()
-            } label: {
-                Label(isReady ? "Ready" : "Prepare", systemImage: isReady ? "checkmark" : "arrow.down")
-            }
-            .buttonStyle(.bordered)
-            .disabled(isPreparing || isReady)
-
-            Button {
-                openLog()
-            } label: {
-                Image(systemName: "terminal")
-            }
-            .buttonStyle(.bordered)
-            .disabled(!hasLog)
-            .help("Open ASR model log")
-        }
-        .padding(14)
-        .background(.background, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.separator.opacity(0.55), lineWidth: 1)
-        )
-    }
-}
-
 private struct SessionListView: View {
     let sessions: [RecordingSession]
     let playingSessionID: RecordingSession.ID?
@@ -903,7 +839,7 @@ private struct SessionListView: View {
     let lastTranscriptionSessionID: RecordingSession.ID?
     let lastTranscriptionStatus: String
     let lastTranscriptionDidFail: Bool
-    let asrModelReady: Bool
+    let hasSavedProviderProfile: Bool
     let transcriptURLsBySessionID: [RecordingSession.ID: URL]
     let transcriptLogURLsBySessionID: [RecordingSession.ID: URL]
     let transcriptionStatesBySessionID: [RecordingSession.ID: TranscriptionState]
@@ -1005,8 +941,8 @@ private struct SessionListView: View {
                                     Image(systemName: transcribingSessionID == session.id ? "waveform" : "text.badge.plus")
                                 }
                                 .buttonStyle(.bordered)
-                                .disabled(transcribingSessionID != nil || !asrModelReady)
-                                .help(asrModelReady ? "Transcribe with oMLX Qwen ASR" : "Wait for the oMLX ASR server check")
+                                .disabled(transcribingSessionID != nil || !hasSavedProviderProfile)
+                                .help(hasSavedProviderProfile ? "Transcribe recording" : "Configure and save an AI provider")
                                 Button {
                                     transcriptSession = session
                                 } label: {

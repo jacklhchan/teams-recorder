@@ -242,7 +242,9 @@ final class AppModelTranscriptionTests: XCTestCase {
         preparer: ControlledPreparer,
         launcher: ControlledLauncher
     ) -> AppModel {
+        let repository = RecordingProviderRepository()
         let model = AppModel(
+            providerRepository: repository,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
@@ -250,7 +252,10 @@ final class AppModelTranscriptionTests: XCTestCase {
             transcriptionProcessLauncher: launcher,
             transcriptionScriptURL: fixture.scriptURL
         )
-        model.asrModelReady = true
+        model.aiProviderSettingsModel.baseURLText = "https://api.example.com/v1"
+        model.aiProviderSettingsModel.asrModel = "asr"
+        model.aiProviderSettingsModel.llmModel = "llm"
+        model.aiProviderSettingsModel.save()
         return model
     }
 

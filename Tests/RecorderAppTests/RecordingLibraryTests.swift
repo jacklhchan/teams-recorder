@@ -135,6 +135,44 @@ final class RecordingLibraryTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("transcript.txt"), encoding: .utf8), "edited version")
     }
 
+    func testCanonicalTranscriptWinsOverLegacyFile() throws {
+        let root = try makeRoot()
+        let folder = try makeSessionFolder(in: root, named: "meeting-2026-07-22-090000")
+        try "canonical".write(
+            to: folder.appendingPathComponent("transcript.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "legacy".write(
+            to: folder.appendingPathComponent("transcript_qwen3_asr_1_7b_8bit_yue_trad.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(try TranscriptDocumentStore.read(in: folder), "canonical")
+    }
+
+    func testLegacyProviderSpecificTranscriptRemainsReadable() throws {
+        let root = try makeRoot()
+        let folder = try makeSessionFolder(in: root, named: "meeting-2026-07-22-090000")
+        let legacy = folder.appendingPathComponent("transcript_qwen3_asr_1_7b_8bit_yue_trad.txt")
+        try "legacy".write(to: legacy, atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(TranscriptDocumentStore.resolvedURL(in: folder), legacy)
+    }
+
+    func testCanonicalLogWinsAndLegacyLogFallsBack() throws {
+        let root = try makeRoot()
+        let folder = try makeSessionFolder(in: root, named: "meeting-2026-07-22-090000")
+        let legacy = folder.appendingPathComponent("transcription_qwen_asr.log")
+        try Data().write(to: legacy)
+        XCTAssertEqual(TranscriptDocumentStore.logURL(in: folder), legacy)
+
+        let canonical = folder.appendingPathComponent("transcription.log")
+        try Data().write(to: canonical)
+        XCTAssertEqual(TranscriptDocumentStore.logURL(in: folder), canonical)
+    }
+
     func testTranscriptionStateCanBeCancelledAndSurvivesReload() throws {
         let root = try makeRoot()
         let folder = try makeSessionFolder(in: root, named: "meeting-2026-07-22-090000")

@@ -1475,18 +1475,11 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let expected = TranscriptDocumentStore.editableURL(in: session.folderURL)
-        if FileManager.default.fileExists(atPath: expected.path) {
-            transcriptURLsBySessionID[session.id] = expected
-            NSWorkspace.shared.open(expected)
+        if let url = TranscriptDocumentStore.resolvedURL(in: session.folderURL) {
+            transcriptURLsBySessionID[session.id] = url
+            NSWorkspace.shared.open(url)
         } else {
-            let qwenTranscript = TranscriptDocumentStore.qwenURL(in: session.folderURL)
-            if FileManager.default.fileExists(atPath: qwenTranscript.path) {
-                transcriptURLsBySessionID[session.id] = qwenTranscript
-                NSWorkspace.shared.open(qwenTranscript)
-            } else {
-                statusMessage = "No transcript found for \(session.displayName)"
-            }
+            statusMessage = "No transcript found for \(session.displayName)"
         }
     }
 
@@ -1496,10 +1489,9 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let expected = session.folderURL.appendingPathComponent("transcription_qwen_asr.log")
-        if FileManager.default.fileExists(atPath: expected.path) {
-            transcriptLogURLsBySessionID[session.id] = expected
-            NSWorkspace.shared.open(expected)
+        if let url = TranscriptDocumentStore.logURL(in: session.folderURL) {
+            transcriptLogURLsBySessionID[session.id] = url
+            NSWorkspace.shared.open(url)
         } else {
             statusMessage = "No ASR log found for \(session.displayName)"
         }

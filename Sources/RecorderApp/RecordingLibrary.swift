@@ -140,14 +140,29 @@ enum TranscriptionStateStore {
 
 enum TranscriptDocumentStore {
     static let editableFileName = "transcript.txt"
-    static let qwenTranscriptFileName = "transcript_qwen3_asr_1_7b_8bit_yue_trad.txt"
+    static let rawFileName = "transcript.raw.txt"
+    static let manifestFileName = "transcription.json"
+    static let logFileName = "transcription.log"
+    static let legacyTranscriptFileNames = [
+        "transcript_qwen3_asr_1_7b_8bit_yue_trad.txt"
+    ]
+    static let legacyLogFileNames = [
+        "transcription_qwen_asr.log"
+    ]
+
+    static func resolvedURL(in folder: URL) -> URL? {
+        firstExisting([editableFileName] + legacyTranscriptFileNames, in: folder)
+    }
+
+    static func logURL(in folder: URL) -> URL? {
+        firstExisting([logFileName] + legacyLogFileNames, in: folder)
+    }
 
     static func read(in folder: URL) throws -> String {
-        let editable = editableURL(in: folder)
-        if FileManager.default.fileExists(atPath: editable.path) {
-            return try String(contentsOf: editable, encoding: .utf8)
+        guard let url = resolvedURL(in: folder) else {
+            throw CocoaError(.fileNoSuchFile)
         }
-        return try String(contentsOf: qwenURL(in: folder), encoding: .utf8)
+        return try String(contentsOf: url, encoding: .utf8)
     }
 
     static func save(_ text: String, in folder: URL) throws {
@@ -158,8 +173,16 @@ enum TranscriptDocumentStore {
         folder.appendingPathComponent(editableFileName)
     }
 
-    static func qwenURL(in folder: URL) -> URL {
-        folder.appendingPathComponent(qwenTranscriptFileName)
+    private static func firstExisting(_ names: [String], in folder: URL) -> URL? {
+        names.lazy
+            .map(folder.appendingPathComponent)
+            .first {
+                var isDirectory: ObjCBool = false
+                return FileManager.default.fileExists(
+                    atPath: $0.path,
+                    isDirectory: &isDirectory
+                ) && !isDirectory.boolValue
+            }
     }
 }
 

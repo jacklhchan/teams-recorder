@@ -942,7 +942,11 @@ private struct SessionListView: View {
                                 }
                                 .buttonStyle(.bordered)
                                 .disabled(transcribingSessionID != nil || !hasSavedProviderProfile)
-                                .help(hasSavedProviderProfile ? "Transcribe recording" : "Configure and save an AI provider")
+                                .help(
+                                    hasSavedProviderProfile
+                                        ? "Transcribe with the configured AI provider"
+                                        : "Configure an AI provider first"
+                                )
                                 Button {
                                     transcriptSession = session
                                 } label: {
@@ -1070,16 +1074,14 @@ private struct SessionListView: View {
         if transcriptURLsBySessionID[session.id] != nil {
             return true
         }
-        return FileManager.default.fileExists(atPath: TranscriptDocumentStore.editableURL(in: session.folderURL).path)
-            || FileManager.default.fileExists(atPath: TranscriptDocumentStore.qwenURL(in: session.folderURL).path)
+        return TranscriptDocumentStore.resolvedURL(in: session.folderURL) != nil
     }
 
     private func hasTranscriptLog(for session: RecordingSession) -> Bool {
         if transcriptLogURLsBySessionID[session.id] != nil {
             return true
         }
-        let expected = session.folderURL.appendingPathComponent("transcription_qwen_asr.log")
-        return FileManager.default.fileExists(atPath: expected.path)
+        return TranscriptDocumentStore.logURL(in: session.folderURL) != nil
     }
 
     private func statusText(for session: RecordingSession) -> String {

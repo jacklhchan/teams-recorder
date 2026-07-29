@@ -3,7 +3,7 @@
 Local Meeting Recorder is licensed under the Apache License, Version 2.0,
 except for the separately identified material below.
 
-## Apple Audio Server Driver Plug-in sample
+## Apple Audio Server Driver Plug-in Sample
 
 `Driver/LocalRecorderVirtualMic/LocalRecorderVirtualMic.c` is derived from
 Apple's "Creating an Audio Server Driver Plug-in" sample.

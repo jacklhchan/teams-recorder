@@ -1,36 +1,73 @@
+import hashlib
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
+CANONICAL_APACHE_2_0_SIZE = 10254
+CANONICAL_APACHE_2_0_SHA256 = (
+    "7505b489cc8ad7f16ba08343184320f1583303cfacdb9121b9b756bc073df1ab"
+)
+REQUIRED_THIRD_PARTY_NOTICES = """# Third-Party Notices
+
+Local Meeting Recorder is licensed under the Apache License, Version 2.0,
+except for the separately identified material below.
+
+## Apple Audio Server Driver Plug-in Sample
+
+`Driver/LocalRecorderVirtualMic/LocalRecorderVirtualMic.c` is derived from
+Apple's "Creating an Audio Server Driver Plug-in" sample.
+
+Copyright (c) 2024 Apple Inc.
+
+The applicable permission notice is distributed in:
+
+`Driver/LocalRecorderVirtualMic/LICENSE-Apple-Sample.txt`
+
+That notice, rather than Apache-2.0, governs the Apple-derived sample material.
+
+## External Runtime Systems
+
+The following systems may be selected or installed separately by a user but
+are not bundled or redistributed with Local Meeting Recorder:
+
+- OpenAI-compatible API providers and their server software
+- User-selected ASR and LLM models
+- FFmpeg and FFprobe
+- oMLX
+- BlackHole
+
+Each external system and model remains subject to its own license and terms.
+Mentioning compatibility does not change or grant those licenses.
+"""
+
 
 class PackagingContractTests(unittest.TestCase):
     def test_repository_declares_apache_2_0(self):
-        license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+        license_bytes = (ROOT / "LICENSE").read_bytes()
+        license_text = license_bytes.decode("utf-8")
+        self.assertEqual(CANONICAL_APACHE_2_0_SIZE, len(license_bytes))
+        self.assertEqual(
+            CANONICAL_APACHE_2_0_SHA256,
+            hashlib.sha256(license_bytes).hexdigest(),
+        )
+        self.assertTrue(license_text.startswith("Apache License\n"))
+        self.assertIn(
+            "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION",
+            license_text,
+        )
         self.assertTrue(
-            license_text.startswith(
-                "Apache License\nVersion 2.0, January 2004"
+            license_text.endswith(
+                "limitations under the License.\n"
             )
-        )
-        self.assertIn(
-            "http://www.apache.org/licenses/",
-            license_text,
-        )
-        self.assertIn(
-            "END OF TERMS AND CONDITIONS",
-            license_text,
         )
 
     def test_notices_preserve_apple_sample_license_boundary(self):
         notices = (
             ROOT / "THIRD_PARTY_NOTICES.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("Apple Audio Server Driver Plug-in sample", notices)
-        self.assertIn("LICENSE-Apple-Sample.txt", notices)
-        self.assertIn("not bundled", notices)
-        self.assertIn("FFmpeg", notices)
-        self.assertIn("OpenAI-compatible", notices)
+        self.assertEqual(REQUIRED_THIRD_PARTY_NOTICES, notices)
 
     def test_abandoned_release_manifest_is_absent(self):
         self.assertFalse(

@@ -53,6 +53,47 @@ enum RecordingOwnership: Equatable {
     case teamsAutomatic
 }
 
+struct OpenAICompatibleTranscriptionLaunchPayload: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let baseURL: String
+    let asrModel: String
+    let language: String
+    let prompt: String
+    let apiKey: String?
+
+    init(snapshot: OpenAICompatibleProviderSnapshot) {
+        schemaVersion = 1
+        baseURL = snapshot.profile.baseURL.absoluteString
+        asrModel = snapshot.profile.asrModel
+        language = snapshot.profile.language
+        prompt = snapshot.profile.prompt
+        apiKey = snapshot.apiKey
+    }
+}
+
+private struct TranscriptionProtocolSnapshot {
+    var status: String?
+    var transcriptPath: String?
+    var logPath: String?
+    var error: String?
+
+    init(lines: [String]) {
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+            if line.hasPrefix("STATUS=") {
+                status = String(line.dropFirst("STATUS=".count))
+            } else if line.hasPrefix("TRANSCRIPT_PATH=") {
+                transcriptPath = String(line.dropFirst("TRANSCRIPT_PATH=".count))
+            } else if line.hasPrefix("LOG_PATH=") {
+                logPath = String(line.dropFirst("LOG_PATH=".count))
+            } else if line.hasPrefix("ERROR=") {
+                error = String(line.dropFirst("ERROR=".count))
+            }
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var devices: [AudioDevice] = []
@@ -1198,9 +1239,27 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let scriptURL = transcriptionScriptURL
-            ?? Bundle.main.resourceURL?.appendingPathComponent("transcribe-qwen-asr.sh")
-            ?? URL(fileURLWithPath: "/Users/apple/Documents/recorder/scripts/transcribe-qwen-asr.sh")
+        let configurationInput: Data
+        do {
+            configurationInput = try JSONEncoder().encode(
+                OpenAICompatibleTranscriptionLaunchPayload(
+                    snapshot: providerRepository.snapshot()
+                )
+            )
+        } catch {
+            lastTranscriptionSessionID = session.id
+            lastTranscriptionStatus = error.localizedDescription
+            lastTranscriptionDidFail = true
+            statusMessage = error.localizedDescription
+            return
+        }
+
+        guard let scriptURL = transcriptionScriptURL
+            ?? Bundle.main.resourceURL?.appendingPathComponent("transcribe-openai-compatible.sh")
+        else {
+            statusMessage = "Missing transcription launcher."
+            return
+        }
         guard FileManager.default.isExecutableFile(atPath: scriptURL.path) else {
             statusMessage = "Missing transcription launcher: \(scriptURL.path)"
             return
@@ -1246,7 +1305,8 @@ final class AppModel: ObservableObject {
                     request: .init(
                         scriptURL: scriptURL,
                         audioURL: audio.audioURL,
-                        folderURL: session.folderURL
+                        folderURL: session.folderURL,
+                        configurationInput: configurationInput
                     ),
                     onOutput: { [weak self] output in
                         Task { @MainActor [weak self] in
@@ -1270,16 +1330,22 @@ final class AppModel: ObservableObject {
                     return
                 }
 
-                // Re-parse the complete drained output before clearing the attempt.
-                self?.handleTranscriptionOutput(
-                    result.output,
-                    session: session,
-                    generation: generation,
-                    attempt: attempt
-                )
                 if Task.isCancelled || self?.transcriptionCancellationRequested == true {
                     self?.finishTranscriptionCancellation(
                         session: session,
+                        generation: generation,
+                        attempt: attempt
+                    )
+                } else if let failure = self?.applyFinalTranscriptionProtocol(
+                    result.protocolLines,
+                    session: session,
+                    generation: generation,
+                    attempt: attempt,
+                    requireTranscript: result.exitStatus == 0
+                ) {
+                    self?.finishTranscriptionFailure(
+                        session: session,
+                        message: failure,
                         generation: generation,
                         attempt: attempt
                     )
@@ -1290,9 +1356,13 @@ final class AppModel: ObservableObject {
                         attempt: attempt
                     )
                 } else {
+                    let protocolSnapshot = TranscriptionProtocolSnapshot(
+                        lines: result.protocolLines
+                    )
                     self?.finishTranscriptionFailure(
                         session: session,
-                        message: "Transcription failed with exit code \(result.exitStatus). Open the ASR log for details.",
+                        message: protocolSnapshot.error.map(Self.boundedTranscriptionError)
+                            ?? "Transcription failed with exit code \(result.exitStatus). Open the ASR log for details.",
                         generation: generation,
                         attempt: attempt
                     )
@@ -1885,13 +1955,6 @@ final class AppModel: ObservableObject {
             lastTranscriptionStatus = lastUsefulLine
         }
 
-        for line in lines where line.hasPrefix("TRANSCRIPT_PATH=") {
-            let path = String(line.dropFirst("TRANSCRIPT_PATH=".count))
-            let url = URL(fileURLWithPath: path)
-            transcriptURLsBySessionID[session.id] = url
-            statusMessage = "Transcript saved: \(url.lastPathComponent)"
-        }
-
         for line in lines where line.hasPrefix("STATUS=") {
             let message = String(line.dropFirst("STATUS=".count))
             transcriptionStatus = message
@@ -1903,10 +1966,63 @@ final class AppModel: ObservableObject {
             )
         }
 
-        for line in lines where line.hasPrefix("LOG_PATH=") {
-            let path = String(line.dropFirst("LOG_PATH=".count))
-            transcriptLogURLsBySessionID[session.id] = URL(fileURLWithPath: path)
+    }
+
+    private func applyFinalTranscriptionProtocol(
+        _ lines: [String],
+        session: RecordingSession,
+        generation: UInt64,
+        attempt: UUID,
+        requireTranscript: Bool
+    ) -> String? {
+        guard isActiveTranscription(generation: generation, attempt: attempt) else {
+            return nil
         }
+        let snapshot = TranscriptionProtocolSnapshot(lines: lines)
+        if requireTranscript, snapshot.transcriptPath == nil {
+            return "Transcription completed without a valid transcript file."
+        }
+        if let transcriptPath = snapshot.transcriptPath,
+           validatedTranscriptionArtifact(path: transcriptPath, in: session.folderURL) == nil {
+            return "Transcription reported an invalid artifact path."
+        }
+        if let logPath = snapshot.logPath,
+           validatedTranscriptionArtifact(path: logPath, in: session.folderURL) == nil {
+            return "Transcription reported an invalid artifact path."
+        }
+        if let transcriptPath = snapshot.transcriptPath,
+           let transcriptURL = validatedTranscriptionArtifact(
+                path: transcriptPath,
+                in: session.folderURL
+           ) {
+            transcriptURLsBySessionID[session.id] = transcriptURL
+            statusMessage = "Transcript saved: \(transcriptURL.lastPathComponent)"
+        }
+        if let logPath = snapshot.logPath,
+           let logURL = validatedTranscriptionArtifact(path: logPath, in: session.folderURL) {
+            transcriptLogURLsBySessionID[session.id] = logURL
+        }
+        if let status = snapshot.status {
+            transcriptionStatus = status
+            lastTranscriptionStatus = status
+        }
+        return nil
+    }
+
+    private func validatedTranscriptionArtifact(path: String, in sessionFolder: URL) -> URL? {
+        guard path.hasPrefix("/") else { return nil }
+        let expectedParent = sessionFolder.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+        guard candidate.deletingLastPathComponent() == expectedParent,
+              let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true else {
+            return nil
+        }
+        return candidate
+    }
+
+    private static func boundedTranscriptionError(_ error: String) -> String {
+        String(error.prefix(500))
     }
 
     private func updateTranscriptionState(_ state: TranscriptionState, for session: RecordingSession) {

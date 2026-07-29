@@ -127,7 +127,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
                 || response.expectedContentLength == NSURLSessionTransferSizeUnknown else {
             completionHandler(.cancel)
             dataTask.cancel()
-            finish(.failure(ProviderConnectionError.modelDiscoveryResponseTooLarge))
+            finish(.failure(ProviderHTTPTransportError.responseTooLarge))
             return
         }
         lock.lock()
@@ -161,7 +161,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
 
         if exceedsLimit {
             dataTask.cancel()
-            finish(.failure(ProviderConnectionError.modelDiscoveryResponseTooLarge))
+            finish(.failure(ProviderHTTPTransportError.responseTooLarge))
         } else {
             retainedBodyByteCountObserver?(retainedByteCount)
         }
@@ -189,7 +189,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
     func urlSession(
         _: URLSession,
         task: URLSessionTask,
-        willPerformHTTPRedirection _: HTTPURLResponse,
+        willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
@@ -197,7 +197,8 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         let redirected = currentRedirectRequest.flatMap {
             ProviderRedirectPolicy.redirectedRequest(
                 from: $0,
-                proposed: request
+                proposed: request,
+                statusCode: response.statusCode
             )
         }
         if let redirected {
@@ -260,7 +261,6 @@ protocol ProviderConnectionTesting: Sendable {
 enum ProviderConnectionError: LocalizedError, Equatable {
     case invalidResponse
     case authenticationRejected
-    case modelDiscoveryResponseTooLarge
     case tooManyDiscoveredModels
     case httpStatus(Int)
 
@@ -270,8 +270,6 @@ enum ProviderConnectionError: LocalizedError, Equatable {
             "The provider returned an invalid response."
         case .authenticationRejected:
             "The provider rejected the API key."
-        case .modelDiscoveryResponseTooLarge:
-            "The provider returned too much model discovery data."
         case .tooManyDiscoveredModels:
             "The provider returned too many models."
         case .httpStatus(let status):

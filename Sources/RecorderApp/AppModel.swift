@@ -172,6 +172,8 @@ final class AppModel: ObservableObject {
     private let teamsIntegrationIngress: TeamsIntegrationIngress
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
     private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
+    private let recordingSearchDocumentLoader:
+        @Sendable (RecordingSession) -> RecordingLibrarySearchDocument
     private let recordingSessionRecovery: @Sendable (URL) -> Void
     private let permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)?
     private let volumeCapacityProvider: any VolumeCapacityProviding
@@ -228,6 +230,9 @@ final class AppModel: ObservableObject {
     private var pendingTeamsMeetingState: TeamsMeetingState?
     private var lastAuthorizedTeamsMeetingState: TeamsMeetingState?
     private var recordingSessionRefreshGeneration: UInt = 0
+    private var recordingSearchDocumentRefreshGeneration: UInt64 = 0
+    private var recordingSearchDocumentRefreshGenerations:
+        [RecordingSession.ID: UInt64] = [:]
     private var recoveredLibraryFolders: Set<URL> = []
     private var storageMonitorTask: Task<Void, Never>?
     private var storageMonitorGeneration: UInt64 = 0
@@ -257,6 +262,16 @@ final class AppModel: ObservableObject {
         },
         recordingSessionLoader: @escaping @Sendable (URL) -> [RecordingSession] = {
             RecordingSessionStore.load(from: $0)
+        },
+        recordingSearchDocumentLoader: @escaping @Sendable (
+            RecordingSession
+        ) -> RecordingLibrarySearchDocument = { session in
+            RecordingLibrarySearchDocument.load(
+                folderURL: session.folderURL,
+                displayName: session.displayName,
+                createdAt: session.createdAt,
+                metadata: session.metadata
+            )
         },
         recordingSessionRecovery: @escaping @Sendable (URL) -> Void = {
             IncompleteSessionRecovery().recover(in: $0)
@@ -340,6 +355,8 @@ final class AppModel: ObservableObject {
         teamsAutoMeetingState = autoCoordinator.state
         self.virtualMicStateProvider = virtualMicStateProvider
         self.recordingSessionLoader = recordingSessionLoader
+        self.recordingSearchDocumentLoader =
+            recordingSearchDocumentLoader
         self.recordingSessionRecovery = recordingSessionRecovery
         self.permissionRequestHandler = permissionRequestHandler
         self.volumeCapacityProvider = volumeCapacityProvider
@@ -391,6 +408,10 @@ final class AppModel: ObservableObject {
             .store(in: &cancellables)
         transcriptionCoordinator.onStatusMessage = { [weak self] message in
             self?.statusMessage = message
+        }
+        transcriptionCoordinator.onSuccessfulPublication = {
+            [weak self] session in
+            self?.rebuildSearchDocument(for: session)
         }
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
@@ -1175,6 +1196,8 @@ final class AppModel: ObservableObject {
     }
 
     func refreshSessions() {
+        recordingSearchDocumentRefreshGeneration &+= 1
+        recordingSearchDocumentRefreshGenerations.removeAll()
         recordingSessionRefreshGeneration &+= 1
         let generation = recordingSessionRefreshGeneration
         let folder = outputFolder
@@ -1205,6 +1228,41 @@ final class AppModel: ObservableObject {
                 self.transcriptionStatesBySessionID = self.projectTranscriptionStates(
                     transcriptionStates
                 )
+            }
+        }
+    }
+
+    private func rebuildSearchDocument(for session: RecordingSession) {
+        let sessionID = session.id
+        recordingSearchDocumentRefreshGeneration &+= 1
+        let nextGeneration =
+            recordingSearchDocumentRefreshGeneration
+        recordingSearchDocumentRefreshGenerations[sessionID] =
+            nextGeneration
+        let loader = recordingSearchDocumentLoader
+
+        recordingSessionLoadingQueue.async { [weak self] in
+            let document = loader(session)
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.recordingSearchDocumentRefreshGenerations[
+                        sessionID
+                      ] == nextGeneration,
+                      let index = self.sessions.firstIndex(
+                        where: { $0.id == sessionID }
+                      ) else {
+                    return
+                }
+                let current = self.sessions[index]
+                guard current.metadata == session.metadata else {
+                    self.rebuildSearchDocument(for: current)
+                    return
+                }
+                self.sessions[index] =
+                    current.replacingSearchDocument(document)
+                self.recordingSearchDocumentRefreshGenerations[
+                    sessionID
+                ] = nil
             }
         }
     }
@@ -1607,6 +1665,7 @@ final class AppModel: ObservableObject {
         do {
             try TranscriptDocumentStore.save(text, in: session.folderURL)
             transcriptURLsBySessionID[session.id] = TranscriptDocumentStore.editableURL(in: session.folderURL)
+            rebuildSearchDocument(for: session)
             statusMessage = "Transcript saved"
         } catch {
             statusMessage = "Cannot save transcript: \(error.localizedDescription)"

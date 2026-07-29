@@ -863,6 +863,13 @@ private struct SessionListView: View {
     @State private var sessionPendingTrash: RecordingSession?
 
     var body: some View {
+        let query = RecordingLibraryQuery(
+            text: searchText,
+            favoritesOnly: favoritesOnly
+        )
+        let visibleSessions = query.filter(sessions)
+        let lastVisibleSessionID = visibleSessions.last?.id
+
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Recordings", systemImage: "list.bullet.rectangle")
@@ -884,13 +891,13 @@ private struct SessionListView: View {
             TextField("Search recordings", text: $searchText)
                 .textFieldStyle(.roundedBorder)
 
-            if filteredSessions.isEmpty {
+            if visibleSessions.isEmpty {
                 Text("No recordings in the selected folder yet.")
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
             } else {
                 LazyVStack(spacing: 0) {
-                    ForEach(filteredSessions) { session in
+                    ForEach(visibleSessions) { session in
                         VStack(spacing: 8) {
                             HStack(spacing: 12) {
                                 VStack(alignment: .leading, spacing: 3) {
@@ -905,7 +912,7 @@ private struct SessionListView: View {
                                             .foregroundStyle(.tint)
                                             .lineLimit(1)
                                     }
-                                    if let snippet = currentQuery
+                                    if let snippet = query
                                         .transcriptSnippet(for: session) {
                                         Text(snippet)
                                             .font(.caption)
@@ -1021,7 +1028,7 @@ private struct SessionListView: View {
                             }
                         }
                         .padding(.vertical, 8)
-                        if session.id != filteredSessions.last?.id {
+                        if session.id != lastVisibleSessionID {
                             Divider()
                         }
                     }
@@ -1061,17 +1068,6 @@ private struct SessionListView: View {
         } message: { session in
             Text(session.displayName)
         }
-    }
-
-    private var filteredSessions: [RecordingSession] {
-        currentQuery.filter(sessions)
-    }
-
-    private var currentQuery: RecordingLibraryQuery {
-        RecordingLibraryQuery(
-            text: searchText,
-            favoritesOnly: favoritesOnly
-        )
     }
 
     private func hasTranscript(for session: RecordingSession) -> Bool {

@@ -14,6 +14,38 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         }
     }
 
+    func testRetryPolicyRetriesOnlySelectedTransientTransportErrors() {
+        let policy = TranscriptionRetryPolicy()
+
+        for code in [
+            URLError.timedOut,
+            .networkConnectionLost,
+            .cannotConnectToHost,
+            .cannotFindHost,
+            .dnsLookupFailed
+        ] {
+            XCTAssertTrue(policy.shouldRetry(error: URLError(code)))
+        }
+        for code in [
+            URLError.cancelled,
+            .userAuthenticationRequired,
+            .badURL,
+            .serverCertificateHasBadDate,
+            .serverCertificateUntrusted,
+            .serverCertificateHasUnknownRoot,
+            .serverCertificateNotYetValid,
+            .secureConnectionFailed
+        ] {
+            XCTAssertFalse(policy.shouldRetry(error: URLError(code)))
+        }
+        XCTAssertFalse(policy.shouldRetry(error: CancellationError()))
+        XCTAssertFalse(
+            policy.shouldRetry(
+                error: NSError(domain: "permanent", code: 1)
+            )
+        )
+    }
+
     func testRedirectPolicyRequiresSameOriginAndScheme() {
         let source = URL(
             string: "https://api.example/v1/audio/transcriptions"
@@ -44,50 +76,98 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
     }
 
     func testRedirectedRequestCarriesAuthorizationOnlyToSameOrigin() throws {
-        var source = URLRequest(
-            url: try XCTUnwrap(
-                URL(
-                    string:
-                        "https://api.example/v1/audio/transcriptions"
-                )
-            )
+        let source = try uploadRequest(
+            url:
+                "https://api.example/v1/audio/transcriptions",
+            authorization: "Bearer private-key"
         )
-        source.setValue(
-            "Bearer private-key",
-            forHTTPHeaderField: "Authorization"
+        let sameOrigin = try uploadRequest(
+            url:
+                "https://api.example/v2/audio/transcriptions"
         )
-        let sameOrigin = URLRequest(
-            url: try XCTUnwrap(
-                URL(
-                    string:
-                        "https://api.example/v2/audio/transcriptions"
-                )
-            )
-        )
-        var crossOrigin = URLRequest(
-            url: try XCTUnwrap(
-                URL(string: "https://evil.example/steal")
-            )
-        )
-        crossOrigin.setValue(
-            "Bearer private-key",
-            forHTTPHeaderField: "Authorization"
+        let crossOrigin = try uploadRequest(
+            url: "https://evil.example/steal",
+            authorization: "Bearer private-key"
         )
 
         XCTAssertEqual(
             ProviderRedirectPolicy.redirectedRequest(
                 from: source,
-                proposed: sameOrigin
+                proposed: sameOrigin,
+                statusCode: 307
             )?.value(forHTTPHeaderField: "Authorization"),
             "Bearer private-key"
         )
         XCTAssertNil(
             ProviderRedirectPolicy.redirectedRequest(
                 from: source,
-                proposed: crossOrigin
+                proposed: crossOrigin,
+                statusCode: 307
             ),
             "Rejecting the request prevents the bearer token from leaving "
                 + "the configured origin."
+        )
+    }
+
+    func testRedirectPolicyAllowsOnlyUploadPreservingStatusCodes() throws {
+        let source = try uploadRequest(
+            url:
+                "https://api.example/v1/audio/transcriptions"
+        )
+        let proposed = try uploadRequest(
+            url:
+                "https://api.example/v2/audio/transcriptions"
+        )
+
+        for status in [307, 308] {
+            XCTAssertNotNil(
+                ProviderRedirectPolicy.redirectedRequest(
+                    from: source,
+                    proposed: proposed,
+                    statusCode: status
+                )
+            )
+        }
+        for status in [301, 302, 303, 305] {
+            XCTAssertNil(
+                ProviderRedirectPolicy.redirectedRequest(
+                    from: source,
+                    proposed: proposed,
+                    statusCode: status
+                )
+            )
+        }
+    }
+
+    func testRedirectPolicyRejectsChangedMethodAndMissingBody() throws {
+        let source = try uploadRequest(
+            url:
+                "https://api.example/v1/audio/transcriptions"
+        )
+        var changedMethod = try uploadRequest(
+            url:
+                "https://api.example/v2/audio/transcriptions"
+        )
+        changedMethod.httpMethod = "GET"
+        var missingBody = try uploadRequest(
+            url:
+                "https://api.example/v2/audio/transcriptions"
+        )
+        missingBody.httpBody = nil
+
+        XCTAssertNil(
+            ProviderRedirectPolicy.redirectedRequest(
+                from: source,
+                proposed: changedMethod,
+                statusCode: 307
+            )
+        )
+        XCTAssertNil(
+            ProviderRedirectPolicy.redirectedRequest(
+                from: source,
+                proposed: missingBody,
+                statusCode: 308
+            )
         )
     }
 
@@ -278,6 +358,103 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         XCTAssertEqual(sleeps.values.count, 2)
     }
 
+    func testTransientTransportFailureRetriesThenSucceeds() async throws {
+        let transport = RecordingTranscriptionTransport(
+            responses: [
+                .urlError(.timedOut),
+                .http(status: 200, body: #"{"text":"done"}"#)
+            ]
+        )
+        let sleeps = LockedValues<Double>()
+        let client = makeClient(
+            transport: transport,
+            sleep: { sleeps.append($0) }
+        )
+
+        let result = try await client.transcribe(
+            audioData: Data([1]),
+            fileName: "chunk.m4a",
+            snapshot: try makeSnapshot(),
+            prompt: ""
+        )
+
+        XCTAssertEqual(result.text, "done")
+        XCTAssertEqual(transport.requests.count, 2)
+        XCTAssertEqual(sleeps.values.count, 1)
+    }
+
+    func testTransientTransportFailuresStopAtMaximumRetryBudget() async throws {
+        let transport = RecordingTranscriptionTransport(
+            responses: [
+                .urlError(.networkConnectionLost),
+                .urlError(.networkConnectionLost),
+                .urlError(.networkConnectionLost),
+                .http(status: 200, body: #"{"text":"too late"}"#)
+            ]
+        )
+        let sleeps = LockedValues<Double>()
+        let client = makeClient(
+            transport: transport,
+            sleep: { sleeps.append($0) }
+        )
+
+        do {
+            _ = try await client.transcribe(
+                audioData: Data([1]),
+                fileName: "chunk.m4a",
+                snapshot: try makeSnapshot(),
+                prompt: ""
+            )
+            XCTFail("Expected the retry budget to be exhausted")
+        } catch {
+            XCTAssertEqual(
+                (error as? URLError)?.code,
+                .networkConnectionLost
+            )
+        }
+
+        XCTAssertEqual(transport.requests.count, 3)
+        XCTAssertEqual(sleeps.values.count, 2)
+    }
+
+    func testCancellationDuringTransportRetryDelayStopsAnotherUpload() async throws {
+        let transport = RecordingTranscriptionTransport(
+            responses: [
+                .urlError(.cannotConnectToHost),
+                .http(status: 200, body: #"{"text":"too late"}"#)
+            ]
+        )
+        let sleeps = LockedValues<Double>()
+        let client = makeClient(
+            transport: transport,
+            sleep: { seconds in
+                sleeps.append(seconds)
+                try await Task.sleep(for: .seconds(60))
+            }
+        )
+        let task = Task {
+            try await client.transcribe(
+                audioData: Data([1]),
+                fileName: "chunk.m4a",
+                snapshot: try makeSnapshot(),
+                prompt: ""
+            )
+        }
+        for _ in 0..<500 where sleeps.values.isEmpty {
+            await Task.yield()
+        }
+
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation during the retry delay")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(transport.requests.count, 1)
+    }
+
     func testCancellationDuringRetryDelayStopsBeforeAnotherUpload() async throws {
         let transport = RecordingTranscriptionTransport(
             responses: [
@@ -446,17 +623,38 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         }
         return text.contains("\r\njson\r\n") ? .json : nil
     }
+
+    private func uploadRequest(
+        url: String,
+        authorization: String? = nil
+    ) throws -> URLRequest {
+        var request = URLRequest(url: try XCTUnwrap(URL(string: url)))
+        request.httpMethod = "POST"
+        request.httpBody = Data("multipart-body".utf8)
+        request.setValue(
+            "multipart/form-data; boundary=test-boundary",
+            forHTTPHeaderField: "Content-Type"
+        )
+        request.setValue(
+            authorization,
+            forHTTPHeaderField: "Authorization"
+        )
+        return request
+    }
 }
 
 private final class RecordingTranscriptionTransport:
     ProviderHTTPTransport,
     @unchecked Sendable
 {
-    struct StubResponse {
-        let status: Int
-        let body: Data
-        let headers: [String: String]
-        let cancelTaskBeforeReturning: Bool
+    enum StubResponse {
+        case response(
+            status: Int,
+            body: Data,
+            headers: [String: String],
+            cancelTaskBeforeReturning: Bool
+        )
+        case urlError(URLError.Code)
 
         static func http(
             status: Int,
@@ -464,7 +662,7 @@ private final class RecordingTranscriptionTransport:
             headers: [String: String] = [:],
             cancelTaskBeforeReturning: Bool = false
         ) -> StubResponse {
-            .init(
+            .response(
                 status: status,
                 body: Data(body.utf8),
                 headers: headers,
@@ -491,18 +689,28 @@ private final class RecordingTranscriptionTransport:
             self.maximumBodyBytes.append(maximumBodyBytes)
             return responses.removeFirst()
         }
-        if response.cancelTaskBeforeReturning {
-            withUnsafeCurrentTask { $0?.cancel() }
+        switch response {
+        case .urlError(let code):
+            throw URLError(code)
+        case .response(
+            let status,
+            let body,
+            let headers,
+            let cancelTaskBeforeReturning
+        ):
+            if cancelTaskBeforeReturning {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+            return (
+                body,
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: status,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: headers
+                )!
+            )
         }
-        return (
-            response.body,
-            HTTPURLResponse(
-                url: request.url!,
-                statusCode: response.status,
-                httpVersion: "HTTP/1.1",
-                headerFields: response.headers
-            )!
-        )
     }
 }
 

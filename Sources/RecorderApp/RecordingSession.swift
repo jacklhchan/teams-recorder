@@ -51,6 +51,21 @@ struct RecordingSession: Identifiable, Hashable {
     var fileSizeText: String {
         ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
     }
+
+    func replacingSearchDocument(
+        _ searchDocument: RecordingLibrarySearchDocument
+    ) -> RecordingSession {
+        RecordingSession(
+            id: id,
+            folderURL: folderURL,
+            recordingURL: recordingURL,
+            createdAt: createdAt,
+            duration: duration,
+            fileSize: fileSize,
+            metadata: metadata,
+            searchDocument: searchDocument
+        )
+    }
 }
 
 enum ManualTranscriptionImportError: LocalizedError {

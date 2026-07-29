@@ -120,6 +120,44 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
         XCTAssertFalse(persisted.message.contains(secret))
     }
 
+    func testResponseTooLargeUsesTransportGenericUserFacingMessage() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: CoordinatorPreparer(
+                result: .success(
+                    .init(
+                        audioURL: fixture.audioURL,
+                        cleanupURL: nil
+                    )
+                )
+            ),
+            service: CoordinatorService(
+                result: .failure(
+                    ProviderHTTPTransportError.responseTooLarge
+                )
+            )
+        )
+
+        coordinator.start(session: fixture.session)
+        await waitForIdle(coordinator)
+
+        XCTAssertEqual(
+            coordinator.lastTranscriptionStatus,
+            "Transcription launch failed: "
+                + "The provider response was too large."
+        )
+        XCTAssertEqual(
+            coordinator.transcriptionStatesBySessionID[
+                fixture.session.id
+            ]?.message,
+            coordinator.lastTranscriptionStatus
+        )
+    }
+
     private func waitForIdle(
         _ coordinator: TranscriptionJobCoordinator
     ) async {

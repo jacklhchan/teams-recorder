@@ -214,9 +214,11 @@ performs multipart upload with response-size limits, redirect validation, and
 typed cancellation. The packaged app does not require Python, FFmpeg, or FFprobe.
 
 Long recordings use bounded fixed-duration chunks, rolling context, validation,
-and retry. HTTP 408, 429, and 5xx responses use bounded backoff and honor
-`Retry-After`; other 4xx configuration errors stop immediately. Providers that
-reject `verbose_json` are retried once with `json`. New output files are:
+and retry. HTTP 408, 429, 5xx responses and selected transient network failures
+use the same bounded retry budget; HTTP responses honor `Retry-After`. Other 4xx
+configuration errors and permanent transport failures stop immediately.
+Providers that reject `verbose_json` are retried once with `json`. New output
+files are:
 
 ```text
 transcript.txt
@@ -225,11 +227,12 @@ transcription.json
 transcription.log
 ```
 
-Transient chunk and response files are isolated under `.transcription-runs`.
-On success, successful runs keep only the four canonical artifacts above plus
-bounded previous transcript backups; expired diagnostic run directories are
-removed automatically. Logs and provider responses are capped, and credentials
-are not written to transcript artifacts.
+Native audio chunks use an isolated system temporary workspace that is removed
+after the job completes or is cancelled. `.transcription-runs` is a legacy
+workspace only: retention cleanup removes expired legacy run directories.
+Successful native jobs keep only the four canonical artifacts above plus
+bounded previous transcript backups. Logs and provider responses are capped,
+and credentials are not written to transcript artifacts.
 
 The optional provider API key and Teams pairing token are stored in macOS Keychain.
 Existing local oMLX settings are read only for a one-time migration; oMLX is

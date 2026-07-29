@@ -9,9 +9,14 @@ struct RecordingLibrarySearchDocument: Equatable, Hashable, Sendable {
 
     let metadataText: String
     let transcriptText: String
+    let normalizedText: String
 
-    var allText: String {
-        metadataText + "\n" + transcriptText
+    init(metadataText: String, transcriptText: String) {
+        self.metadataText = metadataText
+        self.transcriptText = transcriptText
+        normalizedText = Self.normalized(
+            metadataText + "\n" + transcriptText
+        )
     }
 
     static func load(
@@ -67,6 +72,17 @@ struct RecordingLibrarySearchDocument: Equatable, Hashable, Sendable {
         ]
         return formatter
     }()
+
+    fileprivate static func normalized(_ value: String) -> String {
+        value.folding(
+            options: [
+                .caseInsensitive,
+                .diacriticInsensitive,
+                .widthInsensitive
+            ],
+            locale: .current
+        )
+    }
 }
 
 struct RecordingLibraryQuery: Equatable, Sendable {
@@ -81,13 +97,13 @@ struct RecordingLibraryQuery: Equatable, Sendable {
     }
 
     func filter(_ sessions: [RecordingSession]) -> [RecordingSession] {
-        let needle = normalized(text)
+        let needle = RecordingLibrarySearchDocument.normalized(text)
         return sessions.filter { session in
             guard !favoritesOnly || session.isFavorite else {
                 return false
             }
             return needle.isEmpty
-                || normalized(session.searchDocument.allText)
+                || session.searchDocument.normalizedText
                     .contains(needle)
         }
     }
@@ -134,16 +150,6 @@ struct RecordingLibraryQuery: Equatable, Sendable {
         return String(snippet.prefix(maximumCharacters))
     }
 
-    private func normalized(_ value: String) -> String {
-        value.folding(
-            options: [
-                .caseInsensitive,
-                .diacriticInsensitive,
-                .widthInsensitive
-            ],
-            locale: .current
-        )
-    }
 }
 
 private extension RecordingSource {

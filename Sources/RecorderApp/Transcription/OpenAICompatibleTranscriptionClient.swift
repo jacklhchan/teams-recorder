@@ -49,6 +49,23 @@ struct TranscriptionRetryPolicy: Equatable, Sendable {
             || (500...599).contains(statusCode)
     }
 
+    func shouldRetry(error: Error) -> Bool {
+        guard !(error is CancellationError),
+              let urlError = error as? URLError else {
+            return false
+        }
+        switch urlError.code {
+        case .timedOut,
+             .networkConnectionLost,
+             .cannotConnectToHost,
+             .cannotFindHost,
+             .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
     func delay(
         after response: HTTPURLResponse,
         failedAttempt: Int,
@@ -68,6 +85,26 @@ struct TranscriptionRetryPolicy: Equatable, Sendable {
                 )
             }
         }
+        return fallbackDelay(
+            failedAttempt: failedAttempt,
+            jitter: jitter
+        )
+    }
+
+    func delay(
+        failedAttempt: Int,
+        jitter: @Sendable (Double) -> Double
+    ) -> Double {
+        fallbackDelay(
+            failedAttempt: failedAttempt,
+            jitter: jitter
+        )
+    }
+
+    private func fallbackDelay(
+        failedAttempt: Int,
+        jitter: @Sendable (Double) -> Double
+    ) -> Double {
         let base = min(8, pow(2, Double(max(0, failedAttempt))))
         return min(
             Self.maximumDelay,
@@ -99,9 +136,24 @@ enum ProviderRedirectPolicy {
 
     static func redirectedRequest(
         from source: URLRequest,
-        proposed: URLRequest
+        proposed: URLRequest,
+        statusCode: Int
     ) -> URLRequest? {
-        guard let sourceURL = source.url,
+        guard statusCode == 307 || statusCode == 308,
+              source.httpMethod == "POST",
+              proposed.httpMethod == "POST",
+              let sourceBody = source.httpBody,
+              proposed.httpBody == sourceBody,
+              let sourceContentType = source.value(
+                forHTTPHeaderField: "Content-Type"
+              ),
+              sourceContentType.lowercased().hasPrefix(
+                "multipart/form-data;"
+              ),
+              proposed.value(
+                forHTTPHeaderField: "Content-Type"
+              ) == sourceContentType,
+              let sourceURL = source.url,
               let destinationURL = proposed.url,
               allows(from: sourceURL, to: destinationURL) else {
             return nil
@@ -321,10 +373,29 @@ struct OpenAICompatibleTranscriptionClient: Sendable {
 
         for attempt in 0..<retryPolicy.maximumAttempts {
             try Task.checkCancellation()
-            let (data, response) = try await transport.response(
-                for: request,
-                maximumBodyBytes: Self.maximumResponseBytes
-            )
+            let data: Data
+            let response: HTTPURLResponse
+            do {
+                (data, response) = try await transport.response(
+                    for: request,
+                    maximumBodyBytes: Self.maximumResponseBytes
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                guard retryPolicy.shouldRetry(error: error),
+                      attempt + 1 < retryPolicy.maximumAttempts else {
+                    throw error
+                }
+                try await sleep(
+                    retryPolicy.delay(
+                        failedAttempt: attempt,
+                        jitter: jitter
+                    )
+                )
+                continue
+            }
             try Task.checkCancellation()
             switch response.statusCode {
             case 200..<300:
@@ -371,8 +442,14 @@ struct OpenAICompatibleTranscriptionClient: Sendable {
 
 enum ProviderHTTPTransportError: LocalizedError, Equatable, Sendable {
     case redirectRejected
+    case responseTooLarge
 
     var errorDescription: String? {
-        "The provider attempted an unsafe HTTP redirect."
+        switch self {
+        case .redirectRejected:
+            "The provider attempted an unsafe HTTP redirect."
+        case .responseTooLarge:
+            "The provider response was too large."
+        }
     }
 }

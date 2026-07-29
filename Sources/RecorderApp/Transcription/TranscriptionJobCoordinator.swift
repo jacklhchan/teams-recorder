@@ -16,6 +16,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
         [RecordingSession.ID: TranscriptionState] = [:]
 
     var onStatusMessage: ((String) -> Void)?
+    var onSuccessfulPublication: ((RecordingSession) -> Void)?
 
     private let providerRepository:
         any OpenAICompatibleProviderManaging
@@ -155,6 +156,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
                     self?.transcriptLogURLsBySessionID[session.id] =
                         logURL
                 }
+                self?.onSuccessfulPublication?(session)
                 self?.finishSuccess(
                     session: session,
                     generation: attemptGeneration,

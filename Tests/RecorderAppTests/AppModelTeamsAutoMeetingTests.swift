@@ -967,6 +967,41 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertEqual(source.teamsRefreshCount, 1)
     }
 
+    func testPauseGateResumesConcurrentWaitersAfterFalseBeforeInstallation() async {
+        let gate = AutoMeetingPauseGate()
+        let barrier = AutoMeetingPauseInstallationBarrier()
+        gate.setPauseRequested(true)
+        gate.setInstallationBarrier(barrier)
+
+        let first = Task { await gate.waitIfRequested() }
+        let second = Task { await gate.waitIfRequested() }
+        await barrier.waitForArrivals(2)
+
+        gate.setPauseRequested(false)
+        await barrier.release()
+
+        let firstResult = await first.value
+        let secondResult = await second.value
+        XCTAssertTrue(firstResult)
+        XCTAssertTrue(secondResult)
+    }
+
+    func testPauseGateResumesAllInstalledConcurrentWaiters() async {
+        let gate = AutoMeetingPauseGate()
+        gate.setPauseRequested(true)
+
+        let first = Task { await gate.waitIfRequested() }
+        let second = Task { await gate.waitIfRequested() }
+        await waitUntil { gate.waitingCount == 2 }
+
+        gate.setPauseRequested(false)
+
+        let firstResult = await first.value
+        let secondResult = await second.value
+        XCTAssertTrue(firstResult)
+        XCTAssertTrue(secondResult)
+    }
+
     func testTerminalStopWinningAutoStopRaceCompletesMeetingEndOnce() async {
         let fixture = makeRecordingFixture()
         await startAutomaticRecording(fixture)
@@ -1349,21 +1384,28 @@ private enum AutoMeetingRecordingError: LocalizedError {
 }
 
 private actor AutoMeetingPauseInstallationBarrier {
-    private var arrived = false
+    private var arrivalCount = 0
     private var released = false
-    private var arrivalContinuations: [CheckedContinuation<Void, Never>] = []
+    private var arrivalContinuations:
+        [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
     private var releaseContinuations: [CheckedContinuation<Void, Never>] = []
 
     func waitForArrival() async {
-        guard !arrived else { return }
-        await withCheckedContinuation { arrivalContinuations.append($0) }
+        await waitForArrivals(1)
+    }
+
+    func waitForArrivals(_ count: Int) async {
+        guard arrivalCount < count else { return }
+        await withCheckedContinuation {
+            arrivalContinuations.append((count: count, continuation: $0))
+        }
     }
 
     func arriveAndWaitForRelease() async {
-        arrived = true
-        let arrivals = arrivalContinuations
-        arrivalContinuations.removeAll()
-        arrivals.forEach { $0.resume() }
+        arrivalCount += 1
+        let arrivals = arrivalContinuations.filter { $0.count <= arrivalCount }
+        arrivalContinuations.removeAll { $0.count <= arrivalCount }
+        arrivals.forEach { $0.continuation.resume() }
 
         guard !released else { return }
         await withCheckedContinuation { releaseContinuations.append($0) }
@@ -1381,7 +1423,7 @@ private final class AutoMeetingPauseGate: @unchecked Sendable {
     private let lock = NSLock()
     private var pauseRequested = false
     private var paused = false
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
     private var installationBarrier: AutoMeetingPauseInstallationBarrier?
 
     var isPauseRequested: Bool {
@@ -1396,18 +1438,22 @@ private final class AutoMeetingPauseGate: @unchecked Sendable {
         lock.withLock { installationBarrier }
     }
 
+    var waitingCount: Int {
+        lock.withLock { continuations.count }
+    }
+
     func setPauseRequested(_ requested: Bool) {
-        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+        let continuations = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
             pauseRequested = requested
             if requested {
                 paused = false
-                return nil
+                return []
             }
-            let continuation = self.continuation
-            self.continuation = nil
-            return continuation
+            let continuations = self.continuations
+            self.continuations.removeAll()
+            return continuations
         }
-        continuation?.resume()
+        continuations.forEach { $0.resume() }
     }
 
     func setInstallationBarrier(_ barrier: AutoMeetingPauseInstallationBarrier?) {
@@ -1429,7 +1475,7 @@ private final class AutoMeetingPauseGate: @unchecked Sendable {
         await withCheckedContinuation { continuation in
             let shouldResumeImmediately = lock.withLock {
                 guard pauseRequested else { return true }
-                self.continuation = continuation
+                self.continuations.append(continuation)
                 return false
             }
             if shouldResumeImmediately {

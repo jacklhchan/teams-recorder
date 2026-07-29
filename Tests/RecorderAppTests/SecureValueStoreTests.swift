@@ -11,7 +11,16 @@ final class SecureValueStoreTests: XCTestCase {
         ))
         let store = KeychainSecureValueStore(backend: backend)
 
-        XCTAssertNil(try store.load(service: "service", account: "account"))
+        XCTAssertNil(
+            try store.load(
+                service: "read-service",
+                account: "read-account"
+            )
+        )
+        XCTAssertEqual(
+            backend.readIdentity,
+            .init(service: "read-service", account: "read-account")
+        )
     }
 
     func testSaveAddsNewValue() throws {
@@ -19,9 +28,17 @@ final class SecureValueStoreTests: XCTestCase {
         let store = KeychainSecureValueStore(backend: backend)
         let secret = Data("do-not-log".utf8)
 
-        try store.save(secret, service: "service", account: "account")
+        try store.save(
+            secret,
+            service: "add-service",
+            account: "add-account"
+        )
 
         XCTAssertEqual(backend.addedData, secret)
+        XCTAssertEqual(
+            backend.addIdentity,
+            .init(service: "add-service", account: "add-account")
+        )
         XCTAssertEqual(backend.updateCount, 0)
     }
 
@@ -33,9 +50,17 @@ final class SecureValueStoreTests: XCTestCase {
         let store = KeychainSecureValueStore(backend: backend)
         let secret = Data("replacement".utf8)
 
-        try store.save(secret, service: "service", account: "account")
+        try store.save(
+            secret,
+            service: "update-service",
+            account: "update-account"
+        )
 
         XCTAssertEqual(backend.updatedData, secret)
+        XCTAssertEqual(
+            backend.updateIdentity,
+            .init(service: "update-service", account: "update-account")
+        )
         XCTAssertEqual(backend.updateCount, 1)
     }
 
@@ -44,7 +69,14 @@ final class SecureValueStoreTests: XCTestCase {
         let store = KeychainSecureValueStore(backend: backend)
 
         XCTAssertNoThrow(
-            try store.delete(service: "service", account: "account")
+            try store.delete(
+                service: "delete-service",
+                account: "delete-account"
+            )
+        )
+        XCTAssertEqual(
+            backend.deleteIdentity,
+            .init(service: "delete-service", account: "delete-account")
         )
     }
 
@@ -56,6 +88,13 @@ final class SecureValueStoreTests: XCTestCase {
         XCTAssertThrowsError(
             try store.save(secret, service: "service", account: "account")
         ) { error in
+            XCTAssertEqual(
+                error as? SecureValueStoreError,
+                .operationFailed(
+                    operation: "add",
+                    status: errSecAuthFailed
+                )
+            )
             XCTAssertFalse(error.localizedDescription.contains("never-appear"))
             XCTAssertTrue(error.localizedDescription.contains("\(errSecAuthFailed)"))
         }
@@ -70,8 +109,18 @@ final class SecureValueStoreTests: XCTestCase {
         XCTAssertThrowsError(
             try KeychainSecureValueStore(backend: backend)
                 .load(service: "service", account: "account")
-        )
+        ) { error in
+            XCTAssertEqual(
+                error as? SecureValueStoreError,
+                .missingResultData
+            )
+        }
     }
+}
+
+private struct KeychainIdentity: Equatable {
+    let service: String
+    let account: String
 }
 
 private final class FakeKeychainBackend: KeychainBackend, @unchecked Sendable {
@@ -80,6 +129,10 @@ private final class FakeKeychainBackend: KeychainBackend, @unchecked Sendable {
     private let addStatus: OSStatus
     private let updateStatus: OSStatus
     private let deleteStatus: OSStatus
+    private var storedReadIdentity: KeychainIdentity?
+    private var storedAddIdentity: KeychainIdentity?
+    private var storedUpdateIdentity: KeychainIdentity?
+    private var storedDeleteIdentity: KeychainIdentity?
     private var storedAddedData: Data?
     private var storedUpdatedData: Data?
     private var storedUpdateCount = 0
@@ -99,6 +152,22 @@ private final class FakeKeychainBackend: KeychainBackend, @unchecked Sendable {
         self.deleteStatus = deleteStatus
     }
 
+    var readIdentity: KeychainIdentity? {
+        lock.withLock { storedReadIdentity }
+    }
+
+    var addIdentity: KeychainIdentity? {
+        lock.withLock { storedAddIdentity }
+    }
+
+    var updateIdentity: KeychainIdentity? {
+        lock.withLock { storedUpdateIdentity }
+    }
+
+    var deleteIdentity: KeychainIdentity? {
+        lock.withLock { storedDeleteIdentity }
+    }
+
     var addedData: Data? {
         lock.withLock { storedAddedData }
     }
@@ -112,7 +181,10 @@ private final class FakeKeychainBackend: KeychainBackend, @unchecked Sendable {
     }
 
     func read(service: String, account: String) -> KeychainReadResult {
-        lock.withLock { readResult }
+        lock.withLock {
+            storedReadIdentity = .init(service: service, account: account)
+            return readResult
+        }
     }
 
     func add(
@@ -121,6 +193,7 @@ private final class FakeKeychainBackend: KeychainBackend, @unchecked Sendable {
         account: String
     ) -> OSStatus {
         lock.withLock {
+            storedAddIdentity = .init(service: service, account: account)
             storedAddedData = data
             return addStatus
         }
@@ -132,6 +205,7 @@ private final class FakeKeychainBackend: KeychainBackend, @unchecked Sendable {
         account: String
     ) -> OSStatus {
         lock.withLock {
+            storedUpdateIdentity = .init(service: service, account: account)
             storedUpdatedData = data
             storedUpdateCount += 1
             return updateStatus
@@ -139,6 +213,9 @@ private final class FakeKeychainBackend: KeychainBackend, @unchecked Sendable {
     }
 
     func delete(service: String, account: String) -> OSStatus {
-        lock.withLock { deleteStatus }
+        lock.withLock {
+            storedDeleteIdentity = .init(service: service, account: account)
+            return deleteStatus
+        }
     }
 }

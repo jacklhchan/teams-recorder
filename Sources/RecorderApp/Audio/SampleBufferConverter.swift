@@ -130,11 +130,11 @@ enum PCMByteDecoder {
         guard bytes.count == encoding.storageByteCount else {
             throw SampleBufferConverterError.invalidPCMLayout
         }
-        return try bytes.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else {
+        return try bytes.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else {
                 throw SampleBufferConverterError.invalidPCMLayout
             }
-            return try decode(baseAddress, encoding: encoding)
+            return try decode(UnsafeRawPointer(baseAddress), encoding: encoding)
         }
     }
 

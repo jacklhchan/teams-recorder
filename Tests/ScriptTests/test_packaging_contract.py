@@ -44,6 +44,24 @@ Mentioning compatibility does not change or grant those licenses.
 
 
 class PackagingContractTests(unittest.TestCase):
+    def test_readme_describes_current_provider_and_license(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("OpenAI-Compatible Transcription", readme)
+        self.assertIn("API Base URL", readme)
+        self.assertIn("ASR Model", readme)
+        self.assertIn("LLM Model", readme)
+        self.assertIn("macOS Keychain", readme)
+        self.assertIn("transcript.txt", readme)
+        self.assertIn("Apache License 2.0", readme)
+        self.assertNotIn(
+            "The transcript button opens oMLX",
+            readme,
+        )
+        self.assertNotIn(
+            "Keychain migration is intentionally deferred",
+            readme,
+        )
+
     def test_app_build_packages_license_and_notices(self):
         script = (
             ROOT / "scripts/build-app.sh"

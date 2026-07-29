@@ -8,7 +8,7 @@ macOS SwiftUI MVP for recording meeting audio locally:
 - Write one combined `recording.m4a` file per session.
 - Run a 10-second test recording and play it back immediately.
 - Review recent recordings from inside the app.
-- Trigger local Qwen ASR transcription from each recording row.
+- Transcribe recordings with an OpenAI-compatible provider.
 - Publish microphone PCM to `Local Recorder Virtual Mic` for Teams.
 - Follow Microsoft Teams' absolute mute state after local API pairing.
 - Let the recorder app keep an independent local mic mute when needed.
@@ -27,7 +27,7 @@ From Terminal, prefer launching the packaged app bundle:
 This creates and opens:
 
 ```text
-build/LocalMeetingRecorder.app
+build/Local Meeting Recorder Staging.app
 ```
 
 To install it into `/Applications`:
@@ -80,22 +80,39 @@ Use `Test 10s` before joining or recording an important meeting. The app records
 
 ## Session List
 
-The Recordings section scans the selected output folder for `meeting-*` and `test-*` folders with a `recording.m4a` file. You can play recent recordings, drag the playback slider to seek, stop playback, transcribe with Qwen ASR, or open their folder directly from the app.
+The Recordings section scans the selected output folder for `meeting-*` and `test-*` folders with a `recording.m4a` file. You can play recent recordings, drag the playback slider to seek, stop playback, transcribe with the configured provider, or open their folder directly from the app.
 
-## Qwen ASR Transcription
+## OpenAI-Compatible Transcription
 
-The transcript button opens oMLX and runs the local MLX Qwen ASR pipeline against the selected `recording.m4a`.
+Configure an OpenAI-compatible provider in the app:
 
-Current local defaults:
+1. Enter the API Base URL ending in `/v1`.
+2. Enter the ASR Model identifier accepted by that provider.
+3. Enter the LLM Model identifier to reserve for future meeting intelligence.
+4. Enter an optional API key, language, and transcription prompt.
+5. Save, then use Test to check connectivity. Model discovery is optional;
+   manually entered model identifiers remain available when `/v1/models` is
+   unsupported.
+
+The app sends post-call audio chunks to:
 
 ```text
-ASR workspace: /Users/apple/Documents/AIA ASR
-Model: aufklarer/Qwen3-ASR-1.7B-MLX-8bit
-Language: yue
-Output: transcript_qwen3_asr_1_7b_8bit_yue_trad.txt
+POST <API Base URL>/audio/transcriptions
 ```
 
-The app packages `scripts/transcribe-qwen-asr.sh` into the app bundle and calls it from the recording row. This currently uses direct `mlx_audio.stt.generate` execution, not an OminiX `/v1/audio/transcriptions` server.
+Long recordings use silence-aware bounded chunks, rolling context, validation,
+and retry. New output files are:
+
+```text
+transcript.txt
+transcript.raw.txt
+transcription.json
+transcription.log
+```
+
+The optional provider API key and Teams pairing token are stored in macOS Keychain.
+Existing local oMLX settings are read only for a one-time migration; oMLX is
+not required, launched, installed, or managed by the recorder.
 
 ## Teams Auto Recording
 
@@ -156,7 +173,13 @@ entry, then use the retry button in the recorder.
 
 - Teams mute sync depends on the desktop Third-party app API being present and
   allowed by the signed-in tenant policy.
-- The current Teams pairing token is stored in the app's local user defaults;
-  Keychain migration is intentionally deferred.
 - Transcription is post-call and file based, not streaming.
 - Speaker diarization is not yet included.
+
+## License
+
+Local Meeting Recorder is available under the Apache License 2.0. See
+`LICENSE` and `THIRD_PARTY_NOTICES.md`.
+
+The Apple-derived virtual microphone sample material retains the separate
+license in `Driver/LocalRecorderVirtualMic/LICENSE-Apple-Sample.txt`.

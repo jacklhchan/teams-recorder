@@ -1,4 +1,5 @@
 import hashlib
+import re
 import unittest
 from pathlib import Path
 
@@ -46,20 +47,43 @@ Mentioning compatibility does not change or grant those licenses.
 class PackagingContractTests(unittest.TestCase):
     def test_readme_describes_current_provider_and_license(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("OpenAI-Compatible Transcription", readme)
-        self.assertIn("API Base URL", readme)
-        self.assertIn("ASR Model", readme)
-        self.assertIn("LLM Model", readme)
-        self.assertIn("macOS Keychain", readme)
-        self.assertIn("transcript.txt", readme)
-        self.assertIn("Apache License 2.0", readme)
-        self.assertNotIn(
-            "The transcript button opens oMLX",
-            readme,
+        required_phrases = (
+            "OpenAI-Compatible Transcription",
+            "API Base URL ending in `/v1`",
+            "ASR Model identifier",
+            "LLM Model identifier",
+            "optional API key, language, and transcription prompt",
+            "POST <API Base URL>/audio/transcriptions",
+            "Model discovery is optional",
+            "when `/v1/models` is\n   unsupported",
+            "manually entered model identifiers remain available",
+            "transcript.txt",
+            "transcript.raw.txt",
+            "transcription.json",
+            "transcription.log",
+            "provider API key and Teams pairing token are stored in macOS Keychain",
+            "oMLX settings are read only for a one-time migration",
+            "oMLX is\nnot required, launched, installed, or managed by the recorder",
+            "build/Local Meeting Recorder Staging.app",
+            "Apache License 2.0",
+            "Apple-derived virtual microphone sample material retains the separate",
+            "Driver/LocalRecorderVirtualMic/LICENSE-Apple-Sample.txt",
         )
-        self.assertNotIn(
+        for phrase in required_phrases:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, readme)
+
+        stale_phrases = (
+            "/Users/apple",
+            "mlx_audio.stt.generate",
+            "The transcript button opens oMLX",
             "Keychain migration is intentionally deferred",
-            readme,
+        )
+        for phrase in stale_phrases:
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, readme)
+        self.assertIsNone(
+            re.search(r"\\bQwen[^\\n`]*(?:4-bit|8-bit|8bit|bf16)\\b", readme),
         )
 
     def test_app_build_packages_license_and_notices(self):

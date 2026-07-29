@@ -1,5 +1,11 @@
 import SwiftUI
 
+enum APIKeyStatus: Equatable {
+    case present
+    case absent
+    case unavailable
+}
+
 @MainActor
 final class AIProviderSettingsModel: ObservableObject {
     @Published var baseURLText = "" { didSet { invalidateConnectionTest() } }
@@ -9,11 +15,30 @@ final class AIProviderSettingsModel: ObservableObject {
     @Published var language = "" { didSet { invalidateConnectionTest() } }
     @Published var prompt = "" { didSet { invalidateConnectionTest() } }
     @Published private(set) var discoveredModels: [String] = []
-    @Published private(set) var hasStoredAPIKey = false
+    @Published private(set) var apiKeyStatus: APIKeyStatus = .absent
     @Published private(set) var hasSavedProfile = false
     @Published private(set) var isTesting = false
     @Published private(set) var status = "Not configured"
     @Published private(set) var statusIsError = false
+
+    var hasStoredAPIKey: Bool {
+        apiKeyStatus == .present
+    }
+
+    var canRemoveAPIKey: Bool {
+        apiKeyStatus != .absent
+    }
+
+    var apiKeyFieldLabel: String {
+        switch apiKeyStatus {
+        case .present:
+            "API Key (saved)"
+        case .absent:
+            "API Key (optional)"
+        case .unavailable:
+            "API Key (status unavailable)"
+        }
+    }
 
     private let repository: any OpenAICompatibleProviderManaging
     private let client: any ProviderConnectionTesting
@@ -58,11 +83,15 @@ final class AIProviderSettingsModel: ObservableObject {
         do {
             try repository.removeAPIKey()
             apiKeyReplacement = ""
-            hasStoredAPIKey = false
+            apiKeyStatus = .absent
             status = "API key removed"
             statusIsError = false
         } catch {
-            present(error)
+            if apiKeyStatus != .present {
+                apiKeyStatus = .unavailable
+            }
+            status = "Could not remove API key."
+            statusIsError = true
         }
     }
 
@@ -148,11 +177,11 @@ final class AIProviderSettingsModel: ObservableObject {
 
     private func updateAPIKeyStatus(after successfulProfileStatus: String) {
         do {
-            hasStoredAPIKey = try repository.hasAPIKey()
+            apiKeyStatus = try repository.hasAPIKey() ? .present : .absent
             status = successfulProfileStatus
             statusIsError = false
         } catch {
-            hasStoredAPIKey = false
+            apiKeyStatus = .unavailable
             status = successfulProfileStatus + "; API key status unavailable"
             statusIsError = true
         }

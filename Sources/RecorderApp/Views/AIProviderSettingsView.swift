@@ -11,7 +11,7 @@ struct AIProviderSettingsView: View {
             TextField("API Base URL", text: $model.baseURLText)
                 .textFieldStyle(.roundedBorder)
             SecureField(
-                model.hasStoredAPIKey ? "API Key (saved)" : "API Key (optional)",
+                model.apiKeyFieldLabel,
                 text: $model.apiKeyReplacement
             )
             modelField(
@@ -47,7 +47,7 @@ struct AIProviderSettingsView: View {
                 Button("Remove Key", systemImage: "key.slash", role: .destructive) {
                     model.removeAPIKey()
                 }
-                .disabled(!model.hasStoredAPIKey)
+                .disabled(!model.canRemoveAPIKey)
                 Spacer()
                 if model.isTesting {
                     ProgressView().controlSize(.small)

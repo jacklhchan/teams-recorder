@@ -46,8 +46,66 @@ final class AIProviderSettingsModelTests: XCTestCase {
 
         XCTAssertTrue(model.hasSavedProfile)
         XCTAssertFalse(model.hasStoredAPIKey)
+        XCTAssertEqual(model.apiKeyStatus, .unavailable)
         XCTAssertEqual(model.status, "Provider settings loaded; API key status unavailable")
         XCTAssertTrue(model.statusIsError)
+    }
+
+    func testUnavailableAPIKeyStatusKeepsRemovalAvailable() throws {
+        let repository = RecordingProviderRepository(
+            profile: try makeProfile(),
+            apiKeyStatusError: TestError.failed
+        )
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient()
+        )
+
+        XCTAssertTrue(model.hasSavedProfile)
+        XCTAssertEqual(model.apiKeyStatus, .unavailable)
+        XCTAssertTrue(model.canRemoveAPIKey)
+    }
+
+    func testRemovalFromUnavailableStatusReturnsKnownAbsent() throws {
+        let repository = RecordingProviderRepository(
+            profile: try makeProfile(),
+            apiKeyStatusError: TestError.failed
+        )
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient()
+        )
+
+        model.removeAPIKey()
+
+        XCTAssertEqual(repository.removeKeyCount, 1)
+        XCTAssertTrue(model.hasSavedProfile)
+        XCTAssertEqual(model.apiKeyStatus, .absent)
+        XCTAssertFalse(model.canRemoveAPIKey)
+        XCTAssertEqual(model.status, "API key removed")
+        XCTAssertFalse(model.statusIsError)
+    }
+
+    func testFailedRemovalPreservesRecoveryAndRedactsError() throws {
+        let repository = RecordingProviderRepository(
+            profile: try makeProfile(),
+            apiKeyStatusError: TestError.failed,
+            removeKeyError: NSError(domain: "secret-keychain-error", code: 1)
+        )
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient()
+        )
+
+        model.removeAPIKey()
+
+        XCTAssertEqual(repository.removeKeyCount, 1)
+        XCTAssertTrue(model.hasSavedProfile)
+        XCTAssertEqual(model.apiKeyStatus, .unavailable)
+        XCTAssertTrue(model.canRemoveAPIKey)
+        XCTAssertEqual(model.status, "Could not remove API key.")
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertFalse(model.status.contains("secret-keychain-error"))
     }
 
     func testSaveKeepsSavedProfileWhenAPIKeyStatusFails() {
@@ -323,6 +381,7 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
     private var keyPresent: Bool
     private let migrationError: Error?
     private let apiKeyStatusError: Error?
+    private let removeKeyError: Error?
     private(set) var lastReplacementAPIKey: String?
     private(set) var removeKeyCount = 0
 
@@ -330,12 +389,14 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
         profile: OpenAICompatibleProviderProfile? = nil,
         hasAPIKey: Bool = false,
         migrationError: Error? = nil,
-        apiKeyStatusError: Error? = nil
+        apiKeyStatusError: Error? = nil,
+        removeKeyError: Error? = nil
     ) {
         self.profile = profile
         keyPresent = hasAPIKey
         self.migrationError = migrationError
         self.apiKeyStatusError = apiKeyStatusError
+        self.removeKeyError = removeKeyError
     }
 
     func loadProfile() throws -> OpenAICompatibleProviderProfile? { profile }
@@ -364,6 +425,7 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
 
     func removeAPIKey() throws {
         removeKeyCount += 1
+        if let removeKeyError { throw removeKeyError }
         keyPresent = false
     }
 

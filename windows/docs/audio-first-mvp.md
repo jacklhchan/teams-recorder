@@ -55,7 +55,7 @@ windows\src\Recorder.WinUI\bin\x64\Release\net10.0-windows10.0.22621.0\win-x64\R
 
 - 已以 Realtek render loopback 寫入非靜音 AAC M4A，bridge 回報 219,840 個輸入／輸出 frame、peak `0.76159`；Windows Shell 可辨識產物為約 4 秒、118 kbps 的 M4A。這驗證 system-only 路徑、AAC finalization 及檔案可被 Windows 重新開啟，但不代表所有音訊裝置都通過。
 - 內建 `Microphone Array (Intel® Smart Sound Technology for Digital Microphones)` 回報 4-channel、48 kHz float mix format，卻對四種 shared `IAudioClient::Initialize` 變體、`IAudioClient3` engine-period 以及同 endpoint 的 48 kHz stereo auto-convert 全部回傳 `E_INVALIDARG`。UI 會保留此失敗並要求使用者修正／改選裝置，絕不靜默替換麥克風。
-- 本執行工作階段無法擷取或控制桌面視窗，因此沒有把這次 M4A 實測宣稱為新的 Teams Test Call 證據；Teams-only 仍不在 MVP 範圍。
+- 已在桌面版 Teams 的「Make a test call」啟動 Echo Test Call，並同時以 Release `BridgeProbe mixed` 錄製 45 秒。bridge 回報 2,263 個 render packets、1,086,720 個輸出 frame、0 個 silent packet、peak `0.761594` 與 12 個 discontinuity；產物為 367,453 bytes，Windows Shell 辨識為 22 秒、126 kbps 的 MPEG-4 Audio。這是 Teams Test Call 期間的 system-loopback 與 M4A finalization 實測證據；它不代表 Teams-only process isolation、Teams API、meeting 偵測或自動錄音。
 
 ## 發行前仍必須完成的實機 gate
 

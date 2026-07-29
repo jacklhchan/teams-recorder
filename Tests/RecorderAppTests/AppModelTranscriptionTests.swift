@@ -135,6 +135,88 @@ final class AppModelTranscriptionTests: XCTestCase {
         XCTAssertEqual(model.transcriptionStatesBySessionID[fixture.session.id]?.phase, .completed)
     }
 
+    func testCurrentArtifactResolutionReplacesCachedLegacyArtifactsWithCanonicalFiles() throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let model = makeModel(
+            fixture: fixture,
+            preparer: ControlledPreparer(.immediate(.failure(TestError.failed))),
+            launcher: ControlledLauncher()
+        )
+        let legacyTranscript = fixture.session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_8bit_yue_trad.txt")
+        let legacyLog = fixture.session.folderURL.appendingPathComponent("transcription_qwen_asr.log")
+        try "legacy".write(to: legacyTranscript, atomically: true, encoding: .utf8)
+        try Data().write(to: legacyLog)
+        model.transcriptURLsBySessionID[fixture.session.id] = legacyTranscript
+        model.transcriptLogURLsBySessionID[fixture.session.id] = legacyLog
+
+        let canonicalTranscript = fixture.session.folderURL.appendingPathComponent("transcript.txt")
+        let canonicalLog = fixture.session.folderURL.appendingPathComponent("transcription.log")
+        try "canonical".write(to: canonicalTranscript, atomically: true, encoding: .utf8)
+        try Data().write(to: canonicalLog)
+
+        XCTAssertEqual(model.currentTranscriptURL(for: fixture.session), canonicalTranscript)
+        XCTAssertEqual(model.currentTranscriptLogURL(for: fixture.session), canonicalLog)
+        XCTAssertEqual(model.transcriptURLsBySessionID[fixture.session.id], canonicalTranscript)
+        XCTAssertEqual(model.transcriptLogURLsBySessionID[fixture.session.id], canonicalLog)
+    }
+
+    func testCurrentArtifactResolutionClearsDeletedCachedFiles() throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let model = makeModel(
+            fixture: fixture,
+            preparer: ControlledPreparer(.immediate(.failure(TestError.failed))),
+            launcher: ControlledLauncher()
+        )
+        let transcript = fixture.session.folderURL.appendingPathComponent("transcript.txt")
+        let log = fixture.session.folderURL.appendingPathComponent("transcription.log")
+        try "cached".write(to: transcript, atomically: true, encoding: .utf8)
+        try Data().write(to: log)
+        model.transcriptURLsBySessionID[fixture.session.id] = transcript
+        model.transcriptLogURLsBySessionID[fixture.session.id] = log
+        try FileManager.default.removeItem(at: transcript)
+        try FileManager.default.removeItem(at: log)
+
+        XCTAssertNil(model.currentTranscriptURL(for: fixture.session))
+        XCTAssertNil(model.currentTranscriptLogURL(for: fixture.session))
+        XCTAssertNil(model.transcriptURLsBySessionID[fixture.session.id])
+        XCTAssertNil(model.transcriptLogURLsBySessionID[fixture.session.id])
+    }
+
+    func testFinalLegacyArtifactsYieldToSubsequentCanonicalResolution() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let preparer = ControlledPreparer(.immediate(.success(.init(
+            audioURL: fixture.temporaryAudioURL,
+            cleanupURL: nil
+        ))))
+        let launcher = ControlledLauncher()
+        let model = makeModel(fixture: fixture, preparer: preparer, launcher: launcher)
+        let legacyTranscript = fixture.session.folderURL.appendingPathComponent("transcript_qwen3_asr_1_7b_8bit_yue_trad.txt")
+        let legacyLog = fixture.session.folderURL.appendingPathComponent("transcription_qwen_asr.log")
+        try "legacy".write(to: legacyTranscript, atomically: true, encoding: .utf8)
+        try Data().write(to: legacyLog)
+
+        model.transcribe(session: fixture.session)
+        let process = await launcher.nextProcess()
+        process.complete(
+            exitStatus: 0,
+            output: "TRANSCRIPT_PATH=\(legacyTranscript.path)\nLOG_PATH=\(legacyLog.path)"
+        )
+        await waitForIdle(model)
+        XCTAssertEqual(model.transcriptURLsBySessionID[fixture.session.id], legacyTranscript)
+        XCTAssertEqual(model.transcriptLogURLsBySessionID[fixture.session.id], legacyLog)
+
+        let canonicalTranscript = fixture.session.folderURL.appendingPathComponent("transcript.txt")
+        let canonicalLog = fixture.session.folderURL.appendingPathComponent("transcription.log")
+        try "canonical".write(to: canonicalTranscript, atomically: true, encoding: .utf8)
+        try Data().write(to: canonicalLog)
+
+        XCTAssertEqual(model.currentTranscriptURL(for: fixture.session), canonicalTranscript)
+        XCTAssertEqual(model.currentTranscriptLogURL(for: fixture.session), canonicalLog)
+    }
+
     func testProviderSnapshotIsCapturedBeforeAudioPreparation() async throws {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }

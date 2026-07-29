@@ -70,8 +70,6 @@ struct ContentView: View {
                         lastTranscriptionStatus: model.lastTranscriptionStatus,
                         lastTranscriptionDidFail: model.lastTranscriptionDidFail,
                         hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
-                        transcriptURLsBySessionID: model.transcriptURLsBySessionID,
-                        transcriptLogURLsBySessionID: model.transcriptLogURLsBySessionID,
                         transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
                         refresh: model.refreshSessions,
                         play: model.play,
@@ -840,8 +838,6 @@ private struct SessionListView: View {
     let lastTranscriptionStatus: String
     let lastTranscriptionDidFail: Bool
     let hasSavedProviderProfile: Bool
-    let transcriptURLsBySessionID: [RecordingSession.ID: URL]
-    let transcriptLogURLsBySessionID: [RecordingSession.ID: URL]
     let transcriptionStatesBySessionID: [RecordingSession.ID: TranscriptionState]
     let refresh: () -> Void
     let play: (RecordingSession) -> Void
@@ -1071,16 +1067,10 @@ private struct SessionListView: View {
     }
 
     private func hasTranscript(for session: RecordingSession) -> Bool {
-        if transcriptURLsBySessionID[session.id] != nil {
-            return true
-        }
         return TranscriptDocumentStore.resolvedURL(in: session.folderURL) != nil
     }
 
     private func hasTranscriptLog(for session: RecordingSession) -> Bool {
-        if transcriptLogURLsBySessionID[session.id] != nil {
-            return true
-        }
         return TranscriptDocumentStore.logURL(in: session.folderURL) != nil
     }
 

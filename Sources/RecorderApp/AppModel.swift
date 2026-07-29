@@ -1470,13 +1470,7 @@ final class AppModel: ObservableObject {
     }
 
     func openTranscript(for session: RecordingSession) {
-        if let url = transcriptURLsBySessionID[session.id] {
-            NSWorkspace.shared.open(url)
-            return
-        }
-
-        if let url = TranscriptDocumentStore.resolvedURL(in: session.folderURL) {
-            transcriptURLsBySessionID[session.id] = url
+        if let url = currentTranscriptURL(for: session) {
             NSWorkspace.shared.open(url)
         } else {
             statusMessage = "No transcript found for \(session.displayName)"
@@ -1484,17 +1478,23 @@ final class AppModel: ObservableObject {
     }
 
     func openTranscriptLog(for session: RecordingSession) {
-        if let url = transcriptLogURLsBySessionID[session.id] {
-            NSWorkspace.shared.open(url)
-            return
-        }
-
-        if let url = TranscriptDocumentStore.logURL(in: session.folderURL) {
-            transcriptLogURLsBySessionID[session.id] = url
+        if let url = currentTranscriptLogURL(for: session) {
             NSWorkspace.shared.open(url)
         } else {
             statusMessage = "No ASR log found for \(session.displayName)"
         }
+    }
+
+    func currentTranscriptURL(for session: RecordingSession) -> URL? {
+        let url = TranscriptDocumentStore.resolvedURL(in: session.folderURL)
+        transcriptURLsBySessionID[session.id] = url
+        return url
+    }
+
+    func currentTranscriptLogURL(for session: RecordingSession) -> URL? {
+        let url = TranscriptDocumentStore.logURL(in: session.folderURL)
+        transcriptLogURLsBySessionID[session.id] = url
+        return url
     }
 
     func toggleRecorderMicMute(source: String = "Button") {

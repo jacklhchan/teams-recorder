@@ -173,6 +173,26 @@ final class RecordingLibraryTests: XCTestCase {
         XCTAssertEqual(TranscriptDocumentStore.logURL(in: folder), canonical)
     }
 
+    func testTranscriptAndLogResolutionIgnoreCanonicalAndLegacyDirectories() throws {
+        let root = try makeRoot()
+        let folder = try makeSessionFolder(in: root, named: "meeting-2026-07-22-090000")
+        let names = [
+            "transcript.txt",
+            "transcript_qwen3_asr_1_7b_8bit_yue_trad.txt",
+            "transcription.log",
+            "transcription_qwen_asr.log"
+        ]
+        for name in names {
+            try FileManager.default.createDirectory(
+                at: folder.appendingPathComponent(name),
+                withIntermediateDirectories: true
+            )
+        }
+
+        XCTAssertNil(TranscriptDocumentStore.resolvedURL(in: folder))
+        XCTAssertNil(TranscriptDocumentStore.logURL(in: folder))
+    }
+
     func testTranscriptionStateCanBeCancelledAndSurvivesReload() throws {
         let root = try makeRoot()
         let folder = try makeSessionFolder(in: root, named: "meeting-2026-07-22-090000")

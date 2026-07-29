@@ -75,6 +75,57 @@ final class TeamsPairingTokenStoreTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: Self.legacyKey), "legacy-token")
     }
 
+    func testEmptyKeychainValueFailsWithoutDeletingLegacyToken() {
+        let secure = InMemorySecureValueStore(stored: Data())
+        let defaults = makeDefaults()
+        defaults.set("legacy-token", forKey: Self.legacyKey)
+
+        XCTAssertThrowsError(
+            try makeStore(secure: secure, defaults: defaults).load()
+        ) { error in
+            XCTAssertEqual(error as? TeamsPairingTokenStoreError, .invalidEncoding)
+        }
+        XCTAssertEqual(defaults.string(forKey: Self.legacyKey), "legacy-token")
+    }
+
+    func testSavingEmptyTokenFailsWithoutCallingSecureStore() {
+        let secure = InMemorySecureValueStore()
+
+        XCTAssertThrowsError(
+            try makeStore(secure: secure, defaults: makeDefaults()).save("")
+        ) { error in
+            XCTAssertEqual(error as? TeamsPairingTokenStoreError, .emptyToken)
+        }
+        XCTAssertTrue(secure.operations.isEmpty)
+    }
+
+    func testUsesRequiredKeychainServiceAndAccountForLoadSaveAndDelete() throws {
+        let secure = InMemorySecureValueStore()
+        let store = makeStore(secure: secure, defaults: makeDefaults())
+
+        XCTAssertNil(try store.load())
+        try store.save("pairing-token")
+        try store.clear()
+
+        XCTAssertEqual(
+            secure.operations,
+            [
+                .load(
+                    service: TeamsPairingCredential.service,
+                    account: TeamsPairingCredential.account
+                ),
+                .save(
+                    service: TeamsPairingCredential.service,
+                    account: TeamsPairingCredential.account
+                ),
+                .delete(
+                    service: TeamsPairingCredential.service,
+                    account: TeamsPairingCredential.account
+                )
+            ]
+        )
+    }
+
     func testClearRemovesLegacyValueEvenWhenKeychainDeleteFails() {
         let secure = InMemorySecureValueStore(deleteError: TestError.failed)
         let defaults = makeDefaults()
@@ -107,8 +158,15 @@ private enum TestError: Error {
 }
 
 private final class InMemorySecureValueStore: SecureValueStoring, @unchecked Sendable {
+    enum Operation: Equatable {
+        case load(service: String, account: String)
+        case save(service: String, account: String)
+        case delete(service: String, account: String)
+    }
+
     private let lock = NSLock()
     private var value: Data?
+    private var recordedOperations: [Operation] = []
     private let readBackOverride: Data?
     private let saveError: Error?
     private let deleteError: Error?
@@ -129,19 +187,30 @@ private final class InMemorySecureValueStore: SecureValueStoring, @unchecked Sen
         lock.withLock { value }
     }
 
+    var operations: [Operation] {
+        lock.withLock { recordedOperations }
+    }
+
     func load(service: String, account: String) throws -> Data? {
         lock.withLock {
+            recordedOperations.append(.load(service: service, account: account))
             guard value != nil else { return nil }
             return readBackOverride ?? value
         }
     }
 
     func save(_ data: Data, service: String, account: String) throws {
+        lock.withLock {
+            recordedOperations.append(.save(service: service, account: account))
+        }
         if let saveError { throw saveError }
         lock.withLock { value = data }
     }
 
     func delete(service: String, account: String) throws {
+        lock.withLock {
+            recordedOperations.append(.delete(service: service, account: account))
+        }
         if let deleteError { throw deleteError }
         lock.withLock { value = nil }
     }

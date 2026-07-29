@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+validate_macho_dependencies() {
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      /System/Library/*|/usr/lib/*) ;;
+      *) echo "Unexpected dependency: $dependency" >&2; return 1 ;;
+    esac
+  done
+}
+
+main() {
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/lmr-package.XXXXXX")"
 trap 'rm -rf "$TEMP_ROOT"' EXIT
@@ -37,12 +47,12 @@ if LC_ALL=C /usr/bin/grep -R -n -E \
   exit 1
 fi
 
-otool -L "$MOVED/Contents/MacOS/LocalMeetingRecorder" \
-  | tail -n +2 \
-  | awk '{print $1}' \
-  | while IFS= read -r dependency; do
-      case "$dependency" in
-        /System/Library/*|/usr/lib/*|@rpath/libswift*) ;;
-        *) echo "Unexpected dependency: $dependency" >&2; exit 1 ;;
-      esac
-    done
+/usr/bin/otool -L "$MOVED/Contents/MacOS/LocalMeetingRecorder" \
+  | /usr/bin/tail -n +2 \
+  | /usr/bin/awk '{print $1}' \
+  | validate_macho_dependencies
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

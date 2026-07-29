@@ -113,7 +113,11 @@ printf '%s' "$OWNER_MARKER_VALUE" > "$RESOURCES_DIR/$OWNER_MARKER_NAME"
 
 cp "$BINARY_PATH" "$MACOS_DIR/$APP_EXECUTABLE"
 if [[ "$CONFIGURATION" == "release" ]]; then
-  STRIP_BIN="$(xcrun --find strip)"
+  STRIP_BIN="$(/usr/bin/xcrun --find strip)"
+  [[ "$STRIP_BIN" == /* && -x "$STRIP_BIN" ]] || {
+    echo "Xcode strip tool must be an absolute executable path." >&2
+    exit 70
+  }
   "$STRIP_BIN" -S "$MACOS_DIR/$APP_EXECUTABLE"
 fi
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"

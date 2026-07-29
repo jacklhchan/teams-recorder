@@ -1,5 +1,6 @@
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -10,17 +11,49 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BUILD_APP = ROOT / "scripts/build-app.sh"
 VERIFY_APP = ROOT / "scripts/verify-app-bundle.sh"
+PACKAGING_SMOKE = ROOT / "Tests/PackagingTests/run-tests.sh"
 OWNER_MARKER_VALUE = "local.meeting.recorder.build-app.v1"
 
 
 class BuildAppContractTests(unittest.TestCase):
     def test_packaging_smoke_script_is_executable_contract(self):
-        script = (
-            ROOT / "Tests/PackagingTests/run-tests.sh"
-        ).read_text(encoding="utf-8")
+        script = PACKAGING_SMOKE.read_text(encoding="utf-8")
         self.assertIn("verify-app-bundle.sh", script)
         self.assertIn("moved", script.lower())
         self.assertNotIn("open -n", script)
+        self.assertIn("validate_macho_dependencies", script)
+        self.assertIn("/usr/bin/otool", script)
+        self.assertNotIn("@rpath/libswift*", script)
+
+        valid = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; validate_macho_dependencies',
+                "validate-macho-dependencies",
+                str(PACKAGING_SMOKE),
+            ],
+            input="/System/Library/Frameworks/Foundation.framework/Foundation\n/usr/lib/libSystem.B.dylib\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        invalid = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; validate_macho_dependencies',
+                "validate-macho-dependencies",
+                str(PACKAGING_SMOKE),
+            ],
+            input="@rpath/libswiftMalware.dylib\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("Unexpected dependency", invalid.stderr)
 
     def run_build(self, *arguments):
         return subprocess.run(
@@ -139,33 +172,6 @@ esac
         shim = directory / "file-shim"
         self.write_executable(shim, "#!/usr/bin/env bash\nprintf '%s: arm64\\n' \"$1\"\n")
         return shim
-
-    def make_xcrun_and_strip_shims(self, directory):
-        strip = directory / "strip-shim"
-        self.write_executable(
-            strip,
-            """#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\\n' "$*" >> "$STRIP_LOG"
-/usr/bin/python3 - "$2" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-path.write_bytes(path.read_bytes().replace(b"/Users/apple/checkout", b"/stripped-checkout  "))
-PY
-""",
-        )
-        xcrun = directory / "xcrun"
-        self.write_executable(
-            xcrun,
-            """#!/usr/bin/env bash
-set -euo pipefail
-[[ "$1" == "--find" && "$2" == "strip" ]]
-printf '%s\\n' "$STRIP_SHIM"
-""",
-        )
-        return xcrun, strip
 
     def make_app_fixture(self, root):
         app = root / "Fixture.app"
@@ -316,18 +322,22 @@ printf '%s\\n' "$STRIP_SHIM"
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(f"-c {configuration}", swift_log.read_text(encoding="utf-8"))
 
-    def test_release_strips_checkout_paths_but_debug_keeps_them(self):
+    def test_release_uses_fixed_xcrun_and_ignores_path_hijack(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)
             binary_directory = root / "bin"
             binary_directory.mkdir()
             binary = binary_directory / "LocalMeetingRecorder"
-            binary.write_bytes(b"binary /Users/apple/checkout marker")
+            shutil.copyfile("/usr/bin/true", binary)
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             swift = self.make_swift_shim(root, binary_directory)
             codesign = self.make_codesign_shim(root)
-            _, strip = self.make_xcrun_and_strip_shims(root)
-            strip_log = root / "strip.log"
+            hijack = root / "xcrun"
+            hijack_log = root / "xcrun-hijack.log"
+            self.write_executable(
+                hijack,
+                "#!/usr/bin/env bash\nprintf 'hijacked\\n' > \"$XCRUN_HIJACK_LOG\"\nprintf '%s\\n' /usr/bin/strip\n",
+            )
             environment = {
                 **os.environ,
                 "PATH": f"{root}:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -336,36 +346,26 @@ printf '%s\\n' "$STRIP_SHIM"
                 "SWIFT_LOG": str(root / "swift.log"),
                 "CODESIGN_BIN": str(codesign),
                 "CODESIGN_DV_EXIT": "1",
-                "STRIP_SHIM": str(strip),
-                "STRIP_LOG": str(strip_log),
+                "XCRUN_HIJACK_LOG": str(hijack_log),
             }
-            for configuration in ("release", "debug"):
-                with self.subTest(configuration=configuration):
-                    output = root / f"{configuration}.app"
-                    result = subprocess.run(
-                        [
-                            "/bin/bash", str(BUILD_APP),
-                            "--configuration", configuration,
-                            "--output", str(output),
-                            "--sign", "none",
-                        ],
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                        env=environment,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    executable = output / "Contents/MacOS/LocalMeetingRecorder"
-                    if configuration == "release":
-                        self.assertNotIn(b"/Users/apple/checkout", executable.read_bytes())
-                    else:
-                        self.assertIn(b"/Users/apple/checkout", executable.read_bytes())
-            strip_calls = strip_log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(strip_calls), 1)
-            self.assertTrue(strip_calls[0].startswith("-S "))
-            self.assertTrue(
-                strip_calls[0].endswith("release.app/Contents/MacOS/LocalMeetingRecorder")
+            output = root / "release.app"
+            result = subprocess.run(
+                [
+                    "/bin/bash", str(BUILD_APP),
+                    "--configuration", "release",
+                    "--output", str(output),
+                    "--sign", "none",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(hijack_log.exists())
+            script = BUILD_APP.read_text(encoding="utf-8")
+            self.assertIn('STRIP_BIN="$(/usr/bin/xcrun --find strip)"', script)
+            self.assertIn('[[ "$STRIP_BIN" == /* && -x "$STRIP_BIN" ]]', script)
 
     def test_owned_output_is_replaced_by_successful_build(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:

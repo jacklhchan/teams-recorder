@@ -14,8 +14,16 @@ struct AIProviderSettingsView: View {
                 model.hasStoredAPIKey ? "API Key (saved)" : "API Key (optional)",
                 text: $model.apiKeyReplacement
             )
-            modelField("ASR Model", text: $model.asrModel)
-            modelField("LLM Model", text: $model.llmModel)
+            modelField(
+                "ASR Model",
+                text: $model.asrModel,
+                selectDiscoveredModel: model.selectDiscoveredASRModel
+            )
+            modelField(
+                "LLM Model",
+                text: $model.llmModel,
+                selectDiscoveredModel: model.selectDiscoveredLLMModel
+            )
             TextField("Language", text: $model.language)
                 .textFieldStyle(.roundedBorder)
             Text("Prompt")
@@ -59,7 +67,8 @@ struct AIProviderSettingsView: View {
 
     private func modelField(
         _ title: String,
-        text: Binding<String>
+        text: Binding<String>,
+        selectDiscoveredModel: @escaping (String) -> Void
     ) -> some View {
         HStack {
             TextField(title, text: text)
@@ -67,13 +76,13 @@ struct AIProviderSettingsView: View {
             if !model.discoveredModels.isEmpty {
                 Menu {
                     ForEach(model.discoveredModels, id: \.self) { value in
-                        Button(value) { text.wrappedValue = value }
+                        Button(value) { selectDiscoveredModel(value) }
                     }
                 } label: {
                     Image(systemName: "chevron.up.chevron.down")
                 }
-                .help("Choose a discovered model")
-                .accessibilityLabel("Choose discovered \(title) model")
+                .help("Choose discovered \(title)")
+                .accessibilityLabel("Choose discovered \(title)")
             }
         }
     }

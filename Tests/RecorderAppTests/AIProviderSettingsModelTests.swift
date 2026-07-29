@@ -226,6 +226,38 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertTrue(model.statusIsError)
     }
 
+    func testSelectingDiscoveredASRThenLLMPreservesDiscoveryAndInvalidatesConnectionOwnership() async {
+        let client = DeferredProviderClient()
+        let model = makeModel(client: client)
+        let testTask = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+        await client.completeNext(
+            with: .success(.init(
+                supportsModelDiscovery: true,
+                models: ["asr-discovered", "llm-discovered"]
+            ))
+        )
+        await testTask.value
+
+        model.selectDiscoveredASRModel("asr-discovered")
+        model.selectDiscoveredLLMModel("llm-discovered")
+
+        XCTAssertEqual(model.asrModel, "asr-discovered")
+        XCTAssertEqual(model.llmModel, "llm-discovered")
+        XCTAssertEqual(model.discoveredModels, ["asr-discovered", "llm-discovered"])
+        XCTAssertEqual(model.status, "Not configured")
+        XCTAssertFalse(model.isTesting)
+    }
+
+    func testSelectingUnknownDiscoveredModelDoesNotChangeDraft() {
+        let model = makeModel()
+        model.selectDiscoveredASRModel("not-discovered")
+        model.selectDiscoveredLLMModel("also-not-discovered")
+
+        XCTAssertEqual(model.asrModel, "asr")
+        XCTAssertEqual(model.llmModel, "llm")
+    }
+
     private func makeModel(
         client: any ProviderConnectionTesting = StubProviderClient()
     ) -> AIProviderSettingsModel {

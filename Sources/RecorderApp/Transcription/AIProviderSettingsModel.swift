@@ -102,6 +102,14 @@ final class AIProviderSettingsModel: ObservableObject {
         }
     }
 
+    func selectDiscoveredASRModel(_ id: String) {
+        selectDiscoveredModel(id) { self.asrModel = id }
+    }
+
+    func selectDiscoveredLLMModel(_ id: String) {
+        selectDiscoveredModel(id) { self.llmModel = id }
+    }
+
     func reload() {
         invalidateConnectionTest()
         do {
@@ -147,6 +155,13 @@ final class AIProviderSettingsModel: ObservableObject {
         invalidateConnectionTest()
         isTesting = true
         return connectionTestGeneration
+    }
+
+    private func selectDiscoveredModel(_ id: String, apply: () -> Void) {
+        guard discoveredModels.contains(id) else { return }
+        let discoveredModels = discoveredModels
+        apply()
+        self.discoveredModels = discoveredModels
     }
 
     private func invalidateConnectionTest() {

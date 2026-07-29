@@ -9,26 +9,60 @@ protocol ProviderHTTPTransport: Sendable {
 
 struct URLSessionProviderHTTPTransport: ProviderHTTPTransport {
     private let configuration: URLSessionConfiguration
+    private let lifecycle: URLSessionProviderHTTPTransportLifecycle
+    private let retainedBodyByteCountObserver: (@Sendable (Int) -> Void)?
 
-    init(configuration: URLSessionConfiguration = .default) {
-        self.configuration = configuration
+    init(
+        configuration: URLSessionConfiguration? = nil,
+        retainedBodyByteCountObserver: (@Sendable (Int) -> Void)? = nil
+    ) {
+        let configured = (configuration ?? .ephemeral).copy() as! URLSessionConfiguration
+        configured.urlCache = nil
+        configured.requestCachePolicy = .reloadIgnoringLocalCacheData
+        self.configuration = configured
+        self.lifecycle = URLSessionProviderHTTPTransportLifecycle()
+        self.retainedBodyByteCountObserver = retainedBodyByteCountObserver
     }
+
+    var configurationForTesting: URLSessionConfiguration { configuration }
+    var hasReleasedTaskAndSessionForTesting: Bool { lifecycle.hasReleased }
 
     func response(
         for request: URLRequest,
         maximumBodyBytes: Int
     ) async throws -> (Data, HTTPURLResponse) {
+        var request = request
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         let collector = CappedHTTPResponseCollector(
             configuration: configuration,
-            maximumBodyBytes: maximumBodyBytes
+            maximumBodyBytes: maximumBodyBytes,
+            lifecycle: lifecycle,
+            retainedBodyByteCountObserver: retainedBodyByteCountObserver
         )
         return try await collector.load(request: request)
+    }
+}
+
+private final class URLSessionProviderHTTPTransportLifecycle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeCount = 0
+
+    var hasReleased: Bool { lock.withLock { activeCount == 0 } }
+
+    func markActive() {
+        lock.withLock { activeCount += 1 }
+    }
+
+    func markReleased() {
+        lock.withLock { activeCount = max(0, activeCount - 1) }
     }
 }
 
 private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let configuration: URLSessionConfiguration
     private let maximumBodyBytes: Int
+    private let lifecycle: URLSessionProviderHTTPTransportLifecycle
+    private let retainedBodyByteCountObserver: (@Sendable (Int) -> Void)?
     private let lock = NSLock()
     private var session: URLSession?
     private var task: URLSessionDataTask?
@@ -37,9 +71,16 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
     private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
     private var isFinished = false
 
-    init(configuration: URLSessionConfiguration, maximumBodyBytes: Int) {
+    init(
+        configuration: URLSessionConfiguration,
+        maximumBodyBytes: Int,
+        lifecycle: URLSessionProviderHTTPTransportLifecycle,
+        retainedBodyByteCountObserver: (@Sendable (Int) -> Void)?
+    ) {
         self.configuration = configuration
         self.maximumBodyBytes = maximumBodyBytes
+        self.lifecycle = lifecycle
+        self.retainedBodyByteCountObserver = retainedBodyByteCountObserver
     }
 
     func load(request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -60,6 +101,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
                 self.session = session
                 let task = session.dataTask(with: request)
                 self.task = task
+                lifecycle.markActive()
                 lock.unlock()
                 task.resume()
             }
@@ -87,6 +129,12 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
             return
         }
         lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            completionHandler(.cancel)
+            dataTask.cancel()
+            return
+        }
         self.response = response
         lock.unlock()
         completionHandler(.allow)
@@ -98,15 +146,22 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         didReceive data: Data
     ) {
         lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
         let exceedsLimit = data.count > maximumBodyBytes - body.count
         if !exceedsLimit {
             body.append(data)
         }
+        let retainedByteCount = body.count
         lock.unlock()
 
         if exceedsLimit {
             dataTask.cancel()
             finish(.failure(ProviderConnectionError.modelDiscoveryResponseTooLarge))
+        } else {
+            retainedBodyByteCountObserver?(retainedByteCount)
         }
     }
 
@@ -148,8 +203,11 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         task = nil
         let session = self.session
         self.session = nil
+        body.removeAll(keepingCapacity: false)
+        response = nil
         lock.unlock()
         session?.finishTasksAndInvalidate()
+        lifecycle.markReleased()
         continuation.resume(with: result)
     }
 }

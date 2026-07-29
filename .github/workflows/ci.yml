@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  swift-tests:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Swift tests first pass
+        run: swift test
+      - name: Swift tests stability pass
+        run: swift test
+
+  script-tests:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Python script tests
+        run: >-
+          python3 -m unittest discover
+          -s Tests/ScriptTests
+          -p 'test_*.py'
+          -v
+
+  packaging:
+    runs-on: macos-15
+    timeout-minutes: 20
+    needs: [swift-tests, script-tests]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: App bundle smoke tests
+        run: Tests/PackagingTests/run-tests.sh
+      - name: Virtual microphone bridge tests
+        run: Tests/VirtualMicDriverTests/run-tests.sh
+      - name: Virtual microphone bundle tests
+        run: Tests/VirtualMicDriverTests/run-bundle-tests.sh
+      - name: Virtual microphone script tests
+        run: Tests/VirtualMicDriverTests/run-script-tests.sh
+
+  policy:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - name: License and active metadata policy
+        run: >-
+          python3 -m unittest
+          Tests.ScriptTests.test_packaging_contract
+          Tests.ScriptTests.test_workflow_contract
+          -v
+      - name: Diff whitespace
+        run: git diff --check origin/main...HEAD

@@ -104,13 +104,20 @@ def ensure_entry_identity(
     *,
     changed_message: str = "Publication source changed during staging.",
 ) -> None:
+    if not entry_matches_fd(parent_fd, name, expected_fd):
+        raise PublishError(73, changed_message)
+
+
+def entry_matches_fd(parent_fd: int, name: str, expected_fd: int) -> bool:
     try:
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError as error:
-        raise PublishError(73, changed_message) from error
-    expected = os.fstat(expected_fd)
-    if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
-        raise PublishError(73, changed_message)
+        expected = os.fstat(expected_fd)
+    except OSError:
+        return False
+    return (current.st_dev, current.st_ino) == (
+        expected.st_dev,
+        expected.st_ino,
+    )
 
 
 def copy_file(source_fd: int, destination_fd: int, name: str) -> None:
@@ -373,22 +380,28 @@ def publish_directory(
         except OSError:
             pass
     finally:
-        if staging_fd >= 0:
-            os.close(staging_fd)
-        if staging_name and destination_parent_fd >= 0:
+        if (
+            staging_fd >= 0
+            and staging_name
+            and destination_parent_fd >= 0
+            and entry_matches_fd(
+                destination_parent_fd,
+                staging_name,
+                staging_fd,
+            )
+        ):
             try:
-                cleanup_fd = os.open(
+                remove_directory_contents(staging_fd)
+                if entry_matches_fd(
+                    destination_parent_fd,
                     staging_name,
-                    DIRECTORY_FLAGS,
-                    dir_fd=destination_parent_fd,
-                )
-                try:
-                    remove_directory_contents(cleanup_fd)
-                finally:
-                    os.close(cleanup_fd)
-                os.rmdir(staging_name, dir_fd=destination_parent_fd)
+                    staging_fd,
+                ):
+                    os.rmdir(staging_name, dir_fd=destination_parent_fd)
             except OSError:
                 pass
+        if staging_fd >= 0:
+            os.close(staging_fd)
         if source_fd >= 0:
             os.close(source_fd)
         if destination_parent_fd >= 0:

@@ -376,6 +376,11 @@ class BuildReleaseContractTests(unittest.TestCase):
             destination_parent.mkdir()
             (source / "artifact.zip").write_bytes(b"trusted release")
             real_copy = module.copy_directory
+            replacement = []
+            malicious = {
+                "artifact.zip": b"malicious replacement",
+                "do-not-delete.marker": b"attacker-owned marker\n",
+            }
 
             def copy_then_replace_staging(source_fd, destination_fd):
                 real_copy(source_fd, destination_fd)
@@ -386,7 +391,9 @@ class BuildReleaseContractTests(unittest.TestCase):
                 )
                 staging.rename(destination_parent / "detached-staging")
                 staging.mkdir()
-                (staging / "artifact.zip").write_bytes(b"malicious replacement")
+                replacement.append(staging)
+                for name, contents in malicious.items():
+                    (staging / name).write_bytes(contents)
 
             with mock.patch.object(
                 module,
@@ -398,6 +405,19 @@ class BuildReleaseContractTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.status, 73)
             self.assertFalse(destination.exists())
+            self.assertEqual(len(replacement), 1)
+            self.assertTrue(replacement[0].is_dir())
+            self.assertEqual(
+                {entry.name for entry in replacement[0].iterdir()},
+                set(malicious),
+            )
+            self.assertEqual(
+                {
+                    name: (replacement[0] / name).read_bytes()
+                    for name in malicious
+                },
+                malicious,
+            )
 
     def test_atomic_publish_rejects_bad_inputs_and_maps_cross_device_failure(self):
         with tempfile.TemporaryDirectory() as temporary:

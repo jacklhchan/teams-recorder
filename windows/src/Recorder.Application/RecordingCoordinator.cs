@@ -14,7 +14,7 @@ public enum RecordingCoordinatorState
 public sealed record RecordingCoordinatorSnapshot(
     long Generation,
     RecordingCoordinatorState State,
-    NativeRecordingRequest? Request,
+    INativeRecordingRequest? Request,
     NativeCaptureStats Stats,
     string? Error,
     bool IsTestRecording,
@@ -81,7 +81,21 @@ public sealed class RecordingCoordinator
     public Task<RecordingCoordinatorSnapshot> StartAsync(NativeRecordingRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        return StartCoreAsync(request, () => nativeBridge.Start(request));
+    }
+
+    public Task<RecordingCoordinatorSnapshot> StartMixedAsync(NativeMixedRecordingRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return StartCoreAsync(request, () => nativeBridge.StartMixed(request));
+    }
+
+    private Task<RecordingCoordinatorSnapshot> StartCoreAsync(
+        INativeRecordingRequest request,
+        Func<NativeOperationResult> startOperation)
+    {
         request.Validate();
+        ArgumentNullException.ThrowIfNull(startOperation);
 
         RecordingCoordinatorSnapshot starting;
         Task<RecordingCoordinatorSnapshot> operation;
@@ -107,7 +121,7 @@ public sealed class RecordingCoordinator
             snapshot = starting;
             stopTask = null;
             refreshTask = null;
-            operation = Enqueue(() => StartCore(starting.Generation, request));
+            operation = Enqueue(() => StartCore(starting.Generation, startOperation));
         }
 
         Publish(starting);
@@ -118,12 +132,28 @@ public sealed class RecordingCoordinator
         NativeRecordingRequest request,
         TimeSpan duration)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        return await StartTestCoreAsync(() => StartAsync(request), duration).ConfigureAwait(false);
+    }
+
+    public async Task<RecordingCoordinatorSnapshot> StartMixedTestAsync(
+        NativeMixedRecordingRequest request,
+        TimeSpan duration)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return await StartTestCoreAsync(() => StartMixedAsync(request), duration).ConfigureAwait(false);
+    }
+
+    private async Task<RecordingCoordinatorSnapshot> StartTestCoreAsync(
+        Func<Task<RecordingCoordinatorSnapshot>> start,
+        TimeSpan duration)
+    {
         if (duration <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(duration), "The test duration must be positive.");
         }
 
-        var started = await StartAsync(request).ConfigureAwait(false);
+        var started = await start().ConfigureAwait(false);
         if (started.State != RecordingCoordinatorState.Recording)
         {
             return started;
@@ -222,9 +252,11 @@ public sealed class RecordingCoordinator
         }
     }
 
-    private RecordingCoordinatorSnapshot StartCore(long generation, NativeRecordingRequest request)
+    private RecordingCoordinatorSnapshot StartCore(
+        long generation,
+        Func<NativeOperationResult> startOperation)
     {
-        var result = InvokeNative(() => nativeBridge.Start(request), "start audio capture");
+        var result = InvokeNative(startOperation, "start audio capture");
         RecordingCoordinatorSnapshot completed;
         var shouldPublish = false;
         lock (stateGate)

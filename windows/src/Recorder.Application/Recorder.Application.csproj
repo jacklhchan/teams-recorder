@@ -5,4 +5,7 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Recorder.Core/Recorder.Core.csproj" />
+  </ItemGroup>
 </Project>

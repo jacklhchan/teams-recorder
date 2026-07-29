@@ -6,6 +6,7 @@
 #include <type_traits>
 
 static_assert(std::is_standard_layout<RecorderNativeStartOptions>::value, "start options must remain C ABI safe");
+static_assert(std::is_standard_layout<RecorderNativeMixedStartOptions>::value, "mixed start options must remain C ABI safe");
 static_assert(std::is_standard_layout<RecorderNativeStats>::value, "stats must remain C ABI safe");
 static_assert(sizeof(RecorderNativeStartOptions) == 32U, "x64 start options layout changed");
 static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8U, "output path offset changed");
@@ -17,6 +18,10 @@ static_assert(offsetof(RecorderNativeStats, peak) == 88U, "peak offset changed")
 static_assert(RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK == 0, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_MICROPHONE == 1, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK == 2, "capture mode ABI value changed");
+static_assert(RECORDER_NATIVE_CAPTURE_MIXED == 3, "mixed capture mode ABI value changed");
+static_assert(sizeof(RecorderNativeMixedStartOptions) == 40U, "x64 mixed options layout changed");
+static_assert(offsetof(RecorderNativeMixedStartOptions, output_path_utf8) == 8U, "mixed output path offset changed");
+static_assert(offsetof(RecorderNativeMixedStartOptions, microphone_endpoint_id_utf8) == 24U, "mixed microphone offset changed");
 static_assert(RECORDER_NATIVE_STATE_STARTING == 4, "state ABI value changed");
 static_assert(RECORDER_NATIVE_STATE_STOPPING == 5, "state ABI value changed");
 static_assert(RECORDER_NATIVE_ENDPOINT_FLOW_RENDER == 0U, "render flow ABI value changed");
@@ -45,7 +50,7 @@ int main() {
     uint32_t endpoint_count = 0;
     recorder_native_endpoint_list_destroy(nullptr);
 
-    if (!Expect(std::strcmp(recorder_native_version(), "0.3.0") == 0) ||
+    if (!Expect(std::strcmp(recorder_native_version(), "0.4.0") == 0) ||
         !Expect(recorder_native_start(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_with_options(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_stop(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
@@ -65,10 +70,18 @@ int main() {
     RecorderNativeStats stats{};
     stats.struct_size = sizeof(stats);
     RecorderNativeStartOptions options = ValidOptions();
+    RecorderNativeMixedStartOptions mixed{};
+    mixed.struct_size = sizeof(mixed);
+    mixed.output_path_utf8 = "contract-test.m4a";
+    mixed.aac_bitrate_bps = 128000U;
     const bool passed =
         Expect(recorder_native_get_state(bridge) == RECORDER_NATIVE_STATE_READY) &&
         Expect(recorder_native_start(bridge) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_start_with_options(bridge, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_start_mixed(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((mixed.struct_size = 0U, recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((mixed.struct_size = sizeof(mixed), mixed.output_path_utf8 = "not-m4a.wav", recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((mixed.output_path_utf8 = "contract-test.m4a", mixed.aac_bitrate_bps = 1000U, recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_get_stats(bridge, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_get_stats(bridge, &stats) == RECORDER_NATIVE_OK) &&
         Expect(stats.struct_size == sizeof(stats)) &&

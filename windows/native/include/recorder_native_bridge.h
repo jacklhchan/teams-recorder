@@ -47,7 +47,9 @@ typedef enum RecorderNativeState {
 typedef enum RecorderNativeCaptureMode {
     RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK = 0,
     RECORDER_NATIVE_CAPTURE_MICROPHONE = 1,
-    RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK = 2
+    RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK = 2,
+    /* System render loopback, optionally mixed with one exact capture endpoint. */
+    RECORDER_NATIVE_CAPTURE_MIXED = 3
 } RecorderNativeCaptureMode;
 
 /*
@@ -74,6 +76,20 @@ typedef struct RecorderNativeStartOptions {
     uint32_t target_process_id;
     uint32_t reserved;
 } RecorderNativeStartOptions;
+
+/* Additive M4A mixed-capture ABI.  All strings are UTF-8 and copied on start. */
+typedef struct RecorderNativeMixedStartOptions {
+    uint32_t struct_size;
+    /* Required final .m4a path.  The encoder writes <path>.partial first. */
+    const char* output_path_utf8;
+    /* NULL/empty selects the default render endpoint for system loopback. */
+    const char* render_endpoint_id_utf8;
+    /* NULL/empty disables microphone capture; a non-empty ID is selected exactly. */
+    const char* microphone_endpoint_id_utf8;
+    /* AAC target bitrate in bits/sec (64,000 through 320,000). */
+    uint32_t aac_bitrate_bps;
+    uint32_t reserved;
+} RecorderNativeMixedStartOptions;
 
 typedef struct RecorderNativeStats {
     /* Set to sizeof(RecorderNativeStats) before calling get_stats. */
@@ -111,6 +127,10 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_start(RecorderNativeBri
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_with_options(
     RecorderNativeBridge* bridge,
     const RecorderNativeStartOptions* options);
+
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_mixed(
+    RecorderNativeBridge* bridge,
+    const RecorderNativeMixedStartOptions* options);
 
 /* Stops capture, drains the source, flushes 48 kHz stereo output, and finalizes once. */
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_stop(RecorderNativeBridge* bridge);

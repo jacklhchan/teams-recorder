@@ -16,7 +16,8 @@ void PrintUsage() {
         << "Usage:\n"
         << "  Recorder.BridgeProbe.exe system <seconds> <output.wav> [endpoint-id]\n"
         << "  Recorder.BridgeProbe.exe mic <seconds> <output.wav> [endpoint-id]\n"
-        << "  Recorder.BridgeProbe.exe process <pid> <seconds> <output.wav>\n";
+        << "  Recorder.BridgeProbe.exe process <pid> <seconds> <output.wav>\n"
+        << "  Recorder.BridgeProbe.exe mixed <seconds> <output.m4a> [render-endpoint-id|-] [microphone-endpoint-id|-]\n";
 }
 
 bool ParsePositiveU32(std::string_view text, std::uint32_t* value) {
@@ -89,6 +90,8 @@ int main(int argc, char** argv) {
     const std::string mode_text(argv[1]);
     RecorderNativeStartOptions options{};
     options.struct_size = sizeof(options);
+    RecorderNativeMixedStartOptions mixed_options{};
+    mixed_options.struct_size = sizeof(mixed_options);
     std::uint32_t seconds = 0;
 
     if (mode_text == "system" || mode_text == "mic") {
@@ -113,6 +116,18 @@ int main(int argc, char** argv) {
         }
         options.mode = RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK;
         options.output_path_utf8 = argv[4];
+    } else if (mode_text == "mixed") {
+        if (argc < 4 || argc > 6 ||
+            !ParsePositiveU32(argv[2], &seconds) || seconds > 86'400U) {
+            PrintUsage();
+            return 64;
+        }
+        mixed_options.output_path_utf8 = argv[3];
+        mixed_options.aac_bitrate_bps = 128000U;
+        mixed_options.render_endpoint_id_utf8 =
+            argc >= 5 && std::string_view(argv[4]) != "-" ? argv[4] : nullptr;
+        mixed_options.microphone_endpoint_id_utf8 =
+            argc >= 6 && std::string_view(argv[5]) != "-" ? argv[5] : nullptr;
     } else {
         PrintUsage();
         return 64;
@@ -125,13 +140,17 @@ int main(int argc, char** argv) {
     }
 
     int exit_code = 0;
-    RecorderNativeResult result = recorder_native_start_with_options(bridge, &options);
+    RecorderNativeResult result = mode_text == "mixed"
+        ? recorder_native_start_mixed(bridge, &mixed_options)
+        : recorder_native_start_with_options(bridge, &options);
     if (result != RECORDER_NATIVE_OK) {
         PrintFailure(bridge, "start", result);
         exit_code = 1;
     } else {
         std::cout << "recording mode=" << mode_text << " seconds=" << seconds
-                  << " output=" << options.output_path_utf8 << "\n";
+                  << " output=" << (mode_text == "mixed"
+                      ? mixed_options.output_path_utf8
+                      : options.output_path_utf8) << "\n";
         Sleep(seconds * 1000U);
         result = recorder_native_stop(bridge);
         if (result != RECORDER_NATIVE_OK) {

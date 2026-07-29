@@ -1,3 +1,7 @@
+# 實作狀態更新（2026-07-29）
+
+本文件是原始 parity／驗收規格，表中的 Phase 1 目標不應視為已交付宣告。最新已實作範圍、端對端缺口和實機發行驗證請見 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md)。特別是，MVP 不聲稱 Teams-only process recording、Teams API、視訊、虛擬麥克風、轉寫、安裝程式或 Start Menu 安裝；實體麥克風的成功錄製仍需在發行前驗證。
+
 # Windows Migration：功能對等與 Phase 0/1 驗收規格
 
 **狀態：** 實作前規格

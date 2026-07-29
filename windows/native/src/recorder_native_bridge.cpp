@@ -2,6 +2,7 @@
 
 #if defined(_WIN32)
 #include "capture_session.h"
+#include "mixed_capture_session.h"
 #include "wasapi_capture.h"
 
 #include <windows.h>
@@ -25,6 +26,7 @@ struct RecorderNativeBridge {
     mutable std::string last_error;
 #if defined(_WIN32)
     std::unique_ptr<recorder::bridge::CaptureSession> session;
+    std::unique_ptr<recorder::bridge::MixedCaptureSession> mixed_session;
 #endif
 };
 
@@ -45,7 +47,7 @@ struct RecorderNativeEndpointList {
 
 namespace {
 
-constexpr char kVersion[] = "0.3.0";
+constexpr char kVersion[] = "0.4.0";
 constexpr char kInvalidHandleError[] = "RecorderNativeBridge handle is null.";
 
 RecorderNativeStats EmptyStats(RecorderNativeCaptureMode mode) {
@@ -64,7 +66,8 @@ void SetErrorLocked(RecorderNativeBridge* bridge, std::string message) {
 bool IsValidMode(RecorderNativeCaptureMode mode) {
     return mode == RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK ||
         mode == RECORDER_NATIVE_CAPTURE_MICROPHONE ||
-        mode == RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK;
+        mode == RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK ||
+        mode == RECORDER_NATIVE_CAPTURE_MIXED;
 }
 
 RecorderNativeResult Reject(
@@ -184,6 +187,75 @@ extern "C" void recorder_native_destroy(RecorderNativeBridge* bridge) {
     delete bridge;
 }
 
+extern "C" RecorderNativeResult recorder_native_start_mixed(
+    RecorderNativeBridge* bridge,
+    const RecorderNativeMixedStartOptions* options) {
+    if (bridge == nullptr) return RECORDER_NATIVE_INVALID_ARGUMENT;
+    if (options == nullptr || options->struct_size < sizeof(RecorderNativeMixedStartOptions)) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "RecorderNativeMixedStartOptions has an invalid struct_size.");
+    }
+    if (options->output_path_utf8 == nullptr || options->output_path_utf8[0] == '\0' ||
+        options->reserved != 0 || options->aac_bitrate_bps < 64000 || options->aac_bitrate_bps > 320000) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "Mixed capture requires a .m4a path, zero reserved field, and AAC bitrate from 64000 to 320000.");
+    }
+#if !defined(_WIN32)
+    return Reject(bridge, RECORDER_NATIVE_NOT_IMPLEMENTED, "Native audio capture is implemented only on Windows.");
+#else
+    std::wstring output;
+    std::wstring render;
+    std::wstring microphone;
+    if (!Utf8ToWide(options->output_path_utf8, &output) ||
+        (options->render_endpoint_id_utf8 != nullptr && !Utf8ToWide(options->render_endpoint_id_utf8, &render)) ||
+        (options->microphone_endpoint_id_utf8 != nullptr && !Utf8ToWide(options->microphone_endpoint_id_utf8, &microphone))) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "A mixed-capture path or endpoint ID is not valid UTF-8.");
+    }
+    if (output.size() < 4 || _wcsicmp(output.c_str() + output.size() - 4, L".m4a") != 0) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "Mixed capture output must use the .m4a extension.");
+    }
+    recorder::bridge::MixedCaptureSessionConfig config;
+    config.output_path = output;
+    config.render_endpoint_id = std::move(render);
+    config.microphone_endpoint_id = std::move(microphone);
+    config.aac_bitrate_bps = options->aac_bitrate_bps;
+    RecorderNativeState previous = RECORDER_NATIVE_STATE_READY;
+    {
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        if (bridge->state != RECORDER_NATIVE_STATE_READY && bridge->state != RECORDER_NATIVE_STATE_STOPPED) {
+            SetErrorLocked(bridge, "Recorder cannot start from its current state.");
+            return RECORDER_NATIVE_INVALID_STATE;
+        }
+        previous = bridge->state;
+        bridge->state = RECORDER_NATIVE_STATE_STARTING;
+        bridge->last_error.clear();
+        bridge->last_stats = EmptyStats(RECORDER_NATIVE_CAPTURE_MIXED);
+    }
+    try {
+        auto session = std::make_unique<recorder::bridge::MixedCaptureSession>();
+        const RecorderNativeResult result = session->Start(std::move(config));
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        bridge->last_stats = session->stats();
+        if (result != RECORDER_NATIVE_OK) {
+            bridge->state = previous;
+            SetErrorLocked(bridge, session->last_error());
+            return result;
+        }
+        bridge->mixed_session = std::move(session);
+        bridge->state = RECORDER_NATIVE_STATE_RECORDING;
+        return RECORDER_NATIVE_OK;
+    } catch (const std::bad_alloc&) {
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        bridge->state = previous;
+        SetErrorLocked(bridge, "Allocating the mixed capture session failed.");
+        return RECORDER_NATIVE_INTERNAL_ERROR;
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        bridge->state = previous;
+        SetErrorLocked(bridge, "Starting mixed capture failed unexpectedly.");
+        return RECORDER_NATIVE_INTERNAL_ERROR;
+    }
+#endif
+}
+
 extern "C" RecorderNativeResult recorder_native_start(
     RecorderNativeBridge* bridge) {
     if (bridge == nullptr) {
@@ -213,6 +285,10 @@ extern "C" RecorderNativeResult recorder_native_start_with_options(
             bridge,
             RECORDER_NATIVE_INVALID_ARGUMENT,
             "The requested capture mode is invalid.");
+    }
+    if (options->mode == RECORDER_NATIVE_CAPTURE_MIXED) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT,
+            "Use recorder_native_start_mixed for mixed M4A capture.");
     }
     if (options->output_path_utf8 == nullptr ||
         options->output_path_utf8[0] == '\0') {
@@ -346,7 +422,7 @@ extern "C" RecorderNativeResult recorder_native_stop(
             return RECORDER_NATIVE_OK;
         }
         if (bridge->state != RECORDER_NATIVE_STATE_RECORDING ||
-            !bridge->session) {
+            (!bridge->session && !bridge->mixed_session)) {
             SetErrorLocked(
                 bridge,
                 "Recorder cannot stop from its current state.");
@@ -355,14 +431,21 @@ extern "C" RecorderNativeResult recorder_native_stop(
         bridge->state = RECORDER_NATIVE_STATE_STOPPING;
         session = bridge->session.get();
     }
-
-    const RecorderNativeResult result = session->Stop();
-    const RecorderNativeStats stats = session->stats();
-    const std::string error = session->last_error();
+    RecorderNativeResult result = RECORDER_NATIVE_OK;
+    RecorderNativeStats stats{};
+    std::string error;
+    if (session != nullptr) {
+        result = session->Stop(); stats = session->stats(); error = session->last_error();
+    } else {
+        recorder::bridge::MixedCaptureSession* mixed = nullptr;
+        { std::lock_guard<std::mutex> lock(bridge->mutex); mixed = bridge->mixed_session.get(); }
+        result = mixed->Stop(); stats = mixed->stats(); error = mixed->last_error();
+    }
 
     std::lock_guard<std::mutex> lock(bridge->mutex);
     bridge->last_stats = stats;
     bridge->session.reset();
+    bridge->mixed_session.reset();
     if (result == RECORDER_NATIVE_OK) {
         bridge->state = RECORDER_NATIVE_STATE_STOPPED;
         bridge->last_error.clear();
@@ -381,10 +464,10 @@ extern "C" RecorderNativeState recorder_native_get_state(
     }
     std::lock_guard<std::mutex> lock(bridge->mutex);
 #if defined(_WIN32)
-    if (bridge->state == RECORDER_NATIVE_STATE_RECORDING && bridge->session) {
-        const RecorderNativeResult health = bridge->session->health_result();
+    if (bridge->state == RECORDER_NATIVE_STATE_RECORDING && (bridge->session || bridge->mixed_session)) {
+        const RecorderNativeResult health = bridge->session ? bridge->session->health_result() : bridge->mixed_session->health_result();
         if (health != RECORDER_NATIVE_OK) {
-            const std::string session_error = bridge->session->last_error();
+            const std::string session_error = bridge->session ? bridge->session->last_error() : bridge->mixed_session->last_error();
             if (!session_error.empty()) {
                 bridge->last_error = session_error;
             }
@@ -413,6 +496,16 @@ extern "C" RecorderNativeResult recorder_native_get_stats(
             if (!session_error.empty()) {
                 bridge->last_error = session_error;
             }
+            return health;
+        }
+        return RECORDER_NATIVE_OK;
+    }
+    if (bridge->mixed_session) {
+        *stats = bridge->mixed_session->stats();
+        const RecorderNativeResult health = bridge->mixed_session->health_result();
+        if (health != RECORDER_NATIVE_OK) {
+            const std::string session_error = bridge->mixed_session->last_error();
+            if (!session_error.empty()) bridge->last_error = session_error;
             return health;
         }
         return RECORDER_NATIVE_OK;

@@ -7,6 +7,7 @@
 #include <propvarutil.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -24,6 +25,11 @@ public:
     T* Get() const { return value_; }
     T** Put() { Reset(); return &value_; }
     T* operator->() const { return value_; }
+    HRESULT As(REFIID iid, void** result) const {
+        if (result == nullptr) { return E_POINTER; }
+        *result = nullptr;
+        return value_ == nullptr ? E_NOINTERFACE : value_->QueryInterface(iid, result);
+    }
     void Reset() { if (value_ != nullptr) { value_->Release(); value_ = nullptr; } }
 private:
     T* value_ = nullptr;
@@ -205,6 +211,29 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     ComPtr<IAudioClient> client;
     ComPtr<IAudioCaptureClient> capture;
     WAVEFORMATEX* mix = nullptr;
+    struct FormatDescription {
+        bool available = false;
+        WORD tag = 0;
+        WORD channels = 0;
+        DWORD sample_rate = 0;
+        DWORD average_bytes = 0;
+        WORD block_align = 0;
+        WORD bits = 0;
+        WORD extra_bytes = 0;
+    } endpoint_format;
+    auto remember_endpoint_format = [&]() {
+        if (mix == nullptr || endpoint_format.available) { return; }
+        endpoint_format = {
+            true,
+            mix->wFormatTag,
+            mix->nChannels,
+            mix->nSamplesPerSec,
+            mix->nAvgBytesPerSec,
+            mix->nBlockAlign,
+            mix->wBitsPerSample,
+            mix->cbSize,
+        };
+    };
     auto fail = [&](HRESULT result, const wchar_t* context) { SetError(result, context); SetEvent(started_event); };
     if (FAILED(com.result())) { fail(com.result(), L"CoInitializeEx failed"); return; }
     HRESULT result = CreateEnumerator(&enumerator);
@@ -217,46 +246,169 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     if (FAILED(result)) { fail(result, L"Activating IAudioClient failed"); return; }
     result = client->GetMixFormat(&mix);
     if (FAILED(result)) { fail(result, L"Getting endpoint mix format failed"); return; }
-    DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-                  (request.flow == EndpointFlow::Render ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0);
-    // A non-zero requested duration is accepted across more desktop audio
-    // drivers than the zero-duration low-latency form. The shared engine still
-    // selects the actual buffer size and period.
-    constexpr REFERENCE_TIME kRequestedBufferDuration100ns = 1'000'000;  // 100 ms
-    result = client->Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        flags,
-        kRequestedBufferDuration100ns,
-        0,
-        mix,
-        nullptr);
-    bool event_driven = true;
-    if (FAILED(result) && request.flow == EndpointFlow::Capture) {
-        // Some virtual microphone drivers reject EVENTCALLBACK even for their
-        // own shared-mode mix format. Re-activate a fresh client and use
-        // bounded polling; never fall back to a different endpoint or flow.
-        CoTaskMemFree(mix);
-        mix = nullptr;
+    remember_endpoint_format();
+    const DWORD base_flags = request.flow == EndpointFlow::Render
+        ? AUDCLNT_STREAMFLAGS_LOOPBACK
+        : 0;
+    // Capture drivers vary more than render drivers in their accepted shared
+    // buffer duration. Re-activate a fresh IAudioClient for every attempt as
+    // required after a failed Initialize call; never substitute the endpoint.
+    struct InitializeAttempt {
+        DWORD additional_flags;
+        REFERENCE_TIME buffer_duration_100ns;
+        bool event_driven;
+    };
+    constexpr std::array<InitializeAttempt, 4> attempts = {{
+        { AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 1'000'000, true },
+        { AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, true },
+        { 0, 0, false },
+        { AUDCLNT_STREAMFLAGS_NOPERSIST, 1'000'000, false },
+    }};
+
+    auto initialize_attempt = [&](const InitializeAttempt& attempt) {
+        if (mix != nullptr) {
+            CoTaskMemFree(mix);
+            mix = nullptr;
+        }
         client.Reset();
-        result = device->Activate(
+        HRESULT attempt_result = device->Activate(
             __uuidof(IAudioClient),
             CLSCTX_ALL,
             nullptr,
             reinterpret_cast<void**>(client.Put()));
-        if (SUCCEEDED(result)) {
-            result = client->GetMixFormat(&mix);
+        if (SUCCEEDED(attempt_result)) {
+            attempt_result = client->GetMixFormat(&mix);
+            remember_endpoint_format();
         }
-        flags = 0;
-        if (SUCCEEDED(result)) {
-            result = client->Initialize(
+        if (SUCCEEDED(attempt_result)) {
+            WAVEFORMATEX* closest = nullptr;
+            const HRESULT support = client->IsFormatSupported(
+                AUDCLNT_SHAREMODE_SHARED, mix, &closest);
+            if (support == S_FALSE && closest != nullptr) {
+                CoTaskMemFree(mix);
+                mix = closest;
+            } else if (closest != nullptr) {
+                CoTaskMemFree(closest);
+            }
+        }
+        if (SUCCEEDED(attempt_result)) {
+            attempt_result = client->Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
-                flags,
-                0,
+                base_flags | attempt.additional_flags,
+                attempt.buffer_duration_100ns,
                 0,
                 mix,
                 nullptr);
         }
-        event_driven = false;
+        return attempt_result;
+    };
+
+    bool event_driven = true;
+    result = E_FAIL;
+    std::array<HRESULT, attempts.size()> attempt_results{};
+    std::size_t attempt_count = 0;
+    HRESULT client3_result = E_NOTIMPL;
+    for (const InitializeAttempt& attempt : attempts) {
+        result = initialize_attempt(attempt);
+        attempt_results[attempt_count++] = result;
+        if (SUCCEEDED(result)) {
+            event_driven = attempt.event_driven;
+            break;
+        }
+    }
+    // Some USB/array microphones advertise an extensible multichannel float
+    // mix format but reject every IAudioClient::Initialize shared-mode variant.
+    // IAudioClient3 obtains the driver-selected shared engine period instead of
+    // guessing a duration; it preserves the exact selected endpoint and mix
+    // format (there is no fallback to another microphone or to stereo).
+    const bool try_client3 =
+        FAILED(result) && request.flow == EndpointFlow::Capture;
+    if (try_client3) {
+        if (mix != nullptr) { CoTaskMemFree(mix); mix = nullptr; }
+        client.Reset();
+        result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                  reinterpret_cast<void**>(client.Put()));
+        if (SUCCEEDED(result)) result = client->GetMixFormat(&mix);
+        if (SUCCEEDED(result)) {
+            WAVEFORMATEX* closest = nullptr;
+            const HRESULT support = client->IsFormatSupported(
+                AUDCLNT_SHAREMODE_SHARED, mix, &closest);
+            if (support == S_FALSE && closest != nullptr) {
+                CoTaskMemFree(mix);
+                mix = closest;
+            } else if (closest != nullptr) {
+                CoTaskMemFree(closest);
+            }
+        }
+    }
+    if (try_client3 && client.Get() != nullptr && mix != nullptr) {
+        ComPtr<IAudioClient3> client3;
+        const HRESULT query_result = client.As(__uuidof(IAudioClient3),
+                                               reinterpret_cast<void**>(client3.Put()));
+        if (SUCCEEDED(query_result)) {
+            UINT32 default_period_frames = 0;
+            UINT32 fundamental_period_frames = 0;
+            UINT32 minimum_period_frames = 0;
+            UINT32 maximum_period_frames = 0;
+            client3_result = client3->GetSharedModeEnginePeriod(
+                mix,
+                &default_period_frames,
+                &fundamental_period_frames,
+                &minimum_period_frames,
+                &maximum_period_frames);
+            if (SUCCEEDED(client3_result)) {
+                client3_result = client3->InitializeSharedAudioStream(
+                    base_flags | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                    default_period_frames,
+                    mix,
+                    nullptr);
+            }
+            if (SUCCEEDED(client3_result)) {
+                result = S_OK;
+                event_driven = true;
+            } else {
+                result = client3_result;
+            }
+        } else {
+            client3_result = query_result;
+            result = query_result;
+        }
+    }
+    // Last-resort shared-engine conversion for drivers that publish an
+    // unusable multichannel float mix format.  This remains on the selected
+    // endpoint; Windows only converts its stream format to the canonical
+    // 48 kHz stereo float form already consumed by the recorder pipeline.
+    if (FAILED(result) && request.flow == EndpointFlow::Capture) {
+        if (mix != nullptr) { CoTaskMemFree(mix); mix = nullptr; }
+        client.Reset();
+        result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                  reinterpret_cast<void**>(client.Put()));
+        WAVEFORMATEX canonical{};
+        canonical.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+        canonical.nChannels = 2;
+        canonical.nSamplesPerSec = 48'000;
+        canonical.wBitsPerSample = 32;
+        canonical.nBlockAlign = 8;
+        canonical.nAvgBytesPerSec = 384'000;
+        if (SUCCEEDED(result)) {
+            result = client->Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                0,
+                0,
+                &canonical,
+                nullptr);
+        }
+        if (SUCCEEDED(result)) {
+            mix = static_cast<WAVEFORMATEX*>(CoTaskMemAlloc(sizeof(canonical)));
+            if (mix == nullptr) {
+                result = E_OUTOFMEMORY;
+            } else {
+                *mix = canonical;
+                event_driven = false;
+            }
+        }
     }
     if (FAILED(result)) {
         std::wostringstream context;
@@ -270,8 +422,26 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
                     << L", bits=" << mix->wBitsPerSample
                     << L", cbSize=" << mix->cbSize
                     << L")";
+        } else if (endpoint_format.available) {
+            context << L" (endpoint tag=" << endpoint_format.tag
+                    << L", channels=" << endpoint_format.channels
+                    << L", sampleRate=" << endpoint_format.sample_rate
+                    << L", avgBytes=" << endpoint_format.average_bytes
+                    << L", blockAlign=" << endpoint_format.block_align
+                    << L", bits=" << endpoint_format.bits
+                    << L", cbSize=" << endpoint_format.extra_bytes
+                    << L")";
         } else {
             context << L" (endpoint mix format unavailable)";
+        }
+        if (try_client3) {
+            context << L"; client3=0x" << std::hex
+                    << static_cast<unsigned long>(client3_result);
+        }
+        context << L"; attempts=";
+        for (std::size_t index = 0; index < attempt_count; ++index) {
+            if (index != 0) { context << L","; }
+            context << L"0x" << std::hex << static_cast<unsigned long>(attempt_results[index]);
         }
         const std::wstring message = context.str();
         if (mix != nullptr) {

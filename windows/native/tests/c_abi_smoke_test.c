@@ -47,7 +47,7 @@ int main(void) {
 
     recorder_native_endpoint_list_destroy(NULL);
 
-    if (!expect(strcmp(recorder_native_version(), "0.3.0") == 0, "version must be exported") ||
+    if (!expect(strcmp(recorder_native_version(), "0.4.0") == 0, "version must be exported") ||
         !expect(recorder_native_start(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "legacy start(NULL) must reject the handle") ||
         !expect(recorder_native_start_with_options(NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,

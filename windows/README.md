@@ -15,17 +15,40 @@ The repository now contains:
 - Windows WASAPI system, microphone, and process-loopback capture modules with
   packet-owned callbacks, 48 kHz stereo normalization, and no-replace WAV
   output;
-- a WinUI 3 desktop shell in `src/Recorder.WinUI` for **system-loopback WAV**
-  recording. It lists render devices, chooses the Windows default or a specific
-  endpoint, starts/stops a recording, provides a 10-second test, displays
-  peak/packet/discontinuity health, and stops native capture on window close;
+- a WinUI 3 desktop shell in `src/Recorder.WinUI` for **system render-loopback
+  recording, optionally mixed with one explicitly selected microphone**. It
+  lists render and capture devices, starts/stops a recording, provides a
+  10-second test, displays aggregate peak/packet/discontinuity health, and
+  stops native capture on window close;
+- an AAC-in-M4A mixed-capture path. The native writer produces an M4A output;
+  the application storage services define a separately test-covered session
+  layout with a backup M4A, no-replace promotion, library discovery, capacity
+  decisions, and conservative interrupted-session recovery;
+- local M4A library discovery and playback controls in the WinUI shell.
 - deterministic native and managed tests, JSON contract fixtures, and real
   process-audio diagnostic tools.
 
-The desktop shell deliberately exposes only the first verified capture path.
-It does not yet offer microphone or process selection, Teams meeting detection,
-video capture, M4A/MP4 export, a recording browser, transcription, or a
-virtual microphone driver.
+This is an audio-first MVP, not a Teams integration. The desktop shell does
+not offer process selection, Teams meeting detection or APIs, video capture,
+transcription, or a virtual microphone driver. It records the system render
+mix, which may include any audible application; it does not claim Teams-only
+process recording. Aggregate health is available, but source-specific health
+statistics are not yet exposed.
+
+The WinUI recording command allocates managed `manual-*` or `test-*` session
+folders through the storage service, writes native capture to
+`recording.audio-backup.m4a`, then promotes it without replacement to
+`recording.m4a` and writes metadata. At startup it conservatively attempts
+recovery before refreshing the local library, and it blocks recording when the
+selected storage root is unavailable or has less than 256 MiB free. This flow
+is covered by managed tests; it still needs end-to-end real-device validation.
+
+The technical probe record is in
+[`docs/2026-07-28-wasapi-probe-results.md`](docs/2026-07-28-wasapi-probe-results.md).
+It includes system and synthetic process-loopback evidence, but no successful
+physical-microphone run. A real Windows device with an actual microphone must
+still complete a record, stop, reopen, playback, and optional-mic-mix release
+validation before shipping.
 
 ## Supported development baseline
 
@@ -44,7 +67,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Verify-Win
 
 The verifier configures the native projects, runs the Debug native test suite,
 builds the distributable x64 Release `Recorder.NativeBridge.dll`, builds the
-.NET solution and WinUI executable, then runs managed and contract tests.
+.NET solution and WinUI executable, then runs managed and contract tests. It
+does not exercise a real audio endpoint, microphone, or speaker, and is not a
+substitute for the release validation above.
 
 The WinUI Release executable is emitted at:
 
@@ -85,11 +110,11 @@ installation.
 ```text
 windows/
 |-- contracts/                  Cross-platform JSON contracts and fixtures
-|-- docs/                       Parity baseline and Windows architecture
+|-- docs/                       Historical design/probe records and MVP scope
 |-- native/                     Native media boundary and lifecycle tests
 |-- scripts/                    Local validation entry points
 |-- src/Recorder.Core/          Portable policy and state machines
 |-- src/Recorder.Application/   Managed native-bridge adapter and lifecycle gate
-|-- src/Recorder.WinUI/         WinUI 3 system-loopback capture shell
+|-- src/Recorder.WinUI/         WinUI 3 audio-first capture, library, playback shell
 `-- tests/Recorder.Core.Tests/  Deterministic core tests
 ```

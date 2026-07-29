@@ -3,9 +3,6 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace TeamsRecorder.Windows.WinUI;
 
-/// <summary>
-/// Presents the first usable system-loopback capture flow.
-/// </summary>
 public sealed partial class MainPage : Page
 {
     private readonly RecordingViewModel viewModel;
@@ -14,6 +11,7 @@ public sealed partial class MainPage : Page
     {
         InitializeComponent();
         viewModel = new RecordingViewModel();
+        viewModel.InitializePlayer();
         DataContext = viewModel;
         Loaded += OnLoaded;
     }

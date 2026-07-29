@@ -22,6 +22,17 @@ var tests = new (string Name, Action Run)[]
     ("an in-recording native fault requests one cleanup stop", NativeCoordinatorRequestsCleanupAfterInRecordingFault),
     ("native recording coordinator does not publish a late start after stop", NativeCoordinatorSuppressesLateStartAfterStop),
     ("test recording stops exactly once after its scheduled delay", TestRecordingStopsExactlyOnce)
+    ,("mixed recording request validates its audio-only contract", AudioMvpTests.MixedRequestValidatesAudioOnlyContract)
+    ,("mixed recording coordinator starts, stops, and retries", AudioMvpTests.MixedCoordinatorStartsStopsAndRetries)
+    ,("mixed test recording stops after its scheduled delay", AudioMvpTests.MixedTestRecordingStopsAfterScheduledDelay)
+    ,("session capacity respects block and warning boundaries", SessionStorageTests.CapacityBoundariesAreExact)
+    ,("session allocation and publishing do not overwrite media", SessionStorageTests.AllocationAndPublishDoNotOverwrite)
+    ,("session library ignores unsafe and incomplete entries", SessionStorageTests.LibraryIgnoresUnsafeIncompleteAndMalformedEntries)
+    ,("session recovery is idempotent and never clobbers", SessionStorageTests.RecoveryIsIdempotentAndNeverClobbers)
+    ,("session storage blocks unavailable capacity", SessionStorageTests.CapacityUnavailableBlocksStart)
+    ,("session metadata normalizes malformed optional fields", SessionStorageTests.MetadataNormalizesMalformedOptionalFields)
+    ,("session folder names are whitelisted", SessionStorageTests.FolderNamesAreWhitelisted)
+    ,("session allocation uses deterministic collision suffixes", SessionStorageTests.AllocatesDeterministicCollisionSuffix)
 };
 
 var failed = 0;
@@ -442,6 +453,21 @@ sealed class FakeNativeRecorderBridge : INativeRecorderBridge
 
     public NativeOperationResult Start(NativeRecordingRequest request)
     {
+        StartEntered.TrySetResult();
+        StartRelease?.Wait();
+        lock (gate)
+        {
+            if (StartResult.IsSuccess)
+            {
+                state = NativeRecorderState.Recording;
+            }
+            return StartResult;
+        }
+    }
+
+    public NativeOperationResult StartMixed(NativeMixedRecordingRequest request)
+    {
+        request.Validate();
         StartEntered.TrySetResult();
         StartRelease?.Wait();
         lock (gate)

@@ -8,131 +8,84 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
     mc:Ignorable="d">
-
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <Grid MaxWidth="960" Padding="28,20,28,28" RowSpacing="16">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
-
-            <StackPanel Grid.Row="0" Spacing="4">
-                <TextBlock Text="Teams Recorder" Style="{StaticResource TitleTextBlockStyle}" />
-                <TextBlock
-                    Text="Windows 版 — 錄製目前系統輸出為 WAV"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    TextWrapping="Wrap" />
+        <StackPanel MaxWidth="1060" Padding="28,20,28,28" Spacing="16">
+            <StackPanel Spacing="4">
+                <TextBlock Text="Teams Recorder — 音訊錄製 MVP" Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock Text="錄製系統輸出與可選麥克風，工作階段以 M4A 為目標格式。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
             </StackPanel>
 
-            <InfoBar
-                Grid.Row="1"
-                IsOpen="{Binding HasError}"
-                IsClosable="False"
-                Severity="Error"
-                Title="錄音元件或操作發生問題"
-                Message="{Binding ErrorText}" />
+            <InfoBar IsOpen="{Binding HasError}" IsClosable="True" Severity="Error" Title="需要處理的問題" Message="{Binding ErrorText}" />
 
-            <Border
-                Grid.Row="2"
-                Padding="20"
-                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                BorderThickness="1"
-                CornerRadius="12">
-                <StackPanel Spacing="16">
-                    <TextBlock Text="錄音設定" Style="{StaticResource SubtitleTextBlockStyle}" />
-
-                    <StackPanel Spacing="6">
-                        <TextBlock Text="系統輸出裝置" />
-                        <ComboBox
-                            MinWidth="320"
-                            DisplayMemberPath="DisplayName"
-                            IsEnabled="{Binding IsDeviceSelectionEnabled}"
-                            ItemsSource="{Binding Endpoints}"
-                            SelectedItem="{Binding SelectedEndpoint, Mode=TwoWay}" />
-                        <TextBlock
-                            Text="{Binding SelectedEndpointDescription}"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            TextWrapping="Wrap" />
+            <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="設定與就緒狀態" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="{Binding ReadinessText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <Grid ColumnSpacing="16" RowSpacing="12">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="5">
+                            <TextBlock Text="系統輸出裝置" />
+                            <ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding RenderEndpoints}" SelectedItem="{Binding SelectedRenderEndpoint, Mode=TwoWay}" />
+                            <TextBlock Text="{Binding SelectedRenderDescription}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="5">
+                            <TextBlock Text="麥克風（可選）" />
+                            <ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding CaptureEndpoints}" SelectedItem="{Binding SelectedMicrophoneEndpoint, Mode=TwoWay}" />
+                            <TextBlock Text="{Binding SelectedMicrophoneDescription}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+                    <StackPanel Spacing="5">
+                        <TextBlock Text="工作階段資料庫" />
+                        <TextBox IsEnabled="{Binding IsDeviceSelectionEnabled}" PlaceholderText="選擇儲存工作階段的資料夾" Text="{Binding OutputFolder, Mode=TwoWay}" />
+                        <TextBlock Text="{Binding NextOutputPath}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     </StackPanel>
-
-                    <StackPanel Spacing="6">
-                        <TextBlock Text="WAV 輸出資料夾" />
-                        <TextBox
-                            IsEnabled="{Binding IsDeviceSelectionEnabled}"
-                            PlaceholderText="輸入儲存錄音的資料夾"
-                            Text="{Binding OutputFolder, Mode=TwoWay}" />
-                        <TextBlock
-                            Text="{Binding NextOutputPath}"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            TextWrapping="Wrap" />
-                    </StackPanel>
-
                     <StackPanel Orientation="Horizontal" Spacing="10">
-                        <Button Command="{Binding StartCommand}" Content="開始錄音" />
+                        <Button Command="{Binding StartCommand}" Content="開始錄製" />
                         <Button Command="{Binding StopCommand}" Content="停止並儲存" />
                         <Button Command="{Binding StartTestCommand}" Content="10 秒測試" />
                         <Button Command="{Binding RefreshDevicesCommand}" Content="重新整理裝置" />
-                        <ProgressRing
-                            Width="24"
-                            Height="24"
-                            IsActive="{Binding IsBusy}" />
+                        <ProgressRing Width="24" Height="24" IsActive="{Binding IsBusy}" />
                     </StackPanel>
                 </StackPanel>
             </Border>
 
-            <Border
-                Grid.Row="3"
-                Padding="20"
-                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                BorderThickness="1"
-                CornerRadius="12">
-                <StackPanel Spacing="14">
-                    <StackPanel Orientation="Horizontal" Spacing="12">
-                        <TextBlock Text="狀態" Style="{StaticResource SubtitleTextBlockStyle}" />
-                        <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" />
+            <Grid ColumnSpacing="16" RowSpacing="16">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="即時健康狀態" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="{Binding StatusText}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="{Binding AggregateHealthText}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding RenderHealthText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding MicrophoneHealthText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <StackPanel><TextBlock Text="經過時間" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><TextBlock Text="{Binding ElapsedText}" Style="{StaticResource TitleTextBlockStyle}" /></StackPanel>
+                            <StackPanel Grid.Column="1"><TextBlock Text="峰值 / 剪裁" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><TextBlock Text="{Binding PeakText}" Style="{StaticResource TitleTextBlockStyle}" /><ProgressBar Maximum="100" Value="{Binding PeakPercent}" /></StackPanel>
+                        </Grid>
                     </StackPanel>
+                </Border>
+                <Border Grid.Column="1" Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="儲存空間與結果" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="{Binding StorageReadinessText}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding ResultText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        <Button Command="{Binding RefreshLibraryCommand}" Content="重新掃描 M4A 工作階段" HorizontalAlignment="Left" />
+                    </StackPanel>
+                </Border>
+            </Grid>
 
-                    <Grid ColumnSpacing="18" RowSpacing="12">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-
-                        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="4">
-                            <TextBlock Text="經過時間" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="{Binding ElapsedText}" Style="{StaticResource TitleTextBlockStyle}" />
-                        </StackPanel>
-                        <StackPanel Grid.Row="0" Grid.Column="1" Spacing="4">
-                            <TextBlock Text="峰值" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="{Binding PeakText}" Style="{StaticResource TitleTextBlockStyle}" />
-                            <ProgressBar Maximum="100" Value="{Binding PeakPercent}" />
-                        </StackPanel>
-                        <StackPanel Grid.Row="1" Grid.Column="0" Spacing="4">
-                            <TextBlock Text="音訊封包" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="{Binding PacketText}" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                        </StackPanel>
-                        <StackPanel Grid.Row="1" Grid.Column="1" Spacing="4">
-                            <TextBlock Text="斷訊 / 來源格式" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="{Binding SourceHealthText}" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" />
-                        </StackPanel>
-                    </Grid>
+            <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                <StackPanel Spacing="12">
+                    <StackPanel Orientation="Horizontal" Spacing="10"><TextBlock Text="本機 M4A 資料庫" Style="{StaticResource SubtitleTextBlockStyle}" /><TextBlock Text="{Binding LibrarySummaryText}" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>
+                    <ListView MaxHeight="220" DisplayMemberPath="DisplayName" ItemsSource="{Binding LibraryItems}" SelectedItem="{Binding SelectedLibraryItem, Mode=TwoWay}" SelectionMode="Single" />
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button Command="{Binding PlayCommand}" Content="播放" /><Button Command="{Binding PauseCommand}" Content="暫停" /><Button Command="{Binding StopPlaybackCommand}" Content="停止" />
+                        <TextBlock Text="{Binding PlaybackText}" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <Slider Maximum="1" Minimum="0" Value="{Binding PlaybackProgress}" IsEnabled="False" />
                 </StackPanel>
             </Border>
-
-            <TextBlock
-                Grid.Row="4"
-                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Text="此版本先支援系統迴路錄音與 WAV 輸出。麥克風、特定 Teams 程序、影片及 M4A 匯出仍在後續開發。"
-                TextWrapping="Wrap" />
-        </Grid>
+            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此 MVP 專注音訊工作階段與本機播放；Teams API、視訊、虛擬麥克風與逐字稿將於後續版本提供。" TextWrapping="Wrap" />
+        </StackPanel>
     </ScrollViewer>
 </Page>

@@ -14,7 +14,7 @@ public sealed class NativeRecorderInteropException : Exception
 
 public sealed partial class NativeRecorderBridge : INativeRecorderBridge
 {
-    private const string RequiredAbiVersion = "0.3.0";
+    private const string RequiredAbiVersion = "0.4.0";
     private readonly object gate = new();
     private readonly NativeBridgeHandle handle;
     private bool disposed;
@@ -69,6 +69,43 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge
             {
                 Marshal.FreeCoTaskMem(outputPath);
                 Marshal.FreeCoTaskMem(endpointId);
+            }
+        }
+    }
+
+    public NativeOperationResult StartMixed(NativeMixedRecordingRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        request.Validate();
+
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            var outputPath = Marshal.StringToCoTaskMemUTF8(request.OutputPath);
+            var renderEndpointId = string.IsNullOrEmpty(request.RenderEndpointId)
+                ? IntPtr.Zero
+                : Marshal.StringToCoTaskMemUTF8(request.RenderEndpointId);
+            var microphoneEndpointId = string.IsNullOrEmpty(request.MicrophoneEndpointId)
+                ? IntPtr.Zero
+                : Marshal.StringToCoTaskMemUTF8(request.MicrophoneEndpointId);
+            try
+            {
+                var options = new NativeMixedStartOptions
+                {
+                    StructSize = checked((uint)Marshal.SizeOf<NativeMixedStartOptions>()),
+                    OutputPathUtf8 = outputPath,
+                    RenderEndpointIdUtf8 = renderEndpointId,
+                    MicrophoneEndpointIdUtf8 = microphoneEndpointId,
+                    AacBitRateBps = request.AacBitRate,
+                    Reserved = 0,
+                };
+                return ToOperationResult(NativeMethods.StartMixed(handle, ref options));
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(outputPath);
+                Marshal.FreeCoTaskMem(renderEndpointId);
+                Marshal.FreeCoTaskMem(microphoneEndpointId);
             }
         }
     }
@@ -228,6 +265,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge
     private static void EnsureStructLayouts()
     {
         if (Marshal.SizeOf<NativeStartOptions>() != 32 ||
+            Marshal.SizeOf<NativeMixedStartOptions>() != 40 ||
             Marshal.SizeOf<NativeStats>() != 96)
         {
             throw new NativeRecorderInteropException(
@@ -241,7 +279,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge
         if (!Version.TryParse(version, out var parsedVersion) ||
             parsedVersion is null ||
             parsedVersion.Major != 0 ||
-            parsedVersion.CompareTo(new Version(0, 3)) < 0)
+            parsedVersion.CompareTo(new Version(0, 4)) < 0)
         {
             throw new NativeRecorderInteropException(
                 $"Recorder.NativeBridge {RequiredAbiVersion} or newer is required.");
@@ -308,6 +346,17 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge
         public IntPtr OutputPathUtf8;
         public IntPtr EndpointIdUtf8;
         public uint TargetProcessId;
+        public uint Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
+    private struct NativeMixedStartOptions
+    {
+        public uint StructSize;
+        public IntPtr OutputPathUtf8;
+        public IntPtr RenderEndpointIdUtf8;
+        public IntPtr MicrophoneEndpointIdUtf8;
+        public uint AacBitRateBps;
         public uint Reserved;
     }
 
@@ -405,6 +454,12 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge
         internal static partial NativeRecorderResult StartWithOptions(
             NativeBridgeHandle bridge,
             ref NativeStartOptions options);
+
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_start_mixed")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial NativeRecorderResult StartMixed(
+            NativeBridgeHandle bridge,
+            ref NativeMixedStartOptions options);
 
         [LibraryImport(LibraryName, EntryPoint = "recorder_native_stop")]
         [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

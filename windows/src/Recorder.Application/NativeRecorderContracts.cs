@@ -5,6 +5,7 @@ public enum RecordingCaptureMode
     SystemLoopback = 0,
     Microphone = 1,
     ProcessLoopback = 2,
+    Mixed = 3,
 }
 
 public enum NativeRecorderState
@@ -44,15 +45,24 @@ public enum EndpointDefaultRole : uint
     Communications = 1U << 2,
 }
 
+public interface INativeRecordingRequest
+{
+    RecordingCaptureMode Mode { get; }
+
+    string OutputPath { get; }
+
+    void Validate();
+}
+
 public sealed record NativeRecordingRequest(
     RecordingCaptureMode Mode,
     string OutputPath,
     string? EndpointId = null,
-    uint TargetProcessId = 0)
+    uint TargetProcessId = 0) : INativeRecordingRequest
 {
     public void Validate()
     {
-        if (!Enum.IsDefined(Mode))
+        if (!Enum.IsDefined(Mode) || Mode == RecordingCaptureMode.Mixed)
         {
             throw new ArgumentOutOfRangeException(nameof(Mode), "The capture mode is not supported.");
         }
@@ -101,6 +111,65 @@ public sealed record NativeRecordingRequest(
             throw new ArgumentException(
                 "Only process-loopback capture accepts a target process ID.",
                 nameof(TargetProcessId));
+        }
+    }
+}
+
+/// <summary>
+/// Describes the audio-first Windows recording path: system render loopback,
+/// optionally mixed with one explicitly selected microphone, encoded as AAC M4A.
+/// Empty endpoint IDs deliberately mean the Windows default render endpoint and
+/// no microphone respectively; the native bridge never substitutes another
+/// explicitly selected endpoint.
+/// </summary>
+public sealed record NativeMixedRecordingRequest(
+    string OutputPath,
+    string? RenderEndpointId = null,
+    string? MicrophoneEndpointId = null,
+    uint AacBitRate = 128_000) : INativeRecordingRequest
+{
+    public RecordingCaptureMode Mode => RecordingCaptureMode.Mixed;
+
+    public bool IncludesMicrophone => !string.IsNullOrEmpty(MicrophoneEndpointId);
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(OutputPath))
+        {
+            throw new ArgumentException("An output path is required.", nameof(OutputPath));
+        }
+
+        if (OutputPath.IndexOf('\0') >= 0)
+        {
+            throw new ArgumentException("The output path contains a null character.", nameof(OutputPath));
+        }
+
+        if (!string.Equals(Path.GetExtension(OutputPath), ".m4a", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Mixed recording output must use the .m4a extension.", nameof(OutputPath));
+        }
+
+        ValidateEndpointId(RenderEndpointId, nameof(RenderEndpointId));
+        ValidateEndpointId(MicrophoneEndpointId, nameof(MicrophoneEndpointId));
+
+        if (AacBitRate is < 64_000 or > 320_000)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(AacBitRate),
+                "AAC bitrate must be between 64,000 and 320,000 bits per second.");
+        }
+    }
+
+    private static void ValidateEndpointId(string? endpointId, string parameterName)
+    {
+        if (endpointId is { Length: > 0 } && string.IsNullOrWhiteSpace(endpointId))
+        {
+            throw new ArgumentException("The endpoint ID cannot consist only of whitespace.", parameterName);
+        }
+
+        if (endpointId?.IndexOf('\0') >= 0)
+        {
+            throw new ArgumentException("The endpoint ID contains a null character.", parameterName);
         }
     }
 }
@@ -170,6 +239,8 @@ public sealed record NativeEndpointEnumerationResult(
 public interface INativeRecorderBridge : IDisposable
 {
     NativeOperationResult Start(NativeRecordingRequest request);
+
+    NativeOperationResult StartMixed(NativeMixedRecordingRequest request);
 
     NativeOperationResult Stop();
 

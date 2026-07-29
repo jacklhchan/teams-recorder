@@ -16,4 +16,8 @@ public sealed record RecordingStoragePolicy(long AudioStopBytes = 256L * 1024 * 
         var bytes when bytes < WarningBytes => RecordingStorageDecision.Warn,
         _ => RecordingStorageDecision.Normal
     };
+
+    /// <summary>An unavailable volume is deliberately treated like a stop condition.</summary>
+    public RecordingStorageDecision Decide(long? availableBytes) =>
+        availableBytes is { } bytes && bytes >= 0 ? Decide(bytes) : RecordingStorageDecision.Stop;
 }

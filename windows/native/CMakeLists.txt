@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(RecorderNativeBridge VERSION 0.3.0 LANGUAGES C CXX)
+project(RecorderNativeBridge VERSION 0.4.0 LANGUAGES C CXX)
 
 option(RECORDER_NATIVE_BUILD_TESTS "Build native bridge contract tests" ON)
 
@@ -12,9 +12,7 @@ function(recorder_enable_strict_warnings target)
     endif()
 endfunction()
 
-add_library(Recorder.NativeBridge SHARED
-    src/recorder_native_bridge.cpp
-)
+add_library(Recorder.NativeBridge SHARED src/recorder_native_bridge.cpp)
 
 add_library(Recorder.NativeBridge::Recorder.NativeBridge ALIAS Recorder.NativeBridge)
 
@@ -73,7 +71,11 @@ if(WIN32)
     target_link_libraries(Recorder.ProcessLoopback PUBLIC ole32 mmdevapi)
     recorder_enable_strict_warnings(Recorder.ProcessLoopback)
 
-    target_sources(Recorder.NativeBridge PRIVATE src/capture_session.cpp)
+    target_sources(Recorder.NativeBridge PRIVATE
+        src/capture_session.cpp
+        src/mixed_capture_session.cpp
+        src/m4a_writer.cpp
+    )
     target_include_directories(Recorder.NativeBridge PRIVATE src)
     target_link_libraries(Recorder.NativeBridge
         PRIVATE
@@ -82,6 +84,9 @@ if(WIN32)
             Recorder.Resample
             Recorder.WasapiCapture
             Recorder.Wav
+            mfplat
+            mfreadwrite
+            mfuuid
     )
 
     add_executable(Recorder.AudioProbe tools/audio_probe_main.cpp)
@@ -159,5 +164,6 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         target_link_libraries(Recorder.Resample.Tests PRIVATE Recorder.Resample)
         recorder_enable_strict_warnings(Recorder.Resample.Tests)
         add_test(NAME Recorder.Resample.Tests COMMAND Recorder.Resample.Tests)
+
     endif()
 endif()

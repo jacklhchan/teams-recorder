@@ -1,3 +1,7 @@
+# 實作狀態更新（2026-07-29）
+
+本文件原為實作前架構規格，部分 Phase 0/1 文字不代表目前的產品承諾。請先以 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md) 為準：它記錄已完成的 system-loopback／可選麥克風 AAC M4A 路徑，以及已接入 WinUI 的 storage、無覆寫 promotion、library、capacity gate 與保守 recovery 流程；實機 release gate 仍未完成。Teams API、程序隔離錄製、視訊、虛擬麥克風與轉寫均不在此 MVP 範圍。
+
 # Windows Migration：Phase 0/1 架構規格
 
 **狀態：** 實作前規格

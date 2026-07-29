@@ -45,11 +45,10 @@ final class AIProviderSettingsModel: ObservableObject {
                 replacementAPIKey: apiKeyReplacement.isEmpty ? nil : apiKeyReplacement
             )
             apiKeyReplacement = ""
-            hasStoredAPIKey = try repository.hasAPIKey()
             hasSavedProfile = true
-            status = "Provider settings saved"
-            statusIsError = false
+            updateAPIKeyStatus(after: "Provider settings saved")
         } catch {
+            hasSavedProfile = false
             present(error)
         }
     }
@@ -115,9 +114,7 @@ final class AIProviderSettingsModel: ObservableObject {
         do {
             guard let profile = try repository.loadProfile() else {
                 hasSavedProfile = false
-                hasStoredAPIKey = try repository.hasAPIKey()
-                status = "Not configured"
-                statusIsError = false
+                updateAPIKeyStatus(after: "Not configured")
                 return
             }
             baseURLText = profile.baseURL.absoluteString
@@ -126,10 +123,8 @@ final class AIProviderSettingsModel: ObservableObject {
             language = profile.language
             prompt = profile.prompt
             apiKeyReplacement = ""
-            hasStoredAPIKey = try repository.hasAPIKey()
             hasSavedProfile = true
-            status = "Provider settings loaded"
-            statusIsError = false
+            updateAPIKeyStatus(after: "Provider settings loaded")
         } catch {
             hasSavedProfile = false
             present(error)
@@ -149,6 +144,18 @@ final class AIProviderSettingsModel: ObservableObject {
     private func present(_: Error) {
         status = "Could not update provider settings."
         statusIsError = true
+    }
+
+    private func updateAPIKeyStatus(after successfulProfileStatus: String) {
+        do {
+            hasStoredAPIKey = try repository.hasAPIKey()
+            status = successfulProfileStatus
+            statusIsError = false
+        } catch {
+            hasStoredAPIKey = false
+            status = successfulProfileStatus + "; API key status unavailable"
+            statusIsError = true
+        }
     }
 
     private func beginConnectionTest() -> UInt64 {

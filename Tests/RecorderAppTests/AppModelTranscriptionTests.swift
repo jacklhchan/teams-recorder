@@ -26,6 +26,44 @@ final class AppModelTranscriptionTests: XCTestCase {
         XCTAssertEqual(model.transcriptionStatesBySessionID[fixture.session.id]?.phase, .completed)
     }
 
+    func testSavedProfileAllowsTranscriptionWhenAPIKeyStatusFails() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let preparer = ControlledPreparer(.immediate(.success(.init(
+            audioURL: fixture.temporaryAudioURL,
+            cleanupURL: nil
+        ))))
+        let launcher = ControlledLauncher()
+        let repository = RecordingProviderRepository(
+            profile: try OpenAICompatibleProviderProfile.validated(
+                baseURLText: "https://api.example.com/v1",
+                asrModel: "asr",
+                llmModel: "llm",
+                language: "",
+                prompt: ""
+            ),
+            apiKeyStatusError: TestError.failed
+        )
+        let model = makeModel(
+            fixture: fixture,
+            preparer: preparer,
+            launcher: launcher,
+            repository: repository,
+            configureProvider: false
+        )
+        model.aiProviderSettingsModel.reload()
+
+        guard model.aiProviderSettingsModel.hasSavedProfile else {
+            XCTFail("A saved profile must remain available when API key status fails")
+            return
+        }
+        model.transcribe(session: fixture.session)
+
+        let process = await launcher.nextProcess()
+        process.complete(exitStatus: 0)
+        await waitForIdle(model)
+    }
+
     func testCancelDuringPreparationCancelsWithoutLaunchingAndSettlesState() async throws {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
@@ -240,9 +278,10 @@ final class AppModelTranscriptionTests: XCTestCase {
     private func makeModel(
         fixture: TranscriptionFixture,
         preparer: ControlledPreparer,
-        launcher: ControlledLauncher
+        launcher: ControlledLauncher,
+        repository: RecordingProviderRepository = RecordingProviderRepository(),
+        configureProvider: Bool = true
     ) -> AppModel {
-        let repository = RecordingProviderRepository()
         let model = AppModel(
             providerRepository: repository,
             inputDevices: { [] },
@@ -252,10 +291,12 @@ final class AppModelTranscriptionTests: XCTestCase {
             transcriptionProcessLauncher: launcher,
             transcriptionScriptURL: fixture.scriptURL
         )
-        model.aiProviderSettingsModel.baseURLText = "https://api.example.com/v1"
-        model.aiProviderSettingsModel.asrModel = "asr"
-        model.aiProviderSettingsModel.llmModel = "llm"
-        model.aiProviderSettingsModel.save()
+        if configureProvider {
+            model.aiProviderSettingsModel.baseURLText = "https://api.example.com/v1"
+            model.aiProviderSettingsModel.asrModel = "asr"
+            model.aiProviderSettingsModel.llmModel = "llm"
+            model.aiProviderSettingsModel.save()
+        }
         return model
     }
 

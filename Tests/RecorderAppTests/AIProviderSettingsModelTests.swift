@@ -33,6 +33,44 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertFalse(model.hasStoredAPIKey)
     }
 
+    func testReloadKeepsSavedProfileWhenAPIKeyStatusFails() throws {
+        let repository = RecordingProviderRepository(
+            profile: try makeProfile(),
+            apiKeyStatusError: TestError.failed
+        )
+
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient()
+        )
+
+        XCTAssertTrue(model.hasSavedProfile)
+        XCTAssertFalse(model.hasStoredAPIKey)
+        XCTAssertEqual(model.status, "Provider settings loaded; API key status unavailable")
+        XCTAssertTrue(model.statusIsError)
+    }
+
+    func testSaveKeepsSavedProfileWhenAPIKeyStatusFails() {
+        let repository = RecordingProviderRepository(
+            apiKeyStatusError: TestError.failed
+        )
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+
+        model.save()
+
+        XCTAssertTrue(model.hasSavedProfile)
+        XCTAssertFalse(model.hasStoredAPIKey)
+        XCTAssertEqual(model.status, "Provider settings saved; API key status unavailable")
+        XCTAssertTrue(model.statusIsError)
+    }
+
     func testConnectionFailureDoesNotDeleteManualModelValues() async {
         let model = makeModel(client: StubProviderClient(error: TestError.failed))
         model.asrModel = "manual-asr"
@@ -284,17 +322,20 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
     private var profile: OpenAICompatibleProviderProfile?
     private var keyPresent: Bool
     private let migrationError: Error?
+    private let apiKeyStatusError: Error?
     private(set) var lastReplacementAPIKey: String?
     private(set) var removeKeyCount = 0
 
     init(
         profile: OpenAICompatibleProviderProfile? = nil,
         hasAPIKey: Bool = false,
-        migrationError: Error? = nil
+        migrationError: Error? = nil,
+        apiKeyStatusError: Error? = nil
     ) {
         self.profile = profile
         keyPresent = hasAPIKey
         self.migrationError = migrationError
+        self.apiKeyStatusError = apiKeyStatusError
     }
 
     func loadProfile() throws -> OpenAICompatibleProviderProfile? { profile }
@@ -316,7 +357,10 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
         .init(profile: profile, apiKey: keyPresent ? "saved" : nil)
     }
 
-    func hasAPIKey() throws -> Bool { keyPresent }
+    func hasAPIKey() throws -> Bool {
+        if let apiKeyStatusError { throw apiKeyStatusError }
+        return keyPresent
+    }
 
     func removeAPIKey() throws {
         removeKeyCount += 1

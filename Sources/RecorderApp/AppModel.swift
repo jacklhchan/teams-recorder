@@ -1946,11 +1946,6 @@ final class AppModel: ObservableObject {
         guard isActiveTranscription(generation: generation, attempt: attempt),
               !transcriptionCancellationRequested else { return }
         let lines = text.split(whereSeparator: \.isNewline).map(String.init)
-        if let lastUsefulLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            transcriptionStatus = lastUsefulLine
-            lastTranscriptionStatus = lastUsefulLine
-        }
-
         for line in lines where line.hasPrefix("STATUS=") {
             let message = String(line.dropFirst("STATUS=".count))
             transcriptionStatus = message

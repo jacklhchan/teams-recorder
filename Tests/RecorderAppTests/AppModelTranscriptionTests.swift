@@ -441,6 +441,43 @@ final class AppModelTranscriptionTests: XCTestCase {
         XCTAssertFalse(persisted.message.contains(secret))
     }
 
+    func testLiveProviderErrorContainingSnapshotAPIKeyIsNotPublishedOrPersisted() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let secret = "exact-live-private-api-key"
+        let repository = SnapshotProviderRepository(
+            snapshot: .init(profile: try makeProfile(), apiKey: secret)
+        )
+        let preparer = ControlledPreparer(.immediate(.success(.init(
+            audioURL: fixture.temporaryAudioURL,
+            cleanupURL: nil
+        ))))
+        let launcher = ControlledLauncher()
+        let model = makeModel(
+            fixture: fixture,
+            preparer: preparer,
+            launcher: launcher,
+            repository: repository,
+            configureProvider: false
+        )
+        model.aiProviderSettingsModel.reload()
+
+        model.transcribe(session: fixture.session)
+        let process = await launcher.nextProcess()
+        defer { process.complete(exitStatus: -15) }
+        process.emit("ERROR=Provider rejected \(secret) while uploading")
+        await Task.yield()
+        await Task.yield()
+
+        let persisted = try XCTUnwrap(
+            try TranscriptionStateStore.load(in: fixture.session.folderURL)
+        )
+        XCTAssertFalse(model.transcriptionStatus.contains(secret))
+        XCTAssertFalse(model.lastTranscriptionStatus.contains(secret))
+        XCTAssertFalse(model.statusMessage.contains(secret))
+        XCTAssertFalse(persisted.message.contains(secret))
+    }
+
     private func makeModel(
         fixture: TranscriptionFixture,
         preparer: ControlledPreparer,

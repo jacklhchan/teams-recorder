@@ -201,7 +201,7 @@ final class TeamsMuteSyncClientTests: XCTestCase {
                 && second.sentActions == ["query-state"]
         }
 
-        XCTAssertNil(tokenStore.token)
+        XCTAssertNil(try? tokenStore.load())
         XCTAssertEqual(tokenStore.clearCount, 1)
         XCTAssertEqual(sleeper.requestCount(for: reconnectDelay), 0)
         XCTAssertFalse(factory.createdURLs[1].queryItems.contains("token"))
@@ -525,12 +525,154 @@ final class TeamsMuteSyncClientTests: XCTestCase {
         first.pushIncoming(#"{"tokenRefresh":"stale-token"}"#)
         await settle()
 
-        XCTAssertEqual(tokenStore.token, "current-token")
+        XCTAssertEqual(try? tokenStore.load(), "current-token")
+        client.stop()
+    }
+
+    func testCredentialLoadFailureDoesNotCreateSocket() async {
+        let store = InMemoryTeamsPairingTokenStore()
+        store.loadError = ScriptedTeamsError.storageFailed
+        let socket = ScriptedTeamsWebSocketConnection()
+        let factory = ScriptedTeamsWebSocketFactory([socket])
+        let sleeper = ManualTeamsSleeper()
+        let events = TeamsEventRecorder()
+        let client = makeClient(
+            tokenStore: store,
+            factory: factory,
+            sleeper: sleeper
+        )
+
+        client.start(onEvent: events.record)
+        await assertEventually {
+            events.events.contains {
+                guard case .status(.failed(let message)) = $0 else {
+                    return false
+                }
+                return message.contains("Keychain")
+            }
+        }
+
+        XCTAssertEqual(factory.createdCount, 0)
+    }
+
+    func testTokenRefreshSaveFailureNeverReportsReady() async {
+        let store = InMemoryTeamsPairingTokenStore()
+        store.saveError = ScriptedTeamsError.storageFailed
+        let socket = ScriptedTeamsWebSocketConnection()
+        let factory = ScriptedTeamsWebSocketFactory([socket])
+        let sleeper = ManualTeamsSleeper()
+        let events = TeamsEventRecorder()
+        let client = makeClient(
+            tokenStore: store,
+            factory: factory,
+            sleeper: sleeper
+        )
+
+        client.start(onEvent: events.record)
+        await assertEventually { socket.sentActions == ["query-state"] }
+        socket.pushIncoming(#"{"tokenRefresh":"secret-value"}"#)
+        await assertEventually {
+            events.events.contains {
+                guard case .status(.failed(let message)) = $0 else {
+                    return false
+                }
+                return message.contains("Keychain")
+            }
+        }
+
+        XCTAssertFalse(events.events.contains(.status(.ready)))
+        XCTAssertFalse(events.events.description.contains("secret-value"))
+        XCTAssertGreaterThan(socket.cancelCount, 0)
+    }
+
+    func testInvalidTokenClearFailureStopsAutomaticReconnect() async {
+        let store = InMemoryTeamsPairingTokenStore(token: "stale")
+        store.clearError = ScriptedTeamsError.storageFailed
+        let socket = ScriptedTeamsWebSocketConnection()
+        let factory = ScriptedTeamsWebSocketFactory([socket])
+        let sleeper = ManualTeamsSleeper()
+        let events = TeamsEventRecorder()
+        let client = makeClient(
+            tokenStore: store,
+            factory: factory,
+            sleeper: sleeper
+        )
+
+        client.start(onEvent: events.record)
+        await assertEventually { socket.sentActions == ["query-state"] }
+        socket.pushIncoming(#"{"errorMsg":"Invalid token"}"#)
+        await assertEventually {
+            events.events.contains {
+                guard case .status(.failed(let message)) = $0 else {
+                    return false
+                }
+                return message.contains("Keychain")
+            }
+        }
+        await settle()
+
+        XCTAssertEqual(factory.createdCount, 1)
+        XCTAssertGreaterThan(socket.cancelCount, 0)
+    }
+
+    func testReconnectCannotAdvanceGenerationDuringTokenSave() async {
+        let store = BlockingTeamsPairingTokenStore(token: nil)
+        let first = ScriptedTeamsWebSocketConnection()
+        let second = ScriptedTeamsWebSocketConnection()
+        let factory = ScriptedTeamsWebSocketFactory([first, second])
+        let sleeper = ManualTeamsSleeper()
+        let client = makeClient(
+            tokenStore: store,
+            factory: factory,
+            sleeper: sleeper
+        )
+
+        client.start { _ in }
+        await assertEventually { first.sentActions == ["query-state"] }
+        first.pushIncoming(#"{"tokenRefresh":"fresh-token"}"#)
+        await store.waitUntilSaveStarts()
+
+        let reconnect = Task { client.reconnect() }
+        try? await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(factory.createdCount, 1)
+
+        store.allowSaveToFinish()
+        await reconnect.value
+        await assertEventually { factory.createdCount == 2 }
+        XCTAssertEqual(try? store.load(), "fresh-token")
+        client.stop()
+    }
+
+    func testReconnectCannotAdvanceGenerationDuringTokenClear() async {
+        let store = BlockingTeamsPairingTokenStore(token: "stale")
+        let first = ScriptedTeamsWebSocketConnection()
+        let second = ScriptedTeamsWebSocketConnection()
+        let factory = ScriptedTeamsWebSocketFactory([first, second])
+        let sleeper = ManualTeamsSleeper()
+        let client = makeClient(
+            tokenStore: store,
+            factory: factory,
+            sleeper: sleeper
+        )
+
+        client.start { _ in }
+        await assertEventually { first.sentActions == ["query-state"] }
+        first.pushIncoming(#"{"errorMsg":"Invalid token"}"#)
+        await store.waitUntilClearStarts()
+
+        let reconnect = Task { client.reconnect() }
+        try? await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(factory.createdCount, 1)
+
+        store.allowClearToFinish()
+        await reconnect.value
+        await assertEventually { factory.createdCount >= 2 }
+        XCTAssertNil(try? store.load())
         client.stop()
     }
 
     private func makeClient(
-        tokenStore: InMemoryTeamsPairingTokenStore,
+        tokenStore: any TeamsPairingTokenStoring,
         factory: ScriptedTeamsWebSocketFactory,
         sleeper: ManualTeamsSleeper
     ) -> TeamsMuteSyncClient {
@@ -895,29 +1037,96 @@ private final class InMemoryTeamsPairingTokenStore:
     private let lock = NSLock()
     private var storedToken: String?
     private var _clearCount = 0
+    var loadError: Error?
+    var saveError: Error?
+    var clearError: Error?
 
     init(token: String? = nil) {
         storedToken = token
-    }
-
-    var token: String? {
-        lock.synchronized { storedToken }
     }
 
     var clearCount: Int {
         lock.synchronized { _clearCount }
     }
 
-    func save(_ token: String) {
+    func load() throws -> String? {
+        if let loadError { throw loadError }
+        return lock.synchronized { storedToken }
+    }
+
+    func save(_ token: String) throws {
+        if let saveError { throw saveError }
         lock.synchronized {
             storedToken = token
         }
     }
 
-    func clear() {
+    func clear() throws {
+        if let clearError { throw clearError }
         lock.synchronized {
             storedToken = nil
             _clearCount += 1
+        }
+    }
+}
+
+private final class BlockingTeamsPairingTokenStore:
+    TeamsPairingTokenStoring,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let saveStarted = DispatchSemaphore(value: 0)
+    private let clearStarted = DispatchSemaphore(value: 0)
+    private let allowSave = DispatchSemaphore(value: 0)
+    private let allowClear = DispatchSemaphore(value: 0)
+    private var token: String?
+
+    init(token: String?) {
+        self.token = token
+    }
+
+    func load() throws -> String? {
+        lock.synchronized { token }
+    }
+
+    func save(_ token: String) throws {
+        saveStarted.signal()
+        allowSave.wait()
+        lock.synchronized {
+            self.token = token
+        }
+    }
+
+    func clear() throws {
+        clearStarted.signal()
+        allowClear.wait()
+        lock.synchronized {
+            token = nil
+        }
+    }
+
+    func waitUntilSaveStarts() async {
+        await wait(for: saveStarted)
+    }
+
+    func waitUntilClearStarts() async {
+        await wait(for: clearStarted)
+    }
+
+    func allowSaveToFinish() {
+        allowSave.signal()
+    }
+
+    func allowClearToFinish() {
+        allowClear.signal()
+    }
+
+    private func wait(for semaphore: DispatchSemaphore) async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                semaphore.wait()
+                continuation.resume()
+            }
         }
     }
 }
@@ -976,6 +1185,7 @@ private enum ScriptedTeamsError: Error {
     case pingFailed
     case sendFailed
     case cancelled
+    case storageFailed
 }
 
 private extension URL {

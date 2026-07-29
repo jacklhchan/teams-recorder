@@ -282,7 +282,7 @@ final class AppModel: ObservableObject {
             )
         }
         self.teamsMuteSyncClient = teamsMuteSyncClient ?? TeamsMuteSyncClient(
-            tokenStore: UserDefaultsTeamsPairingTokenStore(defaults: defaults)
+            tokenStore: KeychainTeamsPairingTokenStore(defaults: defaults)
         )
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()

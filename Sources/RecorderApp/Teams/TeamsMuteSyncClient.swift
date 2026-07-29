@@ -36,44 +36,9 @@ protocol TeamsMuteSyncing: AnyObject {
 }
 
 protocol TeamsPairingTokenStoring: AnyObject {
-    var token: String? { get }
-    func save(_ token: String)
-    func clear()
-}
-
-final class UserDefaultsTeamsPairingTokenStore: TeamsPairingTokenStoring {
-    private let defaults: UserDefaults
-    private let key: String
-    private let lock = NSLock()
-
-    init(
-        defaults: UserDefaults = .standard,
-        key: String = "teamsThirdPartyAPIPairingToken"
-    ) {
-        self.defaults = defaults
-        self.key = key
-    }
-
-    var token: String? {
-        lock.withLock {
-            guard let value = defaults.string(forKey: key), !value.isEmpty else {
-                return nil
-            }
-            return value
-        }
-    }
-
-    func save(_ token: String) {
-        lock.withLock {
-            defaults.set(token, forKey: key)
-        }
-    }
-
-    func clear() {
-        lock.withLock {
-            defaults.removeObject(forKey: key)
-        }
-    }
+    func load() throws -> String?
+    func save(_ token: String) throws
+    func clear() throws
 }
 
 protocol TeamsWebSocketConnection: AnyObject, Sendable {
@@ -221,7 +186,7 @@ final class TeamsMuteSyncClient: TeamsMuteSyncing, @unchecked Sendable {
                 forInfoDictionaryKey: "CFBundleShortVersionString"
             ) as? String ?? "1.0"
         ),
-        tokenStore: TeamsPairingTokenStoring = UserDefaultsTeamsPairingTokenStore(),
+        tokenStore: TeamsPairingTokenStoring = KeychainTeamsPairingTokenStore(),
         urlSession: URLSession = .shared,
         reconnectDelay: Duration = .seconds(2),
         heartbeatInterval: Duration = .seconds(2),
@@ -386,7 +351,14 @@ final class TeamsMuteSyncClient: TeamsMuteSyncing, @unchecked Sendable {
         while !Task.isCancelled, isCurrent(generation) {
             emit(.status(.connecting), generation: generation)
 
-            let token = tokenStore.token
+            let token: String?
+            do {
+                token = try tokenStore.load()
+            } catch {
+                emitCredentialFailure(generation: generation)
+                return
+            }
+            var activeToken = token
             guard let endpoint = TeamsThirdPartyAPI.endpoint(
                 token: token,
                 identity: identity
@@ -413,7 +385,7 @@ final class TeamsMuteSyncClient: TeamsMuteSyncing, @unchecked Sendable {
                     generation: generation
                 )
                 emit(
-                    .status(token == nil ? .waitingForMeeting : .ready),
+                    .status(activeToken == nil ? .waitingForMeeting : .ready),
                     generation: generation
                 )
                 let heartbeatTask = Task { [weak self] in
@@ -450,7 +422,7 @@ final class TeamsMuteSyncClient: TeamsMuteSyncing, @unchecked Sendable {
 
                     switch try TeamsThirdPartyAPI.decode(text) {
                     case .meetingUpdate(let update):
-                        let hasToken = tokenStore.token != nil
+                        let hasToken = activeToken != nil
                         if update.canPair, !hasToken {
                             if let state = update.state {
                                 emit(
@@ -497,29 +469,50 @@ final class TeamsMuteSyncClient: TeamsMuteSyncing, @unchecked Sendable {
                         emit(.status(status), generation: generation)
 
                     case .tokenRefresh(let token):
-                        guard acceptTokenRefresh(
-                            token,
+                        let saved = mutateCredentialIfInstalled(
                             socket: socket,
-                            generation: generation
-                        ) else {
-                            return
-                        }
-                        emit(.status(.ready), generation: generation)
-                        try await send(
-                            action: .queryState,
-                            through: socket,
-                            generation: generation
+                            generation: generation,
+                            operation: { try tokenStore.save(token) },
+                            onSuccess: { pairingPhase = .idle }
                         )
+                        switch saved {
+                        case nil:
+                            return
+                        case .failure:
+                            emitCredentialFailure(generation: generation)
+                            clear(socket: socket, generation: generation)
+                            socket.cancel(with: .goingAway, reason: nil)
+                            return
+                        case .success:
+                            activeToken = token
+                            emit(.status(.ready), generation: generation)
+                            try await send(
+                                action: .queryState,
+                                through: socket,
+                                generation: generation
+                            )
+                        }
 
                     case .error(let requestID, let message):
                         if message.localizedCaseInsensitiveContains("invalid token") {
-                            guard clearPairingToken(
+                            let cleared = mutateCredentialIfInstalled(
                                 socket: socket,
-                                generation: generation
-                            ) else {
+                                generation: generation,
+                                operation: { try tokenStore.clear() }
+                            )
+                            switch cleared {
+                            case nil:
                                 return
+                            case .failure:
+                                emitCredentialFailure(generation: generation)
+                                clear(socket: socket, generation: generation)
+                                socket.cancel(with: .goingAway, reason: nil)
+                                return
+                            case .success:
+                                activeToken = nil
+                                shouldReconnectImmediately = true
+                                break
                             }
-                            shouldReconnectImmediately = true
                             break
                         }
                         if isDeviceAlreadyPaired(message) {
@@ -808,35 +801,36 @@ final class TeamsMuteSyncClient: TeamsMuteSyncing, @unchecked Sendable {
         }
     }
 
-    private func acceptTokenRefresh(
-        _ token: String,
-        socket: any TeamsWebSocketConnection,
-        generation: UInt64
-    ) -> Bool {
-        lock.withLock {
-            guard self.generation == generation,
-                  let socketTask,
-                  connectionsMatch(socketTask, socket) else {
-                return false
-            }
-            tokenStore.save(token)
-            pairingPhase = .idle
-            return true
-        }
+    private func emitCredentialFailure(generation: UInt64) {
+        emit(
+            .status(.failed(
+                "Teams pairing credential is unavailable in Keychain. "
+                    + "Retry after allowing Keychain access."
+            )),
+            generation: generation
+        )
     }
 
-    private func clearPairingToken(
+    private func mutateCredentialIfInstalled(
         socket: any TeamsWebSocketConnection,
-        generation: UInt64
-    ) -> Bool {
+        generation: UInt64,
+        operation: () throws -> Void,
+        onSuccess: () -> Void = {}
+    ) -> Result<Void, Error>? {
         lock.withLock {
             guard self.generation == generation,
+                  onEvent != nil,
                   let socketTask,
                   connectionsMatch(socketTask, socket) else {
-                return false
+                return nil
             }
-            tokenStore.clear()
-            return true
+            do {
+                try operation()
+                onSuccess()
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
         }
     }
 

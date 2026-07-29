@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRUSTED_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH="$TRUSTED_PATH"
-unset SWIFT_BIN CODESIGN_BIN
+unset SWIFT_BIN CODESIGN_BIN DEVELOPER_DIR
+TRUSTED_DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+export DEVELOPER_DIR="$TRUSTED_DEVELOPER_DIR"
+ROOT_DIR="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+[[ "$(/usr/bin/uname -s)" == "Darwin" ]] || {
+  echo "Developer ID releases are supported only on macOS." >&2
+  exit 78
+}
 
 VERSION=""
 BUILD_NUMBER=""
@@ -112,8 +119,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-[[ "$(/usr/bin/uname -s)" == "Darwin" ]] || {
-  echo "Developer ID releases are supported only on macOS." >&2
+[[ "$DEVELOPER_DIR" == /* && -d "$DEVELOPER_DIR" && ! -L "$DEVELOPER_DIR" ]] || {
+  echo "Trusted Xcode developer directory is unavailable." >&2
   exit 78
 }
 [[ ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || {
@@ -155,13 +162,9 @@ if [[ "$MODE" == "notarized-production" ]]; then
   STAPLER_BIN="$(resolve_xcode_tool stapler)"
 fi
 
-WORK_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/lmr-release.XXXXXX")" || fail_execution "Cannot create release work directory."
-PUBLISH_STAGING=""
+WORK_DIR="$(/usr/bin/mktemp -d "/private/tmp/lmr-release.XXXXXX")" || fail_execution "Cannot create release work directory."
 cleanup() {
   /bin/rm -rf "$WORK_DIR"
-  if [[ -n "$PUBLISH_STAGING" ]]; then
-    /bin/rm -rf "$PUBLISH_STAGING"
-  fi
 }
 trap cleanup EXIT
 APP="$WORK_DIR/Local Meeting Recorder.app"
@@ -192,31 +195,28 @@ if [[ "$MODE" == "notarized-production" ]]; then
   run_checked "$SPCTL_BIN" --assess --type execute --verbose=4 "$APP"
 fi
 
-OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
-/bin/mkdir -p "$OUTPUT_PARENT" || fail_execution "Cannot create release output parent."
-PUBLISH_STAGING="$(/usr/bin/mktemp -d "$OUTPUT_PARENT/.lmr-release-publish.XXXXXX")" || fail_execution "Cannot create release publication staging."
-STAGED_ZIP="$PUBLISH_STAGING/${ARTIFACT_STEM}.zip"
+PUBLISH_SOURCE="$WORK_DIR/release"
+/bin/mkdir "$PUBLISH_SOURCE" || fail_execution "Cannot create release publication source."
+STAGED_ZIP="$PUBLISH_SOURCE/${ARTIFACT_STEM}.zip"
 run_checked "$DITTO_BIN" -c -k --keepParent "$APP" "$STAGED_ZIP"
 STAGED_CHECKSUM="$("$ROOT_DIR/scripts/write-sha256.sh" "$STAGED_ZIP")" || fail_execution "Checksum generation failed."
-/bin/cp "$ROOT_DIR/LICENSE" "$PUBLISH_STAGING/LICENSE" || fail_execution "Cannot stage LICENSE."
-/bin/cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PUBLISH_STAGING/THIRD_PARTY_NOTICES.md" || fail_execution "Cannot stage third-party notices."
+/bin/cp "$ROOT_DIR/LICENSE" "$PUBLISH_SOURCE/LICENSE" || fail_execution "Cannot stage LICENSE."
+/bin/cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PUBLISH_SOURCE/THIRD_PARTY_NOTICES.md" || fail_execution "Cannot stage third-party notices."
 [[ -s "$STAGED_ZIP" && -s "$STAGED_CHECKSUM" ]] || fail_execution "Staged release artifacts are incomplete."
-/usr/bin/cmp -s "$ROOT_DIR/LICENSE" "$PUBLISH_STAGING/LICENSE" || fail_execution "Staged LICENSE differs."
-/usr/bin/cmp -s "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PUBLISH_STAGING/THIRD_PARTY_NOTICES.md" || fail_execution "Staged third-party notices differ."
+/usr/bin/cmp -s "$ROOT_DIR/LICENSE" "$PUBLISH_SOURCE/LICENSE" || fail_execution "Staged LICENSE differs."
+/usr/bin/cmp -s "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PUBLISH_SOURCE/THIRD_PARTY_NOTICES.md" || fail_execution "Staged third-party notices differ."
 (
-  cd "$PUBLISH_STAGING"
-  /usr/bin/shasum -a 256 -c "$(basename "$STAGED_CHECKSUM")" >/dev/null
+  cd "$PUBLISH_SOURCE"
+  /usr/bin/shasum -a 256 -c "$(/usr/bin/basename "$STAGED_CHECKSUM")" >/dev/null
 ) || fail_execution "Staged checksum verification failed."
 
-if /usr/bin/python3 "$ROOT_DIR/scripts/atomic-publish-directory.py" "$PUBLISH_STAGING" "$OUTPUT_DIR"; then
+if /usr/bin/python3 "$ROOT_DIR/scripts/atomic-publish-directory.py" "$PUBLISH_SOURCE" "$OUTPUT_DIR"; then
   :
 else
   STATUS=$?
   [[ "$STATUS" -eq 73 ]] && exit 73
   fail_execution "Atomic release publication failed."
 fi
-[[ -d "$OUTPUT_DIR" && ! -e "$PUBLISH_STAGING" ]] || fail_execution "Atomic release publication failed."
-PUBLISH_STAGING=""
 
 FINAL_ZIP="$OUTPUT_DIR/${ARTIFACT_STEM}.zip"
 CHECKSUM="$FINAL_ZIP.sha256"

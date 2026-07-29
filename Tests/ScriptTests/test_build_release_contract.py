@@ -1,7 +1,11 @@
+import errno
+import importlib.util
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -15,6 +19,16 @@ SAFE_ENV = {
     "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
     "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
 }
+
+
+def load_atomic_publish_module():
+    spec = importlib.util.spec_from_file_location(
+        "atomic_publish_directory",
+        ATOMIC_PUBLISH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class BuildReleaseContractTests(unittest.TestCase):
@@ -33,6 +47,21 @@ class BuildReleaseContractTests(unittest.TestCase):
             "--signing-identity", "Developer ID Application: Test (TEAMID)",
             "--signed-only", *extra,
         )
+
+    def write_release_fixture(self, root, transform):
+        scripts = root / "scripts"
+        scripts.mkdir()
+        source = RELEASE_SCRIPT.read_text(encoding="utf-8")
+        fixture = scripts / "build-release.sh"
+        fixture.write_text(transform(source), encoding="utf-8")
+        fixture.chmod(0o755)
+        for name in (
+            "build-app.sh",
+            "write-sha256.sh",
+            "atomic-publish-directory.py",
+        ):
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        return fixture
 
     def test_requires_exact_version_build_identity_and_mode(self):
         result = self.run_release("--dry-run")
@@ -88,6 +117,91 @@ class BuildReleaseContractTests(unittest.TestCase):
                 (Path(temporary) / name).symlink_to(sentinel)
             result = self.run_release(*self.dry_run_arguments("--dry-run"), env=environment)
             self.assertEqual(result.returncode, 0)
+            self.assertFalse(Path(environment["R3_SENTINEL"]).exists())
+
+    def test_hostile_developer_dir_cannot_redirect_xcode_tools(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            hostile = root / "hostile-developer"
+            (hostile / "usr/bin").mkdir(parents=True)
+            (hostile / "usr/bin/codesign").write_text("hostile")
+            identity = (
+                'IDENTITIES=\' 1) HASH "Developer ID Application: '
+                'Test (TEAMID)"\''
+            )
+
+            def transform(source):
+                source = source.replace(
+                    'IDENTITIES="$(/usr/bin/security find-identity -v '
+                    '-p codesigning 2>/dev/null || true)"',
+                    identity,
+                )
+                return source.replace(
+                    'CODESIGN_BIN="$(resolve_xcode_tool codesign)"',
+                    'CODESIGN_BIN="$(resolve_xcode_tool codesign)"\n'
+                    'printf "developer_dir=%s\\nresolved=%s\\n" '
+                    '"$DEVELOPER_DIR" "$CODESIGN_BIN"\n'
+                    'exit 0',
+                )
+
+            fixture = self.write_release_fixture(root, transform)
+            environment = SAFE_ENV | {"DEVELOPER_DIR": str(hostile)}
+            result = subprocess.run(
+                [
+                    "/bin/bash", str(fixture),
+                    *self.dry_run_arguments(
+                        "--output-dir", str(root / "release"),
+                    ),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "developer_dir=/Applications/Xcode.app/Contents/Developer",
+                result.stdout,
+            )
+            self.assertNotIn(str(hostile), result.stdout)
+
+    def test_unsupported_host_fails_closed_even_in_dry_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            fixture = self.write_release_fixture(
+                root,
+                lambda source: source.replace(
+                    '"$(/usr/bin/uname -s)" == "Darwin"',
+                    '"Linux" == "Darwin"',
+                ),
+            )
+            sentinel = root / "sentinel"
+            sentinel.write_text(
+                '#!/bin/sh\necho "$0" >> "$R3_SENTINEL"\nexit 99\n',
+                encoding="utf-8",
+            )
+            sentinel.chmod(0o755)
+            environment = SAFE_ENV | {
+                "PATH": f"{root}:/usr/bin:/bin",
+                "R3_SENTINEL": str(root / "calls"),
+            }
+            for name in ("security", "swift", "codesign", "notarytool", "ditto", "rm", "mkdir"):
+                (root / name).symlink_to(sentinel)
+            result = subprocess.run(
+                [
+                    "/bin/bash", str(fixture),
+                    *self.dry_run_arguments(
+                        "--output-dir", str(root / "release"),
+                        "--dry-run",
+                    ),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 78)
+            self.assertFalse((root / "release").exists())
             self.assertFalse(Path(environment["R3_SENTINEL"]).exists())
 
     def test_missing_identity_fails_before_build(self):
@@ -164,6 +278,60 @@ class BuildReleaseContractTests(unittest.TestCase):
             self.assertTrue((destination / "artifact.zip").is_file())
             self.assertEqual(sum(source.exists() for source in sources), 1)
 
+    def test_atomic_publish_rejects_destination_ancestor_swap_before_rename(self):
+        module = load_atomic_publish_module()
+        self.assertTrue(hasattr(module, "publish_directory"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "source/staged"
+            source.mkdir(parents=True)
+            (source / "artifact.zip").write_bytes(b"release")
+            output_parent = root / "output"
+            output_parent.mkdir()
+            detached = root / "detached-output"
+            attacker = root / "attacker-output"
+            attacker.mkdir()
+
+            real_copy = module.copy_directory
+
+            def copy_then_swap(source_fd, destination_fd):
+                real_copy(source_fd, destination_fd)
+                output_parent.rename(detached)
+                output_parent.symlink_to(attacker, target_is_directory=True)
+
+            with mock.patch.object(module, "copy_directory", copy_then_swap):
+                with self.assertRaises(module.PublishError) as raised:
+                    module.publish_directory(source, output_parent / "release")
+            self.assertEqual(raised.exception.status, 73)
+            self.assertFalse((detached / "release").exists())
+            self.assertFalse((attacker / "release").exists())
+
+    def test_atomic_publish_rejects_source_ancestor_swap_after_open(self):
+        module = load_atomic_publish_module()
+        self.assertTrue(hasattr(module, "publish_directory"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source_parent = root / "source"
+            source = source_parent / "staged"
+            source.mkdir(parents=True)
+            (source / "artifact.zip").write_bytes(b"release")
+            detached = root / "detached-source"
+            attacker = root / "attacker-source"
+            attacker.mkdir()
+
+            real_copy = module.copy_directory
+
+            def copy_then_swap(source_fd, destination_fd):
+                real_copy(source_fd, destination_fd)
+                source_parent.rename(detached)
+                source_parent.symlink_to(attacker, target_is_directory=True)
+
+            with mock.patch.object(module, "copy_directory", copy_then_swap):
+                with self.assertRaises(module.PublishError) as raised:
+                    module.publish_directory(source, root / "output/release")
+            self.assertEqual(raised.exception.status, 73)
+            self.assertFalse((root / "output/release").exists())
+
     def test_atomic_publish_rejects_bad_inputs_and_maps_cross_device_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -172,8 +340,43 @@ class BuildReleaseContractTests(unittest.TestCase):
             destination = root / "release"
             bad_source = subprocess.run(["/usr/bin/python3", str(ATOMIC_PUBLISH), str(root / "absent"), str(destination)], text=True, capture_output=True, check=False, env=SAFE_ENV)
             self.assertEqual(bad_source.returncode, 66)
-            forced = subprocess.run(["/usr/bin/python3", str(ATOMIC_PUBLISH), "--force-errno", "18", str(source), str(destination)], text=True, capture_output=True, check=False, env=SAFE_ENV)
-            self.assertEqual(forced.returncode, 70)
+            undocumented = subprocess.run(["/usr/bin/python3", str(ATOMIC_PUBLISH), "--force-errno", "18", str(source), str(destination)], text=True, capture_output=True, check=False, env=SAFE_ENV)
+            self.assertEqual(undocumented.returncode, 64)
+            module = load_atomic_publish_module()
+            self.assertTrue(hasattr(module, "publish_directory"))
+
+            def cross_device(*_arguments):
+                raise OSError(errno.EXDEV, "cross-device")
+
+            with self.assertRaises(module.PublishError) as raised:
+                module.publish_directory(
+                    source,
+                    destination,
+                    rename_exclusive=cross_device,
+                )
+            self.assertEqual(raised.exception.status, 70)
+
+    def test_atomic_publish_maps_parent_creation_failure_to_execution_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "staged"
+            source.mkdir()
+            (source / "artifact.zip").write_bytes(b"release")
+            module = load_atomic_publish_module()
+            original_mkdir = module.os.mkdir
+
+            def deny_new_directory(name, *args, **kwargs):
+                if name == "missing":
+                    raise OSError(errno.EACCES, "permission denied")
+                return original_mkdir(name, *args, **kwargs)
+
+            with mock.patch.object(module.os, "mkdir", deny_new_directory):
+                with self.assertRaises(module.PublishError) as raised:
+                    module.publish_directory(
+                        source,
+                        root / "locked/missing/release",
+                    )
+            self.assertEqual(raised.exception.status, 70)
 
     def test_checksum_is_portable_and_verified(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -190,9 +393,37 @@ class BuildReleaseContractTests(unittest.TestCase):
 
     def test_publication_stages_complete_release_before_rename(self):
         script = RELEASE_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn(".lmr-release-publish.XXXXXX", script)
+        helper = ATOMIC_PUBLISH.read_text(encoding="utf-8")
+        self.assertIn(".lmr-release-publish.", helper)
+        self.assertIn('PUBLISH_SOURCE="$WORK_DIR/release"', script)
+        self.assertNotIn('/bin/mkdir -p "$OUTPUT_PARENT"', script)
         self.assertIn('cp "$ROOT_DIR/LICENSE"', script)
         self.assertIn('cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md"', script)
         publish_call = '"$ROOT_DIR/scripts/atomic-publish-directory.py"'
         self.assertIn(publish_call, script)
         self.assertLess(script.index('cp "$ROOT_DIR/LICENSE"'), script.rindex(publish_call))
+
+    def test_signing_and_notary_command_order_is_fixed(self):
+        script = RELEASE_SCRIPT.read_text(encoding="utf-8")
+        commands = [
+            '"$ROOT_DIR/scripts/build-app.sh"',
+            '"$APP/Contents/MacOS/LocalMeetingRecorder"',
+            '--entitlements "$ROOT_DIR/Config/LocalMeetingRecorder.entitlements" "$APP"',
+            '--verify --deep --strict --verbose=2 "$APP"',
+            "grep -q 'flags=.*runtime'",
+            "grep -q 'TeamIdentifier='",
+            '-d --entitlements :- "$APP"',
+            '"$DITTO_BIN" -c -k --keepParent "$APP" "$SUBMISSION_ZIP"',
+            '"$NOTARYTOOL_BIN" submit',
+            '"$STAPLER_BIN" staple "$APP"',
+            '"$STAPLER_BIN" validate "$APP"',
+            '"$SPCTL_BIN" --assess',
+            '"$DITTO_BIN" -c -k --keepParent "$APP" "$STAGED_ZIP"',
+            '"$ROOT_DIR/scripts/write-sha256.sh"',
+            'cp "$ROOT_DIR/LICENSE"',
+            '"$ROOT_DIR/scripts/atomic-publish-directory.py"',
+        ]
+        position = 0
+        for command in commands:
+            position = script.find(command, position)
+            self.assertNotEqual(position, -1, command)

@@ -15,6 +15,7 @@ enum ProviderRepositoryError: LocalizedError, Equatable {
     case invalidAPIKeyEncoding
     case legacyCredentialMismatch
     case migrationVerificationFailed
+    case migrationRollbackFailed
 
     var errorDescription: String? {
         switch self {
@@ -26,6 +27,8 @@ enum ProviderRepositoryError: LocalizedError, Equatable {
             "The saved provider key differs from the legacy local key."
         case .migrationVerificationFailed:
             "Provider credential migration could not be verified."
+        case .migrationRollbackFailed:
+            "Provider credential migration could not be rolled back."
         }
     }
 }
@@ -133,27 +136,6 @@ final class OpenAICompatibleProviderRepository: @unchecked Sendable {
             }
 
             let legacy = try reader.read(from: settingsURL)
-            let existingKey = try loadAPIKey()
-            if let existingKey,
-               let legacyKey = legacy.apiKey,
-               existingKey != legacyKey {
-                throw ProviderRepositoryError.legacyCredentialMismatch
-            }
-            if existingKey == nil, let legacyKey = legacy.apiKey {
-                let data = Data(legacyKey.utf8)
-                try secureStore.save(
-                    data,
-                    service: OpenAICompatibleProviderCredential.service,
-                    account: OpenAICompatibleProviderCredential.account
-                )
-                guard try secureStore.load(
-                    service: OpenAICompatibleProviderCredential.service,
-                    account: OpenAICompatibleProviderCredential.account
-                ) == data else {
-                    throw ProviderRepositoryError.migrationVerificationFailed
-                }
-            }
-
             let profile = try OpenAICompatibleProviderProfile.validated(
                 baseURLText: legacy.baseURL.absoluteString,
                 asrModel: "mlx-community--Qwen3-ASR-1.7B-4bit",
@@ -163,7 +145,46 @@ final class OpenAICompatibleProviderRepository: @unchecked Sendable {
                     + "公司名、產品名及技術縮寫。請忠實轉錄錄音"
                     + "內容，不要翻譯或補寫沒有說出的內容。"
             )
-            try profiles.save(profile)
+            let existingKey = try loadAPIKey()
+            if let existingKey,
+               let legacyKey = legacy.apiKey,
+               existingKey != legacyKey {
+                throw ProviderRepositoryError.legacyCredentialMismatch
+            }
+            var newlySavedLegacyKey: Data?
+            if existingKey == nil, let legacyKey = legacy.apiKey {
+                let data = Data(legacyKey.utf8)
+                try secureStore.save(
+                    data,
+                    service: OpenAICompatibleProviderCredential.service,
+                    account: OpenAICompatibleProviderCredential.account
+                )
+                newlySavedLegacyKey = data
+            }
+
+            do {
+                if let newlySavedLegacyKey {
+                    guard try secureStore.load(
+                        service: OpenAICompatibleProviderCredential.service,
+                        account: OpenAICompatibleProviderCredential.account
+                    ) == newlySavedLegacyKey else {
+                        throw ProviderRepositoryError.migrationVerificationFailed
+                    }
+                }
+                try profiles.save(profile)
+            } catch {
+                if newlySavedLegacyKey != nil {
+                    do {
+                        try secureStore.delete(
+                            service: OpenAICompatibleProviderCredential.service,
+                            account: OpenAICompatibleProviderCredential.account
+                        )
+                    } catch {
+                        throw ProviderRepositoryError.migrationRollbackFailed
+                    }
+                }
+                throw error
+            }
             try? fileManager.setAttributes(
                 [.posixPermissions: 0o700],
                 ofItemAtPath: settingsURL.deletingLastPathComponent().path

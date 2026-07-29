@@ -35,6 +35,35 @@ final class LegacyOMLXSettingsReaderTests: XCTestCase {
         )
     }
 
+    func testMapsIPv6WildcardBindHostToLoopbackClientHost() throws {
+        let file = try writeSettings(
+            """
+            {
+              "server": {"host": "::", "port": 8000}
+            }
+            """
+        )
+
+        XCTAssertEqual(
+            try LegacyOMLXSettingsReader().read(from: file).baseURL.host,
+            "127.0.0.1"
+        )
+    }
+
+    func testRejectsOutOfRangePortWithInvalidBaseURLError() throws {
+        let file = try writeSettings(
+            """
+            {
+              "server": {"host": "127.0.0.1", "port": 65536}
+            }
+            """
+        )
+
+        XCTAssertThrowsError(try LegacyOMLXSettingsReader().read(from: file)) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidBaseURL)
+        }
+    }
+
     private func writeSettings(_ contents: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

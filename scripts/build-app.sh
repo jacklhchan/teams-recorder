@@ -12,6 +12,8 @@ OUTPUT="$ROOT_DIR/build/Local Meeting Recorder Staging.app"
 SIGN_MODE="ad-hoc"
 OWNER_MARKER_NAME=".lmr-build-owner"
 OWNER_MARKER_VALUE="local.meeting.recorder.build-app.v1"
+SWIFT_BIN="${SWIFT_BIN:-swift}"
+CODESIGN_BIN="${CODESIGN_BIN:-codesign}"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -82,8 +84,8 @@ fi
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 cd "$ROOT_DIR"
 echo "Building $CONFIGURATION app binary" >&2
-swift build -c "$CONFIGURATION" --arch arm64 >&2
-BIN_DIR="$(swift build -c "$CONFIGURATION" --arch arm64 --show-bin-path)"
+"$SWIFT_BIN" build -c "$CONFIGURATION" --arch arm64 >&2
+BIN_DIR="$("$SWIFT_BIN" build -c "$CONFIGURATION" --arch arm64 --show-bin-path)"
 BINARY_PATH="$BIN_DIR/$APP_EXECUTABLE"
 [[ -x "$BINARY_PATH" ]] || {
   echo "Built executable not found: $BINARY_PATH" >&2
@@ -150,12 +152,12 @@ plutil -lint "$PLIST" >&2
 
 if [[ "$SIGN_MODE" == "ad-hoc" ]]; then
   ENTITLEMENTS="$ROOT_DIR/Config/LocalMeetingRecorder.entitlements"
-  codesign --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$MACOS_DIR/$APP_EXECUTABLE"
-  codesign --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$TEMP_OUTPUT"
-  codesign --verify --deep --strict "$TEMP_OUTPUT"
+  "$CODESIGN_BIN" --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$MACOS_DIR/$APP_EXECUTABLE" >&2
+  "$CODESIGN_BIN" --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$TEMP_OUTPUT" >&2
+  "$CODESIGN_BIN" --verify --deep --strict "$TEMP_OUTPUT" >&2
 else
-  codesign --remove-signature "$MACOS_DIR/$APP_EXECUTABLE" >/dev/null 2>&1 || true
-  if codesign -dv "$TEMP_OUTPUT" >/dev/null 2>&1; then
+  "$CODESIGN_BIN" --remove-signature "$MACOS_DIR/$APP_EXECUTABLE" >/dev/null 2>&1 || true
+  if "$CODESIGN_BIN" -dv "$TEMP_OUTPUT" >/dev/null 2>&1; then
     echo "Unsigned staging bundle unexpectedly has a signature." >&2
     exit 70
   fi

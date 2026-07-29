@@ -67,6 +67,103 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertFalse(model.status.contains("legacy-secret"))
     }
 
+    func testBlockedOldConnectionCannotOverwriteStatusAfterSavingDifferentSettings() async {
+        let client = DeferredProviderClient()
+        let model = makeModel(client: client)
+        let testTask = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+
+        model.baseURLText = "https://new.example.com/v1"
+        model.save()
+        await client.completeNext(
+            with: .success(.init(
+                supportsModelDiscovery: true,
+                models: ["old-model"]
+            ))
+        )
+        await testTask.value
+
+        XCTAssertEqual(model.status, "Provider settings saved")
+        XCTAssertFalse(model.statusIsError)
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+        XCTAssertFalse(model.isTesting)
+    }
+
+    func testDirectFormEditInvalidatesBlockedConnectionResult() async {
+        let client = DeferredProviderClient()
+        let model = makeModel(client: client)
+        let testTask = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+
+        model.asrModel = "edited-asr"
+        await client.completeNext(
+            with: .success(.init(
+                supportsModelDiscovery: true,
+                models: ["old-model"]
+            ))
+        )
+        await testTask.value
+
+        XCTAssertEqual(model.asrModel, "edited-asr")
+        XCTAssertEqual(model.status, "Not configured")
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+        XCTAssertFalse(model.isTesting)
+    }
+
+    func testReloadAndRemoveKeyInvalidateBlockedConnectionResult() async {
+        let client = DeferredProviderClient()
+        let repository = RecordingProviderRepository(
+            profile: try! makeProfile(),
+            hasAPIKey: true
+        )
+        let model = AIProviderSettingsModel(repository: repository, client: client)
+        let firstTest = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+
+        model.reload()
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["old"]))
+        )
+        await firstTest.value
+        XCTAssertEqual(model.status, "Provider settings loaded")
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+
+        let secondTest = Task { await model.testConnection() }
+        await client.waitForRequestCount(2)
+        model.removeAPIKey()
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["old"]))
+        )
+        await secondTest.value
+        XCTAssertEqual(model.status, "API key removed")
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+    }
+
+    func testOldConnectionCannotClearTestingStateForNewerConnection() async {
+        let client = DeferredProviderClient()
+        let model = makeModel(client: client)
+        let oldTest = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+        let newTest = Task { await model.testConnection() }
+        await client.waitForRequestCount(2)
+
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["old"]))
+        )
+        await oldTest.value
+
+        XCTAssertTrue(model.isTesting)
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["new"]))
+        )
+        await newTest.value
+
+        XCTAssertFalse(model.isTesting)
+        XCTAssertEqual(model.discoveredModels, ["new"])
+    }
+
     private func makeModel(
         client: any ProviderConnectionTesting = StubProviderClient()
     ) -> AIProviderSettingsModel {
@@ -76,6 +173,16 @@ final class AIProviderSettingsModelTests: XCTestCase {
         model.asrModel = "asr"
         model.llmModel = "llm"
         return model
+    }
+
+    private func makeProfile() throws -> OpenAICompatibleProviderProfile {
+        try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "asr",
+            llmModel: "llm",
+            language: "yue",
+            prompt: ""
+        )
     }
 }
 
@@ -141,6 +248,33 @@ private struct StubProviderClient: ProviderConnectionTesting {
     ) async throws -> ProviderConnectionReport {
         if let error { throw error }
         return .init(supportsModelDiscovery: true, models: [])
+    }
+}
+
+private actor DeferredProviderClient: ProviderConnectionTesting {
+    private var continuations: [CheckedContinuation<ProviderConnectionReport, Error>] = []
+    private var requestsStarted = 0
+
+    func testConnection(
+        profile: OpenAICompatibleProviderProfile,
+        apiKey: String?
+    ) async throws -> ProviderConnectionReport {
+        try await withCheckedThrowingContinuation { continuation in
+            requestsStarted += 1
+            continuations.append(continuation)
+        }
+    }
+
+    func waitForRequestCount(_ count: Int) async {
+        while requestsStarted < count {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+    }
+
+    func completeNext(
+        with result: Result<ProviderConnectionReport, Error>
+    ) {
+        continuations.removeFirst().resume(with: result)
     }
 }
 

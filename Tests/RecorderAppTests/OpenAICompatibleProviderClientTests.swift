@@ -62,6 +62,55 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         }
     }
 
+    func testOversizedModelDiscoveryResponseIsRejectedBeforeDecode() async throws {
+        let loader = RecordingProviderDataLoader(
+            response: .success(.init(
+                status: 200,
+                body: String(
+                    repeating: "x",
+                    count: OpenAICompatibleProviderClient
+                        .maximumModelDiscoveryResponseBytes + 1
+                )
+            ))
+        )
+
+        do {
+            _ = try await OpenAICompatibleProviderClient(loader: loader)
+                .testConnection(profile: try makeProfile(), apiKey: nil)
+            XCTFail("Expected oversized response failure")
+        } catch {
+            XCTAssertEqual(
+                error as? ProviderConnectionError,
+                .modelDiscoveryResponseTooLarge
+            )
+            XCTAssertFalse(error.localizedDescription.contains("xxxxx"))
+        }
+    }
+
+    func testExcessiveModelDiscoveryItemsAreRejectedBeforeRender() async throws {
+        let itemCount = OpenAICompatibleProviderClient
+            .maximumDiscoveredModelCount + 1
+        let body = #"{"data":["#
+            + Array(repeating: #"{"id":"any/provider:model"}"#, count: itemCount)
+                .joined(separator: ",")
+            + "]}"
+        let loader = RecordingProviderDataLoader(
+            response: .success(.init(status: 200, body: body))
+        )
+
+        do {
+            _ = try await OpenAICompatibleProviderClient(loader: loader)
+                .testConnection(profile: try makeProfile(), apiKey: nil)
+            XCTFail("Expected excessive model item failure")
+        } catch {
+            XCTAssertEqual(
+                error as? ProviderConnectionError,
+                .tooManyDiscoveredModels
+            )
+            XCTAssertFalse(error.localizedDescription.contains("any/provider:model"))
+        }
+    }
+
     private func makeProfile() throws -> OpenAICompatibleProviderProfile {
         try OpenAICompatibleProviderProfile.validated(
             baseURLText: "https://api.example.com/v1",

@@ -2,12 +2,12 @@ import SwiftUI
 
 @MainActor
 final class AIProviderSettingsModel: ObservableObject {
-    @Published var baseURLText = ""
-    @Published var apiKeyReplacement = ""
-    @Published var asrModel = ""
-    @Published var llmModel = ""
-    @Published var language = ""
-    @Published var prompt = ""
+    @Published var baseURLText = "" { didSet { invalidateConnectionTest() } }
+    @Published var apiKeyReplacement = "" { didSet { invalidateConnectionTest() } }
+    @Published var asrModel = "" { didSet { invalidateConnectionTest() } }
+    @Published var llmModel = "" { didSet { invalidateConnectionTest() } }
+    @Published var language = "" { didSet { invalidateConnectionTest() } }
+    @Published var prompt = "" { didSet { invalidateConnectionTest() } }
     @Published private(set) var discoveredModels: [String] = []
     @Published private(set) var hasStoredAPIKey = false
     @Published private(set) var hasSavedProfile = false
@@ -17,6 +17,7 @@ final class AIProviderSettingsModel: ObservableObject {
 
     private let repository: any OpenAICompatibleProviderManaging
     private let client: any ProviderConnectionTesting
+    private var connectionTestGeneration: UInt64 = 0
 
     init(
         repository: any OpenAICompatibleProviderManaging,
@@ -36,6 +37,7 @@ final class AIProviderSettingsModel: ObservableObject {
     }
 
     func save() {
+        invalidateConnectionTest()
         do {
             let profile = try draftProfile()
             try repository.save(
@@ -53,6 +55,7 @@ final class AIProviderSettingsModel: ObservableObject {
     }
 
     func removeAPIKey() {
+        invalidateConnectionTest()
         do {
             try repository.removeAPIKey()
             apiKeyReplacement = ""
@@ -65,8 +68,7 @@ final class AIProviderSettingsModel: ObservableObject {
     }
 
     func testConnection() async {
-        isTesting = true
-        defer { isTesting = false }
+        let generation = beginConnectionTest()
         do {
             let profile = try draftProfile()
             let snapshot = try repository.snapshot(overriding: profile)
@@ -74,17 +76,22 @@ final class AIProviderSettingsModel: ObservableObject {
                 profile: profile,
                 apiKey: snapshot.apiKey
             )
+            guard generation == connectionTestGeneration else { return }
             discoveredModels = report.models
             status = report.supportsModelDiscovery
                 ? "Connected; model list available"
                 : "Connected; enter models manually"
             statusIsError = false
+            isTesting = false
         } catch {
+            guard generation == connectionTestGeneration else { return }
             present(error)
+            isTesting = false
         }
     }
 
     func performStartupMigration(settingsURL: URL) {
+        invalidateConnectionTest()
         do {
             _ = try repository.migrateLegacyIfNeeded(settingsURL: settingsURL)
             reload()
@@ -95,7 +102,8 @@ final class AIProviderSettingsModel: ObservableObject {
         }
     }
 
-    private func reload() {
+    func reload() {
+        invalidateConnectionTest()
         do {
             guard let profile = try repository.loadProfile() else {
                 hasSavedProfile = false
@@ -133,5 +141,16 @@ final class AIProviderSettingsModel: ObservableObject {
     private func present(_: Error) {
         status = "Could not update provider settings."
         statusIsError = true
+    }
+
+    private func beginConnectionTest() -> UInt64 {
+        connectionTestGeneration &+= 1
+        isTesting = true
+        return connectionTestGeneration
+    }
+
+    private func invalidateConnectionTest() {
+        connectionTestGeneration &+= 1
+        isTesting = false
     }
 }

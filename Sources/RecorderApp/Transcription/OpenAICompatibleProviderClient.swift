@@ -39,6 +39,8 @@ protocol ProviderConnectionTesting: Sendable {
 enum ProviderConnectionError: LocalizedError, Equatable {
     case invalidResponse
     case authenticationRejected
+    case modelDiscoveryResponseTooLarge
+    case tooManyDiscoveredModels
     case httpStatus(Int)
 
     var errorDescription: String? {
@@ -47,6 +49,10 @@ enum ProviderConnectionError: LocalizedError, Equatable {
             "The provider returned an invalid response."
         case .authenticationRejected:
             "The provider rejected the API key."
+        case .modelDiscoveryResponseTooLarge:
+            "The provider returned too much model discovery data."
+        case .tooManyDiscoveredModels:
+            "The provider returned too many models."
         case .httpStatus(let status):
             "The provider returned HTTP \(status)."
         }
@@ -54,6 +60,9 @@ enum ProviderConnectionError: LocalizedError, Equatable {
 }
 
 struct OpenAICompatibleProviderClient: ProviderConnectionTesting {
+    static let maximumModelDiscoveryResponseBytes = 1_048_576
+    static let maximumDiscoveredModelCount = 1_000
+
     private let loader: any ProviderHTTPDataLoading
 
     init(
@@ -80,7 +89,14 @@ struct OpenAICompatibleProviderClient: ProviderConnectionTesting {
         let (data, response) = try await loader.data(for: request)
         switch response.statusCode {
         case 200..<300:
+            guard data.count <= Self.maximumModelDiscoveryResponseBytes else {
+                throw ProviderConnectionError.modelDiscoveryResponseTooLarge
+            }
             let decoded = try? JSONDecoder().decode(ModelList.self, from: data)
+            if let decoded,
+               decoded.data.count > Self.maximumDiscoveredModelCount {
+                throw ProviderConnectionError.tooManyDiscoveredModels
+            }
             return ProviderConnectionReport(
                 supportsModelDiscovery: decoded != nil,
                 models: decoded?.data.map(\.id).sorted() ?? []

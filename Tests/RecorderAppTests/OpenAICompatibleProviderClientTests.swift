@@ -101,7 +101,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         XCTAssertEqual(ControlledURLProtocol.stopLoadingCount, 1)
     }
 
-    func testURLSessionTransportCancellationCompletesOnceAndCleansUpLateCallbacks() async {
+    func testURLSessionTransportCancellationDuringUploadCompletesOnceAndCleansUpLateCallbacks() async {
         let transport = URLSessionProviderHTTPTransport(
             configuration: controlledSessionConfiguration()
         )
@@ -110,9 +110,18 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
             protocolInstance.respond(status: 200, body: nil)
         }
 
+        var request = URLRequest(
+            url: URL(
+                string:
+                    "https://provider.test/v1/audio/transcriptions"
+            )!
+        )
+        request.httpMethod = "POST"
+        request.httpBody = Data(repeating: 7, count: 4_096)
+        let uploadRequest = request
         let task = Task {
             try await transport.response(
-                for: URLRequest(url: URL(string: "https://provider.test/models")!),
+                for: uploadRequest,
                 maximumBodyBytes: 32
             )
         }

@@ -97,6 +97,31 @@ enum ProviderRedirectPolicy {
         return effectivePort(for: source) == effectivePort(for: destination)
     }
 
+    static func redirectedRequest(
+        from source: URLRequest,
+        proposed: URLRequest
+    ) -> URLRequest? {
+        guard let sourceURL = source.url,
+              let destinationURL = proposed.url,
+              allows(from: sourceURL, to: destinationURL) else {
+            return nil
+        }
+        var redirected = proposed
+        redirected.setValue(
+            nil,
+            forHTTPHeaderField: "Authorization"
+        )
+        if let authorization = source.value(
+            forHTTPHeaderField: "Authorization"
+        ) {
+            redirected.setValue(
+                authorization,
+                forHTTPHeaderField: "Authorization"
+            )
+        }
+        return redirected
+    }
+
     private static func effectivePort(for url: URL) -> Int? {
         if let port = url.port {
             return port
@@ -300,6 +325,7 @@ struct OpenAICompatibleTranscriptionClient: Sendable {
                 for: request,
                 maximumBodyBytes: Self.maximumResponseBytes
             )
+            try Task.checkCancellation()
             switch response.statusCode {
             case 200..<300:
                 let payload = try? JSONDecoder().decode(

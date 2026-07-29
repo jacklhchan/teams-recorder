@@ -103,6 +103,42 @@ final class RecordingLibraryQueryTests: XCTestCase {
         XCTAssertLessThanOrEqual(snippet?.count ?? .max, 220)
     }
 
+    func testSearchDocumentReadsAtMostFourMiBOfTranscript() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "library-search-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let transcript = Data(
+            repeating: Character("a").asciiValue!,
+            count:
+                RecordingLibrarySearchDocument.maximumTranscriptBytes
+                + 32
+        )
+        try transcript.write(
+            to: folder.appendingPathComponent(
+                TranscriptDocumentStore.editableFileName
+            )
+        )
+
+        let document = RecordingLibrarySearchDocument.load(
+            folderURL: folder,
+            displayName: "Large transcript",
+            createdAt: Date(timeIntervalSince1970: 0),
+            metadata: .init()
+        )
+
+        XCTAssertEqual(
+            document.transcriptText.utf8.count,
+            RecordingLibrarySearchDocument.maximumTranscriptBytes
+        )
+    }
+
     private func makeSession(
         name: String,
         createdAt: Date = Date(timeIntervalSince1970: 0),

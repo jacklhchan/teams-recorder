@@ -31,7 +31,14 @@ final class RecordingLibraryTests: XCTestCase {
               "title": "Old",
               "windowsCapture": {
                 "device": "default",
-                "exclusive": false
+                "exclusive": false,
+                "routes": [
+                  {
+                    "kind": "communications",
+                    "channels": [1, 2, {"label": "mixed"}]
+                  },
+                  ["fallback", true, null]
+                ]
               }
             }
             """#.utf8
@@ -57,6 +64,21 @@ final class RecordingLibraryTests: XCTestCase {
                 as? String,
             "default"
         )
+        let routes = try XCTUnwrap(
+            (object["windowsCapture"] as? [String: Any])?["routes"]
+                as? [Any]
+        )
+        let primary = try XCTUnwrap(routes.first as? [String: Any])
+        let channels = try XCTUnwrap(primary["channels"] as? [Any])
+        XCTAssertEqual(channels[0] as? Int, 1)
+        XCTAssertEqual(
+            (channels[2] as? [String: Any])?["label"] as? String,
+            "mixed"
+        )
+        let fallback = try XCTUnwrap(routes.last as? [Any])
+        XCTAssertEqual(fallback[0] as? String, "fallback")
+        XCTAssertEqual(fallback[1] as? Bool, true)
+        XCTAssertTrue(fallback[2] is NSNull)
     }
 
     func testMetadataEncodingIncludesVersionedSearchFields() throws {

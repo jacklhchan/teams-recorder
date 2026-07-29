@@ -43,6 +43,54 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         )
     }
 
+    func testRedirectedRequestCarriesAuthorizationOnlyToSameOrigin() throws {
+        var source = URLRequest(
+            url: try XCTUnwrap(
+                URL(
+                    string:
+                        "https://api.example/v1/audio/transcriptions"
+                )
+            )
+        )
+        source.setValue(
+            "Bearer private-key",
+            forHTTPHeaderField: "Authorization"
+        )
+        let sameOrigin = URLRequest(
+            url: try XCTUnwrap(
+                URL(
+                    string:
+                        "https://api.example/v2/audio/transcriptions"
+                )
+            )
+        )
+        var crossOrigin = URLRequest(
+            url: try XCTUnwrap(
+                URL(string: "https://evil.example/steal")
+            )
+        )
+        crossOrigin.setValue(
+            "Bearer private-key",
+            forHTTPHeaderField: "Authorization"
+        )
+
+        XCTAssertEqual(
+            ProviderRedirectPolicy.redirectedRequest(
+                from: source,
+                proposed: sameOrigin
+            )?.value(forHTTPHeaderField: "Authorization"),
+            "Bearer private-key"
+        )
+        XCTAssertNil(
+            ProviderRedirectPolicy.redirectedRequest(
+                from: source,
+                proposed: crossOrigin
+            ),
+            "Rejecting the request prevents the bearer token from leaving "
+                + "the configured origin."
+        )
+    }
+
     func testMultipartBuilderCapsAudioAndIncludesTypedFields() throws {
         let builder = TranscriptionMultipartBuilder(
             maximumAudioBytes: 3,
@@ -196,6 +244,103 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         )
     }
 
+    func testTransientFailuresStopAtMaximumRetryBudget() async throws {
+        let transport = RecordingTranscriptionTransport(
+            responses: [
+                .http(status: 503, body: "{}"),
+                .http(status: 503, body: "{}"),
+                .http(status: 503, body: "{}"),
+                .http(status: 200, body: #"{"text":"too late"}"#)
+            ]
+        )
+        let sleeps = LockedValues<Double>()
+        let client = makeClient(
+            transport: transport,
+            sleep: { sleeps.append($0) }
+        )
+
+        do {
+            _ = try await client.transcribe(
+                audioData: Data([1]),
+                fileName: "chunk.m4a",
+                snapshot: try makeSnapshot(),
+                prompt: ""
+            )
+            XCTFail("Expected the retry budget to be exhausted")
+        } catch {
+            XCTAssertEqual(
+                error as? OpenAICompatibleTranscriptionError,
+                .httpStatus(503)
+            )
+        }
+
+        XCTAssertEqual(transport.requests.count, 3)
+        XCTAssertEqual(sleeps.values.count, 2)
+    }
+
+    func testCancellationDuringRetryDelayStopsBeforeAnotherUpload() async throws {
+        let transport = RecordingTranscriptionTransport(
+            responses: [
+                .http(status: 503, body: "{}"),
+                .http(status: 200, body: #"{"text":"too late"}"#)
+            ]
+        )
+        let sleeps = LockedValues<Double>()
+        let client = makeClient(
+            transport: transport,
+            sleep: { seconds in
+                sleeps.append(seconds)
+                try await Task.sleep(for: .seconds(60))
+            }
+        )
+        let task = Task {
+            try await client.transcribe(
+                audioData: Data([1]),
+                fileName: "chunk.m4a",
+                snapshot: try makeSnapshot(),
+                prompt: ""
+            )
+        }
+        for _ in 0..<500 where sleeps.values.isEmpty {
+            await Task.yield()
+        }
+
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation during the retry delay")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(transport.requests.count, 1)
+    }
+
+    func testCancellationBeforeResponseProcessingRejectsCompletedBody() async throws {
+        let transport = RecordingTranscriptionTransport(
+            responses: [
+                .http(
+                    status: 200,
+                    body: #"{"text":"must not publish"}"#,
+                    cancelTaskBeforeReturning: true
+                )
+            ]
+        )
+        let client = makeClient(transport: transport)
+
+        do {
+            _ = try await client.transcribe(
+                audioData: Data([1]),
+                fileName: "chunk.m4a",
+                snapshot: try makeSnapshot(),
+                prompt: ""
+            )
+            XCTFail("Expected cancellation before response processing")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
     func testConfiguration4xxStopsWithoutRetryingJSONRequest() async throws {
         let transport = RecordingTranscriptionTransport(
             responses: [
@@ -311,16 +456,19 @@ private final class RecordingTranscriptionTransport:
         let status: Int
         let body: Data
         let headers: [String: String]
+        let cancelTaskBeforeReturning: Bool
 
         static func http(
             status: Int,
             body: String,
-            headers: [String: String] = [:]
+            headers: [String: String] = [:],
+            cancelTaskBeforeReturning: Bool = false
         ) -> StubResponse {
             .init(
                 status: status,
                 body: Data(body.utf8),
-                headers: headers
+                headers: headers,
+                cancelTaskBeforeReturning: cancelTaskBeforeReturning
             )
         }
     }
@@ -342,6 +490,9 @@ private final class RecordingTranscriptionTransport:
             requests.append(request)
             self.maximumBodyBytes.append(maximumBodyBytes)
             return responses.removeFirst()
+        }
+        if response.cancelTaskBeforeReturning {
+            withUnsafeCurrentTask { $0?.cancel() }
         }
         return (
             response.body,

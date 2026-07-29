@@ -33,6 +33,43 @@ protocol PlaybackObserving: AnyObject {
     func removeEndObserver(_ token: Any)
 }
 
+private final class PlaybackDeinitCleanup: @unchecked Sendable {
+    private let player: AVPlayer
+    private let observer: PlaybackObserving
+    private let currentItem: AVPlayerItem?
+    private let periodicObserver: Any?
+    private let endObserver: Any?
+
+    init(
+        player: AVPlayer,
+        observer: PlaybackObserving,
+        currentItem: AVPlayerItem?,
+        periodicObserver: Any?,
+        endObserver: Any?
+    ) {
+        self.player = player
+        self.observer = observer
+        self.currentItem = currentItem
+        self.periodicObserver = periodicObserver
+        self.endObserver = endObserver
+    }
+
+    @MainActor
+    func perform() {
+        player.pause()
+        if let currentItem {
+            observer.cancelPendingSeeks(for: currentItem)
+        }
+        if let periodicObserver {
+            observer.removePeriodicTimeObserver(periodicObserver, from: player)
+        }
+        if let endObserver {
+            observer.removeEndObserver(endObserver)
+        }
+        player.replaceCurrentItem(with: nil)
+    }
+}
+
 @MainActor
 final class PlaybackCoordinator: PlaybackCoordinating {
     let player: AVPlayer
@@ -58,8 +95,23 @@ final class PlaybackCoordinator: PlaybackCoordinating {
         self.init(player: AVPlayer(), observer: AVPlayerPlaybackObserver())
     }
 
-    isolated deinit {
-        removeObserversAndItem()
+    deinit {
+        let cleanup = PlaybackDeinitCleanup(
+            player: player,
+            observer: observer,
+            currentItem: currentItem,
+            periodicObserver: periodicObserver,
+            endObserver: endObserver
+        )
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                cleanup.perform()
+            }
+        } else {
+            DispatchQueue.main.async {
+                cleanup.perform()
+            }
+        }
     }
 
     func load(_ session: RecordingSession) async throws {

@@ -18,9 +18,6 @@ let package = Package(
         .executableTarget(
             name: "RecorderApp",
             dependencies: ["VirtualMicBridge"],
-            swiftSettings: [
-                .enableExperimentalFeature("IsolatedDeinit")
-            ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AudioToolbox"),

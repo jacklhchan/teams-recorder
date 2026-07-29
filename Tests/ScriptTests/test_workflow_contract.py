@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
 PACKAGE_MANIFEST = ROOT / "Package.swift"
+PLAYBACK_COORDINATOR = (
+    ROOT / "Sources/RecorderApp/Playback/PlaybackCoordinator.swift"
+)
 CHECKOUT_SHA = "34e114876b0b11c390a56381ad16ebd13914f8d5"
 UPLOAD_ARTIFACT_SHA = "ea165f8d65b6e75b540449e92b4886f43607fa02"
 REQUIRED_JOBS = {"swift-tests", "script-tests", "packaging", "policy"}
@@ -141,13 +144,15 @@ class WorkflowContractTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assert_step_command(packaging, name, command)
 
-    def test_package_enables_isolated_deinit_for_ci_toolchains(self):
+    def test_ci_sources_avoid_unavailable_isolated_deinit_feature(self):
         manifest = PACKAGE_MANIFEST.read_text(encoding="utf-8")
+        playback_coordinator = PLAYBACK_COORDINATOR.read_text(encoding="utf-8")
 
-        self.assertIn(
+        self.assertNotIn(
             '.enableExperimentalFeature("IsolatedDeinit")',
             manifest,
         )
+        self.assertNotIn("isolated deinit", playback_coordinator)
 
     def test_ci_is_read_only_and_uses_fully_pinned_checkout(self):
         workflow = self.read_workflow()

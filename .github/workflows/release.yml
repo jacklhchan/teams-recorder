@@ -1,0 +1,202 @@
+name: Production Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: CFBundleShortVersionString
+        required: true
+        type: string
+      build_number:
+        description: CFBundleVersion
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: production
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Verify releasable ref
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Production releases must run from main." >&2
+            exit 64
+          fi
+      - name: Validate release inputs
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] || {
+            echo "Release version must contain two or three numeric components." >&2
+            exit 64
+          }
+          [[ "$RELEASE_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+            echo "Release build number must be a positive integer." >&2
+            exit 64
+          }
+      - name: Run release gates
+        run: |
+          set -euo pipefail
+          swift test
+          swift test
+          python3 -m unittest discover \
+            -s Tests/ScriptTests \
+            -p 'test_*.py' \
+            -v
+          Tests/PackagingTests/run-tests.sh
+          Tests/VirtualMicDriverTests/run-tests.sh
+          Tests/VirtualMicDriverTests/run-bundle-tests.sh
+          Tests/VirtualMicDriverTests/run-script-tests.sh
+      - name: Preflight required secrets
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          PRIVATE_KEY: ${{ secrets.MACOS_NOTARY_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          for value in "$P12" "$P12_PASSWORD" "$IDENTITY" \
+            "$KEY_ID" "$ISSUER_ID" "$PRIVATE_KEY"; do
+            test -n "$value" || {
+              echo "A required production secret is missing." >&2
+              exit 78
+            }
+          done
+      - name: Configure temporary signing keychain
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          PRIVATE_KEY: ${{ secrets.MACOS_NOTARY_PRIVATE_KEY_BASE64 }}
+          KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KEYCHAIN="$RUNNER_TEMP/lmr-signing.keychain-db"
+          ORIGINAL_KEYCHAINS="$RUNNER_TEMP/lmr-original-keychains"
+          SIGNING_P12="$RUNNER_TEMP/signing.p12"
+          NOTARY_KEY="$RUNNER_TEMP/AuthKey.p8"
+          security list-keychains -d user > "$ORIGINAL_KEYCHAINS"
+          echo "LMR_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          echo "LMR_ORIGINAL_KEYCHAINS=$ORIGINAL_KEYCHAINS" >> "$GITHUB_ENV"
+          echo "LMR_SIGNING_P12=$SIGNING_P12" >> "$GITHUB_ENV"
+          echo "LMR_NOTARY_KEY=$NOTARY_KEY" >> "$GITHUB_ENV"
+          configure_cleanup() {
+            status=$?
+            trap - ERR
+            if [[ -s "$ORIGINAL_KEYCHAINS" ]]; then
+              ORIGINAL_KEYCHAINS_ARRAY=()
+              while IFS= read -r keychain; do
+                keychain="${keychain#\"}"
+                keychain="${keychain%\"}"
+                if [[ -n "$keychain" ]]; then
+                  ORIGINAL_KEYCHAINS_ARRAY+=("$keychain")
+                fi
+              done < "$ORIGINAL_KEYCHAINS"
+              security list-keychains -d user -s "${ORIGINAL_KEYCHAINS_ARRAY[@]}" || true
+            fi
+            if [[ -e "$KEYCHAIN" ]]; then
+              security delete-keychain "$KEYCHAIN" || true
+            fi
+            rm -f "$SIGNING_P12" "$NOTARY_KEY" "$ORIGINAL_KEYCHAINS" || true
+            exit "$status"
+          }
+          trap configure_cleanup ERR
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          printf '%s' "$P12" | base64 --decode > "$SIGNING_P12"
+          printf '%s' "$PRIVATE_KEY" | base64 --decode > "$NOTARY_KEY"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$SIGNING_P12" \
+            -k "$KEYCHAIN" \
+            -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN"
+          ORIGINAL_KEYCHAINS_ARRAY=()
+          while IFS= read -r keychain; do
+            keychain="${keychain#\"}"
+            keychain="${keychain%\"}"
+            if [[ -n "$keychain" ]]; then
+              ORIGINAL_KEYCHAINS_ARRAY+=("$keychain")
+            fi
+          done < "$ORIGINAL_KEYCHAINS"
+          security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS_ARRAY[@]}"
+          xcrun notarytool store-credentials lmr-production \
+            --key "$NOTARY_KEY" \
+            --key-id "$KEY_ID" \
+            --issuer "$ISSUER_ID" \
+            --keychain "$KEYCHAIN"
+          trap - ERR
+      - name: Build, sign, notarize, and verify
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          ./scripts/build-release.sh \
+            --version "$RELEASE_VERSION" \
+            --build-number "$RELEASE_BUILD_NUMBER" \
+            --signing-identity "$SIGNING_IDENTITY" \
+            --notary-profile lmr-production \
+            --notary-keychain "$LMR_KEYCHAIN" \
+            --output-dir "$RUNNER_TEMP/release"
+      - name: Verify portable checksum
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release"
+          /usr/bin/shasum -a 256 -c ./*.sha256
+      - name: Upload verified release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Local-Meeting-Recorder
+          path: |
+            ${{ runner.temp }}/release/*.zip
+            ${{ runner.temp }}/release/*.sha256
+            ${{ runner.temp }}/release/LICENSE
+            ${{ runner.temp }}/release/THIRD_PARTY_NOTICES.md
+          if-no-files-found: error
+      - name: Remove temporary credentials
+        if: always()
+        run: |
+          set -euo pipefail
+          KEYCHAIN="${LMR_KEYCHAIN:-$RUNNER_TEMP/lmr-signing.keychain-db}"
+          ORIGINAL_KEYCHAINS_FILE="${LMR_ORIGINAL_KEYCHAINS:-$RUNNER_TEMP/lmr-original-keychains}"
+          SIGNING_P12="${LMR_SIGNING_P12:-$RUNNER_TEMP/signing.p12}"
+          NOTARY_KEY="${LMR_NOTARY_KEY:-$RUNNER_TEMP/AuthKey.p8}"
+          if [[ -s "$ORIGINAL_KEYCHAINS_FILE" ]]; then
+            ORIGINAL_KEYCHAINS=()
+            while IFS= read -r keychain; do
+              keychain="${keychain#\"}"
+              keychain="${keychain%\"}"
+              if [[ -n "$keychain" ]]; then
+                ORIGINAL_KEYCHAINS+=("$keychain")
+              fi
+            done < "$ORIGINAL_KEYCHAINS_FILE"
+            security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"
+          fi
+          if [[ -e "$KEYCHAIN" ]]; then
+            security delete-keychain "$KEYCHAIN" || true
+          fi
+          rm -f \
+            "$SIGNING_P12" \
+            "$NOTARY_KEY" \
+            "$ORIGINAL_KEYCHAINS_FILE"

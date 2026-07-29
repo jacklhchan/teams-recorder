@@ -6,7 +6,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
+RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
 CHECKOUT_SHA = "34e114876b0b11c390a56381ad16ebd13914f8d5"
+UPLOAD_ARTIFACT_SHA = "ea165f8d65b6e75b540449e92b4886f43607fa02"
 REQUIRED_JOBS = {"swift-tests", "script-tests", "packaging", "policy"}
 FORBIDDEN_WORKFLOW_TERMS = (
     "install",
@@ -166,6 +168,192 @@ class WorkflowContractTests(unittest.TestCase):
                     self.assert_no_forbidden_workflow_terms(
                         f"{workflow}\n# injected review fixture: {forbidden}\n"
                     )
+
+
+class ReleaseWorkflowContractTests(unittest.TestCase):
+    def read_workflow(self):
+        self.assertTrue(
+            RELEASE_WORKFLOW.is_file(),
+            f"Missing workflow: {RELEASE_WORKFLOW}",
+        )
+        return RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_release_yaml_is_syntax_valid_with_ruby_stdlib(self):
+        result = subprocess.run(
+            [
+                "/usr/bin/ruby",
+                "-e",
+                'require "yaml"; YAML.parse_file(ARGV.fetch(0))',
+                str(RELEASE_WORKFLOW),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_is_manual_protected_and_read_only(self):
+        workflow = self.read_workflow()
+        self.assertRegex(workflow, r"(?m)^  workflow_dispatch:$")
+        self.assertNotIn("pull_request:", workflow)
+        self.assertNotIn("push:", workflow)
+        self.assertRegex(workflow, r"(?m)^permissions:\n  contents: read$")
+        self.assertRegex(workflow, r"(?m)^  release:\n")
+        self.assertEqual(
+            re.findall(r"(?m)^  ([a-z][a-z-]*):\n", workflow.split("jobs:\n", 1)[1]),
+            ["release"],
+        )
+        self.assertRegex(workflow, r"(?m)^    runs-on: macos-15$")
+        self.assertRegex(workflow, r"(?m)^    environment: production$")
+        self.assertIn("refs/heads/main", workflow)
+
+    def test_release_uses_exact_pinned_actions_and_artifacts(self):
+        workflow = self.read_workflow()
+        self.assertRegex(
+            workflow,
+            rf"(?m)^      - uses: actions/checkout@{CHECKOUT_SHA} # v4\.3\.1$",
+        )
+        self.assertRegex(
+            workflow,
+            rf"(?m)^        uses: actions/upload-artifact@{UPLOAD_ARTIFACT_SHA} # v4\.6\.2$",
+        )
+        actions = re.findall(r"(?m)^\s*(?:- )?uses: ([^\s#]+)", workflow)
+        self.assertEqual(
+            actions,
+            [
+                f"actions/checkout@{CHECKOUT_SHA}",
+                f"actions/upload-artifact@{UPLOAD_ARTIFACT_SHA}",
+            ],
+        )
+        self.assertIn("${{ runner.temp }}/release/*.zip", workflow)
+        self.assertIn("${{ runner.temp }}/release/*.sha256", workflow)
+        self.assertIn("${{ runner.temp }}/release/LICENSE", workflow)
+        self.assertIn("${{ runner.temp }}/release/THIRD_PARTY_NOTICES.md", workflow)
+
+    def test_release_inputs_are_validated_through_step_environment(self):
+        workflow = self.read_workflow()
+        self.assertRegex(
+            workflow,
+            r"(?ms)- name: Validate release inputs\n"
+            r"        env:\n"
+            r"          RELEASE_VERSION: \$\{\{ inputs\.version \}\}\n"
+            r"          RELEASE_BUILD_NUMBER: \$\{\{ inputs\.build_number \}\}",
+        )
+        self.assertIn('[[ "$RELEASE_VERSION" =~ ^[0-9]+(\\.[0-9]+){1,2}$ ]]', workflow)
+        self.assertIn('[[ "$RELEASE_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]', workflow)
+        run_blocks = re.findall(r"(?ms)^        run: \|\n(.*?)(?=^      - |\Z)", workflow)
+        self.assertTrue(run_blocks)
+        for run_block in run_blocks:
+            with self.subTest(run_block=run_block):
+                self.assertNotRegex(run_block, r"\$\{\{\s*inputs\.")
+                self.assertIn("set -euo pipefail", run_block)
+                self.assertNotIn("set -x", run_block)
+
+    def test_release_gates_and_secret_preflight_precede_import(self):
+        workflow = self.read_workflow()
+        self.assertLess(
+            workflow.index("Verify releasable ref"),
+            workflow.index("Configure temporary signing keychain"),
+        )
+        self.assertLess(
+            workflow.index("Validate release inputs"),
+            workflow.index("Preflight required secrets"),
+        )
+        self.assertLess(
+            workflow.index("Run release gates"),
+            workflow.index("Configure temporary signing keychain"),
+        )
+        self.assertLess(
+            workflow.index("Preflight required secrets"),
+            workflow.index("Configure temporary signing keychain"),
+        )
+        for secret in (
+            "MACOS_CERTIFICATE_P12_BASE64",
+            "MACOS_CERTIFICATE_PASSWORD",
+            "MACOS_SIGNING_IDENTITY",
+            "MACOS_NOTARY_KEY_ID",
+            "MACOS_NOTARY_ISSUER_ID",
+            "MACOS_NOTARY_PRIVATE_KEY_BASE64",
+        ):
+            with self.subTest(secret=secret):
+                self.assertIn(secret, workflow)
+        self.assertIn("A required production secret is missing.", workflow)
+
+    def test_release_preserves_keychain_search_list_and_cleans_up(self):
+        workflow = self.read_workflow()
+        self.assertIn("umask 077", workflow)
+        self.assertIn('security list-keychains -d user > "$ORIGINAL_KEYCHAINS"', workflow)
+        self.assertIn(
+            'security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS_ARRAY[@]}"',
+            workflow,
+        )
+        self.assertLess(
+            workflow.index('echo "::add-mask::$KEYCHAIN_PASSWORD"'),
+            workflow.index('printf \'%s\' "$P12"'),
+        )
+        cleanup = workflow.split("- name: Remove temporary credentials", 1)[1]
+        self.assertIn("if: always()", cleanup)
+        self.assertIn('KEYCHAIN="${LMR_KEYCHAIN:-$RUNNER_TEMP/lmr-signing.keychain-db}"', cleanup)
+        self.assertLess(
+            cleanup.index('security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"'),
+            cleanup.index('security delete-keychain "$KEYCHAIN"'),
+        )
+        self.assertIn("$RUNNER_TEMP/signing.p12", cleanup)
+        self.assertIn("$RUNNER_TEMP/AuthKey.p8", cleanup)
+        self.assertIn("$RUNNER_TEMP/lmr-original-keychains", cleanup)
+
+    def test_release_configure_failure_trap_restores_before_mutation(self):
+        workflow = self.read_workflow()
+        configure = workflow.split("- name: Configure temporary signing keychain", 1)[1]
+        configure = configure.split("- name: Build, sign, notarize, and verify", 1)[0]
+        self.assertLess(
+            configure.index('echo "LMR_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"'),
+            configure.index('security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"'),
+        )
+        self.assertLess(
+            configure.index('echo "LMR_ORIGINAL_KEYCHAINS=$ORIGINAL_KEYCHAINS" >> "$GITHUB_ENV"'),
+            configure.index('security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"'),
+        )
+        self.assertLess(
+            configure.index('echo "LMR_SIGNING_P12=$SIGNING_P12" >> "$GITHUB_ENV"'),
+            configure.index('security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"'),
+        )
+        self.assertLess(
+            configure.index('echo "LMR_NOTARY_KEY=$NOTARY_KEY" >> "$GITHUB_ENV"'),
+            configure.index('security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"'),
+        )
+        self.assertIn("configure_cleanup()", configure)
+        self.assertIn("trap configure_cleanup ERR", configure)
+        trap_index = configure.index("trap configure_cleanup ERR")
+        mutation_index = configure.index('security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"')
+        self.assertLess(trap_index, mutation_index)
+        self.assertIn(
+            'security list-keychains -d user -s "${ORIGINAL_KEYCHAINS_ARRAY[@]}"',
+            configure,
+        )
+        self.assertIn('security delete-keychain "$KEYCHAIN" || true', configure)
+        self.assertNotIn("mapfile", workflow)
+        self.assertNotIn("readarray", workflow)
+        self.assertNotIn("eval", workflow)
+        self.assertNotRegex(workflow, r"\$\([^)]*security list-keychains")
+
+    def test_release_builds_notarized_artifacts_without_operational_side_effects(self):
+        workflow = self.read_workflow().lower()
+        self.assertIn("./scripts/build-release.sh", workflow)
+        self.assertIn("--notary-profile lmr-production", workflow)
+        self.assertIn("--notary-keychain \"$lmr_keychain\"", workflow)
+        self.assertIn('"$runner_temp/release"', workflow)
+        self.assertIn("/usr/bin/shasum -a 256 -c ./*.sha256", workflow)
+        for forbidden in (
+            "install",
+            "launch",
+            "tcc",
+            "teams",
+            "provider",
+            "github release",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, workflow)
 
 
 if __name__ == "__main__":

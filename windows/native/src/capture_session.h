@@ -25,6 +25,7 @@ public:
 
     RecorderNativeResult Start(CaptureSessionConfig config);
     RecorderNativeResult Stop();
+    RecorderNativeResult health_result() const;
     RecorderNativeStats stats() const;
     std::string last_error() const;
 

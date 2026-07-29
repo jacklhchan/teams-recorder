@@ -1,4 +1,5 @@
 using Recorder.Core;
+using TeamsRecorder.Windows.Application;
 
 var tests = new (string Name, Action Run)[]
 {
@@ -13,7 +14,14 @@ var tests = new (string Name, Action Run)[]
     ("disabling while starting cancels automatic start", DisableWhileStartingCancelsStart),
     ("manual start does not steal active automatic ownership", ManualStartDoesNotStealAutomaticOwnership),
     ("late completions are idempotent", LateCompletionsAreIdempotent),
-    ("failed automatic start waits for meeting end", FailedStartWaitsForMeetingEnd)
+    ("failed automatic start waits for meeting end", FailedStartWaitsForMeetingEnd),
+    ("native recording coordinator starts, refreshes, and stops", NativeCoordinatorStartsRefreshesAndStops),
+    ("native recording coordinator exposes copied endpoint snapshots", NativeCoordinatorExposesEndpointSnapshots),
+    ("native recording coordinator reports a failed start and allows retry", NativeCoordinatorReportsFailedStartAndAllowsRetry),
+    ("failed native stop faults the coordinator and blocks retries", NativeCoordinatorFaultsAfterFailedStop),
+    ("an in-recording native fault requests one cleanup stop", NativeCoordinatorRequestsCleanupAfterInRecordingFault),
+    ("native recording coordinator does not publish a late start after stop", NativeCoordinatorSuppressesLateStartAfterStop),
+    ("test recording stops exactly once after its scheduled delay", TestRecordingStopsExactlyOnce)
 };
 
 var failed = 0;
@@ -167,6 +175,203 @@ static void FailedStartWaitsForMeetingEnd()
     Equal(new TeamsAutoMeetingState.WaitingForMeeting(), snapshot.State);
 }
 
+static void NativeCoordinatorStartsRefreshesAndStops()
+{
+    var bridge = new FakeNativeRecorderBridge();
+    var coordinator = new RecordingCoordinator(bridge);
+    var request = SystemLoopbackRequest();
+
+    var started = coordinator.StartAsync(request).GetAwaiter().GetResult();
+    Equal(RecordingCoordinatorState.Recording, started.State);
+    Equal(request, started.Request!);
+
+    bridge.Stats = bridge.Stats with
+    {
+        Packets = 4,
+        InputFrames = 1_920,
+        OutputFrames = 1_920,
+        Peak = 0.75F,
+    };
+    var refreshed = coordinator.RefreshAsync().GetAwaiter().GetResult();
+    Equal((ulong)4, refreshed.Stats.Packets);
+    Equal(0.75F, refreshed.Stats.Peak);
+
+    var firstStop = coordinator.StopAsync();
+    var secondStop = coordinator.StopAsync();
+    var stopped = firstStop.GetAwaiter().GetResult();
+    secondStop.GetAwaiter().GetResult();
+    Equal(RecordingCoordinatorState.Stopped, stopped.State);
+    Equal(1, bridge.StopCalls);
+}
+
+static void NativeCoordinatorExposesEndpointSnapshots()
+{
+    var expectedEndpoint = new NativeCaptureEndpoint(
+        CaptureEndpointFlow.Render,
+        EndpointDefaultRole.Console | EndpointDefaultRole.Multimedia,
+        "render-endpoint-id",
+        "Speakers");
+    var bridge = new FakeNativeRecorderBridge
+    {
+        EndpointResult = new NativeEndpointEnumerationResult(
+            NativeOperationResult.Success(),
+            [expectedEndpoint]),
+    };
+    var coordinator = new RecordingCoordinator(bridge);
+
+    var endpoints = coordinator.RefreshEndpointsAsync().GetAwaiter().GetResult();
+    if (!endpoints.IsSuccess)
+    {
+        throw new InvalidOperationException(endpoints.Operation.Error);
+    }
+    Equal(1, endpoints.Endpoints.Count);
+    Equal(expectedEndpoint, endpoints.Endpoints[0]);
+}
+
+static void NativeCoordinatorReportsFailedStartAndAllowsRetry()
+{
+    var bridge = new FakeNativeRecorderBridge
+    {
+        StartResult = NativeOperationResult.Failure(
+            NativeRecorderResult.CaptureError,
+            "The selected microphone is unavailable."),
+    };
+    var coordinator = new RecordingCoordinator(bridge);
+
+    var failed = coordinator.StartAsync(SystemLoopbackRequest()).GetAwaiter().GetResult();
+    Equal(RecordingCoordinatorState.Failed, failed.State);
+    Equal("The selected microphone is unavailable.", failed.Error!);
+
+    bridge.StartResult = NativeOperationResult.Success();
+    var retry = coordinator.StartAsync(SystemLoopbackRequest("retry.wav")).GetAwaiter().GetResult();
+    Equal(RecordingCoordinatorState.Recording, retry.State);
+    Equal(2L, retry.Generation);
+}
+
+static void NativeCoordinatorFaultsAfterFailedStop()
+{
+    var bridge = new FakeNativeRecorderBridge
+    {
+        StopResult = NativeOperationResult.Failure(
+            NativeRecorderResult.CaptureError,
+            "The capture writer could not finalize."),
+    };
+    var coordinator = new RecordingCoordinator(bridge);
+
+    coordinator.StartAsync(SystemLoopbackRequest()).GetAwaiter().GetResult();
+    var faulted = coordinator.StopAsync().GetAwaiter().GetResult();
+    Equal(RecordingCoordinatorState.Faulted, faulted.State);
+    if (faulted.NeedsNativeCleanup)
+    {
+        throw new InvalidOperationException("A failed stop must not schedule another native cleanup attempt.");
+    }
+    Throws<InvalidOperationException>(() => coordinator.StartAsync(SystemLoopbackRequest("retry.wav")));
+}
+
+static void NativeCoordinatorRequestsCleanupAfterInRecordingFault()
+{
+    var bridge = new FakeNativeRecorderBridge
+    {
+        SnapshotResult = NativeRecorderResult.CaptureError,
+        SnapshotError = "The capture writer reported an I/O failure.",
+        StopResult = NativeOperationResult.Failure(
+            NativeRecorderResult.CaptureError,
+            "The capture writer reported an I/O failure."),
+    };
+    var coordinator = new RecordingCoordinator(bridge);
+
+    coordinator.StartAsync(SystemLoopbackRequest()).GetAwaiter().GetResult();
+    var faulted = coordinator.RefreshAsync().GetAwaiter().GetResult();
+    Equal(RecordingCoordinatorState.Faulted, faulted.State);
+    if (!faulted.NeedsNativeCleanup)
+    {
+        throw new InvalidOperationException("An in-recording native fault must request cleanup.");
+    }
+
+    var afterCleanup = coordinator.StopAsync().GetAwaiter().GetResult();
+    Equal(1, bridge.StopCalls);
+    Equal(RecordingCoordinatorState.Faulted, afterCleanup.State);
+    if (afterCleanup.NeedsNativeCleanup)
+    {
+        throw new InvalidOperationException("The failed cleanup must not loop indefinitely.");
+    }
+}
+
+static void NativeCoordinatorSuppressesLateStartAfterStop()
+{
+    using var releaseStart = new ManualResetEventSlim(false);
+    var bridge = new FakeNativeRecorderBridge
+    {
+        StartRelease = releaseStart,
+    };
+    var coordinator = new RecordingCoordinator(bridge);
+    var states = new List<RecordingCoordinatorState>();
+    coordinator.SnapshotChanged += (_, changed) =>
+    {
+        lock (states)
+        {
+            states.Add(changed.State);
+        }
+    };
+
+    var startTask = coordinator.StartAsync(SystemLoopbackRequest());
+    if (!bridge.StartEntered.Task.Wait(TimeSpan.FromSeconds(2)))
+    {
+        throw new InvalidOperationException("The fake native start did not begin.");
+    }
+
+    var stopTask = coordinator.StopAsync();
+    Equal(RecordingCoordinatorState.Stopping, coordinator.Snapshot.State);
+    releaseStart.Set();
+
+    startTask.GetAwaiter().GetResult();
+    var stopped = stopTask.GetAwaiter().GetResult();
+    Equal(RecordingCoordinatorState.Stopped, stopped.State);
+    Equal(1, bridge.StopCalls);
+    lock (states)
+    {
+        if (states.Contains(RecordingCoordinatorState.Recording))
+        {
+            throw new InvalidOperationException("A stale start published a recording state after stop was requested.");
+        }
+    }
+}
+
+static void TestRecordingStopsExactlyOnce()
+{
+    var bridge = new FakeNativeRecorderBridge();
+    var delay = new ControllableRecordingDelay();
+    var coordinator = new RecordingCoordinator(bridge, delay);
+    using var stopped = new ManualResetEventSlim(false);
+    coordinator.SnapshotChanged += (_, changed) =>
+    {
+        if (changed.State == RecordingCoordinatorState.Stopped)
+        {
+            stopped.Set();
+        }
+    };
+
+    var started = coordinator.StartTestAsync(SystemLoopbackRequest(), TimeSpan.FromSeconds(10))
+        .GetAwaiter()
+        .GetResult();
+    Equal(RecordingCoordinatorState.Recording, started.State);
+    if (!started.IsTestRecording)
+    {
+        throw new InvalidOperationException("Expected the session to be marked as a test recording.");
+    }
+    if (!delay.Entered.Task.Wait(TimeSpan.FromSeconds(2)))
+    {
+        throw new InvalidOperationException("The test delay was not scheduled.");
+    }
+
+    delay.Complete();
+    if (!stopped.Wait(TimeSpan.FromSeconds(2)))
+    {
+        throw new InvalidOperationException("The scheduled test stop did not complete.");
+    }
+    Equal(1, bridge.StopCalls);
+}
+
 static TeamsAutoMeetingSnapshot EnableAndEnterMeeting(TeamsAutoMeetingMachine machine)
 {
     var snapshot = machine.Reduce(TeamsAutoMeetingSnapshot.Initial, new TeamsAutoMeetingEvent.AutoMeetingEnabled(true)).Snapshot;
@@ -190,4 +395,104 @@ static void Equal<T>(T expected, T actual) where T : notnull
 {
     if (!EqualityComparer<T>.Default.Equals(expected, actual))
         throw new InvalidOperationException($"Expected {expected}; got {actual}.");
+}
+
+static void Throws<TException>(Action action) where TException : Exception
+{
+    try
+    {
+        action();
+    }
+    catch (TException)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException($"Expected {typeof(TException).Name}.");
+}
+
+static NativeRecordingRequest SystemLoopbackRequest(string fileName = "recording.wav") => new(
+    RecordingCaptureMode.SystemLoopback,
+    $"C:\\recordings\\{fileName}");
+
+sealed class FakeNativeRecorderBridge : INativeRecorderBridge
+{
+    private readonly object gate = new();
+    private NativeRecorderState state = NativeRecorderState.Ready;
+
+    public NativeOperationResult StartResult { get; set; } = NativeOperationResult.Success();
+
+    public NativeOperationResult StopResult { get; set; } = NativeOperationResult.Success();
+
+    public NativeRecorderResult SnapshotResult { get; set; } = NativeRecorderResult.Ok;
+
+    public string? SnapshotError { get; set; }
+
+    public NativeCaptureStats Stats { get; set; } = NativeCaptureStats.Empty(RecordingCaptureMode.SystemLoopback);
+
+    public NativeEndpointEnumerationResult EndpointResult { get; set; } = new(
+        NativeOperationResult.Success(),
+        Array.Empty<NativeCaptureEndpoint>());
+
+    public ManualResetEventSlim? StartRelease { get; set; }
+
+    public TaskCompletionSource StartEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public int StopCalls { get; private set; }
+
+    public NativeOperationResult Start(NativeRecordingRequest request)
+    {
+        StartEntered.TrySetResult();
+        StartRelease?.Wait();
+        lock (gate)
+        {
+            if (StartResult.IsSuccess)
+            {
+                state = NativeRecorderState.Recording;
+            }
+            return StartResult;
+        }
+    }
+
+    public NativeOperationResult Stop()
+    {
+        lock (gate)
+        {
+            StopCalls++;
+            if (StopResult.IsSuccess)
+            {
+                state = NativeRecorderState.Stopped;
+            }
+            return StopResult;
+        }
+    }
+
+    public NativeRecorderSnapshot GetSnapshot()
+    {
+        lock (gate)
+        {
+            return new NativeRecorderSnapshot(SnapshotResult, state, Stats, SnapshotError);
+        }
+    }
+
+    public NativeEndpointEnumerationResult EnumerateEndpoints() => EndpointResult;
+
+    public void Dispose()
+    {
+    }
+}
+
+sealed class ControllableRecordingDelay : IRecordingDelay
+{
+    private readonly TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task DelayAsync(TimeSpan duration, CancellationToken cancellationToken)
+    {
+        Entered.TrySetResult();
+        return completion.Task.WaitAsync(cancellationToken);
+    }
+
+    public void Complete() => completion.TrySetResult();
 }

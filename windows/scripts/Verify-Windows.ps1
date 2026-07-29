@@ -39,18 +39,9 @@ function Resolve-Tool {
 }
 
 $dotnet = Resolve-Tool "dotnet" (Join-Path $env:ProgramFiles "dotnet\dotnet.exe")
-$cmake = Resolve-Tool "cmake" (Join-Path $env:ProgramFiles "CMake\bin\cmake.exe")
-$ctest = Resolve-Tool "ctest" (Join-Path $env:ProgramFiles "CMake\bin\ctest.exe")
-
-Push-Location $windowsRoot
-try {
-    Invoke-Checked $dotnet "build" ".\TeamsRecorder.Windows.sln" "--configuration" "Release"
-    Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.Core.Tests\Recorder.Core.Tests.csproj" "--configuration" "Release" "--no-build"
-} finally {
-    Pop-Location
-}
-
-& (Join-Path $PSScriptRoot "Test-Contracts.ps1")
+$visualStudioCmake = Join-Path $env:ProgramFiles "Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+$cmake = Resolve-Tool "cmake" $visualStudioCmake
+$ctest = Resolve-Tool "ctest" (Join-Path (Split-Path -Parent $cmake) "ctest.exe")
 
 # Some automation hosts inject both Path and PATH. MSBuild treats those as
 # duplicate case-insensitive environment keys when it starts cl.exe.
@@ -62,9 +53,21 @@ Push-Location $nativeRoot
 try {
     Invoke-Checked $cmake "--preset" "windows-x64"
     Invoke-Checked $cmake "--build" "--preset" "windows-x64-debug"
+    Invoke-Checked $cmake "--build" "--preset" "windows-x64-release" "--target" "Recorder.NativeBridge"
     Invoke-Checked $ctest "--preset" "windows-x64-debug"
 } finally {
     Pop-Location
 }
+
+Push-Location $windowsRoot
+try {
+    Invoke-Checked $dotnet "build" ".\TeamsRecorder.Windows.sln" "--configuration" "Release" "--tl:off"
+    Invoke-Checked $dotnet "build" ".\src\Recorder.WinUI\Recorder.WinUI.csproj" "--configuration" "Release" "--property:Platform=x64" "--property:RuntimeIdentifier=win-x64" "--no-restore" "--tl:off"
+    Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.Core.Tests\Recorder.Core.Tests.csproj" "--configuration" "Release" "--no-build"
+} finally {
+    Pop-Location
+}
+
+& (Join-Path $PSScriptRoot "Test-Contracts.ps1")
 
 Write-Host "Windows migration verification passed."

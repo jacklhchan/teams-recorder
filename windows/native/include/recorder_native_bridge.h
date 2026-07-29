@@ -22,6 +22,7 @@ extern "C" {
 #endif
 
 typedef struct RecorderNativeBridge RecorderNativeBridge;
+typedef struct RecorderNativeEndpointList RecorderNativeEndpointList;
 
 typedef enum RecorderNativeResult {
     RECORDER_NATIVE_OK = 0,
@@ -48,6 +49,18 @@ typedef enum RecorderNativeCaptureMode {
     RECORDER_NATIVE_CAPTURE_MICROPHONE = 1,
     RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK = 2
 } RecorderNativeCaptureMode;
+
+/*
+ * Endpoint flow and default-role values deliberately use fixed-width macros
+ * rather than a public enum/bitfield struct. This keeps the endpoint-list ABI
+ * additive without imposing packing or lifetime rules on callers.
+ */
+#define RECORDER_NATIVE_ENDPOINT_FLOW_RENDER 0u
+#define RECORDER_NATIVE_ENDPOINT_FLOW_CAPTURE 1u
+
+#define RECORDER_NATIVE_ENDPOINT_DEFAULT_CONSOLE (1u << 0)
+#define RECORDER_NATIVE_ENDPOINT_DEFAULT_MULTIMEDIA (1u << 1)
+#define RECORDER_NATIVE_ENDPOINT_DEFAULT_COMMUNICATIONS (1u << 2)
 
 typedef struct RecorderNativeStartOptions {
     /* Set to sizeof(RecorderNativeStartOptions) for ABI versioning. */
@@ -105,6 +118,39 @@ RECORDER_NATIVE_API RecorderNativeState recorder_native_get_state(const Recorder
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_get_stats(
     const RecorderNativeBridge* bridge,
     RecorderNativeStats* stats);
+
+/*
+ * Produces an immutable snapshot of active WASAPI render and capture endpoints.
+ * The snapshot owns all returned UTF-8 strings and is independent of the
+ * bridge after this call. On failure, *out_list is NULL and the bridge's
+ * last-error diagnostic is updated. Do not call this concurrently with another
+ * operation on the same bridge when the diagnostic matters.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_enumerate_endpoints(
+    RecorderNativeBridge* bridge,
+    RecorderNativeEndpointList** out_list);
+
+/* Releases an endpoint snapshot. NULL is accepted. */
+RECORDER_NATIVE_API void recorder_native_endpoint_list_destroy(
+    RecorderNativeEndpointList* list);
+
+/* Returns the number of snapshot entries. */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_endpoint_list_get_count(
+    const RecorderNativeEndpointList* list,
+    uint32_t* out_count);
+
+/*
+ * Reads one snapshot entry. On success the returned strings are non-NULL,
+ * NUL-terminated, immutable, and valid only until list_destroy(list). Callers
+ * must copy them before releasing the list and must never free them directly.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_endpoint_list_get(
+    const RecorderNativeEndpointList* list,
+    uint32_t index,
+    uint32_t* out_flow,
+    uint32_t* out_default_flags,
+    const char** out_endpoint_id_utf8,
+    const char** out_friendly_name_utf8);
 
 /*
  * For a non-NULL handle, the pointer is bridge-owned and remains valid until the

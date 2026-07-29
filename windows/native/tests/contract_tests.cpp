@@ -1,15 +1,29 @@
 #include "recorder_native_bridge.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <type_traits>
 
 static_assert(std::is_standard_layout<RecorderNativeStartOptions>::value, "start options must remain C ABI safe");
 static_assert(std::is_standard_layout<RecorderNativeStats>::value, "stats must remain C ABI safe");
+static_assert(sizeof(RecorderNativeStartOptions) == 32U, "x64 start options layout changed");
+static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8U, "output path offset changed");
+static_assert(offsetof(RecorderNativeStartOptions, endpoint_id_utf8) == 16U, "endpoint ID offset changed");
+static_assert(offsetof(RecorderNativeStartOptions, target_process_id) == 24U, "target PID offset changed");
+static_assert(sizeof(RecorderNativeStats) == 96U, "x64 stats layout changed");
+static_assert(offsetof(RecorderNativeStats, packets) == 32U, "packet counter offset changed");
+static_assert(offsetof(RecorderNativeStats, peak) == 88U, "peak offset changed");
 static_assert(RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK == 0, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_MICROPHONE == 1, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK == 2, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_STATE_STARTING == 4, "state ABI value changed");
 static_assert(RECORDER_NATIVE_STATE_STOPPING == 5, "state ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_FLOW_RENDER == 0U, "render flow ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_FLOW_CAPTURE == 1U, "capture flow ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_CONSOLE == 1U, "console default ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_MULTIMEDIA == 2U, "multimedia default ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_COMMUNICATIONS == 4U, "communications default ABI value changed");
 
 namespace {
 
@@ -26,12 +40,21 @@ RecorderNativeStartOptions ValidOptions() {
 }  // namespace
 
 int main() {
-    if (!Expect(std::strcmp(recorder_native_version(), "0.2.0") == 0) ||
+    RecorderNativeEndpointList* endpoint_list =
+        reinterpret_cast<RecorderNativeEndpointList*>(static_cast<std::uintptr_t>(1));
+    uint32_t endpoint_count = 0;
+    recorder_native_endpoint_list_destroy(nullptr);
+
+    if (!Expect(std::strcmp(recorder_native_version(), "0.3.0") == 0) ||
         !Expect(recorder_native_start(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_with_options(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_stop(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_get_stats(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_get_state(nullptr) == RECORDER_NATIVE_STATE_FAULTED) ||
+        !Expect(recorder_native_enumerate_endpoints(nullptr, &endpoint_list) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(endpoint_list == nullptr) ||
+        !Expect(recorder_native_endpoint_list_get_count(nullptr, &endpoint_count) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_endpoint_list_get(nullptr, 0U, nullptr, nullptr, nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(std::strstr(recorder_native_get_last_error(nullptr), "null") != nullptr)) {
         return 1;
     }
@@ -55,6 +78,11 @@ int main() {
         Expect((options = ValidOptions(), options.output_path_utf8 = nullptr,
                 recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect((options = ValidOptions(), options.mode = static_cast<RecorderNativeCaptureMode>(99),
+                recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((options = ValidOptions(), options.target_process_id = 42U,
+                recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((options = ValidOptions(), options.mode = RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK,
+                options.target_process_id = 42U, options.endpoint_id_utf8 = "endpoint-id",
                 recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_get_state(bridge) == RECORDER_NATIVE_STATE_READY);
     recorder_native_destroy(bridge);

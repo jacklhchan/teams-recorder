@@ -2,10 +2,12 @@
 
 #if defined(_WIN32)
 #include "capture_session.h"
+#include "wasapi_capture.h"
 
 #include <windows.h>
 #endif
 
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -14,20 +16,36 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 struct RecorderNativeBridge {
     mutable std::mutex mutex;
     RecorderNativeState state = RECORDER_NATIVE_STATE_READY;
     RecorderNativeStats last_stats{};
-    std::string last_error;
+    mutable std::string last_error;
 #if defined(_WIN32)
     std::unique_ptr<recorder::bridge::CaptureSession> session;
 #endif
 };
 
+#if defined(_WIN32)
+struct RecorderNativeEndpointEntry {
+    std::uint32_t flow = RECORDER_NATIVE_ENDPOINT_FLOW_RENDER;
+    std::uint32_t default_flags = 0;
+    std::string endpoint_id;
+    std::string friendly_name;
+};
+#endif
+
+struct RecorderNativeEndpointList {
+#if defined(_WIN32)
+    std::vector<RecorderNativeEndpointEntry> entries;
+#endif
+};
+
 namespace {
 
-constexpr char kVersion[] = "0.2.0";
+constexpr char kVersion[] = "0.3.0";
 constexpr char kInvalidHandleError[] = "RecorderNativeBridge handle is null.";
 
 RecorderNativeStats EmptyStats(RecorderNativeCaptureMode mode) {
@@ -94,6 +112,43 @@ bool Utf8ToWide(const char* value, std::wstring* result) {
                static_cast<int>(length),
                result->data(),
                required) == required;
+}
+
+bool WideToUtf8(const std::wstring& value, std::string* result) {
+    if (result == nullptr) {
+        return false;
+    }
+    if (value.empty()) {
+        result->clear();
+        return true;
+    }
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+
+    const int required = WideCharToMultiByte(
+        CP_UTF8,
+        WC_ERR_INVALID_CHARS,
+        value.data(),
+        static_cast<int>(value.size()),
+        nullptr,
+        0,
+        nullptr,
+        nullptr);
+    if (required <= 0) {
+        return false;
+    }
+
+    result->assign(static_cast<std::size_t>(required), '\0');
+    return WideCharToMultiByte(
+               CP_UTF8,
+               WC_ERR_INVALID_CHARS,
+               value.data(),
+               static_cast<int>(value.size()),
+               result->data(),
+               required,
+               nullptr,
+               nullptr) == required;
 }
 #endif
 
@@ -178,6 +233,20 @@ extern "C" RecorderNativeResult recorder_native_start_with_options(
             bridge,
             RECORDER_NATIVE_INVALID_ARGUMENT,
             "Process-loopback capture requires a non-zero target PID.");
+    }
+    if (options->mode == RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK &&
+        options->endpoint_id_utf8 != nullptr && options->endpoint_id_utf8[0] != '\0') {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_INVALID_ARGUMENT,
+            "Process-loopback capture does not accept an endpoint ID.");
+    }
+    if (options->mode != RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK &&
+        options->target_process_id != 0) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_INVALID_ARGUMENT,
+            "Only process-loopback capture accepts a target PID.");
     }
 
 #if !defined(_WIN32)
@@ -311,6 +380,18 @@ extern "C" RecorderNativeState recorder_native_get_state(
         return RECORDER_NATIVE_STATE_FAULTED;
     }
     std::lock_guard<std::mutex> lock(bridge->mutex);
+#if defined(_WIN32)
+    if (bridge->state == RECORDER_NATIVE_STATE_RECORDING && bridge->session) {
+        const RecorderNativeResult health = bridge->session->health_result();
+        if (health != RECORDER_NATIVE_OK) {
+            const std::string session_error = bridge->session->last_error();
+            if (!session_error.empty()) {
+                bridge->last_error = session_error;
+            }
+            return RECORDER_NATIVE_STATE_FAULTED;
+        }
+    }
+#endif
     return bridge->state;
 }
 
@@ -326,11 +407,144 @@ extern "C" RecorderNativeResult recorder_native_get_stats(
 #if defined(_WIN32)
     if (bridge->session) {
         *stats = bridge->session->stats();
+        const RecorderNativeResult health = bridge->session->health_result();
+        if (health != RECORDER_NATIVE_OK) {
+            const std::string session_error = bridge->session->last_error();
+            if (!session_error.empty()) {
+                bridge->last_error = session_error;
+            }
+            return health;
+        }
         return RECORDER_NATIVE_OK;
     }
 #endif
     *stats = bridge->last_stats;
     return RECORDER_NATIVE_OK;
+}
+
+extern "C" RecorderNativeResult recorder_native_enumerate_endpoints(
+    RecorderNativeBridge* bridge,
+    RecorderNativeEndpointList** out_list) {
+    if (out_list == nullptr) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+    *out_list = nullptr;
+    if (bridge == nullptr) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+
+#if !defined(_WIN32)
+    return Reject(
+        bridge,
+        RECORDER_NATIVE_NOT_IMPLEMENTED,
+        "Endpoint enumeration is implemented only on Windows.");
+#else
+    std::vector<recorder::audio::EndpointInfo> endpoints;
+    recorder::audio::CaptureError capture_error;
+    const HRESULT enumeration_result =
+        recorder::audio::WasapiCapture::EnumerateEndpoints(&endpoints, &capture_error);
+    if (FAILED(enumeration_result)) {
+        std::string error_text;
+        if (!WideToUtf8(capture_error.message, &error_text) || error_text.empty()) {
+            error_text = "Enumerating active audio endpoints failed.";
+        }
+        return Reject(bridge, RECORDER_NATIVE_CAPTURE_ERROR, error_text.c_str());
+    }
+
+    try {
+        auto list = std::make_unique<RecorderNativeEndpointList>();
+        list->entries.reserve(endpoints.size());
+        for (const auto& endpoint : endpoints) {
+            RecorderNativeEndpointEntry entry;
+            entry.flow = endpoint.flow == recorder::audio::EndpointFlow::Render
+                ? RECORDER_NATIVE_ENDPOINT_FLOW_RENDER
+                : RECORDER_NATIVE_ENDPOINT_FLOW_CAPTURE;
+            entry.default_flags = endpoint.default_flags;
+            if (!WideToUtf8(endpoint.endpoint_id, &entry.endpoint_id) ||
+                !WideToUtf8(endpoint.friendly_name, &entry.friendly_name)) {
+                return Reject(
+                    bridge,
+                    RECORDER_NATIVE_INTERNAL_ERROR,
+                    "Converting an audio endpoint name or ID to UTF-8 failed.");
+            }
+            list->entries.push_back(std::move(entry));
+        }
+        *out_list = list.release();
+        return RECORDER_NATIVE_OK;
+    } catch (const std::bad_alloc&) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_INTERNAL_ERROR,
+            "Allocating the audio endpoint snapshot failed.");
+    } catch (...) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_INTERNAL_ERROR,
+            "Enumerating audio endpoints failed unexpectedly.");
+    }
+#endif
+}
+
+extern "C" void recorder_native_endpoint_list_destroy(
+    RecorderNativeEndpointList* list) {
+    delete list;
+}
+
+extern "C" RecorderNativeResult recorder_native_endpoint_list_get_count(
+    const RecorderNativeEndpointList* list,
+    uint32_t* out_count) {
+    if (list == nullptr || out_count == nullptr) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+#if defined(_WIN32)
+    if (list->entries.size() > std::numeric_limits<uint32_t>::max()) {
+        *out_count = 0;
+        return RECORDER_NATIVE_INTERNAL_ERROR;
+    }
+    *out_count = static_cast<uint32_t>(list->entries.size());
+#else
+    *out_count = 0;
+#endif
+    return RECORDER_NATIVE_OK;
+}
+
+extern "C" RecorderNativeResult recorder_native_endpoint_list_get(
+    const RecorderNativeEndpointList* list,
+    uint32_t index,
+    uint32_t* out_flow,
+    uint32_t* out_default_flags,
+    const char** out_endpoint_id_utf8,
+    const char** out_friendly_name_utf8) {
+    if (out_flow != nullptr) {
+        *out_flow = 0;
+    }
+    if (out_default_flags != nullptr) {
+        *out_default_flags = 0;
+    }
+    if (out_endpoint_id_utf8 != nullptr) {
+        *out_endpoint_id_utf8 = nullptr;
+    }
+    if (out_friendly_name_utf8 != nullptr) {
+        *out_friendly_name_utf8 = nullptr;
+    }
+    if (list == nullptr || out_flow == nullptr || out_default_flags == nullptr ||
+        out_endpoint_id_utf8 == nullptr || out_friendly_name_utf8 == nullptr) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+#if !defined(_WIN32)
+    (void)index;
+    return RECORDER_NATIVE_NOT_IMPLEMENTED;
+#else
+    if (index >= list->entries.size()) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+    const RecorderNativeEndpointEntry& entry = list->entries[index];
+    *out_flow = entry.flow;
+    *out_default_flags = entry.default_flags;
+    *out_endpoint_id_utf8 = entry.endpoint_id.c_str();
+    *out_friendly_name_utf8 = entry.friendly_name.c_str();
+    return RECORDER_NATIVE_OK;
+#endif
 }
 
 extern "C" const char* recorder_native_get_last_error(

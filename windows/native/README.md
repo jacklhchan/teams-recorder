@@ -1,7 +1,7 @@
 # Recorder.NativeBridge
 
 `Recorder.NativeBridge` is the Windows native boundary for audio capture.
-ABI version 0.2 owns the source lifecycle, normalizes captured packets to
+ABI version 0.3 owns the source lifecycle, normalizes captured packets to
 48 kHz stereo float, writes through a `.partial` recovery file, and publishes
 the final WAV only after a successful stop. The legacy no-options
 `recorder_native_start` remains exported but returns `INVALID_ARGUMENT` because
@@ -63,6 +63,15 @@ duration. It is useful for creating the interfering or target audio signal:
 ## ABI and lifecycle
 
 The public C ABI is in `include/recorder_native_bridge.h`. Handles are opaque and must be destroyed with `recorder_native_destroy`. For a non-null handle, `get_last_error` returns bridge-owned memory, valid only until the next call on that handle or destruction; the null-handle diagnostic is implementation-owned. Neither pointer is caller-freeable. Calls are internally synchronized. A failed start preserves its prior non-recording state; stop drains and joins the capture thread before the format, resampler, and writer pipeline can be released.
+
+Endpoint enumeration uses a separate opaque `RecorderNativeEndpointList`.
+`recorder_native_enumerate_endpoints` creates an immutable snapshot of active
+render and capture endpoints; its UTF-8 endpoint IDs and friendly names are
+owned by that list and remain valid only until
+`recorder_native_endpoint_list_destroy`. Callers copy strings before releasing
+the list and never free them directly. The managed `Recorder.Application`
+adapter does exactly this through SafeHandles and exposes only copied endpoint
+records, lifecycle state, scalar health statistics, and copied diagnostics.
 
 ## Planned Windows media boundaries
 

@@ -16,12 +16,13 @@ macOS SwiftUI MVP for recording meeting audio locally:
 
 ## Windows migration
 
-The Windows-native re-platform has started under [`windows/`](windows/README.md).
-It currently includes the portable recording policy core, cross-platform
-session contracts, and a native audio bridge for WASAPI system, microphone,
-and process-tree loopback capture with canonical 48 kHz WAV output. WinUI,
-video capture, and the virtual microphone driver are not yet implemented; the
-Windows README keeps the current build status explicit.
+The Windows-native re-platform is under [`windows/`](windows/README.md). It
+now includes the portable recording policy core, cross-platform session
+contracts, a managed native-bridge coordinator, WASAPI capture modules, and a
+WinUI 3 shell for verified system-loopback WAV recordings. Video capture,
+M4A/MP4 export, Teams meeting integration, and the virtual microphone driver
+remain future Windows work; the Windows README keeps the current build and
+installation status explicit.
 
 ## Run
 

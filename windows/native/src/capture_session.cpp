@@ -101,6 +101,7 @@ public:
             stats_.event_driven = 1;
             failure_result_ = RECORDER_NATIVE_OK;
             last_error_.clear();
+            stopping_ = false;
 
             std::error_code filesystem_error;
             if (config_.output_path.empty()) {
@@ -197,6 +198,16 @@ public:
     }
 
     RecorderNativeResult Stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!started_) {
+                return SetFailureLocked(
+                    RECORDER_NATIVE_INVALID_STATE,
+                    "Capture session was not started.");
+            }
+            stopping_ = true;
+        }
+
         if (wasapi_capture_) {
             wasapi_capture_->Stop();
             const auto error = wasapi_capture_->last_error();
@@ -223,12 +234,8 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!started_) {
-            return SetFailureLocked(
-                RECORDER_NATIVE_INVALID_STATE,
-                "Capture session was not started.");
-        }
         started_ = false;
+        stopping_ = false;
         if (failure_result_ != RECORDER_NATIVE_OK) {
             if (writer_) {
                 writer_->Abort();
@@ -279,12 +286,41 @@ public:
         return stats_;
     }
 
+    RecorderNativeResult health_result() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        DetectStoppedSourceLocked();
+        return failure_result_;
+    }
+
     std::string last_error() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return last_error_;
     }
 
 private:
+    void DetectStoppedSourceLocked() {
+        if (!started_ || stopping_ || failure_result_ != RECORDER_NATIVE_OK) {
+            return;
+        }
+        if (wasapi_capture_ && !wasapi_capture_->is_running()) {
+            const auto error = wasapi_capture_->last_error();
+            SetFailureLocked(
+                RECORDER_NATIVE_CAPTURE_ERROR,
+                FAILED(error.hresult)
+                    ? WideToUtf8(error.message)
+                    : "WASAPI capture stopped unexpectedly.");
+            return;
+        }
+        if (process_capture_ && !process_capture_->is_running()) {
+            const auto error = process_capture_->last_error();
+            SetFailureLocked(
+                RECORDER_NATIVE_CAPTURE_ERROR,
+                FAILED(error.hresult)
+                    ? WideToUtf8(error.message)
+                    : "Process-loopback capture stopped unexpectedly.");
+        }
+    }
+
     void ProcessBlock(
         std::vector<std::uint8_t> bytes,
         std::vector<std::uint8_t> format_bytes,
@@ -431,6 +467,7 @@ private:
     RecorderNativeResult failure_result_ = RECORDER_NATIVE_OK;
     std::string last_error_;
     bool started_ = false;
+    bool stopping_ = false;
 };
 
 CaptureSession::CaptureSession() : impl_(std::make_unique<Impl>()) {}
@@ -442,6 +479,10 @@ RecorderNativeResult CaptureSession::Start(CaptureSessionConfig config) {
 
 RecorderNativeResult CaptureSession::Stop() {
     return impl_->Stop();
+}
+
+RecorderNativeResult CaptureSession::health_result() const {
+    return impl_->health_result();
 }
 
 RecorderNativeStats CaptureSession::stats() const {

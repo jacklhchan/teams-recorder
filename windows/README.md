@@ -1,66 +1,84 @@
 # Teams Recorder for Windows
 
-This directory is the beginning of the Windows-native re-platform of Local
-Meeting Recorder. The existing macOS application remains the behaviour
-baseline; the Windows implementation is intentionally being delivered in
-small, testable slices.
+This directory contains the Windows-native re-platform of Local Meeting
+Recorder. The macOS application remains the behavioural baseline; Windows is
+being delivered in small, testable slices.
 
-## Current migration slice
+## Current working slice
 
-The repository currently contains:
+The repository now contains:
 
 - a portable .NET domain core for recording ownership and Teams automatic
   recording policy;
-- a versioned native C ABI with synchronized start/stop/state/stats lifecycle
-  for system loopback, microphone, and process-tree loopback capture;
-- Windows-only capture modules with endpoint enumeration, packet-owned WASAPI
-  callbacks, QPC/device positions, format decoding, streaming normalization to
-  48 kHz stereo, and no-replace float WAV output;
-- deterministic bridge and dual-tone tools used to prove real process-audio
-  isolation on this machine;
-- versioned JSON contracts and compatibility fixtures for recording metadata
-  and transcription state;
-- parity and architecture documents in `docs/`.
+- a versioned native C ABI and a SafeHandle-backed managed coordinator for
+  recording lifecycle, endpoint enumeration, test recordings, and telemetry;
+- Windows WASAPI system, microphone, and process-loopback capture modules with
+  packet-owned callbacks, 48 kHz stereo normalization, and no-replace WAV
+  output;
+- a WinUI 3 desktop shell in `src/Recorder.WinUI` for **system-loopback WAV**
+  recording. It lists render devices, chooses the Windows default or a specific
+  endpoint, starts/stops a recording, provides a 10-second test, displays
+  peak/packet/discontinuity health, and stops native capture on window close;
+- deterministic native and managed tests, JSON contract fixtures, and real
+  process-audio diagnostic tools.
 
-The native bridge now captures and finalizes audio through its public C ABI.
-There is not yet a WinUI application, Windows Graphics Capture video path,
-Media Foundation MP4 writer, or virtual microphone driver.
+The desktop shell deliberately exposes only the first verified capture path.
+It does not yet offer microphone or process selection, Teams meeting detection,
+video capture, M4A/MP4 export, a recording browser, transcription, or a
+virtual microphone driver.
 
 ## Supported development baseline
 
-- Windows 11 x64
+- Windows 11 x64 (22H2 / build 22621 or newer)
 - .NET 10 SDK
-- Visual Studio 2022 Build Tools with the Desktop development with C++ workload
+- Visual Studio 2022 with the Desktop development with C++ workload
 - CMake 3.25 or newer
 
 ## Build and test
 
-From a Developer PowerShell:
+From a Developer PowerShell at repository root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Verify-Windows.ps1
 ```
 
-The individual commands run by that verifier are:
+The verifier configures the native projects, runs the Debug native test suite,
+builds the distributable x64 Release `Recorder.NativeBridge.dll`, builds the
+.NET solution and WinUI executable, then runs managed and contract tests.
 
-```powershell
-Push-Location .\windows
-dotnet build .\TeamsRecorder.Windows.sln
-dotnet run --project .\tests\Recorder.Core.Tests\Recorder.Core.Tests.csproj
-Pop-Location
+The WinUI Release executable is emitted at:
 
-Push-Location .\windows\native
-cmake --preset windows-x64
-cmake --build --preset windows-x64-debug
-ctest --preset windows-x64-debug
-Pop-Location
-
-powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Test-Contracts.ps1
+```text
+windows\src\Recorder.WinUI\bin\x64\Release\net10.0-windows10.0.22621.0\win-x64\Recorder.WinUI.exe
 ```
 
-The .NET core is OS-independent by design. Raw PCM samples and Direct3D frames
-must remain in the native media layer; managed code receives only lifecycle
-events, level summaries, errors, and completed-file notifications.
+The matching Release `Recorder.NativeBridge.dll` is copied next to it. Do not
+ship the Debug native DLL: it depends on the non-redistributable debug C++
+runtime.
+
+## Why the app is not installed yet
+
+Building an `.exe` does not register or install an app in Windows. The project
+defaults to an unpackaged, self-contained developer build so the Release EXE
+can run directly. It also retains a single-project MSIX manifest, but this
+repository intentionally does not create or trust a signing certificate and
+does not enable Windows Developer Mode. Both change machine security state.
+
+To produce an unsigned MSIX for a deployment pipeline without installing it:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Package-Windows.ps1
+```
+
+That creates a package under `windows\out\packages\`. It is intentionally
+unsigned and is not installable through the ordinary user workflow.
+
+To make Teams Recorder appear in Start, create a signed MSIX whose certificate
+matches `Publisher="CN=Teams Recorder"`, trust that certificate through the
+normal organisation or release process, then install it with App Installer or
+`Add-AppxPackage`. Until that release-signing decision is made, the supported
+developer handoff is the Release executable above rather than a machine-wide
+installation.
 
 ## Layout
 
@@ -71,11 +89,7 @@ windows/
 |-- native/                     Native media boundary and lifecycle tests
 |-- scripts/                    Local validation entry points
 |-- src/Recorder.Core/          Portable policy and state machines
+|-- src/Recorder.Application/   Managed native-bridge adapter and lifecycle gate
+|-- src/Recorder.WinUI/         WinUI 3 system-loopback capture shell
 `-- tests/Recorder.Core.Tests/  Deterministic core tests
 ```
-
-The next implementation slice is the managed-to-native coordinator, capture
-device selection UI, long-duration/device-loss testing, and then the Windows
-Graphics Capture + QPC synchronization spike. Physical microphone validation
-still requires a usable physical input endpoint; this machine currently exposes
-only an incompatible Steam Streaming Microphone virtual endpoint.

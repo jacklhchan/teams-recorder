@@ -260,17 +260,23 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     }
     if (FAILED(result)) {
         std::wostringstream context;
-        context << L"Initializing shared WASAPI capture failed"
-                << L" (tag=" << mix->wFormatTag
-                << L", channels=" << mix->nChannels
-                << L", sampleRate=" << mix->nSamplesPerSec
-                << L", avgBytes=" << mix->nAvgBytesPerSec
-                << L", blockAlign=" << mix->nBlockAlign
-                << L", bits=" << mix->wBitsPerSample
-                << L", cbSize=" << mix->cbSize
-                << L")";
+        context << L"Initializing shared WASAPI capture failed";
+        if (mix != nullptr) {
+            context << L" (tag=" << mix->wFormatTag
+                    << L", channels=" << mix->nChannels
+                    << L", sampleRate=" << mix->nSamplesPerSec
+                    << L", avgBytes=" << mix->nAvgBytesPerSec
+                    << L", blockAlign=" << mix->nBlockAlign
+                    << L", bits=" << mix->wBitsPerSample
+                    << L", cbSize=" << mix->cbSize
+                    << L")";
+        } else {
+            context << L" (endpoint mix format unavailable)";
+        }
         const std::wstring message = context.str();
-        CoTaskMemFree(mix);
+        if (mix != nullptr) {
+            CoTaskMemFree(mix);
+        }
         fail(result, message.c_str());
         return;
     }

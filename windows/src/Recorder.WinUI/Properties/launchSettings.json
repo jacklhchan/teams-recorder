@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Recorder.WinUI (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Recorder.WinUI (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Recorder.Core/Recorder.Core.csproj" />
+    <ProjectReference Include="../../src/Recorder.Application/Recorder.Application.csproj" />
   </ItemGroup>
 </Project>

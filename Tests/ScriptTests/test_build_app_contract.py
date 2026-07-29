@@ -14,6 +14,14 @@ OWNER_MARKER_VALUE = "local.meeting.recorder.build-app.v1"
 
 
 class BuildAppContractTests(unittest.TestCase):
+    def test_packaging_smoke_script_is_executable_contract(self):
+        script = (
+            ROOT / "Tests/PackagingTests/run-tests.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("verify-app-bundle.sh", script)
+        self.assertIn("moved", script.lower())
+        self.assertNotIn("open -n", script)
+
     def run_build(self, *arguments):
         return subprocess.run(
             ["/bin/bash", str(BUILD_APP), *arguments],

@@ -2,7 +2,12 @@ namespace TeamsRecorder.Windows.Application;
 
 public enum TeamsMuteSyncStatus { Disabled, WaitingForTeamsApi, WaitingForMeeting, WaitingForPairingApproval, Ready, InMeeting, Failed }
 
-public sealed record TeamsMuteSyncSnapshot(TeamsMuteSyncStatus Status, TeamsMeetingState? LastMeetingState, string? Detail)
+public sealed record TeamsMuteSyncSnapshot(
+    TeamsMuteSyncStatus Status,
+    TeamsMeetingState? LastMeetingState,
+    string? Detail,
+    bool IsPairingAuthenticated = false,
+    bool IsMicrophoneRoutingEngaged = false)
 {
     public static TeamsMuteSyncSnapshot Initial { get; } = new(TeamsMuteSyncStatus.Disabled, null, null);
 }
@@ -21,9 +26,10 @@ public interface ITeamsThirdPartyApiClient
 public interface IRecorderMicrophoneMuteSink { void SetMuted(bool muted); }
 
 /// <summary>
-/// Applies authoritative Teams mute notifications to recorder audio. If a previously observed
-/// Teams meeting loses its API connection, it fails closed by muting the local microphone until
-/// a fresh absolute state is received. It does not mute/unmute Teams itself.
+/// Applies authenticated Teams mute updates to recorder audio without ever controlling Teams.
+/// A single initial unmuted snapshot never opens the recorder microphone: routing only engages
+/// after Teams reports a muted state, so an implementation that fails to push later updates cannot
+/// turn a locally muted recording source back on. Once routing has engaged, lost trust fails closed.
 /// </summary>
 public sealed class TeamsMuteSyncCoordinator : IDisposable
 {
@@ -32,6 +38,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
     private readonly IRecorderMicrophoneMuteSink microphone;
     private TeamsMuteSyncSnapshot snapshot = TeamsMuteSyncSnapshot.Initial;
     private bool enabled;
+    private bool microphoneRoutingEngaged;
     private bool disposed;
 
     public TeamsMuteSyncCoordinator(ITeamsThirdPartyApiClient client, IRecorderMicrophoneMuteSink microphone)
@@ -52,6 +59,11 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         lock (gate)
         {
             enabled = value;
+            if (!value && microphoneRoutingEngaged)
+            {
+                microphone.SetMuted(false);
+                microphoneRoutingEngaged = false;
+            }
             SetSnapshotLocked(value ? snapshot with { Status = TeamsMuteSyncStatus.WaitingForTeamsApi, Detail = null } : TeamsMuteSyncSnapshot.Initial);
         }
         if (value) await client.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -84,22 +96,44 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
             if (!enabled) return;
             switch (@event)
             {
-                case TeamsThirdPartyApiEvent.MeetingUpdate(var update):
-                    if (update.State is { } state)
+                case TeamsThirdPartyApiEvent.MeetingUpdate(var update, var isPairingAuthenticated):
+                    if (!isPairingAuthenticated)
                     {
-                        if (state.IsInMeeting) microphone.SetMuted(state.IsMuted);
+                        FailClosedForLostTrustLocked();
+                        SetSnapshotLocked(new TeamsMuteSyncSnapshot(
+                            update.CanPair ? TeamsMuteSyncStatus.WaitingForPairingApproval : TeamsMuteSyncStatus.WaitingForMeeting,
+                            null,
+                            null,
+                            false,
+                            microphoneRoutingEngaged));
+                    }
+                    else if (update.State is { } state)
+                    {
+                        ApplyMutedStateIfSafeLocked(state);
                         SetSnapshotLocked(snapshot with
                         {
                             LastMeetingState = state,
                             Status = state.IsInMeeting ? TeamsMuteSyncStatus.InMeeting : TeamsMuteSyncStatus.Ready,
                             Detail = null,
+                            IsPairingAuthenticated = true,
+                            IsMicrophoneRoutingEngaged = microphoneRoutingEngaged,
                         });
                         MeetingPresenceChanged?.Invoke(this, state.IsInMeeting);
                     }
-                    else SetSnapshotLocked(snapshot with { Status = update.CanPair ? TeamsMuteSyncStatus.WaitingForPairingApproval : TeamsMuteSyncStatus.WaitingForMeeting });
+                    else
+                    {
+                        FailClosedForLostTrustLocked();
+                        SetSnapshotLocked(new TeamsMuteSyncSnapshot(
+                            TeamsMuteSyncStatus.WaitingForMeeting,
+                            null,
+                            null,
+                            true,
+                            microphoneRoutingEngaged));
+                    }
                     break;
                 case TeamsThirdPartyApiEvent.Error(_, var message):
-                    SetSnapshotLocked(snapshot with { Status = TeamsMuteSyncStatus.Failed, Detail = message });
+                    FailClosedForLostTrustLocked();
+                    SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.Failed, null, message, false, microphoneRoutingEngaged));
                     break;
             }
         }
@@ -110,9 +144,42 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         lock (gate)
         {
             if (!enabled) return;
-            if (snapshot.LastMeetingState is { IsInMeeting: true }) microphone.SetMuted(true);
-            SetSnapshotLocked(snapshot with { Status = TeamsMuteSyncStatus.WaitingForTeamsApi, Detail = error });
+            FailClosedForLostTrustLocked();
+            SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.WaitingForTeamsApi, null, error, false, microphoneRoutingEngaged));
         }
+    }
+
+    private void ApplyMutedStateIfSafeLocked(TeamsMeetingState state)
+    {
+        var previous = snapshot.LastMeetingState;
+        if (!state.IsInMeeting)
+        {
+            if (microphoneRoutingEngaged)
+            {
+                microphone.SetMuted(false);
+                microphoneRoutingEngaged = false;
+            }
+            return;
+        }
+
+        if (state.IsMuted)
+        {
+            microphone.SetMuted(true);
+            microphoneRoutingEngaged = true;
+            return;
+        }
+
+        // Do not unmute from a connection's initial snapshot. A later unmuted state is useful
+        // only after this connection has first established that the muted state was delivered.
+        if (microphoneRoutingEngaged && previous is { IsInMeeting: true, IsMuted: true })
+            microphone.SetMuted(false);
+    }
+
+    private void FailClosedForLostTrustLocked()
+    {
+        var wasTrustedMeeting = snapshot.IsPairingAuthenticated && snapshot.LastMeetingState is { IsInMeeting: true };
+        if (microphoneRoutingEngaged) microphone.SetMuted(true);
+        if (wasTrustedMeeting) MeetingPresenceChanged?.Invoke(this, false);
     }
 
     private void SetSnapshotLocked(TeamsMuteSyncSnapshot value)

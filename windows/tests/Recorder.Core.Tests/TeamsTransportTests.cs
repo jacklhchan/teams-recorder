@@ -4,26 +4,34 @@ using TeamsRecorder.Windows.Application;
 
 internal static class TeamsTransportTests
 {
-    public static void ClientQueriesStateAfterConnectAndTokenRefreshThenSendsPairing()
+    public static void ClientReconnectsWithTokenRefreshBeforeSendingPairing()
     {
-        var socket = new FakeSocket(); var store = new FakeTokenStore();
-        var client = new TeamsThirdPartyApiClient(TeamsThirdPartyApiIdentity.Recorder("test"), store, () => socket, TimeSpan.FromHours(1));
+        var pairingSocket = new FakeSocket(); var authenticatedSocket = new FakeSocket();
+        var sockets = new Queue<FakeSocket>([pairingSocket, authenticatedSocket]);
+        var store = new FakeTokenStore();
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"),
+            store,
+            () => sockets.Dequeue(),
+            TimeSpan.Zero);
         var events = 0; client.EventReceived += (_, _) => Interlocked.Increment(ref events);
         client.StartAsync().GetAwaiter().GetResult();
-        Wait(socket.Connected.Task, "The fake socket did not connect.");
-        Wait(socket.ReceiveEntered.Task, "The fake socket did not begin receiving.");
-        WaitUntil(() => socket.Sent.Count == 1, "The initial state query was not sent.");
-        AssertAction(socket.Sent[0], "query-state");
-        socket.Publish("""{"tokenRefresh":"stored-only-in-fake"}""");
+        Wait(pairingSocket.Connected.Task, "The pairing socket did not connect.");
+        Wait(pairingSocket.ReceiveEntered.Task, "The pairing socket did not begin receiving.");
+        Equal(0, pairingSocket.Sent.Count);
+        pairingSocket.Publish("""{"tokenRefresh":"stored-only-in-fake"}""");
         WaitUntil(() => store.Token == "stored-only-in-fake", "The refreshed token was not saved.");
-        WaitUntil(() => socket.Sent.Count == 2, "The state query after token refresh was not sent.");
-        AssertAction(socket.Sent[1], "query-state");
-        socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
+        Wait(authenticatedSocket.Connected.Task, "The client did not reconnect after token refresh.");
+        Wait(authenticatedSocket.ReceiveEntered.Task, "The authenticated socket did not begin receiving.");
+        if (authenticatedSocket.Endpoint?.Query.Contains("token=stored-only-in-fake", StringComparison.Ordinal) != true)
+            throw new InvalidOperationException("The refreshed token was not used for the authenticated reconnect.");
+        Equal(0, authenticatedSocket.Sent.Count);
+        authenticatedSocket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
         WaitUntil(() => Volatile.Read(ref events) == 1, "The WebSocket event was not delivered.");
         Equal("stored-only-in-fake", store.Token!);
         client.RequestPairingAsync().GetAwaiter().GetResult();
-        WaitUntil(() => socket.Sent.Count == 3, "The pairing command was not sent.");
-        AssertAction(socket.Sent[2], "pair");
+        WaitUntil(() => authenticatedSocket.Sent.Count == 1, "The pairing command was not sent.");
+        AssertAction(authenticatedSocket.Sent[0], "pair");
         client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
@@ -37,6 +45,71 @@ internal static class TeamsTransportTests
         socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":true}}}""");
         Thread.Sleep(50);
         Equal(0, events);
+        client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void ClientDeliversAuthenticatedPushUpdates()
+    {
+        var socket = new FakeSocket();
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"),
+            new FakeTokenStore { Token = "paired-token" },
+            () => socket,
+            TimeSpan.FromHours(1));
+        var states = new List<TeamsMeetingState>();
+        client.EventReceived += (_, value) =>
+        {
+            if (value is TeamsThirdPartyApiEvent.MeetingUpdate { Update.State: { } state, IsPairingAuthenticated: true })
+            {
+                lock (states) states.Add(state);
+            }
+        };
+
+        client.StartAsync().GetAwaiter().GetResult();
+        Wait(socket.Connected.Task, "The push socket did not connect.");
+        Wait(socket.ReceiveEntered.Task, "The push socket did not begin receiving.");
+        Equal(0, socket.Sent.Count);
+
+        socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
+        WaitUntil(() => { lock (states) return states.Count == 1; }, "The initial authenticated state was not delivered.");
+
+        socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":true},"meetingPermissions":{"canToggleMute":true}}}""");
+        WaitUntil(() => { lock (states) return states.Count == 2; }, "The second pushed state was not delivered.");
+        bool secondStateMuted;
+        lock (states) secondStateMuted = states[1].IsMuted;
+        Equal(true, secondStateMuted);
+
+        client.StopAsync().GetAwaiter().GetResult();
+        Wait(socket.Closed.Task, "Stopping the client did not close the push socket.");
+        Equal(0, socket.Sent.Count);
+        client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void ClientFailsClosedWhenRemoteSocketClosesDuringMeeting()
+    {
+        var socket = new FakeSocket();
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"),
+            new FakeTokenStore { Token = "paired-token" },
+            () => socket,
+            TimeSpan.FromHours(1));
+        var microphone = new RecordingMuteSink();
+        using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
+
+        coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
+        Wait(socket.Connected.Task, "The close-test socket did not connect.");
+        Wait(socket.ReceiveEntered.Task, "The close-test socket did not begin receiving.");
+        Equal(0, socket.Sent.Count);
+        socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":true},"meetingPermissions":{"canToggleMute":true}}}""");
+        WaitUntil(() => coordinator.Snapshot.Status == TeamsMuteSyncStatus.InMeeting, "The authenticated meeting state was not applied.");
+        socket.PublishClose();
+
+        WaitUntil(() => coordinator.Snapshot.Status == TeamsMuteSyncStatus.WaitingForTeamsApi, "A remote close did not clear trusted meeting state.");
+        if (!microphone.Calls.SequenceEqual([true, true])) throw new InvalidOperationException("A remote close during a routed mute must fail closed.");
+        Equal(false, coordinator.Snapshot.IsPairingAuthenticated);
+        if (coordinator.Snapshot.LastMeetingState is not null) throw new InvalidOperationException("A closed socket must not retain a trusted meeting state.");
+
+        coordinator.SetEnabledAsync(false).GetAwaiter().GetResult();
         client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
@@ -106,9 +179,15 @@ internal static class TeamsTransportTests
         public Task ClearAsync(CancellationToken cancellationToken = default) { Token = null; ClearCalls++; return Task.CompletedTask; }
     }
 
+    private sealed class RecordingMuteSink : IRecorderMicrophoneMuteSink
+    {
+        public List<bool> Calls { get; } = [];
+        public void SetMuted(bool muted) => Calls.Add(muted);
+    }
+
     private sealed class FakeSocket : ITeamsWebSocketConnection
     {
-        private readonly Queue<(byte[] Bytes, bool EndOfMessage)> messages = [];
+        private readonly Queue<(byte[] Bytes, bool EndOfMessage, WebSocketMessageType MessageType)> messages = [];
         private readonly SemaphoreSlim messageAvailable = new(0);
         public TaskCompletionSource Connected { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReceiveEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -122,13 +201,14 @@ internal static class TeamsTransportTests
         {
             ReceiveEntered.TrySetResult();
             await messageAvailable.WaitAsync(cancellationToken).ConfigureAwait(false);
-            (byte[] Bytes, bool EndOfMessage) message; lock (messages) message = messages.Dequeue();
+            (byte[] Bytes, bool EndOfMessage, WebSocketMessageType MessageType) message; lock (messages) message = messages.Dequeue();
             message.Bytes.AsMemory().CopyTo(buffer);
-            return new WebSocketReceiveResult(message.Bytes.Length, WebSocketMessageType.Text, message.EndOfMessage);
+            return new WebSocketReceiveResult(message.Bytes.Length, message.MessageType, message.EndOfMessage);
         }
         public Task CloseAsync(CancellationToken cancellationToken) { State = WebSocketState.Closed; Closed.TrySetResult(); return Task.CompletedTask; }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public void Publish(string message) => Publish(Encoding.UTF8.GetBytes(message), endOfMessage: true);
+        public void PublishClose() => Publish([], endOfMessage: true, WebSocketMessageType.Close);
         public void PublishFragments(string message, int fragmentSize)
         {
             var bytes = Encoding.UTF8.GetBytes(message);
@@ -138,6 +218,10 @@ internal static class TeamsTransportTests
                 Publish(bytes.AsSpan(offset, length).ToArray(), offset + length == bytes.Length);
             }
         }
-        private void Publish(byte[] message, bool endOfMessage) { lock (messages) messages.Enqueue((message, endOfMessage)); messageAvailable.Release(); }
+        private void Publish(byte[] message, bool endOfMessage, WebSocketMessageType messageType = WebSocketMessageType.Text)
+        {
+            lock (messages) messages.Enqueue((message, endOfMessage, messageType));
+            messageAvailable.Release();
+        }
     }
 }

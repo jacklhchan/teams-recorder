@@ -189,6 +189,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     private bool HasTrustedTeamsMeetingState =>
         IsTeamsMuteSyncEnabled &&
+        teamsMuteSnapshot.IsPairingAuthenticated &&
         teamsMuteSnapshot.Status is TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting &&
         teamsMuteSnapshot.LastMeetingState is not null;
 
@@ -213,8 +214,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         TeamsMuteSyncStatus.WaitingForMeeting => "已連線，正在等待 Teams 會議狀態。",
         TeamsMuteSyncStatus.Ready => "已取得 Teams 狀態；目前不在會議中。",
         TeamsMuteSyncStatus.InMeeting => teamsMuteSnapshot.LastMeetingState?.IsMuted == true
-            ? "Teams 會議中：Teams 回報已靜音。"
-            : "Teams 會議中：Teams 回報未靜音。",
+            ? "Teams 會議中：Teams 最近回報已靜音（Preview 快照）。"
+            : "Teams 會議中：Teams 最近回報未靜音（Preview 快照；後續變更未驗證）。",
         TeamsMuteSyncStatus.Failed => string.IsNullOrWhiteSpace(teamsMuteSnapshot.Detail)
             ? "Teams 整合發生錯誤；請重新啟用或檢查 Teams。"
             : $"Teams 整合發生錯誤：{teamsMuteSnapshot.Detail}",
@@ -222,10 +223,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     };
 
     public string TeamsMuteRoutingText => teamsMuteSnapshot.LastMeetingState is not { IsInMeeting: true }
-        ? "這項設定會準備本機錄音麥克風的絕對靜音狀態；不會向 Teams 發出靜音命令，也不需要虛擬麥克風。"
+        ? "此 Preview 只會讀取已配對 Teams 連線推送的狀態；不會向 Teams 發出靜音命令。"
+        : !teamsMuteSnapshot.IsMicrophoneRoutingEngaged
+            ? "Teams 只提供了會議快照。尚未驗證後續靜音事件，因此 Recorder 不會依「未靜音」快照自動開啟本機錄音麥克風。"
         : teamsInputMute.IsInputMuted
-            ? "Teams 回報已靜音：已靜音本次 M4A 錄音內選取的麥克風來源；不會改變 Teams 本身。"
-            : "Teams 回報未靜音：本次 M4A 錄音內選取的麥克風來源可用；不會改變 Teams 本身。";
+            ? "Teams 推送了靜音狀態：已靜音本次 M4A 錄音內選取的麥克風來源；不會改變 Teams 本身。"
+            : "Teams 推送了後續未靜音狀態：本次 M4A 錄音內選取的麥克風來源可用；不會改變 Teams 本身。";
 
     public string TeamsAutomaticRecordingStatusText => !IsTeamsAutomaticRecordingEnabled
         ? HasTrustedTeamsMeetingState
@@ -1818,6 +1821,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         EnableTeamsMuteSyncCommand.RaiseCanExecuteChanged();
         DisableTeamsMuteSyncCommand.RaiseCanExecuteChanged();
         RequestTeamsPairingCommand.RaiseCanExecuteChanged();
+        EnableTeamsAutomaticRecordingCommand.RaiseCanExecuteChanged();
+        DisableTeamsAutomaticRecordingCommand.RaiseCanExecuteChanged();
         ToggleLocalMicrophoneMuteCommand.RaiseCanExecuteChanged();
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
         OnPropertyChanged(nameof(CanSeek));

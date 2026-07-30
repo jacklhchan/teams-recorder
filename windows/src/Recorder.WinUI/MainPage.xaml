@@ -56,8 +56,8 @@
 
             <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                 <StackPanel Spacing="10">
-                    <TextBlock Text="Teams 靜音同步（選用）" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock Text="選擇啟用後，應用程式才會嘗試連線至本機 Teams Third-party API。請在 Teams 中完成配對；在配對成功及收到狀態前，此功能不會宣稱已可用。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <TextBlock Text="Teams 會議／靜音 Preview（選用）" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="選擇啟用後，應用程式才會嘗試連線至本機 Teams Third-party API。請在 Teams 中完成配對；此 Preview 只採用已配對連線推送的狀態，不能假定 Teams 會可靠推送每次靜音變更。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <TextBlock Text="{Binding TeamsMuteStatusText}" TextWrapping="Wrap" />
                     <TextBlock Text="{Binding TeamsMuteRoutingText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <StackPanel Orientation="Horizontal" Spacing="10">
@@ -140,7 +140,7 @@
                     <Slider Maximum="1" Minimum="0" Value="{Binding PlaybackProgress}" IsEnabled="{Binding CanSeek}" />
                 </StackPanel>
             </Border>
-            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此 MVP 專注音訊工作階段與本機播放；Teams 靜音同步仍需在實際 Teams 租戶完成配對才可運作，且不包含視訊、虛擬麥克風或逐字稿。" TextWrapping="Wrap" />
+            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此 MVP 專注音訊工作階段與本機播放。Teams 整合仍屬 Preview：靜音狀態更新需要在實際 Teams 租戶／用戶端重複驗證；不包含視訊、虛擬麥克風或逐字稿。" TextWrapping="Wrap" />
         </StackPanel>
     </ScrollViewer>
 </Page>

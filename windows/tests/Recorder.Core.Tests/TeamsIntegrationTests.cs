@@ -2,13 +2,13 @@ using TeamsRecorder.Windows.Application;
 
 internal static class TeamsIntegrationTests
 {
-    public static void ProtocolUsesLocalEndpointAndAbsoluteCommands()
+    public static void ProtocolUsesLocalEndpointAndPairingOnly()
     {
         var endpoint = TeamsThirdPartyApi.CreateEndpoint(TeamsThirdPartyApiIdentity.Recorder("1.2 test"), "token+/=");
         if (endpoint.Scheme != "ws" || endpoint.Host != "127.0.0.1" || endpoint.Port != 8124) throw new InvalidOperationException("Teams endpoint must remain local.");
         if (!endpoint.Query.Contains("token=token%2B%2F%3D", StringComparison.Ordinal)) throw new InvalidOperationException("Pairing token was not safely encoded.");
-        var command = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.QueryState, 7);
-        if (command != "{\"action\":\"query-state\",\"parameters\":{},\"requestId\":7}") throw new InvalidOperationException($"Unexpected Teams command: {command}");
+        var command = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.Pair, 7);
+        if (command != "{\"action\":\"pair\",\"parameters\":{},\"requestId\":7}") throw new InvalidOperationException($"Unexpected Teams command: {command}");
         if (command.Contains("mute", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Mute synchronization must not issue a Teams mute command.");
     }
 
@@ -27,11 +27,14 @@ internal static class TeamsIntegrationTests
         using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
         var presence = new List<bool>(); coordinator.MeetingPresenceChanged += (_, inMeeting) => presence.Add(inMeeting);
         coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
-        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, false), true, false)));
-        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, true, true, false), true, false)));
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, false), true, false), true));
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, true, true, false), true, false), true));
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, false), true, false), true));
         client.Disconnect("Teams API unavailable");
-        if (!microphone.Calls.SequenceEqual([false, true, true]) || !presence.SequenceEqual([true, true])) throw new InvalidOperationException("Mute or meeting updates were not absolute and ordered.");
+        if (!microphone.Calls.SequenceEqual([true, false, true]) || !presence.SequenceEqual([true, true, true, false])) throw new InvalidOperationException("Mute routing or meeting updates were not ordered and fail-closed.");
         Equal(TeamsMuteSyncStatus.WaitingForTeamsApi, coordinator.Snapshot.Status); Equal("Teams API unavailable", coordinator.Snapshot.Detail!);
+        Equal(false, coordinator.Snapshot.IsPairingAuthenticated);
+        if (coordinator.Snapshot.LastMeetingState is not null) throw new InvalidOperationException("A disconnected meeting state must not remain trusted.");
     }
 
     public static void MuteCoordinatorDoesNotChangeMicForOutOfMeetingState()
@@ -39,8 +42,37 @@ internal static class TeamsIntegrationTests
         var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
         using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
         coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
-        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(false, true, true, false), true, false)));
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(false, true, true, false), true, false), true));
         Equal(0, microphone.Calls.Count); Equal(TeamsMuteSyncStatus.Ready, coordinator.Snapshot.Status);
+    }
+
+    public static void MuteCoordinatorRejectsUnauthenticatedMeetingState()
+    {
+        var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
+        using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
+        var presence = new List<bool>(); coordinator.MeetingPresenceChanged += (_, inMeeting) => presence.Add(inMeeting);
+        coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
+
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, true), true, true)));
+
+        Equal(0, microphone.Calls.Count);
+        Equal(0, presence.Count);
+        Equal(TeamsMuteSyncStatus.WaitingForPairingApproval, coordinator.Snapshot.Status);
+        Equal(false, coordinator.Snapshot.IsPairingAuthenticated);
+        if (coordinator.Snapshot.LastMeetingState is not null) throw new InvalidOperationException("Unauthenticated meeting state must not be retained.");
+    }
+
+    public static void MuteCoordinatorFailsClosedOnApiError()
+    {
+        var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
+        using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
+        coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, true, true, false), true, false), true));
+        client.Publish(new TeamsThirdPartyApiEvent.Error(null, "Teams API request failed"));
+
+        if (!microphone.Calls.SequenceEqual([true, true])) throw new InvalidOperationException("An API error after Teams routed a mute must fail closed.");
+        Equal(TeamsMuteSyncStatus.Failed, coordinator.Snapshot.Status);
+        Equal(false, coordinator.Snapshot.IsPairingAuthenticated);
     }
 
     public static void MuteCoordinatorOnlyReportsPairingAfterEnabledClientAcceptsIt()

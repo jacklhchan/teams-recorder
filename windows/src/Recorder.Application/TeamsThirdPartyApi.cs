@@ -77,13 +77,12 @@ public sealed record TeamsThirdPartyApiIdentity(string Manufacturer, string Devi
     public static TeamsThirdPartyApiIdentity Recorder(string appVersion) => new("Local Meeting Recorder", "Windows Audio Bridge", "Local Meeting Recorder", appVersion);
 }
 
-public enum TeamsThirdPartyApiAction { Pair, QueryState }
+public enum TeamsThirdPartyApiAction { Pair }
 public static class TeamsThirdPartyApiActionExtensions
 {
     public static string ToWireValue(this TeamsThirdPartyApiAction action) => action switch
     {
         TeamsThirdPartyApiAction.Pair => "pair",
-        TeamsThirdPartyApiAction.QueryState => "query-state",
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
     };
 }
@@ -92,7 +91,12 @@ public sealed record TeamsMeetingState(bool IsInMeeting, bool IsMuted, bool CanT
 public sealed record TeamsThirdPartyApiMeetingUpdate(TeamsMeetingState? State, bool CanToggleMute, bool CanPair);
 public abstract record TeamsThirdPartyApiEvent
 {
-    public sealed record MeetingUpdate(TeamsThirdPartyApiMeetingUpdate Update) : TeamsThirdPartyApiEvent;
+    /// <summary>
+    /// A raw meeting payload is authoritative only when the transport confirms that the active
+    /// socket was opened with a persisted pairing credential.  Decoder callers use the default
+    /// false value; the WebSocket client sets it for authenticated connections before publishing.
+    /// </summary>
+    public sealed record MeetingUpdate(TeamsThirdPartyApiMeetingUpdate Update, bool IsPairingAuthenticated = false) : TeamsThirdPartyApiEvent;
     public sealed record TokenRefresh(string Token) : TeamsThirdPartyApiEvent;
     public sealed record Response(int? RequestId, string Message) : TeamsThirdPartyApiEvent;
     public sealed record Error(int? RequestId, string Message) : TeamsThirdPartyApiEvent;

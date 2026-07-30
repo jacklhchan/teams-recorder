@@ -28,16 +28,18 @@ The repository now contains:
 - deterministic native and managed tests, JSON contract fixtures, and real
   process-audio diagnostic tools.
 
-This is an audio-first MVP, not a completed Teams integration. The desktop
-shell does not offer process selection, Teams meeting detection, video capture,
-transcription, or a virtual microphone driver. It includes a **preview** local
-Microsoft Teams Third-party App API client for pairing and absolute mute-state
-handling, but that preview has not yet been approved and exercised in a usable
-Teams tenant or meeting; it must not be presented as generally available Teams
-API support, Teams mute control, meeting detection, or automatic recording. It
-records the system render mix, which may include any audible application; it
-does not claim Teams-only process recording. Aggregate health is available, but
-source-specific health statistics are not yet exposed.
+This is an audio-first MVP, not a generally available Teams integration. In one
+Windows validation environment, Teams Third-party App API pairing completed,
+authoritative meeting-presence updates were received, and the automatic-recording
+flow finalized an M4A file. This is limited single-environment evidence only; it
+does not establish general Teams API availability, Teams-only process recording,
+or cross-tenant support. Teams UI mute/unmute actions did not deliver reliable
+mute-state updates in that validation. Teams Mute Sync therefore remains an
+unverified Preview and must not be presented as working, reliable, or capable of
+controlling Teams mute. The integration relies on supported pushed events and
+does not retain `query-state` polling as a workaround. Video capture,
+transcription, and a virtual microphone driver are not available. Aggregate
+health is available, but source-specific health statistics are not yet exposed.
 
 The WinUI recording command allocates managed `manual-*` or `test-*` session
 folders through the storage service, writes native capture to

@@ -1,9 +1,12 @@
 # UI and Feature Boundary Refactor Design
 
 **Date:** 2026-07-30
-**Status:** Approved architecture baseline
+**Status:** Approved architecture baseline with approved macOS 26 PR A revision
 **Approved baseline SHA:** `8f110466093c9a3fabc5f5d1fad3c69afa849c53`
 **Approval date:** 2026-07-30
+**macOS 26 PR A revision approval:** 2026-07-31
+**Revision dependency:** PR #5 merged at
+`b84b79fefd915a97beaf8c97f667e774ef0d7ab7`
 **Delivery:** Three sequential, bounded Draft pull requests
 **Reference UI:** `codex/liquid-glass-recorder-ui` at `776837b`
 
@@ -440,9 +443,12 @@ capture source mutation during start/finalization.
 
 ### Visual rules
 
-- Glass is limited to navigation and primary chrome.
-- `RecorderGlass` is the only macOS 26 `glassEffect` availability boundary.
-- macOS 15–25 use material and border fallback.
+- Glass is limited to system-provided navigation and primary chrome.
+- The native `NavigationSplitView` owns the sidebar material. PR A does not
+  wrap the sidebar in a custom Glass modifier, material, border, overlay, or
+  manually composed divider.
+- The repository supports macOS 26 and later only. PR A contains no
+  pre-macOS-26 UI availability or material fallback.
 - meters, lists, warnings, transcripts, and forms use stable content surfaces.
 - system audio uses cyan/blue semantics;
 - microphone uses mint/green semantics;
@@ -469,7 +475,6 @@ Expected new presentation files:
 Sources/RecorderApp/UI/
   RecorderNavigation.swift
   RecorderActionID.swift
-  RecorderGlass.swift
   RecorderVisualStyle.swift
   RecordDashboardPresentation.swift
   RecorderSidebar.swift
@@ -611,7 +616,7 @@ replace a specific blocking state with an unrelated global status message.
   it to existing sheets;
 - dashboard Start/Stop presentation and compact-height policy;
 - stable action identifiers;
-- Glass availability/fallback boundary where testable;
+- native sidebar, toolbar, search, list, and form behavior;
 - current playback window remains outside the main content hierarchy;
 - current runtime constructs one model and one presenter;
 - capture, Teams auto-meeting, mute, and floating-controller regressions.
@@ -622,12 +627,11 @@ XCTest/AppKit runtime can create a hosting window:
 1. construct a deterministic, startup-disabled fixture `AppModel`;
 2. host the actual workspace in an `NSHostingView` and `NSWindow` with an
    860×680 content rect, disable animations, and force main-actor layout;
-3. assert the initial Record viewport contains non-zero, non-clipped frames for
-   recording state/timer, Start-or-Stop, microphone mute, both audio meters,
-   and immediate capture health without scrolling;
-4. drive an injectable internal workspace navigation boundary through Record,
-   Recordings, and Settings for at least 25 repeated cycles, asserting each
-   destination renders and no clean-navigation pending state leaks;
+3. assert the initial Record viewport renders recording state/timer,
+   Start-or-Stop, both audio meters, and immediate capture health;
+4. drive the internal workspace navigation boundary through Record,
+   Recordings, and Settings for a small repeated route cycle, asserting each
+   destination renders and selection remains stable;
 5. repeat the structural layout at a representative wide size;
 6. after exercising video playback and the destination-switching cycle,
    recursively assert that no `AVPlayerView` exists in the main workspace
@@ -705,7 +709,7 @@ Required existing focused suites also include
 
 ### Full automated gate for each PR
 
-1. complete Swift test suite twice;
+1. complete Swift test suite once;
 2. Python/script tests;
 3. policy checks;
 4. `Tests/PackagingTests/run-tests.sh`, including the staging app bundle
@@ -721,13 +725,13 @@ release authorization on an eligible ref with production secrets. If they are
 not run, the PR report says `not run`; an ad-hoc staging signature must never
 be described as notarized production-artifact acceptance.
 
-The existing GitHub 20-minute Swift cancellation is verification-unknown, not
-a pass or product failure, and blocks merge until the same SHA obtains a
-passing terminal result. Record the exact SHA, phase, and final output; rerun
-the same SHA and use two full local runs with the same toolchain for diagnosis.
-A repeated timeout requires a separate CI performance/sharding PR. Do not
-weaken the second Swift pass or skip packaging/policy, and do not mix workflow
-performance changes into the UI refactor.
+The main-only stability step runs
+`RECORDER_STABILITY=1 swift test --filter RecorderWorkspaceStabilityTests`.
+Pull requests run one unflagged full suite, where loop-based stability tests
+are skipped, and do not repeat the identical full Swift suite. A GitHub timeout
+remains verification-unknown and blocks merge until the same SHA obtains a
+passing terminal result; do not increase timeouts or skip deterministic
+cancellation, packaging, or policy coverage.
 
 ## 15. Manual Acceptance
 
@@ -747,7 +751,7 @@ Required PR A smoke tests before merge:
   Teams screen, Teams Auto/Mute Sync, virtual microphone, and provider;
 - manual start/stop and Mute command routing;
 - independent playback and Teams-countdown presenters;
-- light/dark appearance and material fallback;
+- light/dark appearance and native macOS 26 material;
 - keyboard traversal, current shortcuts, and VoiceOver labels where the local
   OS/hardware permits.
 
@@ -770,7 +774,7 @@ Required final program smoke tests:
 - keyboard traversal and physical shortcuts;
 - VoiceOver labels;
 - Reduce Transparency, Reduce Motion, and Increase Contrast;
-- macOS 15 fallback and macOS 26 Glass where hardware/OS access is available.
+- macOS 26 native sidebar, toolbar, search, and accessibility appearances.
 
 Real-provider, notarized production artifact, live Teams, AirPods, physical
 shortcut, and accessibility hardware/OS acceptance remain explicit manual
@@ -793,3 +797,106 @@ The three-PR program is complete when:
   responsibilities;
 - no PR claims full production acceptance without completing the outstanding
   manual gates.
+
+## 17. Approved macOS 26 Liquid Glass PR A Revision
+
+This section supersedes earlier PR A presentation and test details where they
+conflict. It does not change the PR B or PR C ownership cutovers.
+
+### Apple design principles
+
+- Prefer standard SwiftUI navigation, toolbars, controls, lists, forms, and
+  search fields so macOS 26 supplies the current appearance and behavior.
+- Treat Liquid Glass as a functional layer for navigation, controls, and
+  transient or floating functional elements, not as a general content-card
+  surface.
+- Let the system render the sidebar. Remove custom sidebar Glass, material
+  backgrounds, overlays, and manual navigation chrome.
+- Keep meters, recording health, recording rows, transcript content, and
+  settings sections in the content layer using standard surfaces, spacing,
+  typography, and separators.
+- Use custom `glassEffect`, Glass button styles, or `GlassEffectContainer` only
+  for a genuinely custom floating control. The separately owned floating
+  recording controller is the only current candidate; PR A does not restyle
+  or move it.
+
+The design authority is Apple's *Adopting Liquid Glass*, *Applying Liquid
+Glass to custom views*, Human Interface Guidelines for *Materials*,
+*Designing for macOS*, *Sidebars*, *Toolbars*, *Search fields*, and *Buttons*,
+and WWDC25 *Build a SwiftUI app with the new design*.
+
+### Before and after component mapping
+
+| Area | Rebased PR A before revision | Approved revision |
+|---|---|---|
+| Workspace | Manual `HStack`, sidebar `List`, and `Divider` | Native `NavigationSplitView` with the same Record, Recordings, and Settings selection |
+| Sidebar | Fixed frame plus `.recorderGlass()` and hidden list background | System sidebar appearance and native show/hide behavior |
+| Compatibility | `RecorderGlass` compiler, availability, and material fallback | Delete the obsolete pre-macOS-26 UI fallback and its tests |
+| Record | Dense action grid and a disabled shortcut pseudo-button | Status, elapsed time, meters, health, and one prominent Start/Stop action; existing secondary commands move to the native toolbar or More menu |
+| Recordings | Scroll/card rows with inline search | Native toolbar search and list presentation while preserving existing row actions, sheets, dialog, playback presenter, and persistence |
+| Settings | Custom stacked card sections | Native `Form` and `Section` grouping with all existing bindings and gates |
+| Toolbar | Destination actions embedded in content | Destination-specific toolbar items calling existing `AppModel` commands only |
+
+### PR A scope
+
+In scope:
+
+- `NavigationSplitView`, native sidebar show/hide, and destination-specific
+  toolbar composition;
+- removal of PR A's custom sidebar Glass and pre-macOS-26 fallback;
+- presentation-only hierarchy changes for Record, Recordings, and Settings;
+- moving existing actions without changing their command, disabled-state, or
+  ownership semantics;
+- native `List`, `searchable`, `Form`, and `Section` where they preserve
+  current behavior;
+- behavior-focused test rationalization.
+
+Out of scope:
+
+- feature models, `AppCoordinator`, state ownership migration, or a second
+  workspace-folder source;
+- sorting behavior, new AppCommands, new keyboard shortcuts, or responder
+  chain changes;
+- list-detail selection ownership, transcript/metadata detail panes, or
+  replacing their existing sheets;
+- recording, transcription, Teams, mute-sync, storage, playback, provider,
+  persistence, or Windows behavior.
+
+### Test retention and removal
+
+Retain focused required-PR coverage for:
+
+- Record, Recordings, and Settings navigation;
+- Start/Stop and effective recorder-mute presentation and gates;
+- permission recovery navigation;
+- recordings rendering, transcript snippets, favorites filtering, and
+  metadata rename projection;
+- Settings enabled/disabled gates;
+- core accessibility identifiers and session-specific labels;
+- one 860×680 smoke, one wide/resizable smoke, and a small route-switch cycle;
+- playback/countdown presenter lifetime and `AVPlayerView` isolation.
+
+Remove or replace:
+
+- source-file searches and tests requiring exact private struct/file placement;
+- exact compiler-directive or availability-source spelling;
+- visual-style-token caller counts;
+- pre-macOS-26 fallback tests;
+- duplicate exact-frame/no-scroll assertions;
+- 25- and 100-cycle loops from required pull-request checks.
+
+Loop-based navigation/render stress moves to a main-only or scheduled
+stability test. Deterministic transcription cancellation tests remain in the
+required suite because they protect a real lifecycle contract and are not
+stress loops.
+
+### Manual macOS 26 acceptance
+
+Automated AppKit tests do not prove real Liquid Glass rendering, system
+accessibility settings, or VoiceOver interaction. Before merge, manually
+inspect Record, Recordings, and Settings in light and dark appearance, one
+Reduce Transparency example, minimum and large window sizes, sidebar shown
+and hidden, keyboard-only navigation, and idle/active recording states.
+Increase Contrast, Reduce Motion, non-default accent color, and VoiceOver
+focus/labels are recorded as passed or explicitly outstanding; they are never
+inferred from source or snapshot tests.

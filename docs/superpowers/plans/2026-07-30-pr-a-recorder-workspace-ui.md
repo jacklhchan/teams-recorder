@@ -4,9 +4,16 @@
 
 **Goal:** Build a presentation-only Record / Recordings / Settings workspace shell while preserving current runtime wiring, direct `AppModel` action parity, and presenter lifetime.
 
-**Architecture:** `ContentView` becomes only the workspace shell: it observes the sole injected `AppModel`, retains exactly the current playback and Teams-countdown presenters, and composes destination views. Every destination receives that same model and calls existing methods directly. `RecorderGlass` is the sole macOS 26 Glass availability boundary; all content is a stable surface.
+**Architecture:** `ContentView` becomes only the native
+`NavigationSplitView` workspace shell: it observes the sole injected
+`AppModel`, retains exactly the current playback and Teams-countdown
+presenters, and composes destination views. Every destination receives that
+same model and calls existing methods directly. Standard macOS 26 navigation,
+toolbar, list, search, form, and control components provide the functional
+Liquid Glass layer; content remains on standard surfaces.
 
-**Tech Stack:** Swift 5.9, SwiftUI, AppKit `NSHostingView`/ `NSWindow`, XCTest, AVKit, Combine, macOS 15+.
+**Tech Stack:** Swift 5.9, SwiftUI, AppKit `NSHostingView`/ `NSWindow`,
+XCTest, AVKit, Combine, macOS 26+.
 
 ## Global Constraints
 
@@ -20,6 +27,64 @@
 - Preserve `Option+Shift+M`. Cmd+Shift+R currently sends `#selector(AppCommands.startStopRecording)` from `LocalMeetingRecorderApp`, but no responder implementation was found. Leave selector/menu/behavior untouched and do not claim it fixed.
 - Preserve IDs: `capture-mode-picker`, `reconnect-selected-application`, `teams-screen-capture-toggle`, `teams-screen-capture-status`, `teams-screen-window-menu`, `teams-auto-recording-toggle`, `teams-auto-recording-status`, `teams-auto-recording-cancel`.
 - Every slice is RED → prove failure → minimal GREEN → focused GREEN before staging source changes.
+
+## Approved 2026-07-31 macOS 26 revision
+
+This addendum supersedes Task 1's custom `RecorderGlass` implementation,
+source-string tests, exact-layout assertions, and loop counts. It also
+supersedes the final requirement to run an identical second full Swift suite
+for pull requests. PR #5 is merged at
+`b84b79fefd915a97beaf8c97f667e774ef0d7ab7`; this branch is rebased on that
+macOS 26 baseline.
+
+Implement the revision in rollback-safe slices:
+
+1. **Design checkpoint** — update the approved design with Apple functional
+   versus content-layer rules, before/after mapping, test rationale, and manual
+   acceptance.
+2. **Native workspace** — first add an AppKit-hosted behavior test proving
+   native sidebar show/hide preserves destination selection; then replace the
+   manual `HStack`/`Divider` shell with `NavigationSplitView`, remove custom
+   sidebar backgrounds, and delete `RecorderGlass` plus its fallback tests.
+3. **Record toolbar and hierarchy** — keep Start/Stop as the one prominent
+   content action; move the existing refresh, mute, Test 10s, choose-folder,
+   and open-folder commands into destination toolbar/More composition. Remove
+   the disabled shortcut pseudo-button without changing actual shortcut
+   wiring or command gates.
+4. **Recordings native list/search** — move existing import, refresh,
+   favorites, and search UI into a native toolbar/`searchable` composition and
+   render sessions in `List`. Preserve the one visible-session calculation,
+   snippets, favorites, row actions, transcript/metadata sheets, trash
+   dialog, playback presenter, and persistence semantics.
+5. **Settings form** — replace custom stacked section cards with `Form` and
+   `Section`, preserving every existing permission, capture, Teams,
+   virtual-microphone, and provider binding and disabled-state gate.
+6. **Test rationalization** — remove source/file/compiler/caller-count tests;
+   retain minimum/wide smoke, a small route cycle, permission recovery,
+   recordings rendering, Settings gates, core IDs, presenter lifetime, and
+   `AVPlayerView` isolation. Gate 25/100-cycle navigation/render loops behind
+   `RECORDER_STABILITY=1`. Pull requests run one unflagged full suite and skip
+   those loops. Replace the existing main-only second full-suite step with:
+
+   ```bash
+   RECORDER_STABILITY=1 swift test --filter RecorderWorkspaceStabilityTests
+   ```
+
+7. **Final gate** — run one complete Swift suite for the PR, focused
+   behavioral UI tests, Python/script, policy, packaging, virtual-microphone,
+   strict codesign, bundle-content, and diff checks. The required PR gate does
+   not set `RECORDER_STABILITY` or execute loop-based stress.
+
+Do not add sorting, new menu commands, new keyboard shortcuts, list-detail
+editor ownership, feature models, or any domain behavior.
+
+## Archived original implementation plan — do not execute
+
+The original Tasks 1–5 below are retained only as implementation history and
+responsibility mapping. Their code snippets, commands, file manifests, test
+counts, and commit instructions are superseded and must not be executed. The
+approved 2026-07-31 slices above are the single implementation plan for the
+remaining PR A revision.
 
 ---
 
@@ -761,7 +826,14 @@ explicitly `not run` without production release authorization.
 
 - [ ] **Step 5: Perform manual 860×680 acceptance and preserve evidence.**
 
-At exact 860×680, capture a screenshot of Record showing without scrolling: state/timer, Start/Stop, Mute, both meters, health. Capture wide Record/Recordings/Settings. Check Start/Stop/Mute routing, independent playback/countdown presenters, light/dark/material fallback, keyboard traversal/current shortcuts, VoiceOver labels where permitted. Report each as `passed` or `not run` with tester, date, macOS version, and screenshot path; explicitly list unrun Teams/provider/TCC/AirPods/macOS-26 Glass checks.
+At exact 860×680, capture a screenshot of Record showing state/timer,
+Start/Stop, both meters, and health. Capture wide
+Record/Recordings/Settings. Check Start/Stop/Mute routing, native sidebar
+shown/hidden, independent playback/countdown presenters, light/dark/native
+macOS 26 material, keyboard traversal/current shortcuts, and VoiceOver labels
+where permitted. Report each as `passed` or `not run` with tester, date,
+macOS version, and screenshot path; explicitly list unrun
+Teams/provider/TCC/AirPods/accessibility-mode checks.
 
 - [ ] **Step 6: Push and create/update the Draft PR only.**
 
@@ -772,6 +844,7 @@ Draft PR must list baseline SHA, five reversible commits (navigation, Record, Re
 - [ ] Every original `ContentView` responsibility is mapped above and exists once.
 - [ ] Every action calls exactly the existing `AppModel` command named above.
 - [ ] `ContentView` alone retains playback/countdown presenters; no `AVPlayerView` exists in main hierarchy.
-- [ ] 860×680, wide, 25 rendered cycles, and 100 pure cycles are covered.
+- [ ] 860×680, wide, and a small required-PR route cycle are covered; 25/100
+  cycle stress is main-only or scheduled.
 - [ ] No state/ownership migration, `workspaceRevision`, or second folder source exists.
 - [ ] Design header is Approved architecture baseline with exact SHA and date.

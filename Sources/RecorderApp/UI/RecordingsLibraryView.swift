@@ -11,6 +11,9 @@ struct RecordingsLibraryView: View {
             favoritesOnly: favoritesOnly
         )
         let visibleSessions = query.filter(model.sessions)
+        let toolbarPresentation = RecordingsToolbarPresentation.make(
+            isTranscribing: model.transcribingSessionID != nil
+        )
 
         SessionListView(
             sessions: visibleSessions,
@@ -48,7 +51,7 @@ struct RecordingsLibraryView: View {
                 } label: {
                     Label("Upload Audio", systemImage: "square.and.arrow.up")
                 }
-                .disabled(model.transcribingSessionID != nil)
+                .disabled(toolbarPresentation.uploadDisabled)
                 .accessibilityIdentifier(RecorderActionID.uploadAudio)
 
                 Button {
@@ -146,6 +149,12 @@ private struct SessionListView: View {
                             Button { open(session) } label: { Image(systemName: "folder") }
                                 .buttonStyle(.bordered)
                                 .accessibilityLabel("Open \(session.displayName)")
+                                .background(
+                                    RecorderDestinationAccessibilityMarker(
+                                        identifier: "recorder.row.open.\(session.id.lastPathComponent)",
+                                        label: "Open \(session.displayName)"
+                                    )
+                                )
                             Button { metadataSession = session } label: {
                                 Image(systemName: session.isFavorite ? "star.fill" : "slider.horizontal.3")
                             }
@@ -165,21 +174,45 @@ private struct SessionListView: View {
                             .disabled(transcribingSessionID != nil || !hasSavedProviderProfile)
                             .help(hasSavedProviderProfile ? "Transcribe with the configured AI provider" : "Configure an AI provider first")
                             .accessibilityLabel("Transcribe \(session.displayName)")
+                            .background(
+                                RecorderDestinationAccessibilityMarker(
+                                    identifier: "recorder.row.transcribe.\(session.id.lastPathComponent)",
+                                    label: "Transcribe \(session.displayName)"
+                                )
+                            )
                             Button { transcriptSession = session } label: { Image(systemName: "doc.text.fill") }
                                 .buttonStyle(.bordered)
                                 .disabled(!hasTranscript(for: session))
                                 .help("View and edit transcript")
                                 .accessibilityIdentifier(RecorderActionID.openTranscript)
                                 .accessibilityLabel("Open Transcript for \(session.displayName)")
+                                .background(
+                                    RecorderDestinationAccessibilityMarker(
+                                        identifier: "recorder.row.transcript.\(session.id.lastPathComponent)",
+                                        label: "Open Transcript for \(session.displayName)"
+                                    )
+                                )
                             Button(role: .destructive) { sessionPendingTrash = session } label: { Image(systemName: "trash") }
                                 .buttonStyle(.bordered)
                                 .help("Move recording to Trash")
                                 .accessibilityLabel("Move \(session.displayName) to Trash")
+                                .background(
+                                    RecorderDestinationAccessibilityMarker(
+                                        identifier: "recorder.row.trash.\(session.id.lastPathComponent)",
+                                        label: "Move \(session.displayName) to Trash"
+                                    )
+                                )
                             Button { openTranscriptLog(session) } label: { Image(systemName: "terminal") }
                                 .buttonStyle(.bordered)
                                 .disabled(!hasTranscriptLog(for: session))
                                 .help("Open ASR log")
                                 .accessibilityLabel("Open ASR log for \(session.displayName)")
+                                .background(
+                                    RecorderDestinationAccessibilityMarker(
+                                        identifier: "recorder.row.log.\(session.id.lastPathComponent)",
+                                        label: "Open ASR log for \(session.displayName)"
+                                    )
+                                )
                         }
 
                         if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id || transcriptionStatesBySessionID[session.id] != nil {

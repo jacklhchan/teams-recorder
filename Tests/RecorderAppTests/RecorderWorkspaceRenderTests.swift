@@ -161,6 +161,37 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(fixture.session.displayName)"))
     }
 
+    func testMinimumRecordingsKeepsSessionActionsInsideWindow() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+
+        let rowID = fixture.session.id.lastPathComponent
+        for identifier in [
+            "recorder.row.play.\(rowID)",
+            "recorder.row.open.\(rowID)",
+            "recorder.row.edit.\(rowID)",
+            "recorder.row.transcribe.\(rowID)",
+            "recorder.row.transcript.\(rowID)",
+            "recorder.row.trash.\(rowID)",
+            "recorder.row.log.\(rowID)"
+        ] {
+            let frame = try XCTUnwrap(
+                host.frame(forAccessibilityIdentifier: identifier),
+                "Missing session action: \(identifier)"
+            )
+            XCTAssertTrue(
+                host.windowContentRect.contains(frame),
+                "\(identifier) must remain inside the 860×680 window"
+            )
+        }
+    }
+
     func testSessionActionMarkersUpdateWhenMetadataProjectionRenamesSameSession() throws {
         let fixture = makeFixtureWithOneSession()
         let host = try makeWorkspaceHost(
@@ -250,6 +281,25 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityIdentifier("teams-auto-recording-toggle"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.audio-integration-section"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.transcription-section"))
+    }
+
+    func testMinimumSettingsRendersCaptureAndTeamsControls() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.settings)
+
+        XCTAssertTrue(
+            host.containsAccessibilityIdentifier("recorder.destination.settings")
+        )
+        XCTAssertTrue(host.containsAccessibilityIdentifier("capture-mode-picker"))
+        XCTAssertTrue(
+            host.containsAccessibilityIdentifier("teams-auto-recording-toggle")
+        )
     }
 
     func testSourceControlGatesRemainDisabledDuringLifecycleWork() throws {
@@ -541,6 +591,14 @@ private final class WorkspaceHost {
 
     var visibleContentRect: CGRect {
         hostingView.accessibilityFrame()
+    }
+
+    var windowContentRect: CGRect {
+        let contentRect = window.contentLayoutRect
+        return CGRect(
+            origin: window.convertPoint(toScreen: contentRect.origin),
+            size: contentRect.size
+        )
     }
 
     func frame(forAccessibilityIdentifier identifier: String) -> CGRect? {

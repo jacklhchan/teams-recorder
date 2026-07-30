@@ -21,7 +21,13 @@ struct RecordDashboardView: View {
     }
 
     private func dashboard(presentation: RecordDashboardPresentation) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let toolbarPresentation = RecordToolbarPresentation.make(
+            sourceControlsEnabled: model.sourceControlsEnabled,
+            isRecording: model.recorder.isRecording,
+            dashboard: presentation
+        )
+
+        return VStack(alignment: .leading, spacing: 10) {
             RecordDashboardHeader(model: model, presentation: presentation)
                 .accessibilityIdentifier("record-state")
                 .background(RecordDashboardFrameMarker(identifier: "record-state"))
@@ -54,7 +60,7 @@ struct RecordDashboardView: View {
                     Label("Refresh Capture", systemImage: "arrow.clockwise")
                 }
                 .accessibilityIdentifier(RecorderActionID.refreshCapture)
-                .disabled(!model.sourceControlsEnabled)
+                .disabled(toolbarPresentation.refreshDisabled)
 
                 Button {
                     model.toggleRecorderMicMute()
@@ -80,7 +86,7 @@ struct RecordDashboardView: View {
                                 )
                         )
                 )
-                .disabled(presentation.muteDisabled)
+                .disabled(toolbarPresentation.muteDisabled)
             }
 
             ToolbarSpacer(.fixed)
@@ -96,7 +102,7 @@ struct RecordDashboardView: View {
                         )
                     }
                     .accessibilityIdentifier(RecorderActionID.testAudio)
-                    .disabled(presentation.testDisabled)
+                    .disabled(toolbarPresentation.testDisabled)
 
                     Divider()
 
@@ -104,7 +110,9 @@ struct RecordDashboardView: View {
                         Label("Choose Output Folder", systemImage: "folder")
                     }
                     .accessibilityIdentifier(RecorderActionID.chooseOutputFolder)
-                    .disabled(model.recorder.isRecording)
+                    .disabled(
+                        toolbarPresentation.chooseOutputFolderDisabled
+                    )
 
                     Button(action: model.openRecordingFolder) {
                         Label("Open Output Folder", systemImage: "arrow.up.right.square")

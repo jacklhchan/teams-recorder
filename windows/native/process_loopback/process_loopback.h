@@ -75,6 +75,33 @@ enum class ActivationCompletionDisposition {
 ActivationCompletionDisposition ActivationCompletionDispositionFor(
     bool activation_abandoned) noexcept;
 
+// The virtual endpoint is scoped to one explicitly selected root process and
+// every process in the tree rooted at that PID; it never means system audio.
+enum class ProcessLoopbackTargetScope : std::uint32_t {
+    include_selected_root_process_tree = 1,
+};
+
+struct ProcessLoopbackCaptureMetadata {
+    DWORD selected_root_process_id = 0;
+    ProcessLoopbackTargetScope target_scope =
+        ProcessLoopbackTargetScope::include_selected_root_process_tree;
+    bool system_audio_fallback_permitted = false;
+};
+
+// Stable metadata for a session/mixer consumer. Performs no OS access.
+ProcessLoopbackCaptureMetadata DescribeProcessLoopbackTarget(
+    DWORD selected_root_process_id) noexcept;
+
+enum class TargetProcessWaitDisposition {
+    still_running,
+    exited,
+    wait_failed,
+};
+
+// The selected root exiting is terminal even if a former child remains alive.
+TargetProcessWaitDisposition TargetProcessWaitDispositionFor(
+    DWORD wait_result) noexcept;
+
 struct ProcessLoopbackActivationResult {
     HRESULT hr = E_FAIL;
     bool timed_out = false;
@@ -114,6 +141,9 @@ struct ProcessLoopbackAudioBlock {
     // False only when the process virtual endpoint rejected event callbacks
     // and this same target PID was reactivated for bounded polling.
     bool event_driven = true;
+    // Appended so existing fields and their order are preserved. Every block
+    // declares the exact root/tree contract that produced it.
+    ProcessLoopbackCaptureMetadata capture_metadata;
 };
 
 using ProcessLoopbackAudioBlockCallback =
@@ -128,9 +158,9 @@ struct ProcessLoopbackCaptureRequest {
 };
 
 // A single-target, shared-mode process loopback session. Start/Stop are safe
-// from a control thread; callbacks run on the dedicated MTA capture thread and
-// must not call Stop synchronously. This class never activates a physical
-// endpoint or all-system loopback path.
+// from a control thread. A callback-thread Stop only signals shutdown (it never
+// self-joins); a later control-thread Stop/destruction joins the worker. This
+// class never activates a physical endpoint or all-system loopback path.
 class ProcessLoopbackCapture final {
 public:
     ProcessLoopbackCapture();

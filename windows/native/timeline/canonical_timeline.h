@@ -11,7 +11,7 @@ namespace recorder::timeline {
 // WASAPI packet timestamp; device_position_frames is used as an independent
 // duration estimate.  The mapper never moves an already emitted packet back
 // in time and bounds clock correction to 10 ms per packet.
-enum class Source : std::uint8_t { Render, Microphone };
+enum class Source : std::uint8_t { Render, Microphone, Process };
 
 struct Placement {
     std::uint64_t frame = 0;
@@ -70,6 +70,7 @@ private:
     std::uint64_t origin_qpc_100ns_ = 0;
     State render_{};
     State microphone_{};
+    State process_{};
 };
 
 }  // namespace recorder::timeline

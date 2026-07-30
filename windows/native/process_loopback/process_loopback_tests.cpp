@@ -7,6 +7,10 @@ using teams_recorder::process_loopback::ActivationCompletionDisposition;
 using teams_recorder::process_loopback::ActivationCompletionDispositionFor;
 using teams_recorder::process_loopback::ProcessLoopbackCapture;
 using teams_recorder::process_loopback::ProcessLoopbackCaptureRequest;
+using teams_recorder::process_loopback::DescribeProcessLoopbackTarget;
+using teams_recorder::process_loopback::ProcessLoopbackTargetScope;
+using teams_recorder::process_loopback::TargetProcessWaitDisposition;
+using teams_recorder::process_loopback::TargetProcessWaitDispositionFor;
 
 int main() {
     const auto ordinary = ParseProcessId(L"12345");
@@ -21,6 +25,18 @@ int main() {
            ActivationCompletionDisposition::deliver_result);
     assert(ActivationCompletionDispositionFor(true) ==
            ActivationCompletionDisposition::release_client);
+
+    const auto target = DescribeProcessLoopbackTarget(12345);
+    assert(target.selected_root_process_id == 12345);
+    assert(target.target_scope ==
+           ProcessLoopbackTargetScope::include_selected_root_process_tree);
+    assert(!target.system_audio_fallback_permitted);
+    assert(TargetProcessWaitDispositionFor(WAIT_TIMEOUT) ==
+           TargetProcessWaitDisposition::still_running);
+    assert(TargetProcessWaitDispositionFor(WAIT_OBJECT_0) ==
+           TargetProcessWaitDisposition::exited);
+    assert(TargetProcessWaitDispositionFor(WAIT_FAILED) ==
+           TargetProcessWaitDisposition::wait_failed);
 
     ProcessLoopbackCapture capture;
     ProcessLoopbackCaptureRequest invalid_request;

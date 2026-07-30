@@ -49,8 +49,18 @@ typedef enum RecorderNativeCaptureMode {
     RECORDER_NATIVE_CAPTURE_MICROPHONE = 1,
     RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK = 2,
     /* System render loopback, optionally mixed with one exact capture endpoint. */
-    RECORDER_NATIVE_CAPTURE_MIXED = 3
+    RECORDER_NATIVE_CAPTURE_MIXED = 3,
+    /* Mixed recording rooted at an explicitly selected process tree. */
+    RECORDER_NATIVE_CAPTURE_SELECTED_APP_MIXED = 4
 } RecorderNativeCaptureMode;
+
+/* Root audio source for recorder_native_start_selected_audio. */
+typedef enum RecorderNativeSelectedAudioSource {
+    /* System render loopback; no PID or process tree is involved. */
+    RECORDER_NATIVE_SELECTED_AUDIO_SYSTEM_LOOPBACK = 0,
+    /* Root PID plus every process in that root process's tree. */
+    RECORDER_NATIVE_SELECTED_AUDIO_PROCESS_TREE_LOOPBACK = 1
+} RecorderNativeSelectedAudioSource;
 
 /*
  * Endpoint flow and default-role values deliberately use fixed-width macros
@@ -90,6 +100,32 @@ typedef struct RecorderNativeMixedStartOptions {
     uint32_t aac_bitrate_bps;
     uint32_t reserved;
 } RecorderNativeMixedStartOptions;
+
+/*
+ * Additive selected-audio mixed-capture ABI. All UTF-8 strings are copied on
+ * start. output_path_utf8 must be a final .m4a path. NULL/empty
+ * microphone_endpoint_id_utf8 means that no microphone is recorded; it never
+ * selects a default microphone.
+ *
+ * SYSTEM_LOOPBACK optionally accepts render_endpoint_id_utf8 (NULL/empty is
+ * the default render endpoint), and requires target_process_id == 0 and
+ * included_process_tree == 0. PROCESS_TREE_LOOPBACK captures exactly the
+ * non-zero root PID and its complete process tree; it requires
+ * included_process_tree == 1 and render_endpoint_id_utf8 NULL/empty. Invalid
+ * combinations are rejected and never fall back to system audio.
+ */
+typedef struct RecorderNativeSelectedAudioStartOptions {
+    uint32_t struct_size;
+    RecorderNativeSelectedAudioSource audio_source;
+    const char* output_path_utf8;
+    const char* render_endpoint_id_utf8;
+    const char* microphone_endpoint_id_utf8;
+    uint32_t target_process_id;
+    uint32_t included_process_tree;
+    /* Required AAC target bitrate in bits/sec (64,000 through 320,000). */
+    uint32_t aac_bitrate_bps;
+    uint32_t reserved;
+} RecorderNativeSelectedAudioStartOptions;
 
 typedef struct RecorderNativeStats {
     /* Set to sizeof(RecorderNativeStats) before calling get_stats. */
@@ -156,6 +192,16 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_with_options(
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_mixed(
     RecorderNativeBridge* bridge,
     const RecorderNativeMixedStartOptions* options);
+
+/*
+ * Starts mixed M4A capture with an explicit system or selected-process-tree
+ * root source. Validation completes before session creation. Unsupported or
+ * malformed combinations return RECORDER_NATIVE_INVALID_ARGUMENT; no source
+ * substitution or fallback is performed.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_selected_audio(
+    RecorderNativeBridge* bridge,
+    const RecorderNativeSelectedAudioStartOptions* options);
 
 /*
  * Sets the microphone contribution to a mixed M4A capture to an absolute

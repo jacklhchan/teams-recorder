@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(RecorderNativeBridge VERSION 0.5.0 LANGUAGES C CXX)
+project(RecorderNativeBridge VERSION 0.6.0 LANGUAGES C CXX)
 
 option(RECORDER_NATIVE_BUILD_TESTS "Build native bridge contract tests" ON)
 
@@ -270,6 +270,15 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         target_link_libraries(Recorder.Timeline.Tests PRIVATE Recorder.Timeline)
         recorder_enable_strict_warnings(Recorder.Timeline.Tests)
         add_test(NAME Recorder.Timeline.Tests COMMAND Recorder.Timeline.Tests)
+
+        add_executable(Recorder.SelectedAudioSessionFacade.Tests
+            tests/selected_audio_session_facade_tests.cpp
+        )
+        target_compile_features(Recorder.SelectedAudioSessionFacade.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.SelectedAudioSessionFacade.Tests PRIVATE src)
+        recorder_enable_strict_warnings(Recorder.SelectedAudioSessionFacade.Tests)
+        add_test(NAME Recorder.SelectedAudioSessionFacade.Tests
+            COMMAND Recorder.SelectedAudioSessionFacade.Tests)
 
     endif()
 endif()

@@ -3,6 +3,8 @@
 #include "linear_resampler.h"
 #include "m4a_writer.h"
 #include "mix_format_decoder.h"
+#include "process_loopback.h"
+#include "selected_audio_session_facade.h"
 #include "wasapi_capture.h"
 #include "canonical_timeline.h"
 
@@ -60,6 +62,7 @@ std::string WideToUtf8(const std::wstring& value) {
 
 struct Source {
     std::unique_ptr<recorder::audio::WasapiCapture> capture;
+    std::unique_ptr<teams_recorder::process_loopback::ProcessLoopbackCapture> process_capture;
     std::unique_ptr<recorder::format::MixFormat> format;
     std::unique_ptr<recorder::resample::LinearResampler> resampler;
     std::vector<std::uint8_t> format_bytes;
@@ -67,8 +70,32 @@ struct Source {
     std::size_t queued_frames = 0;
     bool received_audio = false;
     bool disconnect_accounted = false;
+    std::uint64_t generation = 0;
     recorder::timeline::Source timeline_source = recorder::timeline::Source::Render;
 };
+
+struct RawAudioBlock {
+    std::vector<std::uint8_t> bytes;
+    std::vector<std::uint8_t> mix_format_bytes;
+    std::uint32_t frame_count = 0;
+    std::uint64_t device_position_frames = 0;
+    std::uint64_t qpc_position = 0;
+    bool silent = false;
+    bool discontinuity = false;
+    bool event_driven = true;
+};
+
+RawAudioBlock ToRaw(recorder::audio::AudioBlock&& block) {
+    return {std::move(block.bytes), std::move(block.mix_format_bytes), block.frame_count,
+            block.device_position_frames, block.qpc_position, block.silent,
+            block.discontinuity, block.event_driven};
+}
+
+RawAudioBlock ToRaw(teams_recorder::process_loopback::ProcessLoopbackAudioBlock&& block) {
+    return {std::move(block.bytes), std::move(block.mix_format_bytes), block.frame_count,
+            block.device_position_frames, block.qpc_position, block.silent,
+            block.discontinuity, block.event_driven};
+}
 
 }  // namespace
 
@@ -90,15 +117,20 @@ public:
             }
 
             config_ = std::move(config);
+            ++session_generation_;
             render_ = {};
             microphone_ = {};
             render_.timeline_source = recorder::timeline::Source::Render;
             microphone_.timeline_source = recorder::timeline::Source::Microphone;
+            render_.timeline_source = selected_audio::PrimaryFor(config_.target_process_id) ==
+                    selected_audio::PrimarySource::SystemRender
+                ? recorder::timeline::Source::Render
+                : recorder::timeline::Source::Process;
             timeline_ = {};
             next_output_frame_ = 0;
             stats_ = {};
             stats_.struct_size = sizeof(stats_);
-            stats_.mode = RECORDER_NATIVE_CAPTURE_MIXED;
+            stats_.mode = config_.mode;
             stats_.output_sample_rate = 48'000;
             stats_.output_channels = 2;
             stats_.event_driven = 1;
@@ -122,15 +154,17 @@ public:
             }
         }
 
-        if (!StartSource(
-                render_,
-                recorder::audio::EndpointFlow::Render,
-                config_.render_endpoint_id)) {
+        const bool primary_started = selected_audio::PrimaryFor(config_.target_process_id) ==
+                selected_audio::PrimarySource::SystemRender
+            ? StartWasapiSource(render_, recorder::audio::EndpointFlow::Render,
+                                config_.render_endpoint_id)
+            : StartProcessSource(render_, config_.target_process_id);
+        if (!primary_started) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 FailLocked(
                     RECORDER_NATIVE_CAPTURE_ERROR,
-                    WideToUtf8(render_.capture->last_error().message));
+                    SourceErrorText(render_));
                 stop_requested_ = true;
                 cv_.notify_all();
             }
@@ -138,7 +172,7 @@ public:
         }
 
         if (!config_.microphone_endpoint_id.empty() &&
-            !StartSource(
+            !StartWasapiSource(
                 microphone_,
                 recorder::audio::EndpointFlow::Capture,
                 config_.microphone_endpoint_id)) {
@@ -146,7 +180,7 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 FailLocked(
                     RECORDER_NATIVE_CAPTURE_ERROR,
-                    WideToUtf8(microphone_.capture->last_error().message));
+                    SourceErrorText(microphone_));
                 stop_requested_ = true;
                 cv_.notify_all();
             }
@@ -172,20 +206,8 @@ public:
             cv_.notify_all();
         }
 
-        if (render_.capture) {
-            render_.capture->Stop();
-            if (render_.capture->last_error().device_invalidated) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                timeline_.MarkDisconnected(render_.timeline_source);
-            }
-        }
-        if (microphone_.capture) {
-            microphone_.capture->Stop();
-            if (microphone_.capture->last_error().device_invalidated) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                timeline_.MarkDisconnected(microphone_.timeline_source);
-            }
-        }
+        StopSource(render_);
+        StopSource(microphone_);
         if (mixer_.joinable()) {
             mixer_.join();
         }
@@ -222,7 +244,13 @@ public:
     RecorderNativeStats stats() const {
         std::lock_guard<std::mutex> lock(mutex_);
         RecorderNativeStats result = stats_;
-        const auto& render_counters = timeline_.counters(recorder::timeline::Source::Render);
+        // The stable ABI names the primary-source diagnostics "render". For
+        // selected-process sessions expose the same slots from Process so the
+        // caller still receives drift/gap fault evidence without an ABI fork.
+        const auto primary_timeline_source = config_.target_process_id == 0
+            ? recorder::timeline::Source::Render
+            : recorder::timeline::Source::Process;
+        const auto& render_counters = timeline_.counters(primary_timeline_source);
         result.render_drift_corrections = render_counters.drift_corrections;
         result.render_late_packets = render_counters.late_packets;
         result.render_late_frames_dropped = render_counters.late_frames_dropped;
@@ -245,7 +273,7 @@ public:
     }
 
 private:
-    bool StartSource(
+    bool StartWasapiSource(
         Source& source,
         recorder::audio::EndpointFlow flow,
         const std::wstring& endpoint_id) {
@@ -254,11 +282,56 @@ private:
         request.flow = flow;
         request.endpoint_id = endpoint_id;
         Source* const source_pointer = &source;
+        const std::uint64_t generation = session_generation_;
+        source.generation = generation;
         return source.capture->Start(
             std::move(request),
-            [this, source_pointer](recorder::audio::AudioBlock&& block) {
-                ProcessBlock(*source_pointer, std::move(block));
+            [this, source_pointer, generation](recorder::audio::AudioBlock&& block) {
+                ProcessBlock(*source_pointer, generation, ToRaw(std::move(block)));
             });
+    }
+
+    bool StartProcessSource(Source& source, std::uint32_t target_process_id) {
+        source.process_capture =
+            std::make_unique<teams_recorder::process_loopback::ProcessLoopbackCapture>();
+        teams_recorder::process_loopback::ProcessLoopbackCaptureRequest request;
+        request.target_process_id = target_process_id;
+        Source* const source_pointer = &source;
+        const std::uint64_t generation = session_generation_;
+        source.generation = generation;
+        return source.process_capture->Start(
+            request,
+            [this, source_pointer, generation](
+                teams_recorder::process_loopback::ProcessLoopbackAudioBlock&& block) {
+                ProcessBlock(*source_pointer, generation, ToRaw(std::move(block)));
+            });
+    }
+
+    std::string SourceErrorText(const Source& source) const {
+        if (source.capture) return WideToUtf8(source.capture->last_error().message);
+        if (source.process_capture) return WideToUtf8(source.process_capture->last_error().message);
+        return "A mixed audio source could not start.";
+    }
+
+    void StopSource(Source& source) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++source.generation;  // Reject callbacks that outlive this session.
+        }
+        if (source.capture) {
+            source.capture->Stop();
+            if (source.capture->last_error().device_invalidated) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                timeline_.MarkDisconnected(source.timeline_source);
+            }
+        }
+        if (source.process_capture) {
+            source.process_capture->Stop();
+            if (source.process_capture->last_error().device_invalidated) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                timeline_.MarkDisconnected(source.timeline_source);
+            }
+        }
     }
 
     RecorderNativeResult FailLocked(
@@ -276,11 +349,11 @@ private:
     }
 
     void ProcessBlock(
-        Source& source,
-        recorder::audio::AudioBlock&& block) noexcept {
+        Source& source, std::uint64_t generation, RawAudioBlock block) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (failure_ != RECORDER_NATIVE_OK || stop_requested_) {
+            if (!selected_audio::AcceptsCallback(source.generation, generation) ||
+                failure_ != RECORDER_NATIVE_OK || stop_requested_) {
                 return;
             }
 
@@ -446,18 +519,19 @@ private:
     }
 
     void DetectUnexpectedDisconnectLocked(Source& source) {
-        if (!source.capture || source.capture->is_running() || stop_requested_ ||
+        const bool running = source.capture ? source.capture->is_running()
+            : source.process_capture && source.process_capture->is_running();
+        if ((!source.capture && !source.process_capture) || running || stop_requested_ ||
             source.disconnect_accounted) {
             return;
         }
         source.disconnect_accounted = true;
         timeline_.MarkDisconnected(source.timeline_source);
-        const auto capture_error = source.capture->last_error();
         FailLocked(
             RECORDER_NATIVE_CAPTURE_ERROR,
-            capture_error.message.empty()
+            SourceErrorText(source).empty()
                 ? "A mixed audio source stopped unexpectedly."
-                : WideToUtf8(capture_error.message));
+                : SourceErrorText(source));
     }
 
     void MixerThread() {
@@ -605,6 +679,7 @@ private:
     Source render_;
     Source microphone_;
     recorder::timeline::CanonicalTimeline timeline_;
+    std::uint64_t session_generation_ = 0;
     std::uint64_t next_output_frame_ = 0;
     std::thread mixer_;
     RecorderNativeStats stats_{};

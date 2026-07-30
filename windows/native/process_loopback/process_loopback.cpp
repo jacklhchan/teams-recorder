@@ -20,8 +20,20 @@ public:
     ~ScopedHandle() { reset(); }
     ScopedHandle(const ScopedHandle&) = delete;
     ScopedHandle& operator=(const ScopedHandle&) = delete;
+    ScopedHandle(ScopedHandle&& other) noexcept : value_(other.release()) {}
+    ScopedHandle& operator=(ScopedHandle&& other) noexcept {
+        if (this != &other) {
+            reset(other.release());
+        }
+        return *this;
+    }
 
     HANDLE get() const noexcept { return value_; }
+    HANDLE release() noexcept {
+        HANDLE value = value_;
+        value_ = nullptr;
+        return value;
+    }
     void reset(HANDLE replacement = nullptr) noexcept {
         if (value_ != nullptr && value_ != INVALID_HANDLE_VALUE) {
             CloseHandle(value_);
@@ -256,6 +268,33 @@ HRESULT ValidateTargetProcess(DWORD process_id) noexcept {
     return S_OK;
 }
 
+ScopedHandle OpenTargetProcessForMonitoring(DWORD process_id, HRESULT* error) noexcept {
+    if (error == nullptr || process_id == 0) {
+        if (error != nullptr) {
+            *error = E_INVALIDARG;
+        }
+        return ScopedHandle();
+    }
+    ScopedHandle process(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                    FALSE, process_id));
+    if (process.get() == nullptr) {
+        *error = HRESULT_FROM_WIN32(GetLastError());
+        return ScopedHandle();
+    }
+    const TargetProcessWaitDisposition disposition =
+        TargetProcessWaitDispositionFor(WaitForSingleObject(process.get(), 0));
+    if (disposition == TargetProcessWaitDisposition::exited) {
+        *error = HRESULT_FROM_WIN32(ERROR_PROCESS_ABORTED);
+        return ScopedHandle();
+    }
+    if (disposition == TargetProcessWaitDisposition::wait_failed) {
+        *error = HRESULT_FROM_WIN32(GetLastError());
+        return ScopedHandle();
+    }
+    *error = S_OK;
+    return process;
+}
+
 HRESULT CheckProcessLoopbackOSSupport() noexcept {
     using RtlGetVersionFunction = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
     const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -280,6 +319,24 @@ ActivationCompletionDisposition ActivationCompletionDispositionFor(
     return activation_abandoned
         ? ActivationCompletionDisposition::release_client
         : ActivationCompletionDisposition::deliver_result;
+}
+
+ProcessLoopbackCaptureMetadata DescribeProcessLoopbackTarget(
+    DWORD selected_root_process_id) noexcept {
+    ProcessLoopbackCaptureMetadata metadata;
+    metadata.selected_root_process_id = selected_root_process_id;
+    return metadata;
+}
+
+TargetProcessWaitDisposition TargetProcessWaitDispositionFor(
+    DWORD wait_result) noexcept {
+    if (wait_result == WAIT_TIMEOUT) {
+        return TargetProcessWaitDisposition::still_running;
+    }
+    if (wait_result == WAIT_OBJECT_0) {
+        return TargetProcessWaitDisposition::exited;
+    }
+    return TargetProcessWaitDisposition::wait_failed;
 }
 
 ProcessLoopbackActivationResult ActivateProcessLoopback(
@@ -349,6 +406,8 @@ ProcessLoopbackActivationResult ActivateProcessLoopback(
         return result;
     }
     if (wait_result != WAIT_OBJECT_0) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->abandoned = true;
         result.hr = HRESULT_FROM_WIN32(GetLastError());
         return result;
     }
@@ -382,6 +441,11 @@ bool ProcessLoopbackCapture::Start(
     if (!callback || request.target_process_id == 0 || request.activation_timeout_ms == 0 ||
         request.polling_interval_ms == 0) {
         SetError(E_INVALIDARG, L"Invalid process loopback capture request");
+        return false;
+    }
+    const HRESULT target_validation = ValidateTargetProcess(request.target_process_id);
+    if (FAILED(target_validation)) {
+        SetError(target_validation, L"Selected root process is unavailable before capture start");
         return false;
     }
     ScopedHandle started(CreateEventW(nullptr, TRUE, FALSE, nullptr));
@@ -434,8 +498,17 @@ void ProcessLoopbackCapture::Stop() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stop = stop_event_;
+        if (!worker_.joinable()) {
+            return;
+        }
         if (stop != nullptr) {
             SetEvent(stop);
+        }
+        // A callback executes on this worker. Joining oneself terminates on
+        // standard library implementations, so make callback Stop a safe,
+        // asynchronous shutdown request. A control thread later joins it.
+        if (worker_.get_id() == std::this_thread::get_id()) {
+            return;
         }
         worker = std::move(worker_);
     }
@@ -443,7 +516,7 @@ void ProcessLoopbackCapture::Stop() {
         worker.join();
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (stop_event_ != nullptr) {
+    if (stop_event_ == stop) {
         CloseHandle(stop_event_);
         stop_event_ = nullptr;
     }
@@ -465,6 +538,9 @@ void ProcessLoopbackCapture::CaptureThread(
     ProcessLoopbackAudioBlockCallback callback,
     HANDLE started_event) {
     ScopedCoInitialize com;
+    HRESULT target_process_error = S_OK;
+    ScopedHandle target_process(
+        OpenTargetProcessForMonitoring(request.target_process_id, &target_process_error));
     AudioClientHandle client;
     ComPtr<IAudioCaptureClient> capture;
     WAVEFORMATEX capture_format{};
@@ -486,6 +562,10 @@ void ProcessLoopbackCapture::CaptureThread(
 
     if (FAILED(com.result())) {
         fail(com.result(), L"CoInitializeEx failed");
+        return;
+    }
+    if (FAILED(target_process_error)) {
+        fail(target_process_error, L"Selected root process exited before activation");
         return;
     }
     auto activation = ActivateProcessLoopback(request.target_process_id,
@@ -584,6 +664,7 @@ void ProcessLoopbackCapture::CaptureThread(
                 break;
             }
             ProcessLoopbackAudioBlock block;
+            block.capture_metadata = DescribeProcessLoopbackTarget(request.target_process_id);
             block.mix_format_bytes = format_bytes;
             block.frame_count = frame_count;
             block.device_position_frames = device_position;
@@ -609,16 +690,22 @@ void ProcessLoopbackCapture::CaptureThread(
         return drain_hr;
     };
 
-    HANDLE waits[] = {stop_event_, audio_event.get()};
+    HANDLE waits[] = {stop_event_, target_process.get(), audio_event.get()};
     bool capture_failed = false;
     while (true) {
         const DWORD waited = event_driven
-            ? WaitForMultipleObjects(2, waits, FALSE, INFINITE)
-            : WaitForSingleObject(stop_event_, request.polling_interval_ms);
+            ? WaitForMultipleObjects(3, waits, FALSE, INFINITE)
+            : WaitForMultipleObjects(2, waits, FALSE, request.polling_interval_ms);
         if (waited == WAIT_OBJECT_0) {
             break;
         }
-        if ((event_driven && waited != WAIT_OBJECT_0 + 1) ||
+        if (waited == WAIT_OBJECT_0 + 1) {
+            SetError(HRESULT_FROM_WIN32(ERROR_PROCESS_ABORTED),
+                     L"Selected root process exited during capture");
+            capture_failed = true;
+            break;
+        }
+        if ((event_driven && waited != WAIT_OBJECT_0 + 2) ||
             (!event_driven && waited != WAIT_TIMEOUT)) {
             SetError(HRESULT_FROM_WIN32(GetLastError()),
                      L"Waiting for process-loopback capture failed");

@@ -17,11 +17,21 @@ std::uint64_t Scale(std::uint64_t value, std::uint64_t numerator,
 }  // namespace
 
 CanonicalTimeline::State& CanonicalTimeline::state(Source source) noexcept {
-    return source == Source::Render ? render_ : microphone_;
+    switch (source) {
+    case Source::Render: return render_;
+    case Source::Microphone: return microphone_;
+    case Source::Process: return process_;
+    }
+    return render_;
 }
 
 const CanonicalTimeline::State& CanonicalTimeline::state(Source source) const noexcept {
-    return source == Source::Render ? render_ : microphone_;
+    switch (source) {
+    case Source::Render: return render_;
+    case Source::Microphone: return microphone_;
+    case Source::Process: return process_;
+    }
+    return render_;
 }
 
 Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,

@@ -75,12 +75,28 @@ void DriftLateAndFaultCountersAreBounded() {
                counters.source_disconnects == 1,
            "source counters incomplete");
 }
+
+void SelectedProcessUsesCanonicalGapsAndCounters() {
+    CanonicalTimeline timeline;
+    (void)timeline.Place(Source::Process, 0, 0, 48'000, 960, false);
+    const auto resumed = timeline.Place(Source::Process, 600'000, 2'880, 48'000, 960, true);
+    Expect(resumed.frame == 2'880 && resumed.silence_before_frames == 1'920,
+           "selected-process gap was compressed");
+    const auto late = timeline.Place(Source::Process, 100'000, 480, 48'000, 960, false);
+    Expect(late.late_frames_dropped > 0, "selected-process late packet not dropped");
+    timeline.MarkQueueOverflow(Source::Process);
+    timeline.MarkDisconnected(Source::Process);
+    const auto& counters = timeline.counters(Source::Process);
+    Expect(counters.discontinuities == 1 && counters.late_packets == 1 &&
+               counters.queue_overflows == 1 && counters.source_disconnects == 1,
+           "selected-process counters incomplete");
+}
 }  // namespace
 
 int main() {
-    const std::array<void (*)(), 6> tests = {LongDurationHasNoTimelineCompression, SilenceGapsArePreserved,
+    const std::array<void (*)(), 7> tests = {LongDurationHasNoTimelineCompression, SilenceGapsArePreserved,
         MicrophoneMuteGapMapsToSilence, LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
-        DriftLateAndFaultCountersAreBounded};
+        DriftLateAndFaultCountersAreBounded, SelectedProcessUsesCanonicalGapsAndCounters};
     try { for (const auto test : tests) test(); }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
     std::cout << "PASS canonical timeline\n";

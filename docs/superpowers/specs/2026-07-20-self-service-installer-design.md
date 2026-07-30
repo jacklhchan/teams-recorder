@@ -16,7 +16,7 @@ Assistant that guides a non-technical user through installing BlackHole,
 installing and configuring oMLX, downloading the Qwen ASR model, configuring
 audio routing, granting microphone permission, and running an end-to-end test.
 
-The first target is an M1 MacBook running macOS 15 or newer. The user has local
+The first target is an M1 MacBook running macOS 26 or newer. The user has local
 administrator rights, normal access to GitHub and Hugging Face, and must be able
 to complete setup without Terminal.
 
@@ -40,7 +40,7 @@ to complete setup without Terminal.
 - Silent installation of privileged audio drivers.
 - Fully automatic creation of a Multi-Output Device using private macOS APIs.
 - Automatic background updates in the first release.
-- Intel Mac or macOS 14 support.
+- Intel Mac or macOS 25 or earlier support.
 
 ## Distribution Model
 
@@ -76,7 +76,7 @@ The Setup Assistant is coordinated by a `SetupCoordinator`. Each dependency is
 represented by an independently testable checker and action provider:
 
 1. `SystemCompatibilityChecker`
-   - Confirms Apple Silicon and macOS 15 or newer.
+   - Confirms Apple Silicon and macOS 26 or newer.
    - Confirms network reachability for required hosts.
    - Confirms enough free disk space before model download.
 
@@ -281,7 +281,7 @@ Integration tests cover:
 - Existing recording, playback, upload, and transcription behavior after setup
   integration.
 
-A clean-account acceptance pass on an M1 MacBook running macOS 15 or newer must
+A clean-account acceptance pass on an M1 MacBook running macOS 26 or newer must
 verify:
 
 1. The DMG opens and the app can be copied to Applications.

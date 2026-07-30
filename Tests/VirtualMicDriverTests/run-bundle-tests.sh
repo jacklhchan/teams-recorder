@@ -18,6 +18,7 @@ test "$(plutil -extract CFBundleIdentifier raw "$INFO_PLIST")" = \
 test "$(plutil -extract CFBundleExecutable raw "$INFO_PLIST")" = \
     "LocalRecorderVirtualMic"
 test "$(plutil -extract CFBundlePackageType raw "$INFO_PLIST")" = "BNDL"
+test "$(plutil -extract LSMinimumSystemVersion raw "$INFO_PLIST")" = "26.0"
 test "$(plutil -extract \
     'CFPlugInFactories.9CA4DB46-8093-4A4E-AD1F-0E119FA69B26' \
     raw \
@@ -29,6 +30,11 @@ test "$(plutil -extract \
 
 file "$EXECUTABLE" | grep -q "arm64"
 nm -gU "$EXECUTABLE" | grep -q "_LocalRecorderVirtualMic_Create"
+BUILD_INFO="$(/usr/bin/xcrun vtool -show-build "$EXECUTABLE")"
+print -r -- "$BUILD_INFO" | \
+    /usr/bin/grep -Eq '^[[:space:]]*platform MACOS$'
+print -r -- "$BUILD_INFO" | \
+    /usr/bin/grep -Eq '^[[:space:]]*minos 26\.0$'
 codesign --verify --deep --strict "$DRIVER_BUNDLE"
 
 echo "Virtual mic driver bundle contract tests passed"

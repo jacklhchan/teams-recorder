@@ -6,7 +6,7 @@
 
 **Architecture:** Put all filtering, ranking, naming, fallback, and selection decisions in a pure Swift model that accepts value descriptors and returns a picker result. Adapt `SCWindow` instances into those descriptors at the existing ScreenCaptureKit discovery boundary, then map the result back to the retained `SCWindow` objects used by the probe. SwiftUI only binds the mode toggle and renders the model-provided labels.
 
-**Tech Stack:** Swift 5.9, SwiftUI, ScreenCaptureKit, XCTest, macOS 15
+**Tech Stack:** Swift 5.9, SwiftUI, ScreenCaptureKit, XCTest, macOS 26
 
 ## Global Constraints
 
@@ -20,7 +20,7 @@
 - `Show all Teams windows` is disabled during capture, but the existing picker remains enabled for filter-dwell testing.
 - Refreshing or selecting a picker item never changes the active capture filter; only the existing explicit filter buttons do that.
 - Do not change `SCStream`, content-filter transitions, audio capture, evidence generation, or viability evaluation.
-- Add no dependencies and keep the deployment target at macOS 15.
+- Add no dependencies and keep the deployment target at macOS 26.
 
 ## File Structure
 

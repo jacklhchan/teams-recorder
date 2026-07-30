@@ -188,7 +188,7 @@ esac
                     "CFBundleIdentifier": "local.meeting.recorder.fixture",
                     "CFBundleShortVersionString": "1.2.3",
                     "CFBundleVersion": "7",
-                    "LSMinimumSystemVersion": "15.0",
+                    "LSMinimumSystemVersion": "26.0",
                 },
                 stream,
             )

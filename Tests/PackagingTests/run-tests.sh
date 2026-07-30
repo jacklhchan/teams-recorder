@@ -10,6 +10,23 @@ validate_macho_dependencies() {
   done
 }
 
+validate_macos_26_binary() {
+  local binary="$1"
+  local build_info
+  build_info="$(/usr/bin/xcrun vtool -show-build "$binary")"
+
+  if ! printf '%s\n' "$build_info" \
+    | /usr/bin/grep -Eq '^[[:space:]]*platform MACOS$'; then
+    echo "Expected a macOS Mach-O build command: $binary" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$build_info" \
+    | /usr/bin/grep -Eq '^[[:space:]]*minos 26\.0$'; then
+    echo "Expected Mach-O minimum macOS 26.0: $binary" >&2
+    return 1
+  fi
+}
+
 main() {
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/lmr-package.XXXXXX")"
@@ -35,6 +52,8 @@ cp -R "$APP" "$MOVED"
   0.2.0 \
   2 \
   ad-hoc
+
+validate_macos_26_binary "$MOVED/Contents/MacOS/LocalMeetingRecorder"
 
 test ! -e "$MOVED/Contents/Resources/transcribe-openai-compatible.sh"
 test ! -e "$MOVED/Contents/Resources/transcribe-qwen-asr.sh"

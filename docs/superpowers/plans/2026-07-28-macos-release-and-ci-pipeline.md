@@ -18,7 +18,7 @@ verified SHA-256 only after all gates pass.
 ## Global Constraints
 
 - Complete the provider-helper rename and license packaging plans first.
-- Minimum deployment target remains macOS 15.
+- Minimum deployment target is macOS 26.
 - Production bundle identifier is `local.meeting.recorder`.
 - Staging defaults remain `local.meeting.recorder.staging` and
   `Local Meeting Recorder Staging`.
@@ -423,7 +423,7 @@ document = {
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": version,
     "CFBundleVersion": build,
-    "LSMinimumSystemVersion": "15.0",
+    "LSMinimumSystemVersion": "26.0",
     "NSHighResolutionCapable": True,
     "NSMicrophoneUsageDescription":
         "Local Meeting Recorder needs microphone access to "
@@ -503,7 +503,7 @@ plutil -lint "$APP/Contents/Info.plist"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "$EXPECTED_ID"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")" = "$EXPECTED_VERSION"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")" = "$EXPECTED_BUILD"
-test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "15.0"
+test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "26.0"
 file "$APP/Contents/MacOS/LocalMeetingRecorder" | grep -q 'arm64'
 test -x "$APP/Contents/Resources/transcribe-openai-compatible.sh"
 test -x "$APP/Contents/Resources/openai_asr_longform.py"
@@ -1254,17 +1254,20 @@ permissions:
 
 jobs:
   swift-tests:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Swift tests first pass
+      - name: Targeted transcription tests
+        run: swift test --filter OpenAICompatibleTranscriptionClientTests
+      - name: Swift tests
         run: swift test
       - name: Swift tests stability pass
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: swift test
 
   script-tests:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -1276,7 +1279,7 @@ jobs:
           -v
 
   packaging:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 20
     needs: [swift-tests, script-tests]
     steps:
@@ -1291,7 +1294,7 @@ jobs:
         run: Tests/VirtualMicDriverTests/run-script-tests.sh
 
   policy:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -1394,7 +1397,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     environment: production
     steps:

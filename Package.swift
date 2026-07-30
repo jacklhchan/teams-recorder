@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "LocalMeetingRecorder",
     platforms: [
-        .macOS("15.0")
+        .macOS("26.0")
     ],
     products: [
         .executable(name: "LocalMeetingRecorder", targets: ["RecorderApp"])

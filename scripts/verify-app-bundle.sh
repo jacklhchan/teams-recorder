@@ -28,7 +28,7 @@ plutil -lint "$PLIST" >&2
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "$EXPECTED_ID"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")" = "$EXPECTED_VERSION"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")" = "$EXPECTED_BUILD"
-test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "15.0"
+test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "26.0"
 "$FILE_BIN" "$APP/Contents/MacOS/LocalMeetingRecorder" | grep -q 'arm64'
 test -f "$APP/Contents/Resources/AppIcon.icns"
 test ! -e "$APP/Contents/Resources/transcribe-openai-compatible.sh"

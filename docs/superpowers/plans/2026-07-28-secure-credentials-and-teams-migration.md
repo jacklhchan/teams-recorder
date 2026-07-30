@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Minimum deployment target remains macOS 15.
+- Minimum deployment target is macOS 26.
 - Use native Security.framework; add no Keychain package dependency.
 - Store no token or API key in `UserDefaults`, process arguments, process environment, logs, diagnostics, or status text.
 - Keychain service is `local.meeting.recorder.teams-third-party-api`.

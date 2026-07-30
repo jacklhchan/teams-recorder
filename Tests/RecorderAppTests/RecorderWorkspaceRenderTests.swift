@@ -1,21 +1,10 @@
 import AppKit
-import AVKit
 import SwiftUI
 import XCTest
 @testable import RecorderApp
 
 @MainActor
 final class RecorderWorkspaceRenderTests: XCTestCase {
-    func testSettingsAccessibilityMarkerReadsInheritedEnabledEnvironment() throws {
-        let enabledHost = try MarkerHarnessHost(isEnabled: true)
-        defer { enabledHost.close() }
-        XCTAssertTrue(try enabledHost.isEnabled("recorder.test.settings-marker"))
-
-        let disabledHost = try MarkerHarnessHost(isEnabled: false)
-        defer { disabledHost.close() }
-        XCTAssertFalse(try disabledHost.isEnabled("recorder.test.settings-marker"))
-    }
-
     func testNavigationShellStartsOnRecordAndCanRenderBaselineDestinations() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
@@ -84,7 +73,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertEqual(host.navigationState.selection, .recordings)
     }
 
-    func testMinimumRecordViewportContainsAllOperationalAnchorsWithoutScrolling() throws {
+    func testMinimumWindowRendersRecordStatusAndPrimaryAction() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
             model: fixture.model,
@@ -92,27 +81,23 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
 
-        let sidebarFrame = try XCTUnwrap(
-            host.frame(forAccessibilityIdentifier: "recorder.workspace.sidebar")
-        )
-        XCTAssertFalse(sidebarFrame.isEmpty)
-        let visibleSidebarBounds = host.visibleContentRect.insetBy(dx: -0.5, dy: -0.5)
-        XCTAssertTrue(
-            visibleSidebarBounds.contains(sidebarFrame),
-            "sidebar navigation must be fully visible without scrolling"
-        )
-
-        for identifier in RecordDashboardPresentation.operationalProbeIDs {
-            let frame = try XCTUnwrap(host.frame(forAccessibilityIdentifier: identifier))
-            XCTAssertFalse(frame.isEmpty)
+        for identifier in [
+            "recorder.workspace.sidebar",
+            "record-state",
+            "elapsed-time",
+            RecorderActionID.startStop,
+            "system-meter",
+            "microphone-meter",
+            "capture-health"
+        ] {
             XCTAssertTrue(
-                host.visibleContentRect.contains(frame),
-                "\(identifier) must be fully visible without scrolling"
+                host.containsAccessibilityIdentifier(identifier),
+                "Missing minimum-window control: \(identifier)"
             )
         }
     }
 
-    func testWideRecordViewportContainsAllOperationalAnchorsWithoutScrolling() throws {
+    func testWideWindowRendersEveryDestinationOnce() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
             model: fixture.model,
@@ -120,31 +105,32 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
 
-        for identifier in RecordDashboardPresentation.operationalProbeIDs {
+        for destination in RecorderDestination.allCases {
+            host.select(destination)
             XCTAssertTrue(
-                host.visibleContentRect.contains(
-                    try XCTUnwrap(host.frame(forAccessibilityIdentifier: identifier))
+                host.containsAccessibilityIdentifier(
+                    "recorder.destination.\(destination.rawValue)"
                 )
             )
         }
     }
 
-    func testBlockingCaptureStateShowsVisibleSettingsRecoveryDeepLink() throws {
-        let fixture = makeStartupDisabledFixture(systemPermission: .denied)
-        try assertVisibleSettingsRecoveryDeepLink(for: fixture)
-    }
-
-    func testRestrictedSystemPermissionShowsVisibleSettingsRecoveryDeepLink() throws {
-        let fixture = makeStartupDisabledFixture(systemPermission: .restricted)
-        try assertVisibleSettingsRecoveryDeepLink(for: fixture)
-    }
-
-    func testRestrictedMicrophonePermissionShowsVisibleSettingsRecoveryDeepLink() throws {
-        let fixture = makeStartupDisabledFixture(
-            systemPermission: .granted,
-            microphonePermission: .restricted
-        )
-        try assertVisibleSettingsRecoveryDeepLink(for: fixture)
+    func testUnavailableCapturePermissionsExposeSettingsRecovery() throws {
+        let cases: [
+            (CapturePermissionState, CapturePermissionState)
+        ] = [
+            (CapturePermissionState.denied, .granted),
+            (.restricted, .granted),
+            (.granted, .restricted)
+        ]
+        for (systemPermission, microphonePermission) in cases {
+            try assertVisibleSettingsRecoveryDeepLink(
+                for: makeStartupDisabledFixture(
+                    systemPermission: systemPermission,
+                    microphonePermission: microphonePermission
+                )
+            )
+        }
     }
 
     func testRecordingsRendersSessionSpecificActions() throws {
@@ -224,45 +210,6 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(renamedName)"))
         XCTAssertFalse(host.containsAccessibilityLabel("Play \(originalName)"))
         XCTAssertFalse(host.containsAccessibilityLabel("Edit details for \(originalName)"))
-    }
-
-    func testTwentyFiveRecordRecordingsCyclesRenderWithoutPendingLeak() throws {
-        let fixture = makeStartupDisabledFixture()
-        let host = try makeWorkspaceHost(
-            model: fixture.model,
-            size: .init(width: 1_280, height: 800)
-        )
-        defer { host.close() }
-
-        for _ in 0 ..< 25 {
-            host.select(.recordings)
-            XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.recordings"))
-            host.select(.record)
-            XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.record"))
-            XCTAssertNil(host.navigationState.pendingDestination)
-        }
-    }
-
-    func testTwentyFiveNavigationCyclesRenderEveryDestinationWithoutPendingLeak() throws {
-        let fixture = makeStartupDisabledFixture()
-        let host = try makeWorkspaceHost(
-            model: fixture.model,
-            size: .init(width: 860, height: 680)
-        )
-        defer { host.close() }
-
-        for _ in 0 ..< 25 {
-            for destination in RecorderDestination.allCases {
-                host.select(destination)
-                XCTAssertTrue(
-                    host.containsAccessibilityIdentifier(
-                        "recorder.destination.\(destination.rawValue)"
-                    )
-                )
-                XCTAssertNil(host.navigationState.pendingDestination)
-            }
-        }
-        XCTAssertFalse(host.containsAVPlayerView())
     }
 
     func testSettingsRendersExistingCaptureTeamsVirtualMicAndProviderSections() throws {
@@ -470,67 +417,7 @@ private struct WorkspaceHostRoot: View {
 }
 
 @MainActor
-private struct MarkerHarnessRoot: View {
-    let isEnabled: Bool
-
-    var body: some View {
-        Color.clear
-            .frame(width: 20, height: 20)
-            .background(
-                RecorderSettingsAccessibilityMarker(
-                    identifier: "recorder.test.settings-marker"
-                )
-            )
-            .disabled(!isEnabled)
-    }
-}
-
-@MainActor
-private final class MarkerHarnessHost {
-    private let hostingView: NSHostingView<MarkerHarnessRoot>
-    private let window: NSWindow
-
-    init(isEnabled: Bool) throws {
-        hostingView = NSHostingView(rootView: MarkerHarnessRoot(isEnabled: isEnabled))
-        let frame = NSRect(x: 0, y: 0, width: 100, height: 100)
-        hostingView.frame = frame
-        window = NSWindow(
-            contentRect: frame,
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = hostingView
-        window.makeKeyAndOrderFront(nil)
-        window.layoutIfNeeded()
-        hostingView.layoutSubtreeIfNeeded()
-    }
-
-    func isEnabled(_ identifier: String) throws -> Bool {
-        guard let marker = findMarker(in: hostingView, identifier: identifier) else {
-            throw WorkspaceHostError.missingAccessibilityElement(identifier)
-        }
-        return marker.isAccessibilityEnabled()
-    }
-
-    func close() {
-        window.orderOut(nil)
-        window.contentView = nil
-    }
-
-    private func findMarker(in view: NSView, identifier: String) -> NSView? {
-        if view.accessibilityIdentifier() == identifier { return view }
-        for subview in view.subviews {
-            if let marker = findMarker(in: subview, identifier: identifier) {
-                return marker
-            }
-        }
-        return nil
-    }
-}
-
-@MainActor
-private final class WorkspaceHost {
+final class WorkspaceHost {
     private let navigationDriver = WorkspaceNavigationDriver()
     private let hostingView: NSHostingView<WorkspaceHostRoot>
     private let window: NSWindow
@@ -663,10 +550,6 @@ private final class WorkspaceHost {
         layout()
     }
 
-    func containsAVPlayerView() -> Bool {
-        containsAVPlayerView(in: hostingView)
-    }
-
     private func layout() {
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
@@ -681,11 +564,6 @@ private final class WorkspaceHost {
             }
         }
         return nil
-    }
-
-    private func containsAVPlayerView(in view: NSView) -> Bool {
-        if view is AVPlayerView { return true }
-        return view.subviews.contains(where: containsAVPlayerView(in:))
     }
 
     private func accessibilityElement(

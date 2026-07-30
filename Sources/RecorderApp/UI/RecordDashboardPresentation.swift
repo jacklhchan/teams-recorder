@@ -6,15 +6,6 @@ struct RecordDashboardPresentation: Equatable {
     let testDisabled: Bool
     let muteDisabled: Bool
 
-    static let operationalProbeIDs = [
-        "record-state",
-        "elapsed-time",
-        RecorderActionID.startStop,
-        "system-meter",
-        "microphone-meter",
-        "capture-health"
-    ]
-
     static func make(
         isRecording: Bool,
         startedAt: Date?,
@@ -37,13 +28,5 @@ struct RecordDashboardPresentation: Equatable {
             testDisabled: isRecording || isRunningTestRecording || isCaptureLifecycleWorking,
             muteDisabled: (teamsMicMuted || nativeInputMicMuted) && !localMicMuted
         )
-    }
-}
-
-struct RecordDashboardMeterPresentation: Equatable {
-    let waveformSamples: [Float]
-
-    static func make(level: LevelSnapshot) -> Self {
-        .init(waveformSamples: level.samples)
     }
 }

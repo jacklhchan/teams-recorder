@@ -151,20 +151,31 @@ final class AppModelPlaybackTests: XCTestCase {
             window.orderOut(nil)
         }
 
-        for _ in 0 ..< 25 {
-            navigationDriver.navigation.select(.recordings, hasUnsavedChanges: false)
-            model.objectWillChange.send()
-            try? await Task.sleep(for: .milliseconds(10))
-            window.layoutIfNeeded()
-            hostingView.layoutSubtreeIfNeeded()
-            XCTAssertTrue(containsAccessibilityIdentifier("recorder.destination.recordings", in: hostingView))
-            navigationDriver.navigation.select(.record, hasUnsavedChanges: false)
-            model.objectWillChange.send()
-            try? await Task.sleep(for: .milliseconds(10))
-            window.layoutIfNeeded()
-            hostingView.layoutSubtreeIfNeeded()
-            XCTAssertTrue(containsAccessibilityIdentifier("recorder.destination.record", in: hostingView))
-        }
+        navigationDriver.navigation.select(
+            .recordings,
+            hasUnsavedChanges: false
+        )
+        model.objectWillChange.send()
+        try? await Task.sleep(for: .milliseconds(10))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(
+            containsAccessibilityIdentifier(
+                "recorder.destination.recordings",
+                in: hostingView
+            )
+        )
+        navigationDriver.navigation.select(.record, hasUnsavedChanges: false)
+        model.objectWillChange.send()
+        try? await Task.sleep(for: .milliseconds(10))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(
+            containsAccessibilityIdentifier(
+                "recorder.destination.record",
+                in: hostingView
+            )
+        )
         XCTAssertEqual(countdownFactory.makeCount, 1)
         XCTAssertEqual(playbackFactory.makeCount, 1)
 

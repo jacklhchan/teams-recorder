@@ -102,7 +102,10 @@ class WorkflowContractTests(unittest.TestCase):
     def test_ci_anchors_required_test_and_packaging_commands(self):
         workflow = self.read_workflow()
         swift_tests = self.job_body(workflow, "swift-tests")
-        self.assertEqual(len(re.findall(r"(?m)^        run: swift test$", swift_tests)), 2)
+        self.assertEqual(
+            len(re.findall(r"(?m)^        run: swift test$", swift_tests)),
+            1,
+        )
         self.assert_step_command(
             swift_tests,
             "Targeted transcription tests",
@@ -115,10 +118,13 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertRegex(
             swift_tests,
-            r"(?m)^      - name: Swift tests stability pass\n"
+            r"(?m)^      - name: Workspace stability tests\n"
             r"        if: github\.event_name == 'push' && "
             r"github\.ref == 'refs/heads/main'\n"
-            r"        run: swift test$",
+            r"        env:\n"
+            r'          RECORDER_STABILITY: "1"\n'
+            r"        run: swift test --filter "
+            r"RecorderWorkspaceStabilityTests$",
         )
 
         script_tests = self.job_body(workflow, "script-tests")

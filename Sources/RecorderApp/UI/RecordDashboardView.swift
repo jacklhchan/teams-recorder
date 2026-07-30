@@ -215,7 +215,6 @@ private struct RecordDashboardMeter: View {
     let tint: Color
 
     var body: some View {
-        let presentation = RecordDashboardMeterPresentation.make(level: level)
         VStack(alignment: .leading, spacing: 5) {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
@@ -236,7 +235,7 @@ private struct RecordDashboardMeter: View {
                 }
             }
             .frame(height: 10)
-            WaveformView(samples: presentation.waveformSamples, tint: tint)
+            WaveformView(samples: level.samples, tint: tint)
                 .frame(height: 32)
             HStack(spacing: 14) {
                 if level.isSilent {

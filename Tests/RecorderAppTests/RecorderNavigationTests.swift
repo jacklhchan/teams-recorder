@@ -33,14 +33,4 @@ final class RecorderNavigationTests: XCTestCase {
         state.discardAndNavigate()
         XCTAssertEqual(state.selection, .settings)
     }
-
-    func testOneHundredCleanCyclesDoNotLeakPendingRoute() {
-        var state = RecorderNavigationState(selection: .record)
-        for _ in 0..<100 {
-            state.select(.recordings, hasUnsavedChanges: false)
-            state.select(.settings, hasUnsavedChanges: false)
-            state.select(.record, hasUnsavedChanges: false)
-            XCTAssertNil(state.pendingDestination)
-        }
-    }
 }

@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import Combine
 import Foundation
 
 struct PlaybackSnapshot: Equatable {
@@ -8,6 +9,42 @@ struct PlaybackSnapshot: Equatable {
     let isPlaying: Bool
 
     static let empty = PlaybackSnapshot(sessionID: nil, progress: 0, duration: 0, isPlaying: false)
+}
+
+@MainActor
+final class PlaybackPresentationModel: ObservableObject {
+    let player: AVPlayer
+
+    @Published private(set) var session: RecordingSession?
+    @Published private(set) var snapshot = PlaybackSnapshot.empty
+
+    var progress: TimeInterval { snapshot.progress }
+    var duration: TimeInterval { snapshot.duration }
+    var isPlaying: Bool { snapshot.isPlaying }
+
+    init(player: AVPlayer) {
+        self.player = player
+    }
+
+    func begin(session: RecordingSession) {
+        self.session = session
+        snapshot = PlaybackSnapshot(
+            sessionID: session.id,
+            progress: 0,
+            duration: 0,
+            isPlaying: false
+        )
+    }
+
+    func apply(_ snapshot: PlaybackSnapshot) {
+        guard snapshot.sessionID == session?.id else { return }
+        self.snapshot = snapshot
+    }
+
+    func clear() {
+        session = nil
+        snapshot = .empty
+    }
 }
 
 @MainActor
@@ -31,6 +68,43 @@ protocol PlaybackObserving: AnyObject {
     func removePeriodicTimeObserver(_ token: Any, from player: AVPlayer)
     func addEndObserver(for item: AVPlayerItem, using block: @escaping @MainActor @Sendable () -> Void) -> Any
     func removeEndObserver(_ token: Any)
+}
+
+private final class PlaybackDeinitCleanup: @unchecked Sendable {
+    private let player: AVPlayer
+    private let observer: PlaybackObserving
+    private let currentItem: AVPlayerItem?
+    private let periodicObserver: Any?
+    private let endObserver: Any?
+
+    init(
+        player: AVPlayer,
+        observer: PlaybackObserving,
+        currentItem: AVPlayerItem?,
+        periodicObserver: Any?,
+        endObserver: Any?
+    ) {
+        self.player = player
+        self.observer = observer
+        self.currentItem = currentItem
+        self.periodicObserver = periodicObserver
+        self.endObserver = endObserver
+    }
+
+    @MainActor
+    func perform() {
+        player.pause()
+        if let currentItem {
+            observer.cancelPendingSeeks(for: currentItem)
+        }
+        if let periodicObserver {
+            observer.removePeriodicTimeObserver(periodicObserver, from: player)
+        }
+        if let endObserver {
+            observer.removeEndObserver(endObserver)
+        }
+        player.replaceCurrentItem(with: nil)
+    }
 }
 
 @MainActor
@@ -58,8 +132,23 @@ final class PlaybackCoordinator: PlaybackCoordinating {
         self.init(player: AVPlayer(), observer: AVPlayerPlaybackObserver())
     }
 
-    isolated deinit {
-        removeObserversAndItem()
+    deinit {
+        let cleanup = PlaybackDeinitCleanup(
+            player: player,
+            observer: observer,
+            currentItem: currentItem,
+            periodicObserver: periodicObserver,
+            endObserver: endObserver
+        )
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                cleanup.perform()
+            }
+        } else {
+            DispatchQueue.main.async {
+                cleanup.perform()
+            }
+        }
     }
 
     func load(_ session: RecordingSession) async throws {

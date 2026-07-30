@@ -382,6 +382,36 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
+    func testAutomaticRecordingPersistsTeamsAutomaticSourceMetadata() async throws {
+        let fixture = makeRecordingFixture()
+        let outputFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: outputFolder,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: outputFolder) }
+        fixture.model.outputFolder = outputFolder
+
+        await startAutomaticRecording(fixture)
+        fixture.model.startOrStop()
+        await waitUntil {
+            !fixture.engine.isRecording
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+
+        let sessionFolder = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: outputFolder,
+                includingPropertiesForKeys: nil
+            ).first
+        )
+        XCTAssertEqual(
+            RecordingSessionMetadataStore.load(in: sessionFolder).source,
+            .teamsAutomatic
+        )
+    }
+
     func testManualStartDuringCountdownOwnsRecordingAndMeetingEndDoesNotStopIt() async {
         let fixture = makeRecordingFixture()
         fixture.model.setTeamsAutoMeetingEnabled(true)
@@ -663,7 +693,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
 
     func testFalseDuringBlockedStoragePreflightCannotLeaveLateRecording() async {
         let provider = AutoMeetingStorageProvider(results: [
-            .blocked(6 * 1_024 * 1_024 * 1_024)
+            .blocked(Int64(6) * 1_024 * 1_024 * 1_024)
         ])
         let fixture = makeRecordingFixture(storageProvider: provider)
         fixture.model.setTeamsAutoMeetingEnabled(true)
@@ -850,8 +880,8 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
     func testStorageForcedStopClearsOwnershipAndSuppressesRestart() async {
         let storageTicker = AutoMeetingManualTicker()
         let provider = AutoMeetingStorageProvider(results: [
-            .value(6 * 1_024 * 1_024 * 1_024),
-            .value((256 * 1_024 * 1_024) - 1)
+            .value(Int64(6) * 1_024 * 1_024 * 1_024),
+            .value((Int64(256) * 1_024 * 1_024) - 1)
         ])
         let fixture = makeRecordingFixture(
             storageProvider: provider,
@@ -1654,7 +1684,7 @@ private final class AutoMeetingStorageProvider:
     static var normal: AutoMeetingStorageProvider {
         AutoMeetingStorageProvider(
             results: Array(
-                repeating: .value(6 * 1_024 * 1_024 * 1_024),
+                repeating: .value(Int64(6) * 1_024 * 1_024 * 1_024),
                 count: 20
             )
         )

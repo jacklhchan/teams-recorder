@@ -3,6 +3,108 @@ import XCTest
 @testable import RecorderApp
 
 final class RecordingLibraryTests: XCTestCase {
+    func testLegacyMetadataDefaultsToCurrentSchemaVersionAndManualSource() throws {
+        let metadata = try JSONDecoder().decode(
+            RecordingSessionMetadata.self,
+            from: Data(#"{"title":"Legacy"}"#.utf8)
+        )
+
+        XCTAssertEqual(
+            metadata.schemaVersion,
+            RecordingSessionMetadata.currentSchemaVersion
+        )
+        XCTAssertEqual(metadata.source, .manual)
+        XCTAssertEqual(metadata.participants, [])
+        XCTAssertNil(metadata.meetingType)
+    }
+
+    func testUnknownCrossPlatformFieldsSurviveLoadEditAndSave() throws {
+        let root = try makeRoot()
+        let folder = try makeEmptySessionFolder(
+            in: root,
+            named: "meeting-contract"
+        )
+        try Data(
+            #"""
+            {
+              "schemaVersion": 1,
+              "title": "Old",
+              "windowsCapture": {
+                "device": "default",
+                "exclusive": false,
+                "routes": [
+                  {
+                    "kind": "communications",
+                    "channels": [1, 2, {"label": "mixed"}]
+                  },
+                  ["fallback", true, null]
+                ]
+              }
+            }
+            """#.utf8
+        ).write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+
+        var metadata = RecordingSessionMetadataStore.load(in: folder)
+        metadata.title = "Edited"
+        try RecordingSessionMetadataStore.save(metadata, in: folder)
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(
+                    contentsOf: RecordingSessionMetadataStore.fileURL(
+                        in: folder
+                    )
+                )
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(object["schemaVersion"] as? Int, 1)
+        XCTAssertEqual(object["title"] as? String, "Edited")
+        XCTAssertEqual(
+            (object["windowsCapture"] as? [String: Any])?["device"]
+                as? String,
+            "default"
+        )
+        let routes = try XCTUnwrap(
+            (object["windowsCapture"] as? [String: Any])?["routes"]
+                as? [Any]
+        )
+        let primary = try XCTUnwrap(routes.first as? [String: Any])
+        let channels = try XCTUnwrap(primary["channels"] as? [Any])
+        XCTAssertEqual(channels[0] as? Int, 1)
+        XCTAssertEqual(
+            (channels[2] as? [String: Any])?["label"] as? String,
+            "mixed"
+        )
+        let fallback = try XCTUnwrap(routes.last as? [Any])
+        XCTAssertEqual(fallback[0] as? String, "fallback")
+        XCTAssertEqual(fallback[1] as? Bool, true)
+        XCTAssertTrue(fallback[2] is NSNull)
+    }
+
+    func testMetadataEncodingIncludesVersionedSearchFields() throws {
+        let metadata = RecordingSessionMetadata(
+            source: .teamsAutomatic,
+            meetingType: "Technical Workshop",
+            participants: ["Alex Chan", " Sam Lee "]
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(metadata)
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(
+            object["schemaVersion"] as? Int,
+            RecordingSessionMetadata.currentSchemaVersion
+        )
+        XCTAssertEqual(object["source"] as? String, "teamsAutomatic")
+        XCTAssertEqual(object["meetingType"] as? String, "Technical Workshop")
+        XCTAssertEqual(
+            object["participants"] as? [String],
+            ["Alex Chan", "Sam Lee"]
+        )
+    }
+
     func testLegacyMetadataAndIndependentlyMalformedNewFieldsKeepValidLegacyFields() throws {
         let legacy = """
         {"title":" Weekly sync ","tags":["sales"],"isFavorite":true,

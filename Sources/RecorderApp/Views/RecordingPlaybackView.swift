@@ -16,7 +16,11 @@ struct RecordingPlaybackView: View {
             if !session.screenIntervals.isEmpty {
                 VideoPlayer(player: player)
                     .aspectRatio(16 / 9, contentMode: .fit)
-                    .frame(maxWidth: 560)
+                    .frame(
+                        minWidth: 520,
+                        maxWidth: .infinity,
+                        minHeight: 292
+                    )
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
 

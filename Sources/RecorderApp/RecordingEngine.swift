@@ -72,6 +72,7 @@ final class RecordingEngine: ObservableObject {
     private let coordinatorFactory: RecordingMediaCoordinatorFactory
     private let metadataWriter: RecordingMetadataWriter
     private let mixerBlockFrames: Int
+    private let onRecordingStopped: (RecordingResult?) -> Void
     private let callbackGate = RecordingCallbackGate()
     nonisolated private let microphoneAudioPaths: MicrophoneAudioPaths
     nonisolated private let videoIngress = VideoIngress()
@@ -119,10 +120,12 @@ final class RecordingEngine: ObservableObject {
             try RecordingSessionMetadataStore.save(metadata, in: folder)
         },
         mixerBlockFrames: Int = 960,
-        virtualMicPublisher: VirtualMicPublishing = VirtualMicPublisher()
+        virtualMicPublisher: VirtualMicPublishing = VirtualMicPublisher(),
+        onRecordingStopped: @escaping (RecordingResult?) -> Void = { _ in }
     ) {
         self.captureSource = captureSource
         self.metadataWriter = metadataWriter
+        self.onRecordingStopped = onRecordingStopped
         if let coordinatorFactory {
             self.coordinatorFactory = coordinatorFactory
         } else if let writerFactory {
@@ -561,6 +564,7 @@ final class RecordingEngine: ObservableObject {
             clearSourceSession(sessionID: sourceSessionID)
         }
         resetMonitoringState()
+        onRecordingStopped(result)
         return result
     }
 

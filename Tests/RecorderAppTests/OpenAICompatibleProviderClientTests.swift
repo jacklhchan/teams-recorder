@@ -49,7 +49,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         await assertTransportError(
             transport,
             maximumBodyBytes: 32,
-            equals: .modelDiscoveryResponseTooLarge
+            equals: .responseTooLarge
         )
         XCTAssertEqual(ControlledURLProtocol.stopLoadingCount, 1)
     }
@@ -72,7 +72,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         await assertTransportError(
             transport,
             maximumBodyBytes: 32,
-            equals: .modelDiscoveryResponseTooLarge
+            equals: .responseTooLarge
         )
         XCTAssertTrue(
             retainedByteCounts.values.allSatisfy { $0 <= 32 },
@@ -96,12 +96,12 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         await assertTransportError(
             transport,
             maximumBodyBytes: 32,
-            equals: .modelDiscoveryResponseTooLarge
+            equals: .responseTooLarge
         )
         XCTAssertEqual(ControlledURLProtocol.stopLoadingCount, 1)
     }
 
-    func testURLSessionTransportCancellationCompletesOnceAndCleansUpLateCallbacks() async {
+    func testURLSessionTransportCancellationDuringUploadCompletesOnceAndCleansUpLateCallbacks() async {
         let transport = URLSessionProviderHTTPTransport(
             configuration: controlledSessionConfiguration()
         )
@@ -110,9 +110,18 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
             protocolInstance.respond(status: 200, body: nil)
         }
 
+        var request = URLRequest(
+            url: URL(
+                string:
+                    "https://provider.test/v1/audio/transcriptions"
+            )!
+        )
+        request.httpMethod = "POST"
+        request.httpBody = Data(repeating: 7, count: 4_096)
+        let uploadRequest = request
         let task = Task {
             try await transport.response(
-                for: URLRequest(url: URL(string: "https://provider.test/models")!),
+                for: uploadRequest,
                 maximumBodyBytes: 32
             )
         }
@@ -192,7 +201,9 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
 
     func testTransportReceivesResponseCapBeforeAnyStatusHandling() async throws {
         let transport = RecordingProviderTransport(
-            response: .failure(ProviderConnectionError.modelDiscoveryResponseTooLarge)
+            response: .failure(
+                ProviderHTTPTransportError.responseTooLarge
+            )
         )
 
         do {
@@ -201,8 +212,8 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
             XCTFail("Expected capped transport failure")
         } catch {
             XCTAssertEqual(
-                error as? ProviderConnectionError,
-                .modelDiscoveryResponseTooLarge
+                error as? ProviderHTTPTransportError,
+                .responseTooLarge
             )
         }
         XCTAssertEqual(
@@ -268,7 +279,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
     private func assertTransportError(
         _ transport: URLSessionProviderHTTPTransport,
         maximumBodyBytes: Int,
-        equals expected: ProviderConnectionError
+        equals expected: ProviderHTTPTransportError
     ) async {
         do {
             _ = try await transport.response(
@@ -277,7 +288,10 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
             )
             XCTFail("Expected transport failure")
         } catch {
-            XCTAssertEqual(error as? ProviderConnectionError, expected)
+            XCTAssertEqual(
+                error as? ProviderHTTPTransportError,
+                expected
+            )
         }
         XCTAssertTrue(transport.hasReleasedTaskAndSessionForTesting)
     }

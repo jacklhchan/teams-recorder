@@ -36,9 +36,9 @@ cp -R "$APP" "$MOVED"
   2 \
   ad-hoc
 
-/bin/bash -n "$MOVED/Contents/Resources/transcribe-openai-compatible.sh"
-/usr/bin/python3 -m py_compile \
-  "$MOVED/Contents/Resources/openai_asr_longform.py"
+test ! -e "$MOVED/Contents/Resources/transcribe-openai-compatible.sh"
+test ! -e "$MOVED/Contents/Resources/transcribe-qwen-asr.sh"
+test ! -e "$MOVED/Contents/Resources/openai_asr_longform.py"
 
 if LC_ALL=C /usr/bin/grep -R -n -E \
   '/Users/apple|open -a "oMLX"|OMLX_API_KEY|release-manifest.json' \

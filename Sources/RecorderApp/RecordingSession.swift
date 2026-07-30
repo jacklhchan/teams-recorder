@@ -10,6 +10,27 @@ struct RecordingSession: Identifiable, Hashable {
     let duration: TimeInterval
     let fileSize: Int64
     let metadata: RecordingSessionMetadata
+    let searchDocument: RecordingLibrarySearchDocument
+
+    init(
+        id: URL,
+        folderURL: URL,
+        recordingURL: URL,
+        createdAt: Date,
+        duration: TimeInterval,
+        fileSize: Int64,
+        metadata: RecordingSessionMetadata,
+        searchDocument: RecordingLibrarySearchDocument = .empty
+    ) {
+        self.id = id
+        self.folderURL = folderURL
+        self.recordingURL = recordingURL
+        self.createdAt = createdAt
+        self.duration = duration
+        self.fileSize = fileSize
+        self.metadata = metadata
+        self.searchDocument = searchDocument
+    }
 
     var displayName: String {
         metadata.title ?? folderURL.lastPathComponent
@@ -29,6 +50,21 @@ struct RecordingSession: Identifiable, Hashable {
 
     var fileSizeText: String {
         ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
+    }
+
+    func replacingSearchDocument(
+        _ searchDocument: RecordingLibrarySearchDocument
+    ) -> RecordingSession {
+        RecordingSession(
+            id: id,
+            folderURL: folderURL,
+            recordingURL: recordingURL,
+            createdAt: createdAt,
+            duration: duration,
+            fileSize: fileSize,
+            metadata: metadata,
+            searchDocument: searchDocument
+        )
     }
 }
 
@@ -69,6 +105,10 @@ enum ManualTranscriptionImporter {
             try fileManager.removeItem(at: recordingURL)
         }
         try fileManager.copyItem(at: sourceURL, to: recordingURL)
+        try RecordingSessionMetadataStore.save(
+            .init(source: .imported),
+            in: folder
+        )
 
         return RecordingSessionStore.session(for: folder, recordingURL: recordingURL)
     }
@@ -108,6 +148,7 @@ enum RecordingSessionStore {
         let fileValues = try? recordingURL.resourceValues(forKeys: [.fileSizeKey])
         let duration = Self.duration(for: recordingURL)
         var metadata = RecordingSessionMetadataStore.load(in: folder)
+        let createdAt = folderValues?.creationDate ?? Date.distantPast
         if recordingURL.lastPathComponent == "recording.mp4", !metadata.screenIntervals.isEmpty {
             metadata.mediaKind = .video
         } else {
@@ -120,10 +161,16 @@ enum RecordingSessionStore {
             id: folder,
             folderURL: folder,
             recordingURL: recordingURL,
-            createdAt: folderValues?.creationDate ?? Date.distantPast,
+            createdAt: createdAt,
             duration: duration,
             fileSize: Int64(fileValues?.fileSize ?? 0),
-            metadata: metadata
+            metadata: metadata,
+            searchDocument: RecordingLibrarySearchDocument.load(
+                folderURL: folder,
+                displayName: metadata.title ?? folder.lastPathComponent,
+                createdAt: createdAt,
+                metadata: metadata
+            )
         )
     }
 

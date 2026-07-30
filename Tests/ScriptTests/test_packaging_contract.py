@@ -61,6 +61,17 @@ class PackagingContractTests(unittest.TestCase):
             "transcript.raw.txt",
             "transcription.json",
             "transcription.log",
+            "Native `AVFoundation`",
+            "`URLSession`",
+            "does not require Python, FFmpeg, or FFprobe",
+            "`recording.mp4`",
+            "`recording.m4a` audio-only recovery fallback",
+            "There is no fixed 12-session display cap",
+            "`schemaVersion`",
+            "Unknown metadata fields are preserved",
+            "Native audio chunks use an isolated system temporary workspace",
+            "`.transcription-runs` is a legacy\nworkspace only",
+            "Successful native jobs keep only the four canonical artifacts",
             "provider API key and Teams pairing token are stored in macOS Keychain",
             "oMLX settings are read only for a one-time migration",
             "oMLX is\nnot required, launched, installed, or managed by the recorder",
@@ -78,6 +89,9 @@ class PackagingContractTests(unittest.TestCase):
             "mlx_audio.stt.generate",
             "The transcript button opens oMLX",
             "Keychain migration is intentionally deferred",
+            "choose Mic Only mode",
+            "Write one combined `recording.m4a` file per session",
+            "folders with a `recording.m4a` file",
         )
         for phrase in stale_phrases:
             with self.subTest(phrase=phrase):
@@ -99,6 +113,13 @@ class PackagingContractTests(unittest.TestCase):
             '"$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"',
             script,
         )
+        for legacy_helper in (
+            "transcribe-openai-compatible.sh",
+            "transcribe-qwen-asr.sh",
+            "openai_asr_longform.py",
+        ):
+            with self.subTest(legacy_helper=legacy_helper):
+                self.assertNotIn(legacy_helper, script)
 
     def test_driver_build_packages_apple_sample_license(self):
         script = (

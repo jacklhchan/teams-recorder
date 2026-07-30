@@ -1,5 +1,51 @@
 import Foundation
 
+struct OpenAICompatibleTranscriptionLaunchPayload:
+    Codable,
+    Equatable,
+    Sendable
+{
+    let schemaVersion: Int
+    let baseURL: String
+    let asrModel: String
+    let language: String
+    let prompt: String
+    let apiKey: String?
+
+    init(snapshot: OpenAICompatibleProviderSnapshot) {
+        schemaVersion = 1
+        baseURL = snapshot.profile.baseURL.absoluteString
+        asrModel = snapshot.profile.asrModel
+        language = snapshot.profile.language
+        prompt = snapshot.profile.prompt
+        apiKey = snapshot.apiKey
+    }
+}
+
+struct TranscriptionProtocolSnapshot {
+    var status: String?
+    var transcriptPath: String?
+    var logPath: String?
+
+    init(lines: [String]) {
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard !line.isEmpty else { continue }
+            if line.hasPrefix("STATUS=") {
+                status = String(line.dropFirst("STATUS=".count))
+            } else if line.hasPrefix("TRANSCRIPT_PATH=") {
+                transcriptPath = String(
+                    line.dropFirst("TRANSCRIPT_PATH=".count)
+                )
+            } else if line.hasPrefix("LOG_PATH=") {
+                logPath = String(line.dropFirst("LOG_PATH=".count))
+            }
+        }
+    }
+}
+
 struct TranscriptionProcessRequest: Equatable, Sendable {
     let scriptURL: URL
     let audioURL: URL
@@ -32,6 +78,176 @@ struct FoundationTranscriptionProcessLauncher: TranscriptionProcessLaunching {
         onOutput: @escaping @Sendable (String) -> Void
     ) throws -> any TranscriptionProcessing {
         FoundationTranscriptionProcess(request: request, onOutput: onOutput)
+    }
+}
+
+enum LegacyProcessTranscriptionServiceError:
+    LocalizedError,
+    Equatable,
+    Sendable
+{
+    case completedWithoutTranscript
+    case invalidArtifactPath
+    case processFailed(Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .completedWithoutTranscript:
+            "Transcription completed without a valid transcript file."
+        case .invalidArtifactPath:
+            "Transcription reported an invalid artifact path."
+        case .processFailed(let status):
+            "Transcription failed with exit code \(status). "
+                + "Open the ASR log for details."
+        }
+    }
+}
+
+final class LegacyProcessTranscriptionService:
+    TranscriptionServicing,
+    @unchecked Sendable
+{
+    private let launcher: any TranscriptionProcessLaunching
+    private let scriptURL: URL
+    private let lock = NSLock()
+    private var activeProcess: (any TranscriptionProcessing)?
+
+    init(
+        launcher: any TranscriptionProcessLaunching,
+        scriptURL: URL
+    ) {
+        self.launcher = launcher
+        self.scriptURL = scriptURL
+    }
+
+    func transcribe(
+        _ request: TranscriptionServiceRequest,
+        onProgress: @escaping @Sendable (
+            TranscriptionServiceProgress
+        ) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        let configurationInput = try JSONEncoder().encode(
+            OpenAICompatibleTranscriptionLaunchPayload(
+                snapshot: request.snapshot
+            )
+        )
+        let process = try launcher.makeProcess(
+            request: .init(
+                scriptURL: scriptURL,
+                audioURL: request.audioURL,
+                folderURL: request.sessionFolder,
+                configurationInput: configurationInput
+            ),
+            onOutput: { text in
+                for line in text.split(
+                    whereSeparator: \.isNewline
+                ).map(String.init) where line.hasPrefix("STATUS=") {
+                    let message = String(
+                        line.dropFirst("STATUS=".count)
+                    )
+                    let phase: TranscriptionState.Phase =
+                        message.localizedCaseInsensitiveContains("upload")
+                        ? .uploading : .transcribing
+                    onProgress(
+                        .status(message: message, phase: phase)
+                    )
+                }
+            }
+        )
+        lock.withLock { activeProcess = process }
+        defer {
+            lock.withLock {
+                if activeProcess === process {
+                    activeProcess = nil
+                }
+            }
+        }
+
+        return try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            try process.run()
+            let result = await process.waitForExit()
+            try Task.checkCancellation()
+            guard result.exitStatus == 0 else {
+                throw LegacyProcessTranscriptionServiceError
+                    .processFailed(result.exitStatus)
+            }
+            let snapshot = TranscriptionProtocolSnapshot(
+                lines: result.protocolLines
+            )
+            guard let transcriptPath = snapshot.transcriptPath else {
+                throw LegacyProcessTranscriptionServiceError
+                    .completedWithoutTranscript
+            }
+            guard let transcriptURL = validatedArtifact(
+                path: transcriptPath,
+                in: request.sessionFolder
+            ) else {
+                throw LegacyProcessTranscriptionServiceError
+                    .invalidArtifactPath
+            }
+            let logURL: URL?
+            if let logPath = snapshot.logPath {
+                guard let validated = validatedArtifact(
+                    path: logPath,
+                    in: request.sessionFolder
+                ) else {
+                    throw LegacyProcessTranscriptionServiceError
+                        .invalidArtifactPath
+                }
+                logURL = validated
+            } else {
+                logURL = nil
+            }
+            if let status = snapshot.status {
+                onProgress(
+                    .status(
+                        message: status,
+                        phase: .transcribing
+                    )
+                )
+            }
+            return .init(
+                transcriptURL: transcriptURL,
+                rawTranscriptURL: existingCanonical(
+                    named: TranscriptDocumentStore.rawFileName,
+                    in: request.sessionFolder
+                ),
+                manifestURL: existingCanonical(
+                    named: TranscriptDocumentStore.manifestFileName,
+                    in: request.sessionFolder
+                ),
+                logURL: logURL
+            )
+        }, onCancel: {
+            process.terminate()
+        })
+    }
+
+    private func validatedArtifact(
+        path: String,
+        in sessionFolder: URL
+    ) -> URL? {
+        guard path.hasPrefix("/") else { return nil }
+        let expectedParent = sessionFolder
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let candidate = URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard candidate.deletingLastPathComponent() == expectedParent,
+              RecordingSessionStore.isRegularFile(candidate) else {
+            return nil
+        }
+        return candidate
+    }
+
+    private func existingCanonical(
+        named name: String,
+        in folder: URL
+    ) -> URL? {
+        let url = folder.appendingPathComponent(name)
+        return RecordingSessionStore.isRegularFile(url) ? url : nil
     }
 }
 

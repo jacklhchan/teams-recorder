@@ -96,7 +96,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             preparer: preparer,
             launcher: launcher
         )
-        weak let weakModel = model
+        weak var weakModel = model
 
         model?.transcribe(session: fixture.session)
         await fulfillment(of: [started], timeout: 1)
@@ -133,6 +133,178 @@ final class AppModelTranscriptionTests: XCTestCase {
 
         XCTAssertEqual(model.transcriptURLsBySessionID[fixture.session.id], transcriptURL)
         XCTAssertEqual(model.transcriptionStatesBySessionID[fixture.session.id]?.phase, .completed)
+    }
+
+    func testPublishedAndEditedTranscriptBecomeSearchableWithoutLibraryRefresh() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let preparer = ControlledPreparer(
+            .immediate(
+                .success(
+                    .init(
+                        audioURL: fixture.temporaryAudioURL,
+                        cleanupURL: nil
+                    )
+                )
+            )
+        )
+        let launcher = ControlledLauncher()
+        let offMainRebuilds = expectation(
+            description: "affected search document rebuilt off main"
+        )
+        offMainRebuilds.expectedFulfillmentCount = 2
+        let libraryMetadata = RecordingSessionMetadata(
+            title: "Priority customer review",
+            tags: ["favorite-search-tag"],
+            isFavorite: true
+        )
+        let librarySession = RecordingSession(
+            id: fixture.session.id,
+            folderURL: fixture.session.folderURL,
+            recordingURL: fixture.session.recordingURL,
+            createdAt: fixture.session.createdAt,
+            duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize,
+            metadata: libraryMetadata,
+            searchDocument: RecordingLibrarySearchDocument.load(
+                folderURL: fixture.session.folderURL,
+                displayName: "Priority customer review",
+                createdAt: fixture.session.createdAt,
+                metadata: libraryMetadata
+            )
+        )
+        let model = makeModel(
+            fixture: fixture,
+            preparer: preparer,
+            launcher: launcher,
+            recordingSearchDocumentLoader: { session in
+                XCTAssertFalse(Thread.isMainThread)
+                offMainRebuilds.fulfill()
+                return RecordingLibrarySearchDocument.load(
+                    folderURL: session.folderURL,
+                    displayName: session.displayName,
+                    createdAt: session.createdAt,
+                    metadata: session.metadata
+                )
+            }
+        )
+        model.sessions = [librarySession]
+        let publishedText = "first newly searchable phrase"
+        let editedText = "replacement edited searchable phrase"
+        let transcriptURL = fixture.session.folderURL
+            .appendingPathComponent("transcript.txt")
+        try publishedText.write(
+            to: transcriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(
+            RecordingLibraryQuery(text: publishedText)
+                .filter(model.sessions)
+                .isEmpty
+        )
+        model.transcribe(session: librarySession)
+        let process = await launcher.nextProcess()
+        process.complete(
+            exitStatus: 0,
+            output: "TRANSCRIPT_PATH=\(transcriptURL.path)"
+        )
+        await waitForIdle(model)
+
+        let publishedBecameSearchable = await eventually {
+            RecordingLibraryQuery(text: publishedText)
+                .filter(model.sessions)
+                .map(\.id) == [librarySession.id]
+        }
+        XCTAssertTrue(
+            publishedBecameSearchable,
+            "Published transcript should update only the affected "
+                + "in-memory search document."
+        )
+        let publishedSession = try XCTUnwrap(model.sessions.first)
+        XCTAssertNotNil(
+            RecordingLibraryQuery(text: publishedText)
+                .transcriptSnippet(for: publishedSession)
+        )
+        XCTAssertEqual(
+            RecordingLibraryQuery(
+                text: "favorite-search-tag",
+                favoritesOnly: true
+            ).filter(model.sessions).map(\.id),
+            [librarySession.id]
+        )
+
+        model.saveTranscript(editedText, for: publishedSession)
+
+        let editedBecameSearchable = await eventually {
+            RecordingLibraryQuery(text: editedText)
+                .filter(model.sessions)
+                .map(\.id) == [librarySession.id]
+                && RecordingLibraryQuery(text: publishedText)
+                    .filter(model.sessions)
+                    .isEmpty
+        }
+        XCTAssertTrue(
+            editedBecameSearchable,
+            "Edited transcript should replace the affected search "
+                + "document without a manual library refresh."
+        )
+        XCTAssertEqual(
+            RecordingLibraryQuery(
+                text: "Priority customer",
+                favoritesOnly: true
+            ).filter(model.sessions).map(\.id),
+            [librarySession.id]
+        )
+        await fulfillment(of: [offMainRebuilds], timeout: 1)
+    }
+
+    func testLibraryRefreshInvalidatesStaleSearchDocumentRebuild() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let firstLoadStarted = expectation(
+            description: "first search document load started"
+        )
+        let searchLoader = BlockingSearchDocumentLoader(
+            firstLoadStarted: firstLoadStarted
+        )
+        defer { searchLoader.releaseFirstLoad() }
+        let model = makeModel(
+            fixture: fixture,
+            preparer: ControlledPreparer(
+                .immediate(.failure(TestError.failed))
+            ),
+            launcher: ControlledLauncher(),
+            recordingSessionLoader: { _ in [fixture.session] },
+            recordingSearchDocumentLoader: { session in
+                searchLoader.load(session)
+            }
+        )
+        model.outputFolder = fixture.root
+        model.sessions = [fixture.session]
+        let staleText = "stale transcript search term"
+        let newestText = "newest transcript search term"
+
+        model.saveTranscript(staleText, for: fixture.session)
+        await fulfillment(of: [firstLoadStarted], timeout: 1)
+        model.refreshSessions()
+        model.saveTranscript(newestText, for: fixture.session)
+        searchLoader.releaseFirstLoad()
+
+        let newestDocumentWon = await eventually {
+            RecordingLibraryQuery(text: newestText)
+                .filter(model.sessions)
+                .map(\.id) == [fixture.session.id]
+                && RecordingLibraryQuery(text: staleText)
+                    .filter(model.sessions)
+                    .isEmpty
+        }
+        XCTAssertTrue(
+            newestDocumentWon,
+            "A search rebuild queued before refresh must not overwrite "
+                + "a newer edited transcript."
+        )
     }
 
     func testCurrentArtifactResolutionReplacesCachedLegacyArtifactsWithCanonicalFiles() throws {
@@ -565,13 +737,31 @@ final class AppModelTranscriptionTests: XCTestCase {
         preparer: ControlledPreparer,
         launcher: ControlledLauncher,
         repository: any OpenAICompatibleProviderManaging = RecordingProviderRepository(),
-        configureProvider: Bool = true
+        configureProvider: Bool = true,
+        recordingSessionLoader: @escaping @Sendable (
+            URL
+        ) -> [RecordingSession] = {
+            RecordingSessionStore.load(from: $0)
+        },
+        recordingSearchDocumentLoader: @escaping @Sendable (
+            RecordingSession
+        ) -> RecordingLibrarySearchDocument = { session in
+            RecordingLibrarySearchDocument.load(
+                folderURL: session.folderURL,
+                displayName: session.displayName,
+                createdAt: session.createdAt,
+                metadata: session.metadata
+            )
+        }
     ) -> AppModel {
         let model = AppModel(
             providerRepository: repository,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            recordingSessionLoader: recordingSessionLoader,
+            recordingSearchDocumentLoader:
+                recordingSearchDocumentLoader,
             transcriptionAudioPreparer: preparer,
             transcriptionProcessLauncher: launcher,
             transcriptionScriptURL: fixture.scriptURL
@@ -618,6 +808,43 @@ final class AppModelTranscriptionTests: XCTestCase {
             language: "",
             prompt: ""
         )
+    }
+}
+
+private final class BlockingSearchDocumentLoader:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let firstLoadStarted: XCTestExpectation
+    private let firstLoadGate = DispatchSemaphore(value: 0)
+    private var loadCount = 0
+
+    init(firstLoadStarted: XCTestExpectation) {
+        self.firstLoadStarted = firstLoadStarted
+    }
+
+    func load(
+        _ session: RecordingSession
+    ) -> RecordingLibrarySearchDocument {
+        let document = RecordingLibrarySearchDocument.load(
+            folderURL: session.folderURL,
+            displayName: session.displayName,
+            createdAt: session.createdAt,
+            metadata: session.metadata
+        )
+        let isFirstLoad = lock.withLock {
+            loadCount += 1
+            return loadCount == 1
+        }
+        if isFirstLoad {
+            firstLoadStarted.fulfill()
+            firstLoadGate.wait()
+        }
+        return document
+    }
+
+    func releaseFirstLoad() {
+        firstLoadGate.signal()
     }
 }
 

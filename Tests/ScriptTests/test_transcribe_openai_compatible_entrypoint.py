@@ -70,9 +70,9 @@ class TranscriptionEntrypointTests(unittest.TestCase):
     def test_propagates_helper_failure(self):
         self.assertEqual(self.run_entrypoint(helper_exit=70).returncode, 70)
 
-    def test_build_script_packages_canonical_resources_only(self):
+    def test_build_script_excludes_legacy_transcription_runtime_helpers(self):
         build_script = BUILD_SCRIPT.read_text(encoding="utf-8")
         for name in ("transcribe-openai-compatible.sh", "transcribe-qwen-asr.sh", "openai_asr_longform.py"):
-            self.assertIn(name, build_script)
+            self.assertNotIn(name, build_script)
         self.assertNotIn("prepare-qwen-asr.sh", build_script)
         self.assertNotIn("qwen_asr_longform.py", build_script)

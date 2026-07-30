@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jacklhchan/teams-recorder/contracts/recording-session.schema.json",
+  "title": "Local Meeting Recorder session metadata",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "tags",
+    "isFavorite",
+    "mediaKind",
+    "screenIntervals",
+    "recoveryState",
+    "source",
+    "participants"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "isFavorite": {
+      "type": "boolean"
+    },
+    "mediaKind": {
+      "enum": [
+        "audio",
+        "video"
+      ]
+    },
+    "screenIntervals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "startSeconds",
+          "endSeconds"
+        ],
+        "properties": {
+          "startSeconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "endSeconds": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "capturedTeamsWindow": {
+      "type": "object",
+      "required": [
+        "processID",
+        "windowID",
+        "title"
+      ],
+      "properties": {
+        "processID": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "windowID": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "recoveryState": {
+      "enum": [
+        "none",
+        "videoLostAudioPreserved",
+        "recoveredAfterInterruption"
+      ]
+    },
+    "source": {
+      "enum": [
+        "manual",
+        "teamsAutomatic",
+        "imported"
+      ]
+    },
+    "meetingType": {
+      "type": "string",
+      "minLength": 1
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "additionalProperties": true
+}

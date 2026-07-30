@@ -628,32 +628,72 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
     }
 
     func testSignedPCMMinimaNormalizeToNegativeOne() throws {
+        let signedInt16Minimum = try PCMByteDecoder.decode(
+            byte0: 0x00,
+            byte1: 0x80,
+            byte2: 0x00,
+            byte3: 0x00,
+            encoding: .signedInt16
+        )
+        let signedInt24Minimum = try PCMByteDecoder.decode(
+            byte0: 0x00,
+            byte1: 0x00,
+            byte2: 0x80,
+            byte3: 0x00,
+            encoding: .signedInt24Packed
+        )
+        let signedInt32Minimum = try PCMByteDecoder.decode(
+            byte0: 0x00,
+            byte1: 0x00,
+            byte2: 0x00,
+            byte3: 0x80,
+            encoding: .signedInt32
+        )
+        let signedInt16Maximum = try PCMByteDecoder.decode(
+            byte0: 0xFF,
+            byte1: 0x7F,
+            byte2: 0x00,
+            byte3: 0x00,
+            encoding: .signedInt16
+        )
+        let signedInt24Zero = try PCMByteDecoder.decode(
+            byte0: 0x00,
+            byte1: 0x00,
+            byte2: 0x00,
+            byte3: 0x00,
+            encoding: .signedInt24Packed
+        )
+        let signedInt24Maximum = try PCMByteDecoder.decode(
+            byte0: 0xFF,
+            byte1: 0xFF,
+            byte2: 0x7F,
+            byte3: 0x00,
+            encoding: .signedInt24Packed
+        )
+
         XCTAssertEqual(
-            try PCMByteDecoder.decode([0x00, 0x80], encoding: .signedInt16),
+            signedInt16Minimum,
             -1,
             accuracy: 0.000_001
         )
         XCTAssertEqual(
-            try PCMByteDecoder.decode([0x00, 0x00, 0x80], encoding: .signedInt24Packed),
+            signedInt24Minimum,
             -1,
             accuracy: 0.000_001
         )
         XCTAssertEqual(
-            try PCMByteDecoder.decode([0x00, 0x00, 0x00, 0x80], encoding: .signedInt32),
+            signedInt32Minimum,
             -1,
             accuracy: 0.000_001
         )
-        XCTAssertLessThanOrEqual(
-            try PCMByteDecoder.decode([0xFF, 0x7F], encoding: .signedInt16),
-            1
-        )
+        XCTAssertLessThanOrEqual(signedInt16Maximum, 1)
         XCTAssertEqual(
-            try PCMByteDecoder.decode([0x00, 0x00, 0x00], encoding: .signedInt24Packed),
+            signedInt24Zero,
             0,
             accuracy: 0.000_001
         )
         XCTAssertEqual(
-            try PCMByteDecoder.decode([0xFF, 0xFF, 0x7F], encoding: .signedInt24Packed),
+            signedInt24Maximum,
             Float(8_388_607.0 / 8_388_608.0),
             accuracy: 0.000_001
         )

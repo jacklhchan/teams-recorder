@@ -70,6 +70,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
     private var body = Data()
     private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
     private var isFinished = false
+    private var currentRedirectRequest: URLRequest?
 
     init(
         configuration: URLSessionConfiguration,
@@ -88,6 +89,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 self.continuation = continuation
+                currentRedirectRequest = request
                 if Task.isCancelled {
                     lock.unlock()
                     finish(.failure(CancellationError()))
@@ -125,7 +127,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
                 || response.expectedContentLength == NSURLSessionTransferSizeUnknown else {
             completionHandler(.cancel)
             dataTask.cancel()
-            finish(.failure(ProviderConnectionError.modelDiscoveryResponseTooLarge))
+            finish(.failure(ProviderHTTPTransportError.responseTooLarge))
             return
         }
         lock.lock()
@@ -159,7 +161,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
 
         if exceedsLimit {
             dataTask.cancel()
-            finish(.failure(ProviderConnectionError.modelDiscoveryResponseTooLarge))
+            finish(.failure(ProviderHTTPTransportError.responseTooLarge))
         } else {
             retainedBodyByteCountObserver?(retainedByteCount)
         }
@@ -184,6 +186,37 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         finish(.success(result))
     }
 
+    func urlSession(
+        _: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        lock.lock()
+        let redirected = currentRedirectRequest.flatMap {
+            ProviderRedirectPolicy.redirectedRequest(
+                from: $0,
+                proposed: request,
+                statusCode: response.statusCode
+            )
+        }
+        if let redirected {
+            currentRedirectRequest = redirected
+        }
+        lock.unlock()
+
+        guard let redirected else {
+            completionHandler(nil)
+            task.cancel()
+            finish(
+                .failure(ProviderHTTPTransportError.redirectRejected)
+            )
+            return
+        }
+        completionHandler(redirected)
+    }
+
     private func cancel() {
         lock.lock()
         let task = self.task
@@ -205,6 +238,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         self.session = nil
         body.removeAll(keepingCapacity: false)
         response = nil
+        currentRedirectRequest = nil
         lock.unlock()
         session?.finishTasksAndInvalidate()
         lifecycle.markReleased()
@@ -227,7 +261,6 @@ protocol ProviderConnectionTesting: Sendable {
 enum ProviderConnectionError: LocalizedError, Equatable {
     case invalidResponse
     case authenticationRejected
-    case modelDiscoveryResponseTooLarge
     case tooManyDiscoveredModels
     case httpStatus(Int)
 
@@ -237,8 +270,6 @@ enum ProviderConnectionError: LocalizedError, Equatable {
             "The provider returned an invalid response."
         case .authenticationRejected:
             "The provider rejected the API key."
-        case .modelDiscoveryResponseTooLarge:
-            "The provider returned too much model discovery data."
         case .tooManyDiscoveredModels:
             "The provider returned too many models."
         case .httpStatus(let status):

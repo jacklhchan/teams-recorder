@@ -1,21 +1,29 @@
-import AVFoundation
 import SwiftUI
 
 struct ContentView: View {
     @ObservedObject private var model: AppModel
     @State private var autoMeetingPanel:
         any TeamsAutoMeetingCountdownPresenting
+    @State private var playbackWindow:
+        any PlaybackWindowPresenting
 
     @MainActor
     init(
         model: AppModel,
         autoMeetingPanelFactory:
             any TeamsAutoMeetingCountdownPresenterFactory =
-                TeamsAutoMeetingCountdownPanelFactory()
+                TeamsAutoMeetingCountdownPanelFactory(),
+        playbackWindowPresenterFactory:
+            any PlaybackWindowPresenterFactory =
+                PlaybackWindowControllerFactory()
     ) {
         self.model = model
         _autoMeetingPanel = State(
             initialValue: autoMeetingPanelFactory.makePresenter()
+        )
+        _playbackWindow = State(
+            initialValue:
+                playbackWindowPresenterFactory.makePresenter()
         )
     }
 
@@ -59,11 +67,6 @@ struct ContentView: View {
                     AIProviderSettingsView(model: model.aiProviderSettingsModel)
                     SessionListView(
                         sessions: model.sessions,
-                        playingSessionID: model.playingSessionID,
-                        playbackProgress: model.playbackProgress,
-                        playbackDuration: model.playbackDuration,
-                        isPlaybackActive: model.isPlaybackActive,
-                        playbackPlayer: model.playbackPlayer,
                         transcribingSessionID: model.transcribingSessionID,
                         transcriptionStatus: model.transcriptionStatus,
                         lastTranscriptionSessionID: model.lastTranscriptionSessionID,
@@ -74,11 +77,6 @@ struct ContentView: View {
                         refresh: model.refreshSessions,
                         play: model.play,
                         open: model.open,
-                        stopPlayback: {
-                            model.stopPlayback()
-                        },
-                        togglePlayback: model.playbackToggle,
-                        seekPlayback: model.seekPlayback,
                         transcribe: model.transcribe,
                         cancelTranscription: model.cancelTranscription,
                         openTranscript: model.openTranscript,
@@ -114,15 +112,34 @@ struct ContentView: View {
                 autoMeetingPanel.dismiss()
             }
         }
+        .onChange(
+            of: model.playingSessionID,
+            initial: true
+        ) { _, sessionID in
+            guard sessionID != nil else {
+                playbackWindow.dismiss()
+                return
+            }
+            playbackWindow.present(
+                presentation: model.playbackPresentation,
+                togglePlayback: model.playbackToggle,
+                stopPlayback: {
+                    model.stopPlayback()
+                },
+                seekPlayback: model.seekPlayback
+            )
+        }
         .onReceive(
             NotificationCenter.default.publisher(
                 for: NSApplication.willTerminateNotification
             )
         ) { _ in
             autoMeetingPanel.dismiss()
+            playbackWindow.dismiss()
         }
         .onDisappear {
             autoMeetingPanel.dismiss()
+            playbackWindow.dismiss()
         }
     }
 
@@ -827,11 +844,6 @@ private struct LiveAudioHealthView: View {
 
 private struct SessionListView: View {
     let sessions: [RecordingSession]
-    let playingSessionID: RecordingSession.ID?
-    let playbackProgress: TimeInterval
-    let playbackDuration: TimeInterval
-    let isPlaybackActive: Bool
-    let playbackPlayer: AVPlayer
     let transcribingSessionID: RecordingSession.ID?
     let transcriptionStatus: String
     let lastTranscriptionSessionID: RecordingSession.ID?
@@ -842,9 +854,6 @@ private struct SessionListView: View {
     let refresh: () -> Void
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
-    let stopPlayback: () -> Void
-    let togglePlayback: () -> Void
-    let seekPlayback: (TimeInterval) -> Void
     let transcribe: (RecordingSession) -> Void
     let cancelTranscription: () -> Void
     let openTranscript: (RecordingSession) -> Void
@@ -863,6 +872,13 @@ private struct SessionListView: View {
     @State private var sessionPendingTrash: RecordingSession?
 
     var body: some View {
+        let query = RecordingLibraryQuery(
+            text: searchText,
+            favoritesOnly: favoritesOnly
+        )
+        let visibleSessions = query.filter(sessions)
+        let lastVisibleSessionID = visibleSessions.last?.id
+
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Recordings", systemImage: "list.bullet.rectangle")
@@ -884,13 +900,13 @@ private struct SessionListView: View {
             TextField("Search recordings", text: $searchText)
                 .textFieldStyle(.roundedBorder)
 
-            if filteredSessions.isEmpty {
+            if visibleSessions.isEmpty {
                 Text("No recordings in the selected folder yet.")
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
             } else {
-                VStack(spacing: 0) {
-                    ForEach(filteredSessions.prefix(12)) { session in
+                LazyVStack(spacing: 0) {
+                    ForEach(visibleSessions) { session in
                         VStack(spacing: 8) {
                             HStack(spacing: 12) {
                                 VStack(alignment: .leading, spacing: 3) {
@@ -905,19 +921,22 @@ private struct SessionListView: View {
                                             .foregroundStyle(.tint)
                                             .lineLimit(1)
                                     }
+                                    if let snippet = query
+                                        .transcriptSnippet(for: session) {
+                                        Text(snippet)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
                                 }
                                 Spacer()
                                 Button {
-                                    if playingSessionID == session.id {
-                                        togglePlayback()
-                                    } else {
-                                        play(session)
-                                    }
+                                    play(session)
                                 } label: {
-                                    Image(systemName: playingSessionID == session.id && isPlaybackActive ? "pause.fill" : "play.fill")
+                                    Image(systemName: "play.fill")
                                 }
                                 .buttonStyle(.bordered)
-                                .help(playingSessionID == session.id && isPlaybackActive ? "Pause playback" : "Play recording")
+                                .help("Play recording in a separate window")
                                 Button {
                                     open(session)
                                 } label: {
@@ -968,19 +987,6 @@ private struct SessionListView: View {
                                 .help("Open ASR log")
                             }
 
-                            if playingSessionID == session.id {
-                                RecordingPlaybackView(
-                                    session: session,
-                                    player: playbackPlayer,
-                                    progress: playbackProgress,
-                                    duration: playbackDuration,
-                                    isPlaying: isPlaybackActive,
-                                    togglePlayback: togglePlayback,
-                                    stopPlayback: stopPlayback,
-                                    seekPlayback: seekPlayback
-                                )
-                            }
-
                             if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id || transcriptionStatesBySessionID[session.id] != nil {
                                 HStack(spacing: 8) {
                                     if transcribingSessionID == session.id {
@@ -1014,7 +1020,7 @@ private struct SessionListView: View {
                             }
                         }
                         .padding(.vertical, 8)
-                        if session.id != filteredSessions.prefix(12).last?.id {
+                        if session.id != lastVisibleSessionID {
                             Divider()
                         }
                     }
@@ -1053,16 +1059,6 @@ private struct SessionListView: View {
             }
         } message: { session in
             Text(session.displayName)
-        }
-    }
-
-    private var filteredSessions: [RecordingSession] {
-        sessions.filter { session in
-            guard !favoritesOnly || session.isFavorite else { return false }
-            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !query.isEmpty else { return true }
-            return session.displayName.localizedCaseInsensitiveContains(query)
-                || session.tags.contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
 

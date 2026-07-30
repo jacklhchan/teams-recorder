@@ -1233,7 +1233,7 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertEqual(writer.events, ["write", "close"])
     }
 
-    func testCaptureFailureAppearsInHealthReport() async throws {
+    func testConversionFailureAppearsInHealthReport() async throws {
         let source = FakeCaptureSource()
         let writer = FakeWriter()
         let engine = makeEngine(source: source, writer: writer)
@@ -1244,13 +1244,33 @@ final class RecordingEngineStateTests: XCTestCase {
         )
 
         source.emit(event: .conversionFailed(.system))
-        source.emit(event: .streamFailed)
-        await settle()
         let result = await engine.stop()
 
         XCTAssertEqual(result?.health.conversionFailures, 1)
-        XCTAssertEqual(result?.health.streamFailures, 1)
         XCTAssertTrue(result?.health.summary.contains("conversion failures") == true)
+    }
+
+    func testTerminalCaptureFailureAppearsInCompletedHealthReport() async throws {
+        let source = FakeCaptureSource()
+        let writer = FakeWriter()
+        let completion = RecordingResultCapture()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in writer },
+            mixerBlockFrames: 4,
+            onRecordingStopped: { completion.store($0) }
+        )
+        _ = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+
+        source.emit(event: .streamFailed)
+        await waitUntil { completion.value != nil }
+
+        XCTAssertEqual(completion.value?.health.streamFailures, 1)
+        XCTAssertFalse(engine.isRecording)
     }
 
     func testTimelineDiscontinuityIsReportedWithoutPaddingElapsedDuration() async throws {
@@ -1763,6 +1783,23 @@ final class RecordingEngineStateTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("Condition was not reached", file: file, line: line)
+    }
+}
+
+private final class RecordingResultCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: RecordingResult?
+
+    var value: RecordingResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func store(_ value: RecordingResult?) {
+        lock.lock()
+        stored = value
+        lock.unlock()
     }
 }
 

@@ -126,36 +126,51 @@ enum PCMLayoutValidator {
 }
 
 enum PCMByteDecoder {
-    static func decode(_ bytes: [UInt8], encoding: PCMEncoding) throws -> Float {
-        guard bytes.count == encoding.storageByteCount else {
-            throw SampleBufferConverterError.invalidPCMLayout
-        }
-        return try bytes.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else {
-                throw SampleBufferConverterError.invalidPCMLayout
-            }
-            return try decode(baseAddress, encoding: encoding)
-        }
+    static func decode(
+        _ pointer: UnsafeRawPointer,
+        encoding: PCMEncoding
+    ) throws -> Float {
+        let count = encoding.storageByteCount
+        return try decode(
+            byte0: pointer.load(fromByteOffset: 0, as: UInt8.self),
+            byte1: count > 1 ? pointer.load(fromByteOffset: 1, as: UInt8.self) : 0,
+            byte2: count > 2 ? pointer.load(fromByteOffset: 2, as: UInt8.self) : 0,
+            byte3: count > 3 ? pointer.load(fromByteOffset: 3, as: UInt8.self) : 0,
+            encoding: encoding
+        )
     }
 
     static func decode(
-        _ pointer: UnsafeRawPointer,
+        byte0: UInt8,
+        byte1: UInt8,
+        byte2: UInt8,
+        byte3: UInt8,
         encoding: PCMEncoding
     ) throws -> Float {
         let value: Float
         switch encoding {
         case .float32:
-            value = Float(bitPattern: UInt32(littleEndian: pointer.loadUnaligned(as: UInt32.self)))
+            let bitPattern = UInt32(byte0)
+                | (UInt32(byte1) << 8)
+                | (UInt32(byte2) << 16)
+                | (UInt32(byte3) << 24)
+            value = Float(bitPattern: bitPattern)
         case .signedInt16:
-            let integer = Int16(littleEndian: pointer.loadUnaligned(as: Int16.self))
+            let bitPattern = UInt16(byte0) | (UInt16(byte1) << 8)
+            let integer = Int16(bitPattern: bitPattern)
             value = Float(Double(integer) / 32_768.0)
         case .signedInt24Packed:
-            let bytes = pointer.assumingMemoryBound(to: UInt8.self)
-            let unsigned = Int32(bytes[0]) | (Int32(bytes[1]) << 8) | (Int32(bytes[2]) << 16)
+            let unsigned = Int32(byte0)
+                | (Int32(byte1) << 8)
+                | (Int32(byte2) << 16)
             let integer = unsigned & 0x80_0000 == 0 ? unsigned : unsigned | ~0xFF_FFFF
             value = Float(Double(integer) / 8_388_608.0)
         case .signedInt32:
-            let integer = Int32(littleEndian: pointer.loadUnaligned(as: Int32.self))
+            let bitPattern = UInt32(byte0)
+                | (UInt32(byte1) << 8)
+                | (UInt32(byte2) << 16)
+                | (UInt32(byte3) << 24)
+            let integer = Int32(bitPattern: bitPattern)
             value = Float(Double(integer) / 2_147_483_648.0)
         }
         guard value.isFinite else {

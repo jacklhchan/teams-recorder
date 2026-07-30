@@ -194,9 +194,6 @@ esac
             )
         for name in (
             "AppIcon.icns",
-            "transcribe-openai-compatible.sh",
-            "transcribe-qwen-asr.sh",
-            "openai_asr_longform.py",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md",
             ".lmr-build-owner",
@@ -205,13 +202,6 @@ esac
                 OWNER_MARKER_VALUE if name == ".lmr-build-owner" else name,
                 encoding="utf-8",
             )
-        for name in (
-            "transcribe-openai-compatible.sh",
-            "transcribe-qwen-asr.sh",
-            "openai_asr_longform.py",
-        ):
-            helper = resources / name
-            helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
         return app
 
     def run_verify(
@@ -475,17 +465,18 @@ esac
                 0,
             )
 
-    def test_verifier_rejects_missing_resources_and_nonexecutable_helpers(self):
+    def test_verifier_rejects_missing_resources_and_legacy_runtime_helpers(self):
         required = (
             "AppIcon.icns",
-            "transcribe-openai-compatible.sh",
-            "transcribe-qwen-asr.sh",
-            "openai_asr_longform.py",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md",
             ".lmr-build-owner",
         )
-        executable = required[1:4]
+        legacy_helpers = (
+            "transcribe-openai-compatible.sh",
+            "transcribe-qwen-asr.sh",
+            "openai_asr_longform.py",
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             codesign = self.make_codesign_shim(root)
@@ -501,11 +492,11 @@ esac
                         self.run_verify(app, codesign, file_command, entitlements).returncode,
                         0,
                     )
-            for name in executable:
-                with self.subTest(nonexecutable=name):
-                    app = self.make_app_fixture(root / f"mode-{name}")
+            for name in legacy_helpers:
+                with self.subTest(legacy_helper=name):
+                    app = self.make_app_fixture(root / f"legacy-{name}")
                     helper = app / "Contents/Resources" / name
-                    helper.chmod(helper.stat().st_mode & ~stat.S_IXUSR)
+                    helper.write_text("legacy runtime dependency", encoding="utf-8")
                     self.assertNotEqual(
                         self.run_verify(app, codesign, file_command, entitlements).returncode,
                         0,

@@ -31,9 +31,9 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")" = "$EXPEC
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "15.0"
 "$FILE_BIN" "$APP/Contents/MacOS/LocalMeetingRecorder" | grep -q 'arm64'
 test -f "$APP/Contents/Resources/AppIcon.icns"
-test -x "$APP/Contents/Resources/transcribe-openai-compatible.sh"
-test -x "$APP/Contents/Resources/transcribe-qwen-asr.sh"
-test -x "$APP/Contents/Resources/openai_asr_longform.py"
+test ! -e "$APP/Contents/Resources/transcribe-openai-compatible.sh"
+test ! -e "$APP/Contents/Resources/transcribe-qwen-asr.sh"
+test ! -e "$APP/Contents/Resources/openai_asr_longform.py"
 test -f "$APP/Contents/Resources/LICENSE"
 test -f "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 test ! -e "$APP/Contents/Resources/release-manifest.json"

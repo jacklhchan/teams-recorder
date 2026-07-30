@@ -674,7 +674,10 @@ final class TeamsMuteSyncClientTests: XCTestCase {
         let store = BlockingTeamsPairingTokenStore(token: "stale")
         let first = ScriptedTeamsWebSocketConnection()
         let second = ScriptedTeamsWebSocketConnection()
-        let factory = ScriptedTeamsWebSocketFactory([first, second])
+        // The invalid-token loop and explicit reconnect may each win the
+        // post-clear race, so both valid schedules need a scripted socket.
+        let third = ScriptedTeamsWebSocketConnection()
+        let factory = ScriptedTeamsWebSocketFactory([first, second, third])
         let sleeper = ManualTeamsSleeper()
         let client = makeClient(
             tokenStore: store,

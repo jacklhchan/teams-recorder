@@ -1,4 +1,8 @@
 @preconcurrency import AVFoundation
+import AppKit
+import AVKit
+import Combine
+import SwiftUI
 import XCTest
 @testable import RecorderApp
 
@@ -29,6 +33,83 @@ final class AppModelPlaybackTests: XCTestCase {
         XCTAssertEqual(model.playbackProgress, 3)
         XCTAssertEqual(model.playbackDuration, 12)
         XCTAssertTrue(model.isPlaybackActive)
+    }
+
+    func testPeriodicPlaybackSnapshotDoesNotRepublishWholeAppModel() async {
+        let coordinator = FakePlaybackCoordinator()
+        let model = makeModel(playbackCoordinator: coordinator)
+        let session = makeSession(extension: "mp4")
+
+        model.play(session: session)
+        await Task.yield()
+
+        var appModelPublicationCount = 0
+        let observation = model.objectWillChange.sink {
+            appModelPublicationCount += 1
+        }
+        coordinator.emit(.init(
+            sessionID: session.id,
+            progress: 3,
+            duration: 12,
+            isPlaying: true
+        ))
+
+        XCTAssertEqual(model.playbackProgress, 3)
+        XCTAssertEqual(model.playbackDuration, 12)
+        XCTAssertTrue(model.isPlaybackActive)
+        XCTAssertEqual(
+            appModelPublicationCount,
+            0,
+            "Periodic playback progress must update only the dedicated playback window"
+        )
+        withExtendedLifetime(observation) {}
+    }
+
+    func testVideoPlaybackIsNotEmbeddedInMainContentHierarchy() async {
+        let coordinator = FakePlaybackCoordinator()
+        let model = makeModel(playbackCoordinator: coordinator)
+        let session = makeSession(
+            extension: "mp4",
+            screenIntervals: [
+                RecordedScreenInterval(startSeconds: 0, endSeconds: 10)
+            ]
+        )
+        model.sessions = [session]
+        model.play(session: session)
+        await Task.yield()
+
+        let hostingView = NSHostingView(rootView: ContentView(model: model))
+        hostingView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        try? await Task.sleep(for: .milliseconds(100))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        if let scrollView = firstScrollView(in: hostingView),
+           let documentView = scrollView.documentView {
+            let maximumY = max(
+                0,
+                documentView.bounds.height -
+                    scrollView.contentView.bounds.height
+            )
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: maximumY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            try? await Task.sleep(for: .milliseconds(100))
+            window.layoutIfNeeded()
+            hostingView.layoutSubtreeIfNeeded()
+        }
+
+        XCTAssertFalse(
+            containsAVPlayerView(in: hostingView),
+            "Video playback must live in a dedicated window, outside the main ScrollView"
+        )
+        window.contentView = nil
     }
 
     func testStopSeekPauseAndStaleSnapshotDoNotPolluteReplacementPlayback() async {
@@ -169,7 +250,7 @@ final class AppModelPlaybackTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertTrue(delayIsWaiting, "The test-recording delay did not start")
-        weak let weakModel = model
+        weak var weakModel = model
         model = nil
 
         let released = await eventually { weakModel == nil }
@@ -196,7 +277,10 @@ final class AppModelPlaybackTests: XCTestCase {
         return defaults
     }
 
-    private func makeSession(extension fileExtension: String) -> RecordingSession {
+    private func makeSession(
+        extension fileExtension: String,
+        screenIntervals: [RecordedScreenInterval] = []
+    ) -> RecordingSession {
         let folder = URL(fileURLWithPath: "/tmp/meeting-\(UUID().uuidString)", isDirectory: true)
         return RecordingSession(
             id: folder,
@@ -205,8 +289,20 @@ final class AppModelPlaybackTests: XCTestCase {
             createdAt: .now,
             duration: 12,
             fileSize: 0,
-            metadata: .init()
+            metadata: .init(screenIntervals: screenIntervals)
         )
+    }
+
+    private func containsAVPlayerView(in view: NSView) -> Bool {
+        if view is AVPlayerView { return true }
+        return view.subviews.contains(where: containsAVPlayerView(in:))
+    }
+
+    private func firstScrollView(in view: NSView) -> NSScrollView? {
+        if let scrollView = view as? NSScrollView {
+            return scrollView
+        }
+        return view.subviews.lazy.compactMap(firstScrollView(in:)).first
     }
 
     private func waitUntil(

@@ -10,7 +10,6 @@ struct RecordDashboardPresentation: Equatable {
         "record-state",
         "elapsed-time",
         RecorderActionID.startStop,
-        RecorderActionID.muteMic,
         "system-meter",
         "microphone-meter",
         "capture-health"

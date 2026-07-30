@@ -22,7 +22,6 @@ final class RecordDashboardPresentationTests: XCTestCase {
                 "record-state",
                 "elapsed-time",
                 RecorderActionID.startStop,
-                RecorderActionID.muteMic,
                 "system-meter",
                 "microphone-meter",
                 "capture-health"

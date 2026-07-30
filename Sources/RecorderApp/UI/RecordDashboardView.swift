@@ -46,6 +46,83 @@ struct RecordDashboardView: View {
             )
         )
         .accessibilityIdentifier("recorder.destination.record")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    model.refreshAllCaptureState()
+                } label: {
+                    Label("Refresh Capture", systemImage: "arrow.clockwise")
+                }
+                .accessibilityIdentifier(RecorderActionID.refreshCapture)
+                .disabled(!model.sourceControlsEnabled)
+
+                Button {
+                    model.toggleRecorderMicMute()
+                } label: {
+                    Label(
+                        micMuteTitle,
+                        systemImage: model.localMicMuted
+                            ? "mic.fill"
+                            : "mic.slash.fill"
+                    )
+                }
+                .accessibilityIdentifier(RecorderActionID.muteMic)
+                .accessibilityValue(
+                    model.localMicMuted
+                        ? "local-muted"
+                        : (
+                            model.teamsMicMuted
+                                ? "teams-muted"
+                                : (
+                                    model.nativeInputMicMuted
+                                        ? "input-muted"
+                                        : "active"
+                                )
+                        )
+                )
+                .disabled(presentation.muteDisabled)
+            }
+
+            ToolbarSpacer(.fixed)
+
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button(action: model.runTestRecording) {
+                        Label(
+                            model.isRunningTestRecording
+                                ? "Testing..."
+                                : "Test 10 Seconds",
+                            systemImage: "waveform.badge.magnifyingglass"
+                        )
+                    }
+                    .accessibilityIdentifier(RecorderActionID.testAudio)
+                    .disabled(presentation.testDisabled)
+
+                    Divider()
+
+                    Button(action: model.chooseOutputFolder) {
+                        Label("Choose Output Folder", systemImage: "folder")
+                    }
+                    .accessibilityIdentifier(RecorderActionID.chooseOutputFolder)
+                    .disabled(model.recorder.isRecording)
+
+                    Button(action: model.openRecordingFolder) {
+                        Label("Open Output Folder", systemImage: "arrow.up.right.square")
+                    }
+                    .accessibilityIdentifier(RecorderActionID.openOutputFolder)
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .accessibilityIdentifier(RecorderActionID.moreRecordActions)
+            }
+        }
+    }
+
+    private var micMuteTitle: String {
+        if model.localMicMuted { return "Unmute Recorder Mic" }
+        if model.teamsMicMuted { return "Muted by Teams" }
+        if model.nativeInputMicMuted { return "Muted by Input" }
+        return "Mute Recorder Mic"
     }
 
     private var blockingCaptureMessage: String? {
@@ -92,14 +169,7 @@ private struct RecordDashboardHeader: View {
                 .frame(width: 88, alignment: .trailing)
                 .accessibilityIdentifier("elapsed-time")
                 .background(RecordDashboardFrameMarker(identifier: "elapsed-time"))
-            Button {
-                model.refreshAllCaptureState()
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.bordered)
         }
-        .environment(\.isEnabled, model.sourceControlsEnabled)
     }
 
 }
@@ -215,62 +285,29 @@ private struct RecordDashboardControls: View {
     let presentation: RecordDashboardPresentation
 
     var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-            GridRow {
-                Button(action: model.startOrStop) {
-                    Label(model.recorder.isRecording ? "Stop Recording" : "Start Recording", systemImage: model.recorder.isRecording ? "stop.fill" : "record.circle")
-                        .frame(minWidth: 156)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .tint(model.recorder.isRecording ? RecorderVisualStyle.recording : .accentColor)
-                .accessibilityIdentifier(RecorderActionID.startStop)
-                .background(RecordDashboardFrameMarker(identifier: RecorderActionID.startStop))
-                .disabled(presentation.startStopDisabled)
-
-                Button(action: model.runTestRecording) {
-                    Label(model.isRunningTestRecording ? "Testing..." : "Test 10s", systemImage: "waveform.badge.magnifyingglass")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .accessibilityIdentifier(RecorderActionID.testAudio)
-                .disabled(presentation.testDisabled)
-
-                Button { model.toggleRecorderMicMute() } label: {
-                    Label(micMuteTitle, systemImage: model.localMicMuted ? "mic.fill" : "mic.slash.fill")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .accessibilityIdentifier(RecorderActionID.muteMic)
-                .background(RecordDashboardFrameMarker(identifier: RecorderActionID.muteMic))
-                .accessibilityValue(model.localMicMuted ? "local-muted" : (model.teamsMicMuted ? "teams-muted" : (model.nativeInputMicMuted ? "input-muted" : "active")))
-                .disabled(presentation.muteDisabled)
-            }
-            GridRow {
-                Button { model.toggleRecorderMicMute() } label: {
-                    Label("Option+Shift+M", systemImage: "keyboard")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(true)
-                Button { model.chooseOutputFolder() } label: {
-                    Label("Folder", systemImage: "folder")
-                }
-                .buttonStyle(.bordered)
-                .disabled(model.recorder.isRecording)
-                Button { model.openRecordingFolder() } label: {
-                    Label("Open", systemImage: "arrow.up.right.square")
-                }
-                .buttonStyle(.bordered)
-            }
+        Button(action: model.startOrStop) {
+            Label(
+                model.recorder.isRecording
+                    ? "Stop Recording"
+                    : "Start Recording",
+                systemImage: model.recorder.isRecording
+                    ? "stop.fill"
+                    : "record.circle"
+            )
+            .frame(minWidth: 180)
         }
-    }
-
-    private var micMuteTitle: String {
-        if model.localMicMuted { return "Unmute Recorder Mic" }
-        if model.teamsMicMuted { return "Muted by Teams" }
-        if model.nativeInputMicMuted { return "Muted by Input" }
-        return "Mute Recorder Mic"
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .tint(
+            model.recorder.isRecording
+                ? RecorderVisualStyle.recording
+                : .accentColor
+        )
+        .accessibilityIdentifier(RecorderActionID.startStop)
+        .background(
+            RecordDashboardFrameMarker(identifier: RecorderActionID.startStop)
+        )
+        .disabled(presentation.startStopDisabled)
     }
 }
 

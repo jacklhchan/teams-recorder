@@ -7,5 +7,10 @@
   "screenIntervals": [],
   "recoveryState": "none",
   "source": "teamsAutomatic",
-  "participants": []
+  "participants": [],
+  "windowsCapture": {
+    "audioSource": "selectedProcessLoopback",
+    "processName": "ms-teams.exe",
+    "includedProcessTree": true
+  }
 }

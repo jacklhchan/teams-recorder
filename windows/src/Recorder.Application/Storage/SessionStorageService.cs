@@ -86,6 +86,20 @@ public sealed class SessionStorageService
 
     public async Task PublishCompletedMediaAsync(RecordingSessionPlan plan, string? title = null, CancellationToken cancellationToken = default)
     {
+        await PublishCompletedMediaAsync(plan, title, windowsCapture: null, cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Finalizes a recording and stores only the privacy-bounded Windows
+    /// capture description. The native request's PID and output path are
+    /// intentionally not accepted here and therefore cannot reach metadata.
+    /// </summary>
+    public async Task PublishCompletedMediaAsync(
+        RecordingSessionPlan plan,
+        string? title,
+        WindowsCaptureMetadata? windowsCapture,
+        CancellationToken cancellationToken = default)
+    {
         EnsurePlan(plan);
         if (!File.Exists(plan.BackupAudioPath)) throw new FileNotFoundException("The recording work file does not exist.", plan.BackupAudioPath);
         if (new FileInfo(plan.BackupAudioPath).Length <= 0) throw new IOException("The recording work file is empty.");
@@ -93,7 +107,9 @@ public sealed class SessionStorageService
         // Publish the metadata first. If it cannot be atomically written, the
         // backup remains in place for startup recovery instead of creating a
         // final media file that recovery would previously skip forever.
-        var info = RecordingInfoJson.CreateAudioOnly(null, title, RecordingRecoveryState.None, plan.Kind);
+        var info = RecordingInfoJson.WithWindowsCapture(
+            RecordingInfoJson.CreateAudioOnly(null, title, RecordingRecoveryState.None, plan.Kind),
+            windowsCapture);
         await WriteMetadataAsync(plan.MetadataPath, info, cancellationToken).ConfigureAwait(false);
         File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
     }

@@ -264,8 +264,12 @@ public sealed class RecordingLifecycleService : IDisposable
             activeWindowsCapture = null;
         }
         coordinator.CompleteFaultRecovery();
+        var diagnostic = string.IsNullOrWhiteSpace(stopped.Error)
+            ? "Native capture did not finish."
+            : stopped.Error;
         return new RecordingSessionPublicationResult(plan, false,
-            plan is null ? null : new IOException("Native capture did not finish; retained session evidence for startup recovery."));
+            plan is null ? null : new IOException(
+                $"Native capture did not finish; retained session evidence for startup recovery. Cause: {diagnostic}"));
     }
 
     public NativeOperationResult SetMicrophoneMuted(bool muted)

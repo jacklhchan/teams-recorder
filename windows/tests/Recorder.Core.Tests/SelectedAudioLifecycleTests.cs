@@ -78,6 +78,8 @@ internal static class SelectedAudioLifecycleTests
         var recovery = lifecycle.FinalizeForRecoveryAsync().GetAwaiter().GetResult();
         if (recovery.Published || !File.Exists(started.Session.BackupAudioPath))
             throw new InvalidOperationException("A selected-process fault discarded accumulated recovery media.");
+        if (recovery.Error?.Message.Contains("target exited", StringComparison.Ordinal) != true)
+            throw new InvalidOperationException("Fault recovery discarded the native diagnostic that explains the retained evidence.");
         Equal(RecordingOwner.None, lifecycle.Owner);
     }
 

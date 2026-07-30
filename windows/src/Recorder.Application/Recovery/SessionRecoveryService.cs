@@ -16,16 +16,25 @@ public sealed class M4aAudioBackupValidator : IAudioBackupValidator
     {
         try
         {
-            if (!File.Exists(path) || new FileInfo(path).Length < 12)
+            if (!File.Exists(path) || new FileInfo(path).Length < 16)
             {
                 return false;
             }
-
-            Span<byte> header = stackalloc byte[12];
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            return stream.Read(header) == header.Length &&
-                header[4] == (byte)'f' && header[5] == (byte)'t' &&
-                header[6] == (byte)'y' && header[7] == (byte)'p';
+            var hasFtyp = false;
+            var hasMoov = false;
+            Span<byte> header = stackalloc byte[8];
+            while (stream.Position + 8 <= stream.Length)
+            {
+                if (stream.Read(header) != header.Length) return false;
+                var size = ((long)header[0] << 24) | ((long)header[1] << 16) | ((long)header[2] << 8) | header[3];
+                if (size == 1 || size < 8 || size > stream.Length - stream.Position + 8) return false;
+                var type = System.Text.Encoding.ASCII.GetString(header[4..]);
+                hasFtyp |= type == "ftyp";
+                hasMoov |= type == "moov";
+                stream.Seek(size - 8, SeekOrigin.Current);
+            }
+            return hasFtyp && hasMoov;
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
@@ -42,23 +51,58 @@ public sealed class SessionRecoveryService
     public async Task<IReadOnlyList<SessionRecoveryResult>> RecoverAsync(CancellationToken cancellationToken = default)
     {
         var results = new List<SessionRecoveryResult>();
-        foreach (var (folder, _) in storage.EnumerateOwnedFolders())
+        foreach (var (folder, kind) in storage.EnumerateOwnedFolders())
         {
             cancellationToken.ThrowIfCancellationRequested();
             var final = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
             var backup = Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName);
-            if (File.Exists(final)) { results.Add(new(folder, false, "Final media already exists.")); continue; }
-            if (!storage.IsSafeFile(backup) || !validator.IsValidNonEmptyAudio(backup)) { results.Add(new(folder, false, "No valid recoverable backup.")); continue; }
-            try { File.Move(backup, final, false); }
+            var partial = Path.Combine(folder, RecordingSessionLayout.PartialAudioFileName);
+            if (File.Exists(final))
+            {
+                if (!storage.IsSafeFile(final)) { results.Add(new(folder, false, "Final media is not a safe regular file.")); continue; }
+                if (!storage.IsSafeFile(Path.Combine(folder, RecordingSessionLayout.MetadataFileName)))
+                {
+                    try { await WriteRecoveryMetadataAsync(folder, kind, cancellationToken).ConfigureAwait(false); }
+                    catch (IOException) { results.Add(new(folder, false, "Final media exists but recovery metadata could not be written yet.")); continue; }
+                    catch (UnauthorizedAccessException) { results.Add(new(folder, false, "Final media exists but recovery metadata could not be written yet.")); continue; }
+                }
+                results.Add(new(folder, false, "Final media already exists."));
+                continue;
+            }
+            var recoverable = storage.IsSafeFile(backup) && validator.IsValidNonEmptyAudio(backup)
+                ? backup
+                : storage.IsSafeFile(partial) && validator.IsValidNonEmptyAudio(partial)
+                    ? partial
+                    : null;
+            if (recoverable is null) { results.Add(new(folder, false, "No valid recoverable backup.")); continue; }
+            // Keep the recoverable artifact until metadata has been durably
+            // written. A metadata failure is therefore retryable at startup.
+            try { await WriteRecoveryMetadataAsync(folder, kind, cancellationToken).ConfigureAwait(false); }
+            catch (IOException) { results.Add(new(folder, false, "Recovery metadata could not be written yet.")); continue; }
+            catch (UnauthorizedAccessException) { results.Add(new(folder, false, "Recovery metadata could not be written yet.")); continue; }
+            try { File.Move(recoverable, final, false); }
             catch (IOException) { results.Add(new(folder, false, "Recovery promotion could not be completed without overwriting media.")); continue; }
-            var current = storage.ReadMetadata(Path.Combine(folder, RecordingSessionLayout.MetadataFileName));
-            var recovered = RecordingInfoJson.CreateAudioOnly(
-                current.Document,
-                current.Title,
-                RecordingRecoveryState.RecoveredAfterInterruption);
-            await storage.WriteMetadataAsync(Path.Combine(folder, RecordingSessionLayout.MetadataFileName), recovered, cancellationToken).ConfigureAwait(false);
             results.Add(new(folder, true, null));
         }
         return results;
     }
+
+    private Task WriteRecoveryMetadataAsync(string folder, RecordingSessionKind kind, CancellationToken cancellationToken)
+    {
+        var metadataPath = Path.Combine(folder, RecordingSessionLayout.MetadataFileName);
+        // Do not feed the parser's synthetic legacy defaults back into a
+        // missing document: the session kind is the only trustworthy source
+        // for a newly reconstructed metadata record.
+        var recovered = File.Exists(metadataPath)
+            ? CreateFromExisting(storage.ReadMetadata(metadataPath), kind)
+            : RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.RecoveredAfterInterruption, kind);
+        return storage.WriteMetadataAsync(metadataPath, recovered, cancellationToken);
+    }
+
+    private static RecordingInfo CreateFromExisting(RecordingInfo current, RecordingSessionKind kind) =>
+        RecordingInfoJson.CreateAudioOnly(
+            current.Document,
+            current.Title,
+            RecordingRecoveryState.RecoveredAfterInterruption,
+            kind);
 }

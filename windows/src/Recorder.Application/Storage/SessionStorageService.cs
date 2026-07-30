@@ -90,9 +90,32 @@ public sealed class SessionStorageService
         if (!File.Exists(plan.BackupAudioPath)) throw new FileNotFoundException("The recording work file does not exist.", plan.BackupAudioPath);
         if (new FileInfo(plan.BackupAudioPath).Length <= 0) throw new IOException("The recording work file is empty.");
         if (File.Exists(plan.FinalAudioPath)) throw new IOException("A final recording already exists for this session.");
-        File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
-        var info = RecordingInfo.AudioOnly(title);
+        // Publish the metadata first. If it cannot be atomically written, the
+        // backup remains in place for startup recovery instead of creating a
+        // final media file that recovery would previously skip forever.
+        var info = RecordingInfoJson.CreateAudioOnly(null, title, RecordingRecoveryState.None, plan.Kind);
         await WriteMetadataAsync(plan.MetadataPath, info, cancellationToken).ConfigureAwait(false);
+        File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
+    }
+
+    /// <summary>
+    /// Removes only an empty folder allocated by this storage service after a
+    /// capture start failed. Any file or child directory is evidence (media,
+    /// partial media, recovery data, or diagnostics), so it is deliberately
+    /// retained for recovery rather than inferred safe to delete.
+    /// </summary>
+    public bool CleanupEmptyOwnedSession(RecordingSessionPlan plan)
+    {
+        EnsurePlan(plan);
+        if (!Directory.Exists(plan.FolderPath) || IsReparsePoint(plan.FolderPath)) return false;
+        try
+        {
+            if (Directory.EnumerateFileSystemEntries(plan.FolderPath).Any()) return false;
+            Directory.Delete(plan.FolderPath, recursive: false);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>

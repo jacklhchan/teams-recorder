@@ -11,6 +11,7 @@ public static class RecordingSessionLayout
 {
     public const string FinalAudioFileName = "recording.m4a";
     public const string BackupAudioFileName = "recording.audio-backup.m4a";
+    public const string PartialAudioFileName = "recording.audio-backup.m4a.partial";
     public const string MetadataFileName = "recording-info.json";
 
     public static string Prefix(RecordingSessionKind kind) => kind switch
@@ -44,10 +45,13 @@ public sealed record RecordingInfo(
     bool IsFavorite,
     string MediaKind,
     RecordingRecoveryState RecoveryState,
+    string Source,
+    JsonArray Participants,
+    int? SchemaVersion,
     JsonObject Document)
 {
     public static RecordingInfo AudioOnly(string? title = null) =>
-        RecordingInfoJson.CreateAudioOnly(null, title, RecordingRecoveryState.None);
+        RecordingInfoJson.CreateAudioOnly(null, title, RecordingRecoveryState.None, RecordingSessionKind.Manual);
 }
 
 /// <summary>Defensive metadata parser. Unknown valid fields are retained for forward compatibility.</summary>
@@ -67,13 +71,28 @@ public static class RecordingInfoJson
         var favorite = BoolValue(document["isFavorite"]);
         var mediaKind = StringValue(document["mediaKind"]) is "video" ? "video" : "audio";
         var recovery = recoveryOverride ?? RecoveryValue(StringValue(document["recoveryState"]));
-        document["schemaVersion"] = 1;
+        var schemaVersion = SchemaVersion(document["schemaVersion"]);
+        // A newer writer may have added semantics that this app does not understand.
+        // Keep its version byte-for-byte rather than relabelling its document as v1.
+        if (schemaVersion is null || schemaVersion < 1)
+        {
+            schemaVersion = 1;
+            document["schemaVersion"] = schemaVersion;
+        }
         if (title is null) document.Remove("title"); else document["title"] = title;
         document["tags"] = new JsonArray(tags.Select(tag => JsonValue.Create(tag)).ToArray());
         document["isFavorite"] = favorite;
         document["mediaKind"] = mediaKind;
         document["recoveryState"] = RecoveryText(recovery);
-        return new RecordingInfo(title, tags, favorite, mediaKind, recovery, document);
+        var sessionSource = StringValue(document["source"]) ?? "manual";
+        if (document["source"] is null) document["source"] = sessionSource;
+        var participants = document["participants"] as JsonArray;
+        if (participants is null)
+        {
+            participants = new JsonArray();
+            document["participants"] = participants;
+        }
+        return new RecordingInfo(title, tags, favorite, mediaKind, recovery, sessionSource, participants.DeepClone() as JsonArray ?? new JsonArray(), schemaVersion, document);
     }
 
     /// <summary>
@@ -85,21 +104,32 @@ public static class RecordingInfoJson
     public static RecordingInfo CreateAudioOnly(
         JsonObject? source,
         string? titleOverride,
-        RecordingRecoveryState recoveryState)
+        RecordingRecoveryState recoveryState,
+        RecordingSessionKind sessionKind = RecordingSessionKind.Manual)
     {
+        var sourceWasMissing = source?["source"] is null;
+        var participantsWereMissing = source?["participants"] is not JsonArray;
         var normalized = Normalize(source, titleOverride, recoveryState);
         var document = normalized.Document.DeepClone() as JsonObject ?? new JsonObject();
         document["mediaKind"] = "audio";
         document["screenIntervals"] = new JsonArray();
         document.Remove("capturedTeamsWindow");
+        if (sourceWasMissing) document["source"] = SessionSource(sessionKind);
+        if (participantsWereMissing) document["participants"] = new JsonArray();
         return new RecordingInfo(
             normalized.Title,
             normalized.Tags,
             normalized.IsFavorite,
             "audio",
             recoveryState,
+            StringValue(document["source"]) ?? SessionSource(sessionKind),
+            document["participants"]?.DeepClone() as JsonArray ?? new JsonArray(),
+            normalized.SchemaVersion,
             document);
     }
+
+    public static string SessionSource(RecordingSessionKind kind) =>
+        kind == RecordingSessionKind.Meeting ? "teamsAutomatic" : "manual";
 
     private static string? StringValue(JsonNode? node) =>
         node is JsonValue value && value.TryGetValue<string>(out var text)
@@ -114,6 +144,8 @@ public static class RecordingInfoJson
         "recoveredAfterInterruption" => RecordingRecoveryState.RecoveredAfterInterruption,
         _ => RecordingRecoveryState.None,
     };
+    private static int? SchemaVersion(JsonNode? node) =>
+        node is JsonValue value && value.TryGetValue<int>(out var version) ? version : null;
     private static string RecoveryText(RecordingRecoveryState value) => value switch
     {
         RecordingRecoveryState.VideoLostAudioPreserved => "videoLostAudioPreserved",

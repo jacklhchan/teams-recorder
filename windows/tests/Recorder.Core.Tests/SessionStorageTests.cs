@@ -220,8 +220,194 @@ internal static class SessionStorageTests
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 
+    public static void NewSessionsWriteCanonicalSourceAndParticipants()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+        var manual = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        var test = service.CreateSessionPlan(RecordingSessionKind.Test);
+        var teams = service.CreateSessionPlan(RecordingSessionKind.Meeting);
+        Publish(manual);
+        Publish(test);
+        Publish(teams);
+
+        AssertContract(manual.MetadataPath, "manual");
+        AssertContract(test.MetadataPath, "manual");
+        AssertContract(teams.MetadataPath, "teamsAutomatic");
+
+        void Publish(RecordingSessionPlan plan)
+        {
+            File.WriteAllBytes(plan.BackupAudioPath, [1, 2, 3]);
+            service.PublishCompletedMediaAsync(plan).GetAwaiter().GetResult();
+        }
+
+        static void AssertContract(string metadataPath, string expectedSource)
+        {
+            var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(metadataPath)).RootElement;
+            if (document.GetProperty("schemaVersion").GetInt32() != 1 ||
+                document.GetProperty("source").GetString() != expectedSource ||
+                document.GetProperty("participants").ValueKind != System.Text.Json.JsonValueKind.Array ||
+                document.GetProperty("participants").GetArrayLength() != 0)
+            {
+                throw new InvalidOperationException("New Windows session metadata did not satisfy the canonical recording-session fields.");
+            }
+        }
+    }
+
+    public static void FutureSchemaVersionSurvivesRoundTrip()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+        var folder = Path.Combine(root.Path, "manual-20260729-120000000");
+        Directory.CreateDirectory(folder);
+        File.WriteAllBytes(Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName), [1]);
+        var metadataPath = Path.Combine(folder, RecordingSessionLayout.MetadataFileName);
+        File.WriteAllText(metadataPath, "{\"schemaVersion\":2,\"source\":\"futureSource\",\"participants\":[{\"id\":\"p1\"}],\"future\":true}");
+
+        service.UpdateMetadataAsync(folder, "Kept", null, null).GetAwaiter().GetResult();
+        var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(metadataPath)).RootElement;
+        if (document.GetProperty("schemaVersion").GetInt32() != 2 ||
+            document.GetProperty("source").GetString() != "futureSource" ||
+            document.GetProperty("participants").GetArrayLength() != 1 ||
+            !document.GetProperty("future").GetBoolean())
+        {
+            throw new InvalidOperationException("An unsupported future metadata document was silently rewritten as v1.");
+        }
+    }
+
+    public static void RootContractFixtureRoundTrips()
+    {
+        var fixture = Path.Combine(AppContext.BaseDirectory, "contracts", "fixtures", "recording-info-v1.json");
+        var info = RecordingInfoJson.Parse(File.ReadAllText(fixture));
+        var roundTripped = System.Text.Json.JsonDocument.Parse(info.Document.ToJsonString()).RootElement;
+        if (info.SchemaVersion != 1 || info.Source != "teamsAutomatic" || info.Participants.Count != 2 ||
+            roundTripped.GetProperty("meetingType").GetString() != "Technical Workshop" ||
+            roundTripped.GetProperty("windowsCapture").GetProperty("endpointId").GetString() != "default")
+        {
+            throw new InvalidOperationException("The root recording-session fixture did not survive the Windows metadata round trip.");
+        }
+    }
+
+    public static void FailedStartCleanupOnlyRemovesEmptyOwnedFolder()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+        var empty = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        if (!service.CleanupEmptyOwnedSession(empty) || Directory.Exists(empty.FolderPath))
+            throw new InvalidOperationException("An empty owned failed-start folder was not cleaned up.");
+
+        var evidence = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(evidence.BackupAudioPath, [1]);
+        if (service.CleanupEmptyOwnedSession(evidence) || !File.Exists(evidence.BackupAudioPath))
+            throw new InvalidOperationException("Failed-start cleanup removed recoverable media evidence.");
+
+        var diagnostic = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllText(Path.Combine(diagnostic.FolderPath, "recovery-note.json"), "{}");
+        if (service.CleanupEmptyOwnedSession(diagnostic) || !File.Exists(Path.Combine(diagnostic.FolderPath, "recovery-note.json")))
+            throw new InvalidOperationException("Failed-start cleanup removed recovery evidence.");
+    }
+
+    public static void RecoveryPromotesCompletePartialM4aOnly()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+        var complete = Path.Combine(root.Path, "manual-20260729-120000000");
+        var incomplete = Path.Combine(root.Path, "test-20260729-120000000");
+        Directory.CreateDirectory(complete);
+        Directory.CreateDirectory(incomplete);
+        WriteBoxFile(Path.Combine(complete, RecordingSessionLayout.PartialAudioFileName), ("ftyp", 12), ("moov", 8));
+        WriteBoxFile(Path.Combine(incomplete, RecordingSessionLayout.PartialAudioFileName), ("ftyp", 12));
+
+        var result = new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult();
+        if (!result.Single(item => item.FolderPath == complete).Recovered ||
+            !File.Exists(Path.Combine(complete, RecordingSessionLayout.FinalAudioFileName)))
+        {
+            throw new InvalidOperationException("A complete partial M4A was not restored at startup.");
+        }
+        if (result.Single(item => item.FolderPath == incomplete).Recovered ||
+            !File.Exists(Path.Combine(incomplete, RecordingSessionLayout.PartialAudioFileName)))
+        {
+            throw new InvalidOperationException("An incomplete partial artifact was promoted or deleted.");
+        }
+
+        static void WriteBoxFile(string path, params (string Type, int Size)[] boxes)
+        {
+            using var stream = File.Create(path);
+            foreach (var (type, size) in boxes)
+            {
+                stream.WriteByte((byte)(size >> 24));
+                stream.WriteByte((byte)(size >> 16));
+                stream.WriteByte((byte)(size >> 8));
+                stream.WriteByte((byte)size);
+                stream.Write(System.Text.Encoding.ASCII.GetBytes(type));
+                for (var index = 8; index < size; index++) stream.WriteByte(0);
+            }
+        }
+    }
+
+    public static void MetadataFailuresRetainRetryableMedia()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+        var publish = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(publish.BackupAudioPath, [1, 2, 3]);
+        Directory.CreateDirectory(publish.MetadataPath);
+        try
+        {
+            service.PublishCompletedMediaAsync(publish).GetAwaiter().GetResult();
+            throw new InvalidOperationException("Publishing unexpectedly replaced a metadata directory.");
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        if (!File.Exists(publish.BackupAudioPath) || File.Exists(publish.FinalAudioPath))
+            throw new InvalidOperationException("Metadata publication failure consumed the only recoverable media copy.");
+        Directory.Delete(publish.MetadataPath);
+        var publishRecovery = new SessionRecoveryService(service, new AlwaysValidValidator());
+        if (!publishRecovery.RecoverAsync().GetAwaiter().GetResult().Single(item => item.FolderPath == publish.FolderPath).Recovered ||
+            !File.Exists(publish.FinalAudioPath) || !File.Exists(publish.MetadataPath))
+            throw new InvalidOperationException("A backup retained after failed publish was not recoverable on retry.");
+
+        var partial = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        WriteBoxFile(Path.Combine(partial.FolderPath, RecordingSessionLayout.PartialAudioFileName), ("ftyp", 12), ("moov", 8));
+        Directory.CreateDirectory(partial.MetadataPath);
+        var firstAttempt = new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult();
+        if (firstAttempt.Single(item => item.FolderPath == partial.FolderPath).Recovered ||
+            !File.Exists(Path.Combine(partial.FolderPath, RecordingSessionLayout.PartialAudioFileName)) || File.Exists(partial.FinalAudioPath))
+            throw new InvalidOperationException("Recovery metadata failure did not retain partial evidence for retry.");
+        Directory.Delete(partial.MetadataPath);
+        var retry = new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult();
+        if (!retry.Single(item => item.FolderPath == partial.FolderPath).Recovered || !File.Exists(partial.FinalAudioPath))
+            throw new InvalidOperationException("Partial media was not recoverable after metadata storage became available.");
+
+        // Also repair a final file left by a pre-fix build that moved media
+        // before its metadata write failed, so it is not skipped forever.
+        var orphanFinal = service.CreateSessionPlan(RecordingSessionKind.Meeting);
+        File.WriteAllBytes(orphanFinal.FinalAudioPath, [9, 8, 7]);
+        new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult();
+        if (!File.Exists(orphanFinal.MetadataPath) ||
+            RecordingInfoJson.Parse(File.ReadAllText(orphanFinal.MetadataPath)).Source != "teamsAutomatic")
+        {
+            throw new InvalidOperationException("Startup recovery did not repair metadata for an existing final recording.");
+        }
+
+        static void WriteBoxFile(string path, params (string Type, int Size)[] boxes)
+        {
+            using var stream = File.Create(path);
+            foreach (var (type, size) in boxes)
+            {
+                stream.WriteByte((byte)(size >> 24));
+                stream.WriteByte((byte)(size >> 16));
+                stream.WriteByte((byte)(size >> 8));
+                stream.WriteByte((byte)size);
+                stream.Write(System.Text.Encoding.ASCII.GetBytes(type));
+                for (var index = 8; index < size; index++) stream.WriteByte(0);
+            }
+        }
+    }
+
     private sealed class FixedCapacity(long? available) : IStorageCapacityProvider { public long? GetAvailableBytes(string _) => available; }
     private sealed class FixedClock(DateTimeOffset now) : IClock { public DateTimeOffset UtcNow => now; }
+    private sealed class AlwaysValidValidator : IAudioBackupValidator { public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0; }
     private sealed class SelectiveValidator(string rejectedPath) : IAudioBackupValidator { public bool IsValidNonEmptyAudio(string path) => !path.StartsWith(rejectedPath, StringComparison.OrdinalIgnoreCase) && File.Exists(path) && new FileInfo(path).Length > 0; }
     private sealed class TestRoot : IDisposable
     {

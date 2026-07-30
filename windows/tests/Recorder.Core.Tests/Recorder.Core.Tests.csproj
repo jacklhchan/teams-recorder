@@ -9,4 +9,7 @@
     <ProjectReference Include="../../src/Recorder.Core/Recorder.Core.csproj" />
     <ProjectReference Include="../../src/Recorder.Application/Recorder.Application.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="../../../contracts/fixtures/recording-info-v1.json" Link="contracts/fixtures/recording-info-v1.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

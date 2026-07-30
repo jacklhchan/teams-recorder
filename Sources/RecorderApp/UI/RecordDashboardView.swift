@@ -31,7 +31,7 @@ struct RecordDashboardView: View {
                     openCaptureSettings: openCaptureSettings
                 )
             }
-            RecordDashboardMeters(model: model)
+            RecordDashboardMeters(model: model, recorder: model.recorder)
             RecordDashboardControls(model: model, presentation: presentation)
             RecordDashboardHealth(model: model)
                 .accessibilityIdentifier("capture-health")
@@ -106,22 +106,23 @@ private struct RecordDashboardHeader: View {
 
 private struct RecordDashboardMeters: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var recorder: RecordingEngine
 
     var body: some View {
         VStack(spacing: 8) {
             RecordDashboardMeter(
                 title: "System Audio",
                 subtitle: model.systemAudioSubtitle,
-                level: model.recorder.systemLevel,
+                level: recorder.systemLevel,
                 tint: RecorderVisualStyle.systemAudio
             )
             .accessibilityIdentifier("system-meter")
             .background(RecordDashboardFrameMarker(identifier: "system-meter"))
             RecordDashboardMeter(
                 title: "Mic Input",
-                subtitle: model.recorder.micMuted ? "Recorder mic track muted" : (model.selectedMicDevice?.name ?? "Select microphone"),
-                level: model.recorder.micLevel,
-                tint: model.recorder.micMuted ? .secondary : RecorderVisualStyle.microphone
+                subtitle: recorder.micMuted ? "Recorder mic track muted" : (model.selectedMicDevice?.name ?? "Select microphone"),
+                level: recorder.micLevel,
+                tint: recorder.micMuted ? .secondary : RecorderVisualStyle.microphone
             )
             .accessibilityIdentifier("microphone-meter")
             .background(RecordDashboardFrameMarker(identifier: "microphone-meter"))

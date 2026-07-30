@@ -82,6 +82,17 @@ final class RecordDashboardPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.waveformSamples, samples)
     }
 
+    func testDashboardMetersObserveRecorderLevelUpdatesDirectly() throws {
+        let dashboard = try source(named: "RecordDashboardView.swift")
+
+        XCTAssertTrue(dashboard.contains("@ObservedObject var recorder: RecordingEngine"))
+        XCTAssertTrue(dashboard.contains("RecordDashboardMeters(model: model, recorder: model.recorder)"))
+        XCTAssertTrue(dashboard.contains("level: recorder.systemLevel"))
+        XCTAssertTrue(dashboard.contains("level: recorder.micLevel"))
+        XCTAssertFalse(dashboard.contains("level: model.recorder.systemLevel"))
+        XCTAssertFalse(dashboard.contains("level: model.recorder.micLevel"))
+    }
+
     private func source(named name: String, in directory: String = "Sources/RecorderApp/UI") throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

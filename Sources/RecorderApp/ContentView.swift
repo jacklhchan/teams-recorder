@@ -111,55 +111,9 @@ struct RecorderWorkspaceContent: View {
     }
 
     private var baselineRecordDestination: some View {
-        VStack(spacing: 0) {
-            HeaderView(recorder: model.recorder, statusMessage: model.statusMessage) {
-                model.refreshAllCaptureState()
-            }
-            .environment(\.isEnabled, model.sourceControlsEnabled)
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    MeterSectionView(
-                        recorder: model.recorder,
-                        systemDeviceName: model.systemAudioSubtitle,
-                        micDeviceName: model.selectedMicDevice?.name
-                    )
-                    LiveAudioHealthView(recorder: model.recorder)
-                    ControlsView(
-                        recorder: model.recorder,
-                        startOrStop: model.startOrStop,
-                        runTestRecording: model.runTestRecording,
-                        toggleRecorderMicMute: {
-                            model.toggleRecorderMicMute()
-                        },
-                        chooseAudioFileForTranscription: model.chooseAudioFileForTranscription,
-                        chooseOutputFolder: model.chooseOutputFolder,
-                        openRecordingFolder: model.openRecordingFolder,
-                        isRunningTestRecording: model.isRunningTestRecording,
-                        isTranscribing: model.transcribingSessionID != nil,
-                        isCaptureLifecycleWorking: model.isCaptureLifecycleWorking,
-                        localMicMuted: model.localMicMuted,
-                        nativeInputMicMuted: model.nativeInputMicMuted,
-                        teamsMicMuted: model.teamsMicMuted
-                    )
-                    if let report = model.lastHealthReport {
-                        HealthSummaryView(report: report)
-                    }
-                    FooterView(
-                        recorder: model.recorder,
-                        outputFolder: model.outputFolder,
-                        lastRecordingSavedAsM4A: model.lastRecordingSavedAsM4A
-                    )
-                }
-                .padding(20)
-            }
+        RecordDashboardView(model: model) {
+            navigation.select(.settings, hasUnsavedChanges: false)
         }
-        .background(
-            RecorderDestinationAccessibilityMarker(
-                identifier: "recorder.destination.record"
-            )
-        )
-        .accessibilityIdentifier("recorder.destination.record")
     }
 
     private var baselineRecordingsDestination: some View {
@@ -230,6 +184,11 @@ struct RecorderWorkspaceContent: View {
     private var deviceSection: some View {
         CaptureControlsView(model: model)
             .accessibilityIdentifier("recorder.settings.capture-section")
+            .background(
+                RecorderDestinationAccessibilityMarker(
+                    identifier: "recorder.settings.capture-section"
+                )
+            )
     }
 }
 
@@ -1261,11 +1220,5 @@ private struct FooterView: View {
                 .foregroundStyle(.secondary)
             }
         }
-    }
-}
-
-private extension AudioDevice {
-    var channelText: String {
-        "\(channelCount) channel\(channelCount == 1 ? "" : "s")"
     }
 }

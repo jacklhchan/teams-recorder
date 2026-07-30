@@ -1,7 +1,9 @@
 # UI and Feature Boundary Refactor Design
 
 **Date:** 2026-07-30
-**Status:** Approved direction; detailed specification under review
+**Status:** Approved architecture baseline
+**Approved baseline SHA:** `8f110466093c9a3fabc5f5d1fad3c69afa849c53`
+**Approval date:** 2026-07-30
 **Delivery:** Three sequential, bounded Draft pull requests
 **Reference UI:** `codex/liquid-glass-recorder-ui` at `776837b`
 

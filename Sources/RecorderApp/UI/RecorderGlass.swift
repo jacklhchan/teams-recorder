@@ -11,19 +11,28 @@ enum RecorderGlassStyle: Equatable {
 
 struct RecorderGlass: ViewModifier {
     func body(content: Content) -> some View {
+#if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             content.glassEffect()
         } else {
-            content
-                .background(
-                    .regularMaterial,
-                    in: RoundedRectangle(cornerRadius: 14)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(.separator.opacity(0.45))
-                )
+            fallback(content)
         }
+#else
+        fallback(content)
+#endif
+    }
+
+    @ViewBuilder
+    private func fallback(_ content: Content) -> some View {
+        content
+            .background(
+                .regularMaterial,
+                in: RoundedRectangle(cornerRadius: RecorderVisualStyle.chromeCornerRadius)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: RecorderVisualStyle.chromeCornerRadius)
+                    .stroke(.separator.opacity(0.45))
+            )
     }
 }
 

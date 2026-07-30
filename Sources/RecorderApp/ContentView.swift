@@ -95,6 +95,7 @@ struct RecorderWorkspaceContent: View {
         HStack(spacing: 0) {
             RecorderSidebar(selection: selection)
                 .frame(minWidth: 180, idealWidth: 200, maxWidth: 240)
+                .recorderGlass()
             Divider()
             destinationContent
         }

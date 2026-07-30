@@ -5,8 +5,24 @@ struct RecordDashboardView: View {
     let openCaptureSettings: () -> Void
 
     var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            let presentation = RecordDashboardPresentation.make(
+                isRecording: model.recorder.isRecording,
+                startedAt: model.recorder.startedAt,
+                now: timeline.date,
+                isCaptureLifecycleWorking: model.isCaptureLifecycleWorking,
+                isRunningTestRecording: model.isRunningTestRecording,
+                localMicMuted: model.localMicMuted,
+                nativeInputMicMuted: model.nativeInputMicMuted,
+                teamsMicMuted: model.teamsMicMuted
+            )
+            dashboard(presentation: presentation)
+        }
+    }
+
+    private func dashboard(presentation: RecordDashboardPresentation) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            RecordDashboardHeader(model: model)
+            RecordDashboardHeader(model: model, presentation: presentation)
                 .accessibilityIdentifier("record-state")
                 .background(RecordDashboardFrameMarker(identifier: "record-state"))
             if let message = blockingCaptureMessage {
@@ -16,7 +32,7 @@ struct RecordDashboardView: View {
                 )
             }
             RecordDashboardMeters(model: model)
-            RecordDashboardControls(model: model)
+            RecordDashboardControls(model: model, presentation: presentation)
             RecordDashboardHealth(model: model)
                 .accessibilityIdentifier("capture-health")
                 .background(RecordDashboardFrameMarker(identifier: "capture-health"))
@@ -54,11 +70,12 @@ struct RecordDashboardView: View {
 
 private struct RecordDashboardHeader: View {
     @ObservedObject var model: AppModel
+    let presentation: RecordDashboardPresentation
 
     var body: some View {
         HStack(spacing: 12) {
             Circle()
-                .fill(model.recorder.isRecording ? Color.red : Color.secondary.opacity(0.45))
+                .fill(model.recorder.isRecording ? RecorderVisualStyle.recording : Color.secondary.opacity(0.45))
                 .frame(width: 12, height: 12)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Local Meeting Recorder")
@@ -69,14 +86,12 @@ private struct RecordDashboardHeader: View {
                     .lineLimit(1)
             }
             Spacer()
-            TimelineView(.periodic(from: .now, by: 1)) { now in
-                Text(presentation(now: now.date).elapsedText)
-                    .font(.system(.title3, design: .monospaced, weight: .medium))
-                    .foregroundStyle(model.recorder.isRecording ? .red : .secondary)
-                    .frame(width: 88, alignment: .trailing)
-                    .accessibilityIdentifier("elapsed-time")
-                    .background(RecordDashboardFrameMarker(identifier: "elapsed-time"))
-            }
+            Text(presentation.elapsedText)
+                .font(.system(.title3, design: .monospaced, weight: .medium))
+                .foregroundStyle(model.recorder.isRecording ? RecorderVisualStyle.recording : .secondary)
+                .frame(width: 88, alignment: .trailing)
+                .accessibilityIdentifier("elapsed-time")
+                .background(RecordDashboardFrameMarker(identifier: "elapsed-time"))
             Button {
                 model.refreshAllCaptureState()
             } label: {
@@ -87,18 +102,6 @@ private struct RecordDashboardHeader: View {
         .environment(\.isEnabled, model.sourceControlsEnabled)
     }
 
-    private func presentation(now: Date) -> RecordDashboardPresentation {
-        .make(
-            isRecording: model.recorder.isRecording,
-            startedAt: model.recorder.startedAt,
-            now: now,
-            isCaptureLifecycleWorking: model.isCaptureLifecycleWorking,
-            isRunningTestRecording: model.isRunningTestRecording,
-            localMicMuted: model.localMicMuted,
-            nativeInputMicMuted: model.nativeInputMicMuted,
-            teamsMicMuted: model.teamsMicMuted
-        )
-    }
 }
 
 private struct RecordDashboardMeters: View {
@@ -110,7 +113,7 @@ private struct RecordDashboardMeters: View {
                 title: "System Audio",
                 subtitle: model.systemAudioSubtitle,
                 level: model.recorder.systemLevel,
-                tint: .cyan
+                tint: RecorderVisualStyle.systemAudio
             )
             .accessibilityIdentifier("system-meter")
             .background(RecordDashboardFrameMarker(identifier: "system-meter"))
@@ -118,7 +121,7 @@ private struct RecordDashboardMeters: View {
                 title: "Mic Input",
                 subtitle: model.recorder.micMuted ? "Recorder mic track muted" : (model.selectedMicDevice?.name ?? "Select microphone"),
                 level: model.recorder.micLevel,
-                tint: model.recorder.micMuted ? .secondary : .green
+                tint: model.recorder.micMuted ? .secondary : RecorderVisualStyle.microphone
             )
             .accessibilityIdentifier("microphone-meter")
             .background(RecordDashboardFrameMarker(identifier: "microphone-meter"))
@@ -208,6 +211,7 @@ private struct RecordDashboardCaptureRecovery: View {
 
 private struct RecordDashboardControls: View {
     @ObservedObject var model: AppModel
+    let presentation: RecordDashboardPresentation
 
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
@@ -218,10 +222,10 @@ private struct RecordDashboardControls: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .tint(model.recorder.isRecording ? .red : .accentColor)
+                .tint(model.recorder.isRecording ? RecorderVisualStyle.recording : .accentColor)
                 .accessibilityIdentifier(RecorderActionID.startStop)
                 .background(RecordDashboardFrameMarker(identifier: RecorderActionID.startStop))
-                .disabled(!model.recorder.isRecording && model.isCaptureLifecycleWorking)
+                .disabled(presentation.startStopDisabled)
 
                 Button(action: model.runTestRecording) {
                     Label(model.isRunningTestRecording ? "Testing..." : "Test 10s", systemImage: "waveform.badge.magnifyingglass")
@@ -229,7 +233,7 @@ private struct RecordDashboardControls: View {
                 .buttonStyle(.bordered)
                 .controlSize(.large)
                 .accessibilityIdentifier(RecorderActionID.testAudio)
-                .disabled(model.recorder.isRecording || model.isRunningTestRecording || model.isCaptureLifecycleWorking)
+                .disabled(presentation.testDisabled)
 
                 Button { model.toggleRecorderMicMute() } label: {
                     Label(micMuteTitle, systemImage: model.localMicMuted ? "mic.fill" : "mic.slash.fill")
@@ -239,7 +243,7 @@ private struct RecordDashboardControls: View {
                 .accessibilityIdentifier(RecorderActionID.muteMic)
                 .background(RecordDashboardFrameMarker(identifier: RecorderActionID.muteMic))
                 .accessibilityValue(model.localMicMuted ? "local-muted" : (model.teamsMicMuted ? "teams-muted" : (model.nativeInputMicMuted ? "input-muted" : "active")))
-                .disabled((model.teamsMicMuted || model.nativeInputMicMuted) && !model.localMicMuted)
+                .disabled(presentation.muteDisabled)
             }
             GridRow {
                 Button { model.toggleRecorderMicMute() } label: {

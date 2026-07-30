@@ -10,6 +10,12 @@ struct RecorderSidebar: View {
                 .accessibilityIdentifier("recorder.navigation.\(destination.rawValue)")
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: "recorder.workspace.sidebar"
+            )
+        )
         .accessibilityIdentifier("recorder.workspace.sidebar")
     }
 }

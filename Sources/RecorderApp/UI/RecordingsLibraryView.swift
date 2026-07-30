@@ -203,7 +203,7 @@ private struct SessionListView: View {
                                         .accessibilityLabel("Open ASR log for \(session.displayName)")
                                 }
                                 .padding(10)
-                                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                                .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 6))
                             }
                         }
                         .padding(.vertical, 8)

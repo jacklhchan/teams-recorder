@@ -39,7 +39,17 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
 
-        for identifier in operationalProbeIDs {
+        let sidebarFrame = try XCTUnwrap(
+            host.frame(forAccessibilityIdentifier: "recorder.workspace.sidebar")
+        )
+        XCTAssertFalse(sidebarFrame.isEmpty)
+        let visibleSidebarBounds = host.visibleContentRect.insetBy(dx: -0.5, dy: -0.5)
+        XCTAssertTrue(
+            visibleSidebarBounds.contains(sidebarFrame),
+            "sidebar navigation must be fully visible without scrolling"
+        )
+
+        for identifier in RecordDashboardPresentation.operationalProbeIDs {
             let frame = try XCTUnwrap(host.frame(forAccessibilityIdentifier: identifier))
             XCTAssertFalse(frame.isEmpty)
             XCTAssertTrue(
@@ -57,7 +67,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
 
-        for identifier in operationalProbeIDs {
+        for identifier in RecordDashboardPresentation.operationalProbeIDs {
             XCTAssertTrue(
                 host.visibleContentRect.contains(
                     try XCTUnwrap(host.frame(forAccessibilityIdentifier: identifier))
@@ -229,18 +239,6 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.probe.capture-recovery"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.capture-section"))
-    }
-
-    private var operationalProbeIDs: [String] {
-        [
-            "record-state",
-            "elapsed-time",
-            RecorderActionID.startStop,
-            RecorderActionID.muteMic,
-            "system-meter",
-            "microphone-meter",
-            "capture-health"
-        ]
     }
 
     private func makeStartupDisabledFixture(

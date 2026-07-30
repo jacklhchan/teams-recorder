@@ -6,7 +6,7 @@ struct RecordDashboardPresentation: Equatable {
     let testDisabled: Bool
     let muteDisabled: Bool
 
-    let operationalProbeIDs = [
+    static let operationalProbeIDs = [
         "record-state",
         "elapsed-time",
         RecorderActionID.startStop,

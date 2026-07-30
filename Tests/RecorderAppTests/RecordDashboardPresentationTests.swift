@@ -17,7 +17,7 @@ final class RecordDashboardPresentationTests: XCTestCase {
 
         XCTAssertEqual(presentation.elapsedText, "00:00:00")
         XCTAssertEqual(
-            presentation.operationalProbeIDs,
+            RecordDashboardPresentation.operationalProbeIDs,
             [
                 "record-state",
                 "elapsed-time",
@@ -28,6 +28,22 @@ final class RecordDashboardPresentationTests: XCTestCase {
                 "capture-health"
             ]
         )
+    }
+
+    func testOperationalProbeIDsAreStaticProductionPolicy() throws {
+        let presentation = try source(named: "RecordDashboardPresentation.swift")
+        let dashboard = try source(named: "RecordDashboardView.swift")
+        let renderTests = try source(named: "RecorderWorkspaceRenderTests.swift", in: "Tests/RecorderAppTests")
+
+        XCTAssertTrue(presentation.contains("static let operationalProbeIDs"))
+        XCTAssertTrue(dashboard.contains("let presentation = RecordDashboardPresentation.make("))
+        XCTAssertTrue(dashboard.contains("RecordDashboardHeader(model: model, presentation: presentation)"))
+        XCTAssertTrue(dashboard.contains("RecordDashboardControls(model: model, presentation: presentation)"))
+        XCTAssertFalse(dashboard.contains(".disabled(!model.recorder.isRecording && model.isCaptureLifecycleWorking)"))
+        XCTAssertFalse(dashboard.contains(".disabled(model.recorder.isRecording || model.isRunningTestRecording || model.isCaptureLifecycleWorking)"))
+        XCTAssertFalse(dashboard.contains(".disabled((model.teamsMicMuted || model.nativeInputMicMuted) && !model.localMicMuted)"))
+        XCTAssertTrue(renderTests.contains("RecordDashboardPresentation.operationalProbeIDs"))
+        XCTAssertFalse(renderTests.contains("private var operationalProbeIDs"))
     }
 
     func testCurrentDisabledPoliciesRemainExact() {
@@ -64,5 +80,16 @@ final class RecordDashboardPresentationTests: XCTestCase {
         )
 
         XCTAssertEqual(presentation.waveformSamples, samples)
+    }
+
+    private func source(named name: String, in directory: String = "Sources/RecorderApp/UI") throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(
+            contentsOf: root.appendingPathComponent(directory).appendingPathComponent(name),
+            encoding: .utf8
+        )
     }
 }

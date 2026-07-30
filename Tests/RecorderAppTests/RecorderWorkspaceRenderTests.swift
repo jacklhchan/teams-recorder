@@ -1,4 +1,5 @@
 import AppKit
+import AVKit
 import SwiftUI
 import XCTest
 @testable import RecorderApp
@@ -148,6 +149,28 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.record"))
             XCTAssertNil(host.navigationState.pendingDestination)
         }
+    }
+
+    func testTwentyFiveNavigationCyclesRenderEveryDestinationWithoutPendingLeak() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        for _ in 0 ..< 25 {
+            for destination in RecorderDestination.allCases {
+                host.select(destination)
+                XCTAssertTrue(
+                    host.containsAccessibilityIdentifier(
+                        "recorder.destination.\(destination.rawValue)"
+                    )
+                )
+                XCTAssertNil(host.navigationState.pendingDestination)
+            }
+        }
+        XCTAssertFalse(host.containsAVPlayerView())
     }
 
     func testSettingsRendersExistingCaptureTeamsVirtualMicAndProviderSections() throws {
@@ -522,6 +545,10 @@ private final class WorkspaceHost {
         layout()
     }
 
+    func containsAVPlayerView() -> Bool {
+        containsAVPlayerView(in: hostingView)
+    }
+
     private func layout() {
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
@@ -536,6 +563,11 @@ private final class WorkspaceHost {
             }
         }
         return nil
+    }
+
+    private func containsAVPlayerView(in view: NSView) -> Bool {
+        if view is AVPlayerView { return true }
+        return view.subviews.contains(where: containsAVPlayerView(in:))
     }
 
     private func accessibilityElement(

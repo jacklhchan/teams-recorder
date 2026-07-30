@@ -53,6 +53,10 @@ public:
     void MarkQueueOverflow(Source source) noexcept;
     void MarkDisconnected(Source source) noexcept;
     const SourceCounters& counters(Source source) const noexcept;
+    // The exclusive canonical frame reached by this source.  The mixer uses
+    // this watermark to wait for both inputs before committing a block: a
+    // faster callback must not make the other source late by one block.
+    std::uint64_t end_frame(Source source) const noexcept;
     bool has_origin() const noexcept { return has_origin_; }
 
 private:

@@ -106,6 +106,9 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
 void CanonicalTimeline::MarkQueueOverflow(Source source) noexcept { ++state(source).counters.queue_overflows; }
 void CanonicalTimeline::MarkDisconnected(Source source) noexcept { ++state(source).counters.source_disconnects; }
 const SourceCounters& CanonicalTimeline::counters(Source source) const noexcept { return state(source).counters; }
+std::uint64_t CanonicalTimeline::end_frame(Source source) const noexcept {
+    return state(source).last_end_frame;
+}
 
 void MixFrames(std::deque<AudioChunk>* queue, std::size_t* queued_frames,
                std::uint64_t output_frame, float* target,

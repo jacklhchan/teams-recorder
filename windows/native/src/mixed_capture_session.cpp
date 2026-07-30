@@ -26,6 +26,7 @@ namespace {
 constexpr std::uint32_t kFramesPerBlock = 960;  // 20 ms at 48 kHz.
 constexpr std::uint64_t kBlock100ns = 200'000;
 constexpr std::size_t kMaxQueuedFrames = 48'000U * 4U;
+constexpr auto kSourceSkewWait = std::chrono::milliseconds(60);
 
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) {
@@ -529,19 +530,35 @@ private:
         }
     }
 
-    bool CanEmitBlockLocked() const {
-        // System loopback is the normal master clock. If it has not emitted a
-        // packet yet, permit an active microphone to establish the recording
-        // clock instead of stalling an otherwise valid mic-only signal.
-        return !render_.queue.empty() ||
-            (!render_.received_audio && !microphone_.queue.empty());
+    bool HasBlockCoverageLocked(const Source& source) const {
+        if (!source.received_audio) {
+            return false;
+        }
+        const std::uint64_t block_end = next_output_frame_ + kFramesPerBlock;
+        return timeline_.end_frame(source.timeline_source) >= block_end;
     }
 
-    bool CanUseMicrophoneFallbackLocked() const {
-        // If a loopback endpoint goes quiet, Windows may stop delivering
-        // packets. A bounded wait below makes the mic the temporary master
-        // rather than doubling or freezing its timeline.
-        return !microphone_.queue.empty() && render_.queue.empty();
+    bool CanEmitBlockLocked() const {
+        // Never let the primary callback commit a 20 ms output block when the
+        // optional microphone has supplied only its first 10 ms packet.  That
+        // made the mixer advance one block ahead and MixFrames then discarded
+        // every subsequently-arriving microphone chunk as already emitted.
+        if (!HasBlockCoverageLocked(render_)) {
+            return !render_.received_audio && HasBlockCoverageLocked(microphone_);
+        }
+        return config_.microphone_endpoint_id.empty() ||
+            HasBlockCoverageLocked(microphone_);
+    }
+
+    bool CanEmitAfterSourceSkewLocked() const {
+        // An endpoint may become silent and therefore stop delivering packets.
+        // After one bounded wait, progress using the source that has covered
+        // the block and represent the other source as silence.  This keeps
+        // capture live without reintroducing the normal one-block race above.
+        if (HasBlockCoverageLocked(render_)) {
+            return true;
+        }
+        return HasBlockCoverageLocked(microphone_);
     }
 
     std::size_t QueuedFramesLocked() const {
@@ -597,7 +614,7 @@ private:
             std::vector<float> block(kFramesPerBlock * 2U, 0.0F);
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait_for(lock, std::chrono::milliseconds(60), [this] {
+                const bool received_required_coverage = cv_.wait_for(lock, kSourceSkewWait, [this] {
                     return stop_requested_ || failure_ != RECORDER_NATIVE_OK ||
                         CanEmitBlockLocked();
                 });
@@ -609,8 +626,8 @@ private:
                 DetectUnexpectedDisconnectLocked(microphone_);
 
                 bool should_emit = CanEmitBlockLocked();
-                if (!should_emit && CanUseMicrophoneFallbackLocked()) {
-                    should_emit = true;
+                if (!should_emit && !received_required_coverage) {
+                    should_emit = CanEmitAfterSourceSkewLocked();
                 }
                 if (!should_emit && (stop_requested_ || failure_ != RECORDER_NATIVE_OK)) {
                     should_emit = QueuedFramesLocked() > 0;

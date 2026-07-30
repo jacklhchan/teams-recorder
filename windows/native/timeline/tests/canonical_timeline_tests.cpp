@@ -76,6 +76,25 @@ void DriftLateAndFaultCountersAreBounded() {
            "source counters incomplete");
 }
 
+void SourceWatermarksRequireBothInputsBeforeMixCommit() {
+    CanonicalTimeline timeline;
+    (void)timeline.Place(Source::Render, 0, 0, 48'000, 480, false);
+    (void)timeline.Place(Source::Microphone, 0, 0, 48'000, 480, false);
+    (void)timeline.Place(Source::Render, 100'000, 480, 48'000, 480, false);
+    Expect(timeline.end_frame(Source::Render) == 960,
+           "render watermark did not reach one mixer block");
+    Expect(timeline.end_frame(Source::Microphone) == 480,
+           "microphone watermark unexpectedly advanced");
+    // A 20 ms mixer block cannot yet be committed: doing so would silently
+    // discard the microphone's second 10 ms packet if its callback arrives
+    // just after the render callback.
+    Expect(timeline.end_frame(Source::Microphone) < 960,
+           "late microphone packet would be lost by an early mixer commit");
+    (void)timeline.Place(Source::Microphone, 100'000, 480, 48'000, 480, false);
+    Expect(timeline.end_frame(Source::Microphone) == 960,
+           "microphone watermark did not complete the mixer block");
+}
+
 void SelectedProcessUsesCanonicalGapsAndCounters() {
     CanonicalTimeline timeline;
     (void)timeline.Place(Source::Process, 0, 0, 48'000, 960, false);
@@ -94,9 +113,10 @@ void SelectedProcessUsesCanonicalGapsAndCounters() {
 }  // namespace
 
 int main() {
-    const std::array<void (*)(), 7> tests = {LongDurationHasNoTimelineCompression, SilenceGapsArePreserved,
+    const std::array<void (*)(), 8> tests = {LongDurationHasNoTimelineCompression, SilenceGapsArePreserved,
         MicrophoneMuteGapMapsToSilence, LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
-        DriftLateAndFaultCountersAreBounded, SelectedProcessUsesCanonicalGapsAndCounters};
+        SourceWatermarksRequireBothInputsBeforeMixCommit, DriftLateAndFaultCountersAreBounded,
+        SelectedProcessUsesCanonicalGapsAndCounters};
     try { for (const auto test : tests) test(); }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
     std::cout << "PASS canonical timeline\n";

@@ -7,6 +7,7 @@
 
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -111,6 +112,7 @@ struct Options {
     std::uint32_t iterations = 16U;
     std::uint32_t frames = 960U;
     bool diagnostic = false;
+    std::filesystem::path input_path;
 };
 
 bool ParseUnsigned(const char* text, std::uint32_t* value) {
@@ -129,9 +131,13 @@ bool ParseOptions(int argc, char** argv, Options* options) {
     bool have_test = false;
     for (int index = 1; index < argc; ++index) {
         const std::string argument(argv[index]);
-        if (argument == "--iterations" || argument == "--frames") {
+        if (argument == "--iterations" || argument == "--frames" || argument == "--input") {
             if (++index >= argc) {
                 return false;
+            }
+            if (argument == "--input") {
+                options->input_path = argv[index];
+                continue;
             }
             std::uint32_t parsed = 0U;
             if (!ParseUnsigned(argv[index], &parsed)) {
@@ -152,6 +158,70 @@ bool ParseOptions(int argc, char** argv, Options* options) {
         }
     }
     return options->iterations <= 10'000U && options->frames <= 48'000U;
+}
+
+struct DecodedAudioAnalysis {
+    std::uint64_t samples = 0U;
+    float peak = 0.0F;
+    double rms = 0.0;
+};
+
+DecodedAudioAnalysis AnalyzeDecodedAac(const std::filesystem::path& path) {
+    Expect(!path.empty() && std::filesystem::exists(path), "inspect input M4A does not exist");
+    ComPtr<IMFSourceReader> reader;
+    HRESULT result = MFCreateSourceReaderFromURL(path.c_str(), nullptr, &reader);
+    Expect(SUCCEEDED(result) && reader != nullptr, "inspect could not open M4A");
+
+    constexpr DWORD kAudioStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
+    ComPtr<IMFMediaType> pcm_type;
+    result = MFCreateMediaType(&pcm_type);
+    if (SUCCEEDED(result)) result = pcm_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    if (SUCCEEDED(result)) result = pcm_type->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+    if (SUCCEEDED(result)) result = pcm_type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48'000U);
+    if (SUCCEEDED(result)) result = pcm_type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2U);
+    if (SUCCEEDED(result)) result = pcm_type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16U);
+    if (SUCCEEDED(result)) result = pcm_type->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4U);
+    if (SUCCEEDED(result)) result = pcm_type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192'000U);
+    if (SUCCEEDED(result)) result = reader->SetCurrentMediaType(kAudioStream, nullptr, pcm_type.Get());
+    Expect(SUCCEEDED(result), "inspect could not configure AAC decoding to PCM");
+
+    std::uint64_t samples = 0U;
+    float peak = 0.0F;
+    double sum_of_squares = 0.0;
+    for (;;) {
+        DWORD actual_stream = 0U;
+        DWORD flags = 0U;
+        LONGLONG timestamp = 0;
+        ComPtr<IMFSample> sample;
+        result = reader->ReadSample(kAudioStream, 0U, &actual_stream, &flags, &timestamp, &sample);
+        Expect(SUCCEEDED(result) && (flags & MF_SOURCE_READERF_ERROR) == 0U,
+               "inspect could not decode AAC");
+        if (sample != nullptr) {
+            ComPtr<IMFMediaBuffer> buffer;
+            result = sample->ConvertToContiguousBuffer(&buffer);
+            DWORD byte_count = 0U;
+            if (SUCCEEDED(result)) result = buffer->GetCurrentLength(&byte_count);
+            Expect(SUCCEEDED(result) && byte_count % sizeof(std::int16_t) == 0U,
+                   "inspect decoder returned malformed PCM");
+            BYTE* bytes = nullptr;
+            DWORD capacity = 0U;
+            result = buffer->Lock(&bytes, &capacity, &byte_count);
+            Expect(SUCCEEDED(result), "inspect could not lock decoded PCM");
+            for (DWORD offset = 0U; offset < byte_count; offset += sizeof(std::int16_t)) {
+                std::int16_t raw = 0;
+                std::memcpy(&raw, bytes + offset, sizeof(raw));
+                const float value = static_cast<float>(raw) / 32768.0F;
+                peak = (std::max)(peak, std::abs(value));
+                sum_of_squares += static_cast<double>(value) * value;
+                ++samples;
+            }
+            Expect(SUCCEEDED(buffer->Unlock()), "inspect could not unlock decoded PCM");
+        }
+        if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0U) {
+            break;
+        }
+    }
+    return {samples, peak, samples == 0U ? 0.0 : std::sqrt(sum_of_squares / samples)};
 }
 
 void Diagnostic(const Options& options, const char* stage) {
@@ -246,6 +316,38 @@ void FinalizedFileIsPlayableContainer(const std::filesystem::path& directory,
 
     ExpectPublishedContainer(final_path);
     ExpectDecodableAacStream(final_path);
+}
+
+void FinalizedFileRetainsAudiblePcm(const std::filesystem::path& directory) {
+    const auto final_path = directory / "audible-signal.m4a";
+    Error error = Error::Ok;
+    std::string detail;
+    auto writer = Writer::Create(final_path, 128'000U, &error, &detail);
+    Expect(writer != nullptr && error == Error::Ok, "signal writer creation failed");
+
+    constexpr std::uint32_t kFrames = 960U;
+    constexpr std::uint32_t kBlocks = 12U;
+    constexpr double kPi = 3.14159265358979323846;
+    std::vector<float> frames(static_cast<std::size_t>(kFrames) * 2U);
+    for (std::uint32_t block = 0U; block < kBlocks; ++block) {
+        for (std::uint32_t frame = 0U; frame < kFrames; ++frame) {
+            const auto absolute_frame = static_cast<std::uint64_t>(block) * kFrames + frame;
+            const float sample = static_cast<float>(0.45 * std::sin(
+                2.0 * kPi * 440.0 * static_cast<double>(absolute_frame) / 48'000.0));
+            frames[frame * 2U] = sample;
+            frames[frame * 2U + 1U] = sample;
+        }
+        Expect(writer->WriteFrames(
+                   frames.data(), kFrames, static_cast<std::uint64_t>(block) * 200'000U,
+                   &detail) == Error::Ok,
+               "signal writer could not write PCM frames");
+    }
+    Expect(writer->Finalize(&detail) == Error::Ok, "signal writer could not finalize");
+    writer.reset();
+
+    const DecodedAudioAnalysis analysis = AnalyzeDecodedAac(final_path);
+    Expect(analysis.samples > 0U && analysis.peak > 0.05F && analysis.rms > 0.01,
+           "AAC output lost all audible PCM energy");
 }
 
 void FinalizeWithStages(const std::filesystem::path& directory, const Options& options) {
@@ -467,7 +569,13 @@ int main(int argc, char** argv) {
         {
             MediaFoundationTestRuntime media_foundation;
             Diagnostic(options, "after-runtime-startup");
-            if (options.test == "runtime") {
+            if (options.test == "inspect") {
+                const DecodedAudioAnalysis analysis = AnalyzeDecodedAac(options.input_path);
+                std::printf("M4A_ANALYSIS: samples=%llu frames=%llu peak=%.6f rms=%.6f\n",
+                            static_cast<unsigned long long>(analysis.samples),
+                            static_cast<unsigned long long>(analysis.samples / 2U),
+                            analysis.peak, analysis.rms);
+            } else if (options.test == "runtime") {
                 // Intentionally do no writer work: this isolates MFStartup,
                 // MFShutdown and COM apartment teardown in a fresh process.
             } else {
@@ -475,6 +583,8 @@ int main(int argc, char** argv) {
                 Diagnostic(options, "before-writer-work");
                 if (options.test == "container" || options.test == "tail") {
                     FinalizedFileIsPlayableContainer(directory, options.frames);
+                } else if (options.test == "signal") {
+                    FinalizedFileRetainsAudiblePcm(directory);
                 } else if (options.test == "finalize") {
                     FinalizeWithStages(directory, options);
                 } else if (options.test == "stress") {

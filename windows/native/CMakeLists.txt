@@ -178,6 +178,7 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     add_test(NAME Recorder.M4aWriter.TailOneFrame COMMAND Recorder.M4aWriter.Tests tail --frames 1)
     add_test(NAME Recorder.M4aWriter.Tail960Frames COMMAND Recorder.M4aWriter.Tests tail --frames 960)
     add_test(NAME Recorder.M4aWriter.Tail1024Frames COMMAND Recorder.M4aWriter.Tests tail --frames 1024)
+    add_test(NAME Recorder.M4aWriter.AudibleSignalRoundTrip COMMAND Recorder.M4aWriter.Tests signal)
     # One deterministic in-process exercise. For teardown isolation, repeat
     # this CTest test from the command line so every repetition is a fresh EXE.
     add_test(NAME Recorder.M4aWriter.Stress COMMAND Recorder.M4aWriter.Tests stress --iterations 16 --frames 960)
@@ -205,6 +206,7 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         Recorder.M4aWriter.TailOneFrame
         Recorder.M4aWriter.Tail960Frames
         Recorder.M4aWriter.Tail1024Frames
+        Recorder.M4aWriter.AudibleSignalRoundTrip
         Recorder.M4aWriter.Stress
         Recorder.M4aWriter.Abort
         Recorder.M4aWriter.AbortAfterOneFrame

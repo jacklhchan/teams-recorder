@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var playbackWindow:
         any PlaybackWindowPresenting
     @State private var navigation = RecorderNavigationState(selection: .record)
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     private let navigationOverride: Binding<RecorderNavigationState>?
 
     @MainActor
@@ -36,7 +37,8 @@ struct ContentView: View {
     var body: some View {
         RecorderWorkspaceContent(
             model: model,
-            navigation: workspaceNavigation
+            navigation: workspaceNavigation,
+            columnVisibility: $columnVisibility
         )
         .onChange(
             of: model.teamsAutoMeetingState,
@@ -90,17 +92,21 @@ struct ContentView: View {
 struct RecorderWorkspaceContent: View {
     @ObservedObject var model: AppModel
     @Binding var navigation: RecorderNavigationState
+    @Binding var columnVisibility: NavigationSplitViewVisibility
 
     var body: some View {
-        HStack(spacing: 0) {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             RecorderSidebar(selection: selection)
-                .frame(minWidth: 180, idealWidth: 200, maxWidth: 240)
-                .recorderGlass()
-            Divider()
+                .navigationSplitViewColumnWidth(
+                    min: 180,
+                    ideal: 200,
+                    max: 240
+                )
+        } detail: {
             destinationContent
         }
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 860, minHeight: 680)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var selection: Binding<RecorderDestination> {

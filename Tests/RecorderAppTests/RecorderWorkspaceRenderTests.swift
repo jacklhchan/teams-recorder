@@ -31,6 +31,59 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.settings"))
     }
 
+    func testSidebarVisibilityChangesPreserveRecordingsSelection() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        XCTAssertTrue(
+            host.containsAccessibilityIdentifier(
+                "recorder.destination.recordings"
+            )
+        )
+        let visibleSidebarFrame = try XCTUnwrap(
+            host.frame(forAccessibilityIdentifier: "recorder.workspace.sidebar")
+        )
+        XCTAssertFalse(visibleSidebarFrame.isEmpty)
+        let expandedDetailFrame = try XCTUnwrap(
+            host.frame(forAccessibilityIdentifier: "recorder.destination.recordings")
+        )
+
+        host.setColumnVisibility(.detailOnly)
+        try waitUntil(timeout: 1) {
+            guard let frame = host.frame(
+                forAccessibilityIdentifier: "recorder.destination.recordings"
+            ) else {
+                return false
+            }
+            return frame.minX < expandedDetailFrame.minX
+        }
+        XCTAssertEqual(host.navigationState.selection, .recordings)
+        XCTAssertTrue(
+            host.containsAccessibilityIdentifier(
+                "recorder.destination.recordings"
+            )
+        )
+
+        let collapsedDetailFrame = try XCTUnwrap(
+            host.frame(forAccessibilityIdentifier: "recorder.destination.recordings")
+        )
+        host.setColumnVisibility(.all)
+        try waitUntil(timeout: 1) {
+            guard let frame = host.frame(
+                forAccessibilityIdentifier: "recorder.destination.recordings"
+            ) else {
+                return false
+            }
+            return frame.minX > collapsedDetailFrame.minX
+        }
+        XCTAssertEqual(host.navigationState.selection, .recordings)
+    }
+
     func testMinimumRecordViewportContainsAllOperationalAnchorsWithoutScrolling() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
@@ -345,6 +398,7 @@ private struct LifecycleWorkingFixture {
 @MainActor
 private final class WorkspaceNavigationDriver: ObservableObject {
     @Published var navigation = RecorderNavigationState(selection: .record)
+    @Published var columnVisibility: NavigationSplitViewVisibility = .all
 }
 
 @MainActor
@@ -358,6 +412,10 @@ private struct WorkspaceHostRoot: View {
             navigation: Binding(
                 get: { navigationDriver.navigation },
                 set: { navigationDriver.navigation = $0 }
+            ),
+            columnVisibility: Binding(
+                get: { navigationDriver.columnVisibility },
+                set: { navigationDriver.columnVisibility = $0 }
             )
         )
     }
@@ -540,6 +598,12 @@ private final class WorkspaceHost {
 
     func render() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        layout()
+    }
+
+    func setColumnVisibility(_ visibility: NavigationSplitViewVisibility) {
+        navigationDriver.columnVisibility = visibility
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         layout()
     }
 

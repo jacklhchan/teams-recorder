@@ -40,7 +40,8 @@ public sealed class CaptureSourceSelectionPolicy
                     RenderEndpointId: null,
                     MicrophoneEndpointId: request.MicrophoneEndpointId,
                     TargetProcessId: target.ProcessId,
-                    IncludedProcessTree: true),
+                    IncludedProcessTree: true,
+                    ExpectedProcessCreationTime100Nanoseconds: checked((ulong)target.StartedAt.UtcDateTime.ToFileTimeUtc())),
             RecordingAudioSource.SelectedProcessLoopback => throw new InvalidOperationException(
                 "The selected process has exited or its PID was reused."),
             _ => throw new ArgumentOutOfRangeException(nameof(request)),

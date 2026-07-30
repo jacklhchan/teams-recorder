@@ -27,11 +27,12 @@ _Static_assert(offsetof(RecorderNativeStats, packets) == 32u, "packet counter of
 _Static_assert(offsetof(RecorderNativeStats, peak) == 88u, "peak offset changed");
 _Static_assert(offsetof(RecorderNativeStats, render_drift_corrections) == 96u, "timeline stats must be additive");
 _Static_assert(RECORDER_NATIVE_STATS_V1_SIZE == 96u, "v1 stats prefix changed");
-_Static_assert(sizeof(RecorderNativeSelectedAudioStartOptions) == 48u, "x64 selected-audio options layout changed");
+_Static_assert(sizeof(RecorderNativeSelectedAudioStartOptions) == 56u, "x64 selected-audio options layout changed");
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, output_path_utf8) == 8u, "selected-audio output path offset changed");
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, render_endpoint_id_utf8) == 16u, "selected-audio render endpoint offset changed");
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, microphone_endpoint_id_utf8) == 24u, "selected-audio microphone offset changed");
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, target_process_id) == 32u, "selected-audio target PID offset changed");
+_Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, expected_process_creation_time_100ns) == 48u, "selected-audio creation time offset changed");
 
 static int expect(int condition, const char* message) {
     if (!condition) {
@@ -56,6 +57,7 @@ static RecorderNativeSelectedAudioStartOptions valid_selected_audio_options(void
     options.output_path_utf8 = "c-abi-selected-audio-contract.m4a";
     options.target_process_id = 42U;
     options.included_process_tree = 1U;
+    options.expected_process_creation_time_100ns = 1U;
     options.aac_bitrate_bps = 128000U;
     return options;
 }
@@ -71,7 +73,7 @@ int main(void) {
 
     recorder_native_endpoint_list_destroy(NULL);
 
-    if (!expect(strcmp(recorder_native_version(), "0.6.0") == 0, "version must be exported") ||
+    if (!expect(strcmp(recorder_native_version(), "0.7.0") == 0, "version must be exported") ||
         !expect(recorder_native_start(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "legacy start(NULL) must reject the handle") ||
         !expect(recorder_native_start_with_options(NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
@@ -157,6 +159,13 @@ int main(void) {
                 "process-tree loopback must not fall back to a render endpoint") ||
         !expect(recorder_native_get_state(bridge) == RECORDER_NATIVE_STATE_READY,
                 "rejected selected-audio options must not start capture")) {
+        recorder_native_destroy(bridge);
+        return 1;
+    }
+    selected = valid_selected_audio_options();
+    selected.expected_process_creation_time_100ns = 0U;
+    if (!expect(recorder_native_start_selected_audio(bridge, &selected) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "process-tree loopback must require the selected process creation time")) {
         recorder_native_destroy(bridge);
         return 1;
     }

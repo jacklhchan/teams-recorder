@@ -49,13 +49,16 @@ public sealed record ProcessSelectionChoice(
         ? null
         : $"Window: {WindowTitle}";
 
-    public bool IsAvailable => Availability == ProcessCatalogAvailability.Available && HasWindow;
+    // Process loopback is PID-based, so valid background/console processes are
+    // selectable too. Windowed applications are merely sorted first by the
+    // catalog for a friendlier picker.
+    public bool IsAvailable => Availability == ProcessCatalogAvailability.Available;
 
     public string ProcessDescription => $"{ProcessName} · PID {ProcessId}";
 
     public string WindowAvailabilityText => HasWindow
         ? "可使用的視窗"
-        : "沒有可使用的視窗";
+        : "沒有頂層視窗（仍可選取）";
 
     public bool HasSameIdentity(ProcessSelectionChoice? other) =>
         other is not null &&

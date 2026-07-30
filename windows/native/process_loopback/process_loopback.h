@@ -61,7 +61,9 @@ ProcessIdParseResult ParseProcessId(std::wstring_view text) noexcept;
 
 // Verifies that a process currently exists. Access denied is returned unchanged:
 // callers must not reinterpret it as a valid capture target.
-HRESULT ValidateTargetProcess(DWORD process_id) noexcept;
+HRESULT ValidateTargetProcess(
+    DWORD process_id,
+    std::uint64_t expected_creation_time_100ns = 0) noexcept;
 
 // Returns ERROR_OLD_WIN_VERSION when process-loopback activation is unavailable.
 HRESULT CheckProcessLoopbackOSSupport() noexcept;
@@ -118,7 +120,8 @@ struct ProcessLoopbackActivationResult {
 // cannot write into caller-owned memory.
 ProcessLoopbackActivationResult ActivateProcessLoopback(
     DWORD target_process_id,
-    DWORD timeout_ms = 10'000) noexcept;
+    DWORD timeout_ms = 10'000,
+    std::uint64_t expected_creation_time_100ns = 0) noexcept;
 
 struct ProcessLoopbackCaptureError {
     HRESULT hresult = S_OK;
@@ -151,6 +154,9 @@ using ProcessLoopbackAudioBlockCallback =
 
 struct ProcessLoopbackCaptureRequest {
     DWORD target_process_id = 0;
+    // Required by selected-process capture to prove the target has not been
+    // replaced by another process using the same PID.
+    std::uint64_t expected_process_creation_time_100ns = 0;
     DWORD activation_timeout_ms = 10'000;
     // Used only after event-callback initialization fails for this same
     // process-loopback virtual endpoint. Must be non-zero.

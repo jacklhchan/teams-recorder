@@ -24,7 +24,7 @@ public sealed record WindowsCaptureMetadata(
         new(SystemLoopback, null, false, endpointId);
 
     public static WindowsCaptureMetadata ForSelectedProcessLoopback(string processName) =>
-        new(SelectedProcessLoopback, processName, true, null);
+        new(SelectedProcessLoopback, WindowsExecutableBasename.ToExecutableBasename(processName), true, null);
 }
 
 public static class RecordingSessionLayout
@@ -193,6 +193,17 @@ public static class RecordingInfoJson
         }
         else
         {
+            if (windowsCapture.AudioSource == WindowsCaptureMetadata.SelectedProcessLoopback &&
+                (!windowsCapture.IncludedProcessTree ||
+                 !WindowsExecutableBasename.TryNormalize(
+                     windowsCapture.ProcessName,
+                     requireExeExtension: true,
+                     out _)))
+            {
+                throw new ArgumentException(
+                    "Selected-process capture metadata requires a safe executable basename and process-tree declaration.",
+                    nameof(windowsCapture));
+            }
             var capture = new JsonObject
             {
                 ["audioSource"] = windowsCapture.AudioSource,
@@ -225,8 +236,10 @@ public static class RecordingInfoJson
         };
 
         var endpointId = SafeEndpointId(StringValue(source["endpointId"]));
-        var processName = audioSource == WindowsCaptureMetadata.SelectedProcessLoopback
-            ? SafeProcessName(StringValue(source["processName"]))
+        var processName = audioSource == WindowsCaptureMetadata.SelectedProcessLoopback &&
+            WindowsExecutableBasename.TryNormalize(
+                StringValue(source["processName"]), requireExeExtension: true, out var safeProcessName)
+            ? safeProcessName
             : null;
 
         // A selected-process declaration without a safe executable basename
@@ -276,20 +289,6 @@ public static class RecordingInfoJson
         return value;
     }
 
-    private static string? SafeProcessName(string? value)
-    {
-        if (value is null || value.Length > 128 || !value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return null;
-        if (value.IndexOfAny(['\\', '/', ':', '"', '\'', '\0']) >= 0 || value.Any(char.IsControl)) return null;
-        if (!string.Equals(Path.GetFileName(value), value, StringComparison.Ordinal)) return null;
-
-        // Process names are executable basenames, not a display name or an
-        // argv fragment. Keep the character set intentionally narrow.
-        foreach (var character in value)
-        {
-            if (!(char.IsLetterOrDigit(character) || character is '.' or '-' or '_')) return null;
-        }
-        return value;
-    }
 }
 
 public sealed record StorageCapacityStatus(long? AvailableBytes, RecordingStorageDecision Decision)

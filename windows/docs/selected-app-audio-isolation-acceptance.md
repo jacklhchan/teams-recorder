@@ -17,8 +17,8 @@
 ## 執行程序
 
 1. 使用兩個不共用 process image 的 tone emitter，準備不同頻率／節奏且足以重疊的 tone。不要把帳號、token 或真實錄音內容加入測試。
-2. 以受控機器執行 [`Test-SelectedAppAudioIsolation.ps1`](../scripts/Test-SelectedAppAudioIsolation.ps1)，以參數提供兩個 emitter 及可辨識的 `TargetToneLabel`／`DistractorToneLabel`（例如兩個已驗證但不含敏感資料的頻率標籤）。腳本先維持兩者重疊，再只終止它所建立的 target process，讓 distractor 繼續播放以觀察 no-fallback；它不保存 executable path 或參數，也不產生判定。
-3. 在產品 UI 選取目標 emitter，於兩者重疊時開始所需的測試錄製，觀察選取狀態、量表與健康資訊。
+2. 以受控機器執行 [`Test-SelectedAppAudioIsolation.ps1`](../scripts/Test-SelectedAppAudioIsolation.ps1)，以參數提供兩個 emitter 及可辨識的 `TargetToneLabel`／`DistractorToneLabel`（例如兩個已驗證但不含敏感資料的頻率標籤）。腳本先啟動 target 並只顯示短暫 PID，暫停等待操作者重新整理 picker、選取 target 並開始錄製；確認後才啟動 distractor、維持重疊、只終止它所建立的 target process，讓 distractor 繼續播放以觀察 no-fallback。它以 `finally` 清理所建立的程序，不保存 executable path 或參數，也不產生判定。
+3. 在腳本要求確認前，於產品 UI 選取目標 emitter 並開始所需的測試錄製；兩者重疊時觀察選取狀態、量表與健康資訊。
 4. 結束目標 emitter，在不停止干擾 emitter 的情況下觀察 UI、量表、健康／錯誤資訊與錄音結果。
 5. 把下列最小紀錄寫入核准的人工 evidence 系統。不得記錄憑證、檔案路徑、完整命令列、音訊內容或任何個人資料。
 

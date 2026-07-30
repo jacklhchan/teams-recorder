@@ -18,7 +18,5 @@ public static class RecordingStartMetadataPolicy
     }
 
     private static string ToExecutableBasename(string processName) =>
-        processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-            ? processName
-            : processName + ".exe";
+        WindowsExecutableBasename.ToExecutableBasename(processName);
 }

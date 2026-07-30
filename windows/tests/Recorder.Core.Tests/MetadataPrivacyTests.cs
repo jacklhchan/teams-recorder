@@ -55,9 +55,40 @@ internal static class MetadataPrivacyTests
         }
     }
 
+    public static void ExecutableBasenamesSupportOrdinarySpacesAndUnicodeWithoutDroppingProvenance()
+    {
+        foreach (var name in new[] { "My Meeting App.exe", "會議助手.exe", "ms-teams.exe" })
+        {
+            var capture = WindowsCaptureMetadata.ForSelectedProcessLoopback(name);
+            var info = RecordingInfoJson.WithWindowsCapture(RecordingInfo.AudioOnly(), capture);
+            var roundTripped = RecordingInfoJson.Parse(info.Document.ToJsonString());
+            Equal(name, roundTripped.WindowsCapture?.ProcessName!);
+        }
+
+        foreach (var invalid in new[] { "C:\\private\\Teams.exe", "bad<name>.exe", "bad\u0001name.exe", "trailing.exe " })
+        {
+            Throws<ArgumentException>(() => WindowsCaptureMetadata.ForSelectedProcessLoopback(invalid));
+        }
+
+        Throws<ArgumentException>(() => RecordingInfoJson.WithWindowsCapture(
+            RecordingInfo.AudioOnly(),
+            new WindowsCaptureMetadata(
+                WindowsCaptureMetadata.SelectedProcessLoopback,
+                "bad<name>.exe",
+                true,
+                null)));
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull
     {
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
             throw new InvalidOperationException($"Expected {expected}; got {actual}.");
+    }
+
+    private static void Throws<TException>(Action action) where TException : Exception
+    {
+        try { action(); }
+        catch (TException) { return; }
+        throw new InvalidOperationException($"Expected {typeof(TException).Name}.");
     }
 }

@@ -21,19 +21,14 @@ public sealed record SelectedProcessTarget(uint ProcessId, DateTimeOffset Starte
     public void Validate()
     {
         if (ProcessId == 0) throw new ArgumentOutOfRangeException(nameof(ProcessId));
-        if (StartedAt == default) throw new ArgumentOutOfRangeException(nameof(StartedAt));
-        if (string.IsNullOrWhiteSpace(DisplayName) || DisplayName.Length > 128 ||
-            DisplayName.IndexOfAny(['\\', '/', ':', '"', '\0']) >= 0 ||
-            DisplayName.Any(char.IsControl))
+        if (StartedAt == default || StartedAt.UtcDateTime <= DateTime.FromFileTimeUtc(0))
+            throw new ArgumentOutOfRangeException(nameof(StartedAt));
+        if (!WindowsExecutableBasename.TryNormalize(
+                DisplayName,
+                requireExeExtension: false,
+                out _))
         {
             throw new ArgumentException("A safe process name is required.", nameof(DisplayName));
-        }
-
-        var extension = Path.GetExtension(DisplayName);
-        if (!string.IsNullOrEmpty(extension) &&
-            !string.Equals(extension, ".exe", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("A process name may be extensionless or end in .exe.", nameof(DisplayName));
         }
     }
 }

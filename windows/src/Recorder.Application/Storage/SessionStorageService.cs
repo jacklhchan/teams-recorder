@@ -90,6 +90,23 @@ public sealed class SessionStorageService
     }
 
     /// <summary>
+    /// Writes the bounded session intent before native ingress starts. This is
+    /// deliberately durable so startup recovery can retain selected-app
+    /// provenance after a source exits or capture faults.
+    /// </summary>
+    public Task WriteProvisionalMetadataAsync(
+        RecordingSessionPlan plan,
+        WindowsCaptureMetadata? windowsCapture,
+        CancellationToken cancellationToken = default)
+    {
+        EnsurePlan(plan);
+        var info = RecordingInfoJson.WithWindowsCapture(
+            RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, plan.Kind),
+            windowsCapture);
+        return WriteMetadataAsync(plan.MetadataPath, info, cancellationToken);
+    }
+
+    /// <summary>
     /// Finalizes a recording and stores only the privacy-bounded Windows
     /// capture description. The native request's PID and output path are
     /// intentionally not accepted here and therefore cannot reach metadata.
@@ -107,9 +124,12 @@ public sealed class SessionStorageService
         // Publish the metadata first. If it cannot be atomically written, the
         // backup remains in place for startup recovery instead of creating a
         // final media file that recovery would previously skip forever.
+        var existing = IsSafeFile(plan.MetadataPath)
+            ? ReadMetadata(plan.MetadataPath)
+            : RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, plan.Kind);
         var info = RecordingInfoJson.WithWindowsCapture(
-            RecordingInfoJson.CreateAudioOnly(null, title, RecordingRecoveryState.None, plan.Kind),
-            windowsCapture);
+            RecordingInfoJson.CreateAudioOnly(existing.Document, title, RecordingRecoveryState.None, plan.Kind),
+            windowsCapture ?? existing.WindowsCapture);
         await WriteMetadataAsync(plan.MetadataPath, info, cancellationToken).ConfigureAwait(false);
         File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
     }
@@ -132,6 +152,34 @@ public sealed class SessionStorageService
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>
+    /// A failed start may remove only its own known provisional metadata and
+    /// then only an otherwise empty owned folder. Media, partial media,
+    /// diagnostics, and unknown files are always retained as evidence.
+    /// </summary>
+    public bool CleanupFailedProvisionalStart(RecordingSessionPlan plan)
+    {
+        EnsurePlan(plan);
+        if (!Directory.Exists(plan.FolderPath) || IsReparsePoint(plan.FolderPath)) return false;
+
+        try
+        {
+            var entries = Directory.EnumerateFileSystemEntries(plan.FolderPath).ToArray();
+            if (entries.Length == 1 && PathEquals(entries[0], plan.MetadataPath) && IsSafeFile(plan.MetadataPath))
+            {
+                File.Delete(plan.MetadataPath);
+            }
+            else if (entries.Length != 0)
+            {
+                return false;
+            }
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+
+        return CleanupEmptyOwnedSession(plan);
     }
 
     /// <summary>

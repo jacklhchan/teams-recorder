@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(RecorderNativeBridge VERSION 0.6.0 LANGUAGES C CXX)
+project(RecorderNativeBridge VERSION 0.7.0 LANGUAGES C CXX)
 
 option(RECORDER_NATIVE_BUILD_TESTS "Build native bridge contract tests" ON)
 

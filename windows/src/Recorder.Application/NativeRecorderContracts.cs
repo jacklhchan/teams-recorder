@@ -199,6 +199,7 @@ public sealed record NativeSelectedAudioRequest(
     string? MicrophoneEndpointId = null,
     uint TargetProcessId = 0,
     bool IncludedProcessTree = false,
+    ulong ExpectedProcessCreationTime100Nanoseconds = 0,
     uint AacBitRate = 128_000) : INativeRecordingRequest
 {
     public RecordingCaptureMode Mode => RecordingCaptureMode.SelectedAppMixed;
@@ -232,10 +233,14 @@ public sealed record NativeSelectedAudioRequest(
 
         switch (AudioSource)
         {
-            case NativeSelectedAudioSource.SystemLoopback when TargetProcessId == 0 && !IncludedProcessTree:
+            case NativeSelectedAudioSource.SystemLoopback when
+                TargetProcessId == 0 && !IncludedProcessTree &&
+                ExpectedProcessCreationTime100Nanoseconds == 0:
                 return;
             case NativeSelectedAudioSource.ProcessTreeLoopback when
-                TargetProcessId != 0 && IncludedProcessTree && string.IsNullOrEmpty(RenderEndpointId):
+                TargetProcessId != 0 && IncludedProcessTree &&
+                ExpectedProcessCreationTime100Nanoseconds != 0 &&
+                string.IsNullOrEmpty(RenderEndpointId):
                 return;
             case NativeSelectedAudioSource.ProcessTreeLoopback:
                 throw new ArgumentException(

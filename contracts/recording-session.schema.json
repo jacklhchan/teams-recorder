@@ -98,8 +98,12 @@
         },
         "processName": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.exe$",
-          "maxLength": 128
+          "minLength": 5,
+          "maxLength": 128,
+          "pattern": "^[^<>:\"/\\\\|?*\\u0000-\\u001F]+\\.[eE][xX][eE]$",
+          "not": {
+            "pattern": "^[.]?[eE][xX][eE]$"
+          }
         },
         "includedProcessTree": {
           "type": "boolean"

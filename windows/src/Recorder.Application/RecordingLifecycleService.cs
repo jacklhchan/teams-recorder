@@ -99,6 +99,8 @@ public sealed class RecordingLifecycleService : IDisposable
         await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         CancellationTokenSource? operationCancellation = null;
         RecordingSessionPlan? plan = null;
+        WindowsCaptureMetadata? capture = null;
+        SessionStorageService? currentStorage = null;
         try
         {
             lock (stateGate)
@@ -109,12 +111,15 @@ public sealed class RecordingLifecycleService : IDisposable
                 activeSession = plan;
                 activeSessionKind = request.Kind;
                 activeWindowsCapture = RecordingStartMetadataPolicy.CreateWindowsCaptureMetadata(request);
+                capture = activeWindowsCapture;
+                currentStorage = storage;
                 generation = checked(generation + 1);
                 operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 pendingStartCancellation = operationCancellation;
             }
 
             operationCancellation.Token.ThrowIfCancellationRequested();
+            await currentStorage!.WriteProvisionalMetadataAsync(plan, capture, operationCancellation.Token).ConfigureAwait(false);
             RecordingCoordinatorSnapshot started;
             if (request.AudioSource == RecordingAudioSource.SelectedProcessLoopback)
             {
@@ -192,6 +197,7 @@ public sealed class RecordingLifecycleService : IDisposable
 
             try
             {
+                await storage.WriteProvisionalMetadataAsync(plan, activeWindowsCapture).ConfigureAwait(false);
                 var request = new NativeMixedRecordingRequest(plan.BackupAudioPath, renderEndpointId, microphoneEndpointId);
                 var snapshot = testDuration is { } duration
                     ? await coordinator.StartMixedTestAsync(request, duration).ConfigureAwait(false)
@@ -246,7 +252,7 @@ public sealed class RecordingLifecycleService : IDisposable
     {
         ThrowIfDisposed();
         var stopped = await StopAsync().ConfigureAwait(false);
-        if (stopped.State == RecordingCoordinatorState.Stopped)
+        if (stopped.State == RecordingCoordinatorState.Stopped && !stopped.HasRecoverableFault)
             return await PublishCompletedAsync().ConfigureAwait(false);
 
         RecordingSessionPlan? plan;
@@ -257,6 +263,7 @@ public sealed class RecordingLifecycleService : IDisposable
             activeSessionKind = null;
             activeWindowsCapture = null;
         }
+        coordinator.CompleteFaultRecovery();
         return new RecordingSessionPublicationResult(plan, false,
             plan is null ? null : new IOException("Native capture did not finish; retained session evidence for startup recovery."));
     }
@@ -281,7 +288,7 @@ public sealed class RecordingLifecycleService : IDisposable
             }
             // CleanupEmptyOwnedSession itself refuses any media, partial media,
             // diagnostics, or recovery evidence; it can only remove an empty folder.
-            storage.CleanupEmptyOwnedSession(plan);
+            storage.CleanupFailedProvisionalStart(plan);
         }
     }
 

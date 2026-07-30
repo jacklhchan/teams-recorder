@@ -68,7 +68,8 @@ internal static class AudioMvpTests
             "C:\\recordings\\selected-test.m4a",
             MicrophoneEndpointId: "capture-usb",
             TargetProcessId: 71,
-            IncludedProcessTree: true);
+            IncludedProcessTree: true,
+            ExpectedProcessCreationTime100Nanoseconds: 1);
 
         var started = coordinator.StartSelectedAudioTestAsync(request, TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
         Equal(RecordingCoordinatorState.Recording, started.State);
@@ -93,18 +94,25 @@ internal static class AudioMvpTests
             NativeSelectedAudioSource.ProcessTreeLoopback,
             "C:\\recordings\\process.m4a",
             TargetProcessId: 71,
-            IncludedProcessTree: true).Validate();
+            IncludedProcessTree: true,
+            ExpectedProcessCreationTime100Nanoseconds: 1).Validate();
 
         Throws<ArgumentException>(() => new NativeSelectedAudioRequest(
             NativeSelectedAudioSource.ProcessTreeLoopback,
             "C:\\recordings\\process.m4a",
             RenderEndpointId: "render-default",
             TargetProcessId: 71,
-            IncludedProcessTree: true).Validate());
+            IncludedProcessTree: true,
+            ExpectedProcessCreationTime100Nanoseconds: 1).Validate());
         Throws<ArgumentException>(() => new NativeSelectedAudioRequest(
             NativeSelectedAudioSource.SystemLoopback,
             "C:\\recordings\\system.m4a",
             TargetProcessId: 71).Validate());
+        Throws<ArgumentException>(() => new NativeSelectedAudioRequest(
+            NativeSelectedAudioSource.ProcessTreeLoopback,
+            "C:\\recordings\\process.m4a",
+            TargetProcessId: 71,
+            IncludedProcessTree: true).Validate());
     }
 
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }

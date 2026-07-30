@@ -85,7 +85,7 @@ struct RecorderNativeEndpointList {
 
 namespace {
 
-constexpr char kVersion[] = "0.6.0";
+constexpr char kVersion[] = "0.7.0";
 constexpr char kInvalidHandleError[] = "RecorderNativeBridge handle is null.";
 
 RecorderNativeStats EmptyStats(RecorderNativeCaptureMode mode) {
@@ -345,19 +345,21 @@ extern "C" RecorderNativeResult recorder_native_start_selected_audio(
             "Selected-audio capture requires a path, zero reserved field, and AAC bitrate from 64000 to 320000.");
     }
     if (options->audio_source == RECORDER_NATIVE_SELECTED_AUDIO_SYSTEM_LOOPBACK) {
-        if (options->target_process_id != 0 || options->included_process_tree != 0) {
+        if (options->target_process_id != 0 || options->included_process_tree != 0 ||
+            options->expected_process_creation_time_100ns != 0) {
             return Reject(
                 bridge,
                 RECORDER_NATIVE_INVALID_ARGUMENT,
-                "System loopback requires target_process_id and included_process_tree to be zero.");
+                "System loopback requires process identity fields to be zero.");
         }
     } else if (options->target_process_id == 0 ||
                options->included_process_tree != 1 ||
+               options->expected_process_creation_time_100ns == 0 ||
                !IsNullOrEmpty(options->render_endpoint_id_utf8)) {
         return Reject(
             bridge,
             RECORDER_NATIVE_INVALID_ARGUMENT,
-            "Process-tree loopback requires a root PID, included_process_tree=1, and no render endpoint.");
+            "Process-tree loopback requires a root PID, creation time, included_process_tree=1, and no render endpoint.");
     }
 
 #if !defined(_WIN32)
@@ -393,6 +395,7 @@ extern "C" RecorderNativeResult recorder_native_start_selected_audio(
     config.render_endpoint_id = std::move(render);
     config.microphone_endpoint_id = std::move(microphone);
     config.target_process_id = options->target_process_id;
+    config.expected_process_creation_time_100ns = options->expected_process_creation_time_100ns;
     config.aac_bitrate_bps = options->aac_bitrate_bps;
 
     RecorderNativeState previous = RECORDER_NATIVE_STATE_READY;
@@ -664,11 +667,13 @@ extern "C" RecorderNativeResult recorder_native_stop(
     bridge->last_stats = stats;
     bridge->session.reset();
     bridge->mixed_session.reset();
+    // The failed session has been destroyed above. Keep its diagnostic but
+    // return the bridge to a restartable terminal state; application recovery
+    // owns the preserved media and decides when another start may occur.
+    bridge->state = RECORDER_NATIVE_STATE_STOPPED;
     if (result == RECORDER_NATIVE_OK) {
-        bridge->state = RECORDER_NATIVE_STATE_STOPPED;
         bridge->last_error.clear();
     } else {
-        bridge->state = RECORDER_NATIVE_STATE_FAULTED;
         SetErrorLocked(bridge, error);
     }
     return result;

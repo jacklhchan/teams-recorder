@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Recorder.Core;
 
 namespace TeamsRecorder.Windows.Application;
 
@@ -30,7 +31,11 @@ public sealed class ProcessCatalog : IProcessCatalog
 {
     public IReadOnlyList<ProcessCatalogEntry> GetProcesses() => Process.GetProcesses()
         .Select(process => { using (process) return TryRead(process, out var entry) ? entry : null; })
-        .Where(entry => entry is not null).Select(entry => entry!).OrderBy(entry => entry.DisplayName, StringComparer.OrdinalIgnoreCase).ThenBy(entry => entry.ProcessId).ToArray();
+        .Where(entry => entry is not null).Select(entry => entry!)
+        .OrderByDescending(entry => entry.HasWindow)
+        .ThenBy(entry => entry.DisplayName, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(entry => entry.ProcessId)
+        .ToArray();
 
     public bool IsCurrent(SelectedProcessTarget target)
     {
@@ -43,7 +48,11 @@ public sealed class ProcessCatalog : IProcessCatalog
     {
         try
         {
-            if (process.Id <= 0 || process.StartTime == default || string.IsNullOrWhiteSpace(process.ProcessName))
+            if (process.Id <= 0 || process.StartTime == default ||
+                !WindowsExecutableBasename.TryNormalize(
+                    process.ProcessName,
+                    requireExeExtension: false,
+                    out var processName))
             {
                 entry = null!;
                 return false;
@@ -51,10 +60,10 @@ public sealed class ProcessCatalog : IProcessCatalog
 
             var hasWindow = process.MainWindowHandle != IntPtr.Zero;
             var title = hasWindow ? SafeWindowTitle(process.MainWindowTitle) : null;
-            entry = new((uint)process.Id, new DateTimeOffset(process.StartTime), process.ProcessName)
+            entry = new((uint)process.Id, new DateTimeOffset(process.StartTime), processName)
             {
-                ApplicationName = process.ProcessName,
-                ProcessName = process.ProcessName,
+                ApplicationName = processName,
+                ProcessName = processName,
                 WindowTitle = title,
                 HasWindow = hasWindow,
                 Availability = ProcessCatalogAvailability.Available,

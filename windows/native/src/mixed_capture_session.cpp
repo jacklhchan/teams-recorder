@@ -158,7 +158,10 @@ public:
                 selected_audio::PrimarySource::SystemRender
             ? StartWasapiSource(render_, recorder::audio::EndpointFlow::Render,
                                 config_.render_endpoint_id)
-            : StartProcessSource(render_, config_.target_process_id);
+            : StartProcessSource(
+                render_,
+                config_.target_process_id,
+                config_.expected_process_creation_time_100ns);
         if (!primary_started) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -291,11 +294,15 @@ private:
             });
     }
 
-    bool StartProcessSource(Source& source, std::uint32_t target_process_id) {
+    bool StartProcessSource(
+        Source& source,
+        std::uint32_t target_process_id,
+        std::uint64_t expected_process_creation_time_100ns) {
         source.process_capture =
             std::make_unique<teams_recorder::process_loopback::ProcessLoopbackCapture>();
         teams_recorder::process_loopback::ProcessLoopbackCaptureRequest request;
         request.target_process_id = target_process_id;
+        request.expected_process_creation_time_100ns = expected_process_creation_time_100ns;
         Source* const source_pointer = &source;
         const std::uint64_t generation = session_generation_;
         source.generation = generation;

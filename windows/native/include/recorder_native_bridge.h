@@ -113,6 +113,9 @@ typedef struct RecorderNativeMixedStartOptions {
  * non-zero root PID and its complete process tree; it requires
  * included_process_tree == 1 and render_endpoint_id_utf8 NULL/empty. Invalid
  * combinations are rejected and never fall back to system audio.
+ * expected_process_creation_time_100ns is a UTC FILETIME value. It is zero
+ * for SYSTEM_LOOPBACK and required for PROCESS_TREE_LOOPBACK, where native
+ * code verifies it after opening the process before activation.
  */
 typedef struct RecorderNativeSelectedAudioStartOptions {
     uint32_t struct_size;
@@ -125,6 +128,7 @@ typedef struct RecorderNativeSelectedAudioStartOptions {
     /* Required AAC target bitrate in bits/sec (64,000 through 320,000). */
     uint32_t aac_bitrate_bps;
     uint32_t reserved;
+    uint64_t expected_process_creation_time_100ns;
 } RecorderNativeSelectedAudioStartOptions;
 
 typedef struct RecorderNativeStats {

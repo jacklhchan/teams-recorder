@@ -66,6 +66,7 @@ internal static class RecordingStartRequestTests
         Equal(RecordingCaptureMode.SelectedAppMixed, native.Mode);
         Equal(selected.ProcessId, native.TargetProcessId);
         Equal(true, native.IncludedProcessTree);
+        Equal(checked((ulong)selected.StartedAt.UtcDateTime.ToFileTimeUtc()), native.ExpectedProcessCreationTime100Nanoseconds);
         Equal(null, native.RenderEndpointId);
         Equal("capture-usb", native.MicrophoneEndpointId!);
     }
@@ -116,6 +117,26 @@ internal static class RecordingStartRequestTests
             ProcessTarget: Target(71, "ms-teams"),
             IncludeProcessTree: true));
         Equal("ms-teams.exe", metadata.ProcessName!);
+    }
+
+    public static void UsesOneExecutableBasenamePolicyForProcessTargetsAndMetadata()
+    {
+        foreach (var name in new[] { "My Meeting App", "會議助手", "normal-app" })
+        {
+            var target = Target(71, name);
+            target.Validate();
+            var metadata = RecordingStartMetadataPolicy.CreateWindowsCaptureMetadata(new RecordingStartRequest(
+                RecordingSessionKind.Manual,
+                RecordingAudioSource.SelectedProcessLoopback,
+                ProcessTarget: target,
+                IncludeProcessTree: true));
+            Equal(name + ".exe", metadata.ProcessName!);
+        }
+
+        foreach (var invalid in new[] { "C:\\private\\app", "reserved|name", "control\u0001name", "trailing " })
+        {
+            Throws<ArgumentException>(() => Target(71, invalid).Validate());
+        }
     }
 
     private static SelectedProcessTarget Target(uint pid, string processName) => new(

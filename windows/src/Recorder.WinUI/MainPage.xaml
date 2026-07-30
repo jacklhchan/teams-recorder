@@ -12,7 +12,7 @@
         <StackPanel MaxWidth="1060" Padding="28,20,28,28" Spacing="16">
             <StackPanel Spacing="4">
                 <TextBlock Text="Teams Recorder — 音訊錄製 MVP" Style="{StaticResource TitleTextBlockStyle}" />
-                <TextBlock Text="錄製系統輸出與可選麥克風，工作階段以 M4A 為目標格式。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                <TextBlock Text="錄製系統或指定應用程式音訊，並可混入麥克風；工作階段以 M4A 為目標格式。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
             </StackPanel>
 
             <InfoBar IsOpen="{Binding HasError}" IsClosable="True" Severity="Error" Title="需要處理的問題" Message="{Binding ErrorText}" />
@@ -43,7 +43,7 @@
                         <TextBlock Text="錄製來源" />
                         <ComboBox
                             DisplayMemberPath="DisplayName"
-                            IsEnabled="{Binding IsCaptureSourceSelectionEnabled}"
+                            IsEnabled="{Binding IsDeviceSelectionEnabled}"
                             ItemsSource="{Binding CaptureSources}"
                             SelectedItem="{Binding SelectedCaptureSource, Mode=TwoWay}" />
                         <TextBlock
@@ -59,7 +59,7 @@
                             <Button Command="{Binding RefreshProcessCatalogCommand}" Content="重新整理應用程式" />
                         </StackPanel>
                         <TextBlock
-                            Text="選擇具有可使用視窗的應用程式。只顯示應用程式名稱、處理程序名稱、PID 與視窗可用性；不會儲存路徑或命令列。"
+                            Text="選擇可用的應用程式或背景程序；有頂層視窗的項目會優先顯示。只顯示應用程式名稱、處理程序名稱、PID 與視窗資訊；不會儲存路徑或命令列。"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                             TextWrapping="Wrap" />
                         <ListView

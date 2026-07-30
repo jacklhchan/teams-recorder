@@ -14,7 +14,7 @@ public sealed class NativeRecorderInteropException : Exception
 
 public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge
 {
-    private const string RequiredAbiVersion = "0.6.0";
+    private const string RequiredAbiVersion = "0.7.0";
     private readonly object gate = new();
     private readonly NativeBridgeHandle handle;
     private bool disposed;
@@ -138,6 +138,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
                     IncludedProcessTree = request.IncludedProcessTree ? 1U : 0U,
                     AacBitRateBps = request.AacBitRate,
                     Reserved = 0,
+                    ExpectedProcessCreationTime100Nanoseconds = request.ExpectedProcessCreationTime100Nanoseconds,
                 };
                 return ToOperationResult(NativeMethods.StartSelectedAudio(handle, ref options));
             }
@@ -315,7 +316,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
     {
         if (Marshal.SizeOf<NativeStartOptions>() != 32 ||
             Marshal.SizeOf<NativeMixedStartOptions>() != 40 ||
-            Marshal.SizeOf<NativeSelectedAudioStartOptions>() != 48 ||
+            Marshal.SizeOf<NativeSelectedAudioStartOptions>() != 56 ||
             Marshal.SizeOf<NativeStats>() != 192)
         {
             throw new NativeRecorderInteropException(
@@ -329,7 +330,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         if (!Version.TryParse(version, out var parsedVersion) ||
             parsedVersion is null ||
             parsedVersion.Major != 0 ||
-            parsedVersion.CompareTo(new Version(0, 6)) < 0)
+            parsedVersion.CompareTo(new Version(0, 7)) < 0)
         {
             throw new NativeRecorderInteropException(
                 $"Recorder.NativeBridge {RequiredAbiVersion} or newer is required.");
@@ -430,6 +431,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         public uint IncludedProcessTree;
         public uint AacBitRateBps;
         public uint Reserved;
+        public ulong ExpectedProcessCreationTime100Nanoseconds;
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 8)]

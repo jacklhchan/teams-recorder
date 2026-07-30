@@ -320,8 +320,6 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         }
     }
 
-    public bool IsCaptureSourceSelectionEnabled => IsSetupEditable;
-
     public Visibility RenderEndpointSelectionVisibility =>
         SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
             ? Visibility.Collapsed
@@ -335,7 +333,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     public string SelectedCaptureSourceDescription => SelectedCaptureSource?.Kind switch
     {
         CaptureSourceKind.SelectedApplication when SelectedProcess is null =>
-            "請選擇一個具有可使用視窗的應用程式。",
+            "請選擇一個可用的應用程式或背景程序。",
         CaptureSourceKind.SelectedApplication =>
             $"只會錄製 {SelectedProcess!.DisplayName}（PID {SelectedProcess.ProcessId}）。",
         _ => "錄製系統音訊，並使用所選輸出裝置。",
@@ -512,9 +510,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
                 ? "無訊號（皆為靜音）"
                 : "偵測到訊號");
 
+    private string PrimaryCaptureLabel => SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+        ? $"指定應用程式：{SelectedProcess?.DisplayName ?? "已選程序"}"
+        : "系統音訊";
+
     public string RenderHealthText => snapshot.Stats.SourceSampleRate == 0
-        ? "系統輸出：等待第一個音訊封包。"
-        : $"系統輸出：bridge 輸出 48 kHz stereo；來源格式 {snapshot.Stats.SourceSampleRate:N0} Hz / {snapshot.Stats.SourceChannels} 聲道。";
+        ? $"{PrimaryCaptureLabel}：等待第一個音訊封包。"
+        : $"{PrimaryCaptureLabel}：bridge 輸出 48 kHz stereo；來源格式 {snapshot.Stats.SourceSampleRate:N0} Hz / {snapshot.Stats.SourceChannels} 聲道。";
 
     public string MicrophoneHealthText => SelectedMicrophoneEndpoint switch
     {
@@ -1467,7 +1469,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
                 ?? throw new InvalidOperationException("請先選擇應用程式。");
             if (!process.IsAvailable)
             {
-                throw new InvalidOperationException("所選應用程式已沒有可使用的視窗。");
+                throw new InvalidOperationException("所選應用程式程序已無法使用。");
             }
 
             // The application layer verifies PID + start time immediately before
@@ -1784,7 +1786,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             ErrorText = changed.Error;
         }
 
-        if (changed.State == RecordingCoordinatorState.Stopped)
+        if (changed.State == RecordingCoordinatorState.Stopped && !changed.HasRecoverableFault)
         {
             _ = EnsureSessionPublishedAsync();
         }
@@ -1918,7 +1920,6 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         isRecorderAvailable = value;
         OnPropertyChanged(nameof(ReadinessText));
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
-        OnPropertyChanged(nameof(IsCaptureSourceSelectionEnabled));
     }
 
     private void UpdateCommandStates()
@@ -1960,6 +1961,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         RecordingCoordinatorState.Recording when snapshot.IsTestRecording => "10 秒測試錄音中",
         RecordingCoordinatorState.Recording => "錄音中",
         RecordingCoordinatorState.Stopping => "正在停止並儲存…",
+        RecordingCoordinatorState.Stopped when snapshot.HasRecoverableFault => "錄音異常已完成清理；保留可復原證據，可開始新的錄音。",
         RecordingCoordinatorState.Stopped => "正在發佈 M4A 工作階段…",
         RecordingCoordinatorState.Failed => "無法開始錄音",
         RecordingCoordinatorState.Faulted => "錄音異常，已保留可復原的工作檔（若存在）。",

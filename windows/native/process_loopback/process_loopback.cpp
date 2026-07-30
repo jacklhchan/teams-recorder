@@ -257,7 +257,43 @@ ProcessIdParseResult ParseProcessId(std::wstring_view text) noexcept {
     return result;
 }
 
-HRESULT ValidateTargetProcess(DWORD process_id) noexcept {
+namespace {
+
+HRESULT ReadProcessCreationTime(HANDLE process, std::uint64_t* result) noexcept {
+    if (process == nullptr || result == nullptr) {
+        return E_INVALIDARG;
+    }
+    FILETIME created{};
+    FILETIME exited{};
+    FILETIME kernel{};
+    FILETIME user{};
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    ULARGE_INTEGER value{};
+    value.LowPart = created.dwLowDateTime;
+    value.HighPart = created.dwHighDateTime;
+    *result = value.QuadPart;
+    return S_OK;
+}
+
+HRESULT VerifyProcessCreationTime(HANDLE process, std::uint64_t expected) noexcept {
+    if (expected == 0) {
+        return S_OK;
+    }
+    std::uint64_t actual = 0;
+    const HRESULT result = ReadProcessCreationTime(process, &actual);
+    if (FAILED(result)) {
+        return result;
+    }
+    return actual == expected ? S_OK : HRESULT_FROM_WIN32(ERROR_PROCESS_ABORTED);
+}
+
+}  // namespace
+
+HRESULT ValidateTargetProcess(
+    DWORD process_id,
+    std::uint64_t expected_creation_time_100ns) noexcept {
     if (process_id == 0) {
         return E_INVALIDARG;
     }
@@ -265,10 +301,13 @@ HRESULT ValidateTargetProcess(DWORD process_id) noexcept {
     if (process.get() == nullptr) {
         return HRESULT_FROM_WIN32(GetLastError());
     }
-    return S_OK;
+    return VerifyProcessCreationTime(process.get(), expected_creation_time_100ns);
 }
 
-ScopedHandle OpenTargetProcessForMonitoring(DWORD process_id, HRESULT* error) noexcept {
+ScopedHandle OpenTargetProcessForMonitoring(
+    DWORD process_id,
+    std::uint64_t expected_creation_time_100ns,
+    HRESULT* error) noexcept {
     if (error == nullptr || process_id == 0) {
         if (error != nullptr) {
             *error = E_INVALIDARG;
@@ -279,6 +318,10 @@ ScopedHandle OpenTargetProcessForMonitoring(DWORD process_id, HRESULT* error) no
                                     FALSE, process_id));
     if (process.get() == nullptr) {
         *error = HRESULT_FROM_WIN32(GetLastError());
+        return ScopedHandle();
+    }
+    *error = VerifyProcessCreationTime(process.get(), expected_creation_time_100ns);
+    if (FAILED(*error)) {
         return ScopedHandle();
     }
     const TargetProcessWaitDisposition disposition =
@@ -341,7 +384,8 @@ TargetProcessWaitDisposition TargetProcessWaitDispositionFor(
 
 ProcessLoopbackActivationResult ActivateProcessLoopback(
     DWORD target_process_id,
-    DWORD timeout_ms) noexcept {
+    DWORD timeout_ms,
+    std::uint64_t expected_creation_time_100ns) noexcept {
     ProcessLoopbackActivationResult result;
     if (target_process_id == 0 || timeout_ms == 0) {
         result.hr = E_INVALIDARG;
@@ -351,7 +395,7 @@ ProcessLoopbackActivationResult ActivateProcessLoopback(
     if (FAILED(result.hr)) {
         return result;
     }
-    result.hr = ValidateTargetProcess(target_process_id);
+    result.hr = ValidateTargetProcess(target_process_id, expected_creation_time_100ns);
     if (FAILED(result.hr)) {
         return result;
     }
@@ -438,12 +482,15 @@ void ProcessLoopbackCapture::SetError(HRESULT hresult, const wchar_t* context,
 bool ProcessLoopbackCapture::Start(
     ProcessLoopbackCaptureRequest request,
     ProcessLoopbackAudioBlockCallback callback) {
-    if (!callback || request.target_process_id == 0 || request.activation_timeout_ms == 0 ||
+    if (!callback || request.target_process_id == 0 ||
+        request.activation_timeout_ms == 0 ||
         request.polling_interval_ms == 0) {
         SetError(E_INVALIDARG, L"Invalid process loopback capture request");
         return false;
     }
-    const HRESULT target_validation = ValidateTargetProcess(request.target_process_id);
+    const HRESULT target_validation = ValidateTargetProcess(
+        request.target_process_id,
+        request.expected_process_creation_time_100ns);
     if (FAILED(target_validation)) {
         SetError(target_validation, L"Selected root process is unavailable before capture start");
         return false;
@@ -540,7 +587,14 @@ void ProcessLoopbackCapture::CaptureThread(
     ScopedCoInitialize com;
     HRESULT target_process_error = S_OK;
     ScopedHandle target_process(
-        OpenTargetProcessForMonitoring(request.target_process_id, &target_process_error));
+        OpenTargetProcessForMonitoring(
+            request.target_process_id,
+            request.expected_process_creation_time_100ns,
+            &target_process_error));
+    // Keep this validated handle alive for the complete activation and capture
+    // lifetime. Windows cannot recycle the PID while this process object is
+    // referenced, so the later virtual-endpoint activation cannot bind a new
+    // process with the same numeric PID.
     AudioClientHandle client;
     ComPtr<IAudioCaptureClient> capture;
     WAVEFORMATEX capture_format{};
@@ -568,8 +622,10 @@ void ProcessLoopbackCapture::CaptureThread(
         fail(target_process_error, L"Selected root process exited before activation");
         return;
     }
-    auto activation = ActivateProcessLoopback(request.target_process_id,
-                                              request.activation_timeout_ms);
+    auto activation = ActivateProcessLoopback(
+        request.target_process_id,
+        request.activation_timeout_ms,
+        request.expected_process_creation_time_100ns);
     if (!activation.succeeded()) {
         fail(activation.hr, L"Activating target-process loopback failed", activation.timed_out);
         return;
@@ -593,8 +649,10 @@ void ProcessLoopbackCapture::CaptureThread(
         // Re-activate the same virtual process-loopback endpoint, never an
         // IMMDevice/all-system endpoint, before using bounded polling.
         client.reset();
-        activation = ActivateProcessLoopback(request.target_process_id,
-                                             request.activation_timeout_ms);
+        activation = ActivateProcessLoopback(
+            request.target_process_id,
+            request.activation_timeout_ms,
+            request.expected_process_creation_time_100ns);
         if (activation.succeeded()) {
             client = std::move(activation.audio_client);
             result = configure_client(false);

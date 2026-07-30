@@ -11,6 +11,7 @@ using teams_recorder::process_loopback::DescribeProcessLoopbackTarget;
 using teams_recorder::process_loopback::ProcessLoopbackTargetScope;
 using teams_recorder::process_loopback::TargetProcessWaitDisposition;
 using teams_recorder::process_loopback::TargetProcessWaitDispositionFor;
+using teams_recorder::process_loopback::ValidateTargetProcess;
 
 int main() {
     const auto ordinary = ParseProcessId(L"12345");
@@ -37,6 +38,8 @@ int main() {
            TargetProcessWaitDisposition::exited);
     assert(TargetProcessWaitDispositionFor(WAIT_FAILED) ==
            TargetProcessWaitDisposition::wait_failed);
+    assert(SUCCEEDED(ValidateTargetProcess(GetCurrentProcessId())));
+    assert(FAILED(ValidateTargetProcess(GetCurrentProcessId(), 1U)));
 
     ProcessLoopbackCapture capture;
     ProcessLoopbackCaptureRequest invalid_request;

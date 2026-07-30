@@ -18,7 +18,7 @@
 
 - 「指定程序」意指啟動時驗證的 root PID 加其完整 process tree；PID 與 start time 在 application 層再確認一次，以拒絕 PID reuse。
 - process loopback 不可用、程序在開始前消失或錄製中退出時，錄製必須停止／fault 並保留可復原的已累積媒體；不得改錄 system loopback。
-- process catalog 只短暫顯示 app name、process name、PID、可選 window title 及 availability。選取只在 PID 與 start time 均相同時保留；不持久化 executable path 或 command line。
+- process catalog 是 process picker：可選無頂層視窗的有效程序，但有視窗的項目優先顯示；只短暫顯示 app name、process name、PID、可選 window title 及 availability。選取只在 PID 與 start time 均相同時保留；不持久化 executable path 或 command line。
 - completed session 的 Windows extension 僅可包含 `audioSource`、`processName`、`includedProcessTree`（舊有 system fixture 的 `endpointId` 仍可讀取）。
 
 ## Selected App 人工隔離驗收

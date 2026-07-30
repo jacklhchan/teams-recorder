@@ -1,5 +1,7 @@
 using Recorder.Core;
 using TeamsRecorder.Windows.Application;
+using TeamsRecorder.Windows.Application.Recovery;
+using TeamsRecorder.Windows.Application.Storage;
 
 internal static class SelectedAudioLifecycleTests
 {
@@ -79,6 +81,75 @@ internal static class SelectedAudioLifecycleTests
         Equal(RecordingOwner.None, lifecycle.Owner);
     }
 
+    public static void FaultFinalizationAllowsRestartAndInvalidatesOldGeneration()
+    {
+        using var root = new TemporaryRoot();
+        var bridge = new SelectedBridge();
+        var target = Target();
+        using var lifecycle = new RecordingLifecycleService(bridge, root.Path, new CurrentProcessCatalog(target));
+        var first = lifecycle.StartAsync(new RecordingStartRequest(
+            RecordingSessionKind.Manual,
+            RecordingAudioSource.SelectedProcessLoopback,
+            ProcessTarget: target,
+            IncludeProcessTree: true)).GetAwaiter().GetResult();
+        var oldGeneration = first.Snapshot.Generation;
+
+        bridge.SourceFaulted = true;
+        Equal(RecordingCoordinatorState.Faulted, lifecycle.RefreshAsync().GetAwaiter().GetResult().State);
+        var retained = lifecycle.FinalizeForRecoveryAsync().GetAwaiter().GetResult();
+        if (retained.Published || !File.Exists(first.Session.BackupAudioPath))
+            throw new InvalidOperationException("Fault finalization did not retain the first session evidence.");
+        if (lifecycle.Snapshot.State != RecordingCoordinatorState.Stopped ||
+            !lifecycle.Snapshot.HasRecoverableFault ||
+            lifecycle.Snapshot.Generation <= oldGeneration)
+        {
+            throw new InvalidOperationException("Fault cleanup did not invalidate the old generation into a restartable state.");
+        }
+
+        var recoveredGeneration = lifecycle.Snapshot.Generation;
+        bridge.SourceFaulted = false;
+        var second = lifecycle.StartAsync(new RecordingStartRequest(
+            RecordingSessionKind.Manual,
+            RecordingAudioSource.SystemLoopback)).GetAwaiter().GetResult();
+        Equal(RecordingCoordinatorState.Recording, second.Snapshot.State);
+        if (second.Snapshot.Generation <= recoveredGeneration || bridge.MixedStartCalls != 1)
+            throw new InvalidOperationException("A second recording did not replace the cleaned-up selected session.");
+    }
+
+    public static void RelaunchRecoveryRetainsSelectedCaptureProvenance()
+    {
+        using var root = new TemporaryRoot();
+        var bridge = new SelectedBridge { SourceFaulted = true };
+        var target = Target();
+        RecordingSessionPlan plan;
+        using (var lifecycle = new RecordingLifecycleService(bridge, root.Path, new CurrentProcessCatalog(target)))
+        {
+            var started = lifecycle.StartAsync(new RecordingStartRequest(
+                RecordingSessionKind.Meeting,
+                RecordingAudioSource.SelectedProcessLoopback,
+                ProcessTarget: target,
+                IncludeProcessTree: true)).GetAwaiter().GetResult();
+            plan = started.Session;
+            Equal(RecordingCoordinatorState.Faulted, lifecycle.RefreshAsync().GetAwaiter().GetResult().State);
+            var retained = lifecycle.FinalizeForRecoveryAsync().GetAwaiter().GetResult();
+            if (retained.Published || !File.Exists(plan.BackupAudioPath))
+                throw new InvalidOperationException("The selected session backup was not retained before relaunch recovery.");
+        }
+
+        var storage = new TeamsRecorder.Windows.Application.Storage.SessionStorageService(root.Path);
+        var recovery = new SessionRecoveryService(storage, new AlwaysValidAudio());
+        var result = recovery.RecoverAsync().GetAwaiter().GetResult();
+        if (result.Count != 1 || !result[0].Recovered || !File.Exists(plan.FinalAudioPath))
+            throw new InvalidOperationException("Startup recovery did not promote the retained selected session.");
+
+        var metadata = RecordingInfoJson.Parse(File.ReadAllText(plan.MetadataPath));
+        Equal("teamsAutomatic", metadata.Source);
+        Equal(0, metadata.Participants.Count);
+        Equal(WindowsCaptureMetadata.SelectedProcessLoopback, metadata.WindowsCapture?.AudioSource);
+        Equal("ms-teams.exe", metadata.WindowsCapture?.ProcessName);
+        Equal(true, metadata.WindowsCapture?.IncludedProcessTree);
+    }
+
     private static SelectedProcessTarget Target() => new(
         71,
         new DateTimeOffset(2026, 7, 30, 5, 0, 0, TimeSpan.Zero),
@@ -112,12 +183,19 @@ internal static class SelectedAudioLifecycleTests
         private NativeRecorderState state = NativeRecorderState.Ready;
         public NativeOperationResult StopResult { get; init; } = NativeOperationResult.Success();
         public int StopCalls { get; private set; }
+        public int MixedStartCalls { get; private set; }
+        public bool SourceFaulted { get; set; }
 
         public NativeOperationResult Start(NativeRecordingRequest request) =>
             NativeOperationResult.Failure(NativeRecorderResult.NotImplemented, "Legacy capture is not part of this test.");
 
-        public NativeOperationResult StartMixed(NativeMixedRecordingRequest request) =>
-            NativeOperationResult.Failure(NativeRecorderResult.NotImplemented, "System capture is not part of this test.");
+        public NativeOperationResult StartMixed(NativeMixedRecordingRequest request)
+        {
+            MixedStartCalls++;
+            File.WriteAllBytes(request.OutputPath, [1, 2, 3, 4]);
+            state = NativeRecorderState.Recording;
+            return NativeOperationResult.Success();
+        }
 
         public NativeOperationResult StartSelectedAudio(NativeSelectedAudioRequest request)
         {
@@ -130,20 +208,31 @@ internal static class SelectedAudioLifecycleTests
         public NativeOperationResult Stop()
         {
             StopCalls++;
-            if (StopResult.IsSuccess) state = NativeRecorderState.Stopped;
+            state = NativeRecorderState.Stopped;
             return StopResult;
         }
 
-        public NativeRecorderSnapshot GetSnapshot() => new(
-            NativeRecorderResult.Ok,
-            state,
-            NativeCaptureStats.Empty(RecordingCaptureMode.SelectedAppMixed),
-            null);
+        public NativeRecorderSnapshot GetSnapshot() => SourceFaulted
+            ? new(
+                NativeRecorderResult.CaptureError,
+                NativeRecorderState.Faulted,
+                NativeCaptureStats.Empty(RecordingCaptureMode.SelectedAppMixed),
+                "target exited")
+            : new(
+                NativeRecorderResult.Ok,
+                state,
+                NativeCaptureStats.Empty(RecordingCaptureMode.SelectedAppMixed),
+                null);
 
         public NativeEndpointEnumerationResult EnumerateEndpoints() =>
             new(NativeOperationResult.Success(), Array.Empty<NativeCaptureEndpoint>());
 
         public void Dispose() { }
+    }
+
+    private sealed class AlwaysValidAudio : IAudioBackupValidator
+    {
+        public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
     }
 
     private sealed class ControlledDelay : IRecordingDelay

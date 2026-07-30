@@ -23,7 +23,7 @@
                     <TextBlock Text="{Binding ReadinessText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <Grid ColumnSpacing="16" RowSpacing="12">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Spacing="5">
+                        <StackPanel Grid.Column="0" Spacing="5" Visibility="{Binding RenderEndpointSelectionVisibility}">
                             <TextBlock Text="系統輸出裝置" />
                             <ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding RenderEndpoints}" SelectedItem="{Binding SelectedRenderEndpoint, Mode=TwoWay}" />
                             <TextBlock Text="{Binding SelectedRenderDescription}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
@@ -39,6 +39,53 @@
                             <TextBlock Text="{Binding GlobalMuteHotKeyStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                     </Grid>
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="錄製來源" />
+                        <ComboBox
+                            DisplayMemberPath="DisplayName"
+                            IsEnabled="{Binding IsCaptureSourceSelectionEnabled}"
+                            ItemsSource="{Binding CaptureSources}"
+                            SelectedItem="{Binding SelectedCaptureSource, Mode=TwoWay}" />
+                        <TextBlock
+                            Text="{Binding SelectedCaptureSourceDescription}"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                    <StackPanel
+                        Spacing="6"
+                        Visibility="{Binding SelectedApplicationPanelVisibility}">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <TextBlock Text="應用程式音訊來源" VerticalAlignment="Center" />
+                            <Button Command="{Binding RefreshProcessCatalogCommand}" Content="重新整理應用程式" />
+                        </StackPanel>
+                        <TextBlock
+                            Text="選擇具有可使用視窗的應用程式。只顯示應用程式名稱、處理程序名稱、PID 與視窗可用性；不會儲存路徑或命令列。"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            TextWrapping="Wrap" />
+                        <ListView
+                            ItemsSource="{Binding ProcessCatalog}"
+                            MaxHeight="180"
+                            SelectedItem="{Binding SelectedProcess, Mode=TwoWay}"
+                            SelectionMode="Single">
+                            <ListView.ItemTemplate>
+                                <DataTemplate x:DataType="local:ProcessSelectionChoice">
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Text="{x:Bind DisplayName}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                            <TextBlock Text="{x:Bind ProcessDescription}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            <TextBlock Text="{x:Bind WindowDescription}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="{x:Bind WindowAvailabilityText}" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                        <TextBlock Text="{Binding ProcessCatalogStatusText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
                     <StackPanel Spacing="5">
                         <TextBlock Text="工作階段資料庫" />
                         <TextBox IsEnabled="{Binding IsDeviceSelectionEnabled}" PlaceholderText="選擇儲存工作階段的資料夾" Text="{Binding OutputFolder, Mode=TwoWay}" />

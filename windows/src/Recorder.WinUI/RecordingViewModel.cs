@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 using Recorder.Core;
 using TeamsRecorder.Windows.Application;
 using TeamsRecorder.Windows.Application.Recovery;
@@ -28,12 +29,15 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     // and final publication in the Application layer.  This VM only maps that
     // state to WinUI properties and commands.
     private RecordingLifecycleService? recordingLifecycle;
+    private readonly IProcessCatalog processCatalog = new ProcessCatalog();
     private RecordingLibraryService? libraryService;
     private string? libraryServiceRoot;
     private RecordingCoordinatorSnapshot snapshot = RecordingCoordinatorSnapshot.Initial;
     private MediaPlayer? mediaPlayer;
     private EndpointChoice? selectedRenderEndpoint;
     private EndpointChoice? selectedMicrophoneEndpoint;
+    private CaptureSourceChoice? selectedCaptureSource;
+    private ProcessSelectionChoice? selectedProcess;
     private LibraryRecording? selectedLibraryItem;
     private string? loadedPlaybackPath;
     private string outputFolder;
@@ -70,6 +74,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     private bool isTeamsAutomaticRecordingOperationInProgress;
     private WindowsGlobalHotKeyRegistrar? globalHotKeyRegistrar;
     private GlobalMuteHotKeyService? globalMuteHotKey;
+    private string processCatalogStatusText = "選擇「指定應用程式」後，按一下重新整理以列出可選程序。";
     private string globalMuteHotKeyStatus = "正在準備 Ctrl+Alt+M 全域麥克風靜音快捷鍵。";
 
     public RecordingViewModel()
@@ -92,6 +97,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         StopCommand = new AsyncRelayCommand(StopAsync, () => CanStop);
         StartTestCommand = new AsyncRelayCommand(StartTestAsync, () => CanStart);
         RefreshDevicesCommand = new AsyncRelayCommand(RefreshEndpointsAsync, () => CanRefreshDevices);
+        RefreshProcessCatalogCommand = new AsyncRelayCommand(RefreshProcessCatalogAsync, () => CanRefreshProcessCatalog);
         RefreshLibraryCommand = new AsyncRelayCommand(RefreshLibraryAsync, () => CanRefreshLibrary);
         PlayCommand = new AsyncRelayCommand(PlayAsync, () => CanPlay);
         PauseCommand = new AsyncRelayCommand(PauseAsync, () => CanPause);
@@ -108,6 +114,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         DisableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(DisableTeamsAutomaticRecordingAsync, () => CanDisableTeamsAutomaticRecording);
         ToggleLocalMicrophoneMuteCommand = new AsyncRelayCommand(ToggleLocalMicrophoneMuteAsync, () => !isShuttingDown);
         teamsInputMute.Changed += OnInputMuteChanged;
+        CaptureSources.Add(CaptureSourceChoice.SystemAudio);
+        CaptureSources.Add(CaptureSourceChoice.SelectedApplication);
+        selectedCaptureSource = CaptureSourceChoice.SystemAudio;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -115,6 +124,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     public ObservableCollection<EndpointChoice> RenderEndpoints { get; } = [];
 
     public ObservableCollection<EndpointChoice> CaptureEndpoints { get; } = [];
+
+    public ObservableCollection<CaptureSourceChoice> CaptureSources { get; } = [];
+
+    public ObservableCollection<ProcessSelectionChoice> ProcessCatalog { get; } = [];
 
     public ObservableCollection<LibraryRecording> LibraryItems { get; } = [];
 
@@ -125,6 +138,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     public AsyncRelayCommand StartTestCommand { get; }
 
     public AsyncRelayCommand RefreshDevicesCommand { get; }
+
+    public AsyncRelayCommand RefreshProcessCatalogCommand { get; }
 
     public AsyncRelayCommand RefreshLibraryCommand { get; }
 
@@ -275,6 +290,61 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
                 UpdateCommandStates();
             }
         }
+    }
+
+    public CaptureSourceChoice? SelectedCaptureSource
+    {
+        get => selectedCaptureSource;
+        set
+        {
+            if (SetProperty(ref selectedCaptureSource, value ?? CaptureSourceChoice.SystemAudio))
+            {
+                OnPropertyChanged(nameof(SelectedCaptureSourceDescription));
+                OnPropertyChanged(nameof(RenderEndpointSelectionVisibility));
+                OnPropertyChanged(nameof(SelectedApplicationPanelVisibility));
+                UpdateCommandStates();
+            }
+        }
+    }
+
+    public ProcessSelectionChoice? SelectedProcess
+    {
+        get => selectedProcess;
+        set
+        {
+            if (SetProperty(ref selectedProcess, value))
+            {
+                OnPropertyChanged(nameof(SelectedCaptureSourceDescription));
+                UpdateCommandStates();
+            }
+        }
+    }
+
+    public bool IsCaptureSourceSelectionEnabled => IsSetupEditable;
+
+    public Visibility RenderEndpointSelectionVisibility =>
+        SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+
+    public Visibility SelectedApplicationPanelVisibility =>
+        SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    public string SelectedCaptureSourceDescription => SelectedCaptureSource?.Kind switch
+    {
+        CaptureSourceKind.SelectedApplication when SelectedProcess is null =>
+            "請選擇一個具有可使用視窗的應用程式。",
+        CaptureSourceKind.SelectedApplication =>
+            $"只會錄製 {SelectedProcess!.DisplayName}（PID {SelectedProcess.ProcessId}）。",
+        _ => "錄製系統音訊，並使用所選輸出裝置。",
+    };
+
+    public string ProcessCatalogStatusText
+    {
+        get => processCatalogStatusText;
+        private set => SetProperty(ref processCatalogStatusText, value);
     }
 
     public LibraryRecording? SelectedLibraryItem
@@ -1020,13 +1090,19 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             RecordingCoordinatorState.Failed;
 
     private bool SelectedDevicesReady =>
-        SelectedRenderEndpoint is { IsAvailable: true } &&
+        (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication ||
+         SelectedRenderEndpoint is { IsAvailable: true }) &&
         (SelectedMicrophoneEndpoint is null or { EndpointId: null } or { IsAvailable: true });
+
+    private bool SelectedProcessReady =>
+        SelectedCaptureSource?.Kind != CaptureSourceKind.SelectedApplication ||
+        SelectedProcess is { IsAvailable: true };
 
     private bool CanStart =>
         IsSetupEditable &&
         storageCanStart &&
         SelectedDevicesReady &&
+        SelectedProcessReady &&
         recordingLifecycle is not { HasPublicationInProgress: true };
 
     private bool CanStop =>
@@ -1039,6 +1115,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             snapshot.State == RecordingCoordinatorState.Faulted && snapshot.NeedsNativeCleanup);
 
     private bool CanRefreshDevices => IsSetupEditable;
+
+    private bool CanRefreshProcessCatalog => IsSetupEditable;
 
     private bool CanRefreshLibrary => !IsBusy && !isShuttingDown;
 
@@ -1223,6 +1301,35 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     private Task RefreshEndpointsAsync() => RunOperationAsync(RefreshEndpointsCoreAsync);
 
+    private Task RefreshProcessCatalogAsync() => RunOperationAsync(RefreshProcessCatalogCoreAsync);
+
+    private async Task RefreshProcessCatalogCoreAsync()
+    {
+        // Process enumeration can be slow or deny access to individual processes.
+        // The Application catalog filters those cases and exposes no paths or command lines.
+        var entries = await Task.Run(processCatalog.GetProcesses);
+        var previous = SelectedProcess;
+
+        ProcessCatalog.Clear();
+        foreach (var entry in entries)
+        {
+            ProcessCatalog.Add(new ProcessSelectionChoice(
+                entry.ProcessId,
+                entry.StartedAtUtc,
+                entry.ApplicationName,
+                entry.ProcessName,
+                entry.WindowTitle,
+                entry.HasWindow,
+                entry.Availability));
+        }
+
+        SelectedProcess = ProcessCatalog.FirstOrDefault(candidate =>
+            candidate.HasSameIdentity(previous));
+        ProcessCatalogStatusText = ProcessCatalog.Count == 0
+            ? "沒有可選的應用程式；請在停止錄製後重新整理。"
+            : $"已列出 {ProcessCatalog.Count} 個應用程式程序。";
+    }
+
     private Task RefreshLibraryAsync() => RunOperationAsync(RefreshLibraryCoreAsync);
 
     private Task PlayAsync() => RunOperationAsync(() =>
@@ -1352,7 +1459,39 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         }
 
         RefreshStorageReadiness();
-        var started = await GetRecordingLifecycle().StartMixedAsync(kind, SelectedRenderEndpoint?.EndpointId, SelectedMicrophoneEndpoint?.EndpointId, testDuration);
+        var lifecycle = GetRecordingLifecycle();
+        RecordingLifecycleStartResult started;
+        if (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication)
+        {
+            var process = SelectedProcess
+                ?? throw new InvalidOperationException("請先選擇應用程式。");
+            if (!process.IsAvailable)
+            {
+                throw new InvalidOperationException("所選應用程式已沒有可使用的視窗。");
+            }
+
+            // The application layer verifies PID + start time immediately before
+            // native capture and fails closed if the identity is no longer current.
+            started = await lifecycle.StartAsync(new RecordingStartRequest(
+                kind,
+                RecordingAudioSource.SelectedProcessLoopback,
+                MicrophoneEndpointId: SelectedMicrophoneEndpoint?.EndpointId,
+                ProcessTarget: new SelectedProcessTarget(
+                    process.ProcessId,
+                    process.StartedAtUtc,
+                    process.ProcessName),
+                IncludeProcessTree: true,
+                TestDuration: testDuration));
+        }
+        else
+        {
+            started = await lifecycle.StartAsync(new RecordingStartRequest(
+                kind,
+                RecordingAudioSource.SystemLoopback,
+                RenderEndpointId: SelectedRenderEndpoint?.EndpointId,
+                MicrophoneEndpointId: SelectedMicrophoneEndpoint?.EndpointId,
+                TestDuration: testDuration));
+        }
         var plan = started.Session;
         NextOutputPath = plan.FinalAudioPath;
         lastResultText = $"正在建立工作階段：{plan.FinalAudioPath}";
@@ -1779,6 +1918,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         isRecorderAvailable = value;
         OnPropertyChanged(nameof(ReadinessText));
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
+        OnPropertyChanged(nameof(IsCaptureSourceSelectionEnabled));
     }
 
     private void UpdateCommandStates()
@@ -1787,6 +1927,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         StopCommand.RaiseCanExecuteChanged();
         StartTestCommand.RaiseCanExecuteChanged();
         RefreshDevicesCommand.RaiseCanExecuteChanged();
+        RefreshProcessCatalogCommand.RaiseCanExecuteChanged();
         RefreshLibraryCommand.RaiseCanExecuteChanged();
         PlayCommand.RaiseCanExecuteChanged();
         PauseCommand.RaiseCanExecuteChanged();

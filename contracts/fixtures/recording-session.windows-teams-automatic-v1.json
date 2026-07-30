@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "title": "Audio-only Teams call",
+  "title": "Teams automatic recording",
   "tags": [],
   "isFavorite": false,
   "mediaKind": "audio",
   "screenIntervals": [],
   "recoveryState": "none",
-  "source": "manual",
+  "source": "teamsAutomatic",
   "participants": []
 }

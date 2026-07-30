@@ -2,36 +2,52 @@
 param()
 
 $ErrorActionPreference = "Stop"
-$contractsRoot = Join-Path $PSScriptRoot "..\contracts"
-$jsonFiles = Get-ChildItem -LiteralPath $contractsRoot -Filter "*.json" -Recurse
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
+$canonicalContractsRoot = Join-Path $repoRoot "contracts"
+$schemaPath = Join-Path $canonicalContractsRoot "recording-session.schema.json"
+$windowsFixturePath = Join-Path $repoRoot "windows\contracts\fixtures\recording-info.windows-v1.json"
+$validatorProject = Join-Path $PSScriptRoot "ContractSchemaValidator\ContractSchemaValidator.csproj"
+$fixturesDirectory = Join-Path $canonicalContractsRoot "fixtures"
 
-if ($jsonFiles.Count -lt 6) {
-    throw "Expected at least six contract, schema, and fixture JSON files."
+foreach ($requiredPath in @($schemaPath, $windowsFixturePath, $validatorProject)) {
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "Required recording-session contract input is missing: $requiredPath"
+    }
+}
+if (-not (Test-Path -LiteralPath $fixturesDirectory -PathType Container)) {
+    throw "Required recording-session fixtures directory is missing: $fixturesDirectory"
 }
 
-foreach ($file in $jsonFiles) {
-    $null = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+function Read-JsonObject {
+    param([Parameter(Mandatory)][string]$Path)
+
+    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
-$legacyMetadataPath = Join-Path $contractsRoot "fixtures\recording-info.macos-legacy.json"
-$legacyMetadata = Get-Content -LiteralPath $legacyMetadataPath -Raw | ConvertFrom-Json
-if ($null -ne $legacyMetadata.schemaVersion) {
-    throw "The legacy fixture must not contain schemaVersion."
-}
-if ($legacyMetadata.mediaKind -ne "video" -or $legacyMetadata.screenIntervals.Count -ne 1) {
-    throw "The legacy video metadata fixture is incomplete."
+$canonicalFixtures = @(Get-ChildItem -LiteralPath $fixturesDirectory -Filter "*.json" -File | Sort-Object Name)
+if ($canonicalFixtures.Count -eq 0) {
+    throw "The canonical recording-session contract must include at least one fixture."
 }
 
-$windowsMetadataPath = Join-Path $contractsRoot "fixtures\recording-info.windows-v1.json"
-$windowsMetadata = Get-Content -LiteralPath $windowsMetadataPath -Raw | ConvertFrom-Json
-if ($windowsMetadata.schemaVersion -ne 1 -or $windowsMetadata.mediaKind -ne "audio") {
-    throw "The Windows v1 metadata fixture does not match the v1 contract."
+$canonicalFixturePath = Join-Path $fixturesDirectory "recording-info-v1.json"
+if (-not (Test-Path -LiteralPath $canonicalFixturePath -PathType Leaf)) {
+    throw "The cross-platform recording-info-v1 fixture is missing."
 }
 
-$meetingEpochPath = Join-Path $contractsRoot "fixtures\teams-meeting-epoch.json"
-$meetingEpoch = Get-Content -LiteralPath $meetingEpochPath -Raw | ConvertFrom-Json
-if ($meetingEpoch.expected.stopCommandCount -ne 0) {
-    throw "The rejoin fixture must not expect an automatic stop."
+$canonicalFixture = Read-JsonObject $canonicalFixturePath
+if ($canonicalFixture.source -ne "teamsAutomatic" -or $canonicalFixture.participants.Count -lt 1) {
+    throw "The cross-platform canonical fixture must describe a Teams automatic recording with participants."
 }
 
-Write-Host "Validated $($jsonFiles.Count) JSON contract and fixture files."
+$windowsFixture = Read-JsonObject $windowsFixturePath
+if ($windowsFixture.source -ne "manual" -or $null -eq $windowsFixture.participants -or $windowsFixture.participants.Count -ne 0) {
+    throw "The Windows fixture must describe a manual recording with an empty participants array."
+}
+
+$fixturePaths = @($canonicalFixtures.FullName) + @($windowsFixturePath)
+& dotnet run --project $validatorProject --configuration Release -- $schemaPath @fixturePaths
+if ($LASTEXITCODE -ne 0) {
+    throw "Draft 2020-12 recording-session schema validation failed."
+}
+
+Write-Host "Validated canonical Draft 2020-12 recording-session schema against $($fixturePaths.Count) cross-platform and Windows fixtures."

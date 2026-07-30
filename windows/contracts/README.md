@@ -1,12 +1,14 @@
 # Cross-platform session contracts
 
-These contracts preserve the existing macOS session folder format while
-allowing Windows writers to add a schema version.
+The canonical cross-platform recording-session contract lives at
+[`../../contracts/recording-session.schema.json`](../../contracts/recording-session.schema.json).
+`recording-info.schema.json` is only a compatibility reference for Windows
+tooling; it must not diverge from that root contract.
 
 Compatibility rules:
 
 1. A missing `schemaVersion` means the legacy macOS v1 shape.
-2. New Windows files write `schemaVersion: 1`.
+2. New Windows files write `schemaVersion: 1`, `source`, and `participants`.
 3. Readers ignore unknown fields so a newer producer does not make a session
    disappear from the library.
 4. Dates use ISO 8601 strings, matching the Swift encoder.

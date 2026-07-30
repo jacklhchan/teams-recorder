@@ -75,11 +75,12 @@ From a Developer PowerShell at repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Verify-Windows.ps1
 ```
 
-The verifier configures the native projects, runs the Debug native test suite,
-builds the distributable x64 Release `Recorder.NativeBridge.dll`, builds the
-.NET solution and WinUI executable, then runs managed and contract tests. It
-does not exercise a real audio endpoint, microphone, or speaker, and is not a
-substitute for the release validation above.
+The verifier configures the native projects, completes both Debug and Release
+native builds and CTest suites, builds the distributable x64 Release
+`Recorder.NativeBridge.dll`, builds the .NET solution and WinUI executable,
+publishes an unpackaged x64 Release output, then runs managed and contract
+tests. It does not exercise a real audio endpoint, microphone, or speaker,
+and is not a substitute for the release validation above.
 
 The WinUI Release executable is emitted at:
 

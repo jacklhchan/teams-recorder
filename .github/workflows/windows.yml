@@ -11,7 +11,7 @@ on:
       - "windows/**"
 
 jobs:
-  portable-core:
+  windows-verification:
     # CMake presets intentionally target the VS 2022 generator. Pin the
     # runner rather than allowing windows-latest to move to a newer VS image.
     runs-on: windows-2022
@@ -20,33 +20,12 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
-      - name: Validate contracts
+      - name: Verify native, managed, contracts, and unpackaged publish
         shell: pwsh
-        run: ./windows/scripts/Test-Contracts.ps1
-      - name: Build Release native bridge
-        working-directory: windows/native
+        run: ./windows/scripts/Verify-Windows.ps1
+      - name: Validate packaging guards
         shell: pwsh
-        run: |
-          cmake --preset windows-x64
-          cmake --build --preset windows-x64-release --target Recorder.NativeBridge
-      - name: Build
-        working-directory: windows
-        run: dotnet build ./TeamsRecorder.Windows.sln --configuration Release
-      - name: Test
-        working-directory: windows
-        run: dotnet run --project ./tests/Recorder.Core.Tests/Recorder.Core.Tests.csproj --configuration Release --no-build
-
-  native-contract:
-    # See portable-core: the native preset requires Visual Studio 2022.
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-      - name: Configure
-        working-directory: windows/native
-        run: cmake --preset windows-x64
-      - name: Build
-        working-directory: windows/native
-        run: cmake --build --preset windows-x64-debug
-      - name: Test
-        working-directory: windows/native
-        run: ctest --preset windows-x64-debug
+        run: ./windows/scripts/Test-Package-Windows.ps1
+      - name: Build unsigned MSIX package
+        shell: pwsh
+        run: ./windows/scripts/Package-Windows.ps1

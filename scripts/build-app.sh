@@ -141,7 +141,7 @@ document = {
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": version,
     "CFBundleVersion": build,
-    "LSMinimumSystemVersion": "15.0",
+    "LSMinimumSystemVersion": "26.0",
     "NSHighResolutionCapable": True,
     "NSMicrophoneUsageDescription": "Local Meeting Recorder needs microphone access to record your selected mic input.",
     "NSDownloadsFolderUsageDescription": "Local Meeting Recorder reads and saves recordings in your Downloads folder.",

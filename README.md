@@ -1,6 +1,6 @@
 # Local Meeting Recorder
 
-macOS SwiftUI MVP for recording meeting audio locally:
+macOS 26.0 or newer SwiftUI app for recording meeting audio locally:
 
 - Capture all system audio or one selected app with ScreenCaptureKit.
 - Capture a selected physical microphone in the same native capture session.

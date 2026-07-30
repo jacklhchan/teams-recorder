@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Complete `2026-07-28-secure-credentials-and-teams-migration.md` Task 1 before this plan.
-- Minimum deployment target remains macOS 15.
+- Minimum deployment target is macOS 26.
 - The saved API base URL ends in `/v1`.
 - Accept HTTPS for any host; accept HTTP only for loopback.
 - Reject URL user information, query strings, and fragments.

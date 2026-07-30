@@ -1,4 +1,5 @@
 import hashlib
+import plistlib
 import re
 import unittest
 from pathlib import Path
@@ -76,6 +77,7 @@ class PackagingContractTests(unittest.TestCase):
             "oMLX settings are read only for a one-time migration",
             "oMLX is\nnot required, launched, installed, or managed by the recorder",
             "build/Local Meeting Recorder Staging.app",
+            "macOS 26.0 or newer",
             "Apache License 2.0",
             "Apple-derived virtual microphone sample material retains the separate",
             "Driver/LocalRecorderVirtualMic/LICENSE-Apple-Sample.txt",
@@ -99,6 +101,62 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIsNone(
             re.search(r"\bQwen[^\n`]*(?:4-bit|8-bit|8bit|bf16)\b", readme),
         )
+
+    def test_macos_26_minimum_deployment_contract(self):
+        package = (ROOT / "Package.swift").read_text(encoding="utf-8")
+        app_build = (
+            ROOT / "scripts/build-app.sh"
+        ).read_text(encoding="utf-8")
+        app_verify = (
+            ROOT / "scripts/verify-app-bundle.sh"
+        ).read_text(encoding="utf-8")
+        virtual_mic_build = (
+            ROOT / "scripts/build-virtual-mic.sh"
+        ).read_text(encoding="utf-8")
+        app_packaging_test = (
+            ROOT / "Tests/PackagingTests/run-tests.sh"
+        ).read_text(encoding="utf-8")
+        driver_bundle_test = (
+            ROOT / "Tests/VirtualMicDriverTests/run-bundle-tests.sh"
+        ).read_text(encoding="utf-8")
+        input_mute = (
+            ROOT
+            / "Sources/RecorderApp/VirtualMic/InputMuteController.swift"
+        ).read_text(encoding="utf-8")
+        with (
+            ROOT / "Driver/LocalRecorderVirtualMic/Info.plist"
+        ).open("rb") as stream:
+            driver_info = plistlib.load(stream)
+
+        self.assertIn('.macOS("26.0")', package)
+        self.assertNotIn('.macOS("15.0")', package)
+        self.assertIn('"LSMinimumSystemVersion": "26.0"', app_build)
+        self.assertIn(
+            "Print :LSMinimumSystemVersion' \"$PLIST\")\" = \"26.0\"",
+            app_verify,
+        )
+        self.assertEqual(driver_info["LSMinimumSystemVersion"], "26.0")
+        self.assertEqual(
+            virtual_mic_build.count("-mmacosx-version-min=26.0"),
+            3,
+        )
+        self.assertNotIn("-mmacosx-version-min=15.0", virtual_mic_build)
+        self.assertIn("validate_macos_26_binary", app_packaging_test)
+        self.assertIn(
+            'validate_macos_26_binary "$MOVED/Contents/MacOS/'
+            'LocalMeetingRecorder"',
+            app_packaging_test,
+        )
+        self.assertIn(
+            'LSMinimumSystemVersion raw "$INFO_PLIST")" = "26.0"',
+            driver_bundle_test,
+        )
+        self.assertIn(
+            '/usr/bin/xcrun vtool -show-build "$EXECUTABLE"',
+            driver_bundle_test,
+        )
+        self.assertIn(r"minos 26\.0", driver_bundle_test)
+        self.assertNotIn("@available(macOS 14.0, *)", input_mute)
 
     def test_app_build_packages_license_and_notices(self):
         script = (

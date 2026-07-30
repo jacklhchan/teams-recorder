@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Target macOS 15.0 and keep the existing Swift Package dependency set unchanged.
+- Target macOS 26.0 and keep the existing Swift Package dependency set unchanged.
 - Auto Meeting Mode is opt-in and persisted under `teamsAutoMeetingEnabled`; its default is `false`.
 - A paired authoritative `isInMeeting == true` event starts one silent, cancellable five-second countdown.
 - A recording owned by Teams automation stops only after ten continuous seconds of authoritative `isInMeeting == false`.

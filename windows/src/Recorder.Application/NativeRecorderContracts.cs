@@ -188,7 +188,9 @@ public sealed record NativeCaptureStats(
     ulong Discontinuities,
     ulong FirstQpc100Nanoseconds,
     ulong LastQpc100Nanoseconds,
-    float Peak)
+    float Peak,
+    NativeSourceTimelineStats RenderTimeline,
+    NativeSourceTimelineStats MicrophoneTimeline)
 {
     public static NativeCaptureStats Empty(RecordingCaptureMode mode) => new(
         mode,
@@ -204,7 +206,20 @@ public sealed record NativeCaptureStats(
         Discontinuities: 0,
         FirstQpc100Nanoseconds: 0,
         LastQpc100Nanoseconds: 0,
-        Peak: 0);
+        Peak: 0,
+        RenderTimeline: NativeSourceTimelineStats.Empty,
+        MicrophoneTimeline: NativeSourceTimelineStats.Empty);
+}
+
+public sealed record NativeSourceTimelineStats(
+    ulong DriftCorrections,
+    ulong LatePackets,
+    ulong LateFramesDropped,
+    ulong QueueOverflows,
+    ulong SourceDisconnects,
+    ulong Discontinuities)
+{
+    public static NativeSourceTimelineStats Empty { get; } = new(0, 0, 0, 0, 0, 0);
 }
 
 public sealed record NativeRecorderSnapshot(

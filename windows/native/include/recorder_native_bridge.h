@@ -109,7 +109,23 @@ typedef struct RecorderNativeStats {
     uint64_t first_qpc_100ns;
     uint64_t last_qpc_100ns;
     float peak;
+    /* Additive v2 canonical-timeline diagnostics. Older callers may provide
+       the v1 96-byte prefix by setting struct_size accordingly. */
+    uint64_t render_drift_corrections;
+    uint64_t render_late_packets;
+    uint64_t render_late_frames_dropped;
+    uint64_t render_queue_overflows;
+    uint64_t render_source_disconnects;
+    uint64_t render_discontinuities;
+    uint64_t microphone_drift_corrections;
+    uint64_t microphone_late_packets;
+    uint64_t microphone_late_frames_dropped;
+    uint64_t microphone_queue_overflows;
+    uint64_t microphone_source_disconnects;
+    uint64_t microphone_discontinuities;
 } RecorderNativeStats;
+
+#define RECORDER_NATIVE_STATS_V1_SIZE 96u
 
 RECORDER_NATIVE_API RecorderNativeBridge* recorder_native_create(void);
 
@@ -153,6 +169,8 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_set_microphone_muted(
 /* Stops capture, drains the source, flushes 48 kHz stereo output, and finalizes once. */
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_stop(RecorderNativeBridge* bridge);
 RECORDER_NATIVE_API RecorderNativeState recorder_native_get_state(const RecorderNativeBridge* bridge);
+/* The bridge accepts the v1 96-byte prefix and copies no more than the
+   caller-provided struct_size. */
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_get_stats(
     const RecorderNativeBridge* bridge,
     RecorderNativeStats* stats);

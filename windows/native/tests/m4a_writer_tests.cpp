@@ -389,7 +389,7 @@ void PublishFailureRetainsDecodablePartial(const std::filesystem::path& director
     std::error_code create_error;
     const bool created_blocker = std::filesystem::create_directory(final_path, create_error);
     Expect(created_blocker && !create_error, "could not create deterministic M4A publish blocker");
-    Expect(writer->Finalize(&detail) == Error::IoError,
+    Expect(writer->FinalizeForRecovery(&detail) == Error::IoError,
            "M4A finalization unexpectedly published through a directory blocker");
     writer.reset();
 
@@ -398,6 +398,47 @@ void PublishFailureRetainsDecodablePartial(const std::filesystem::path& director
     Expect(std::filesystem::exists(partial_path),
            "M4A publish failure discarded the recoverable partial artifact");
     ExpectDecodableAacStream(partial_path);
+}
+
+void FaultAfterBlocksFinalizesRecoverableBackup(const std::filesystem::path& directory,
+                                                const Options& options) {
+    const auto session = directory / "manual-fault-after-blocks";
+    std::error_code create_error;
+    std::filesystem::create_directories(session, create_error);
+    Expect(!create_error, "could not create fault-recovery session directory");
+
+    const auto backup_path = session / "recording.audio-backup.m4a";
+    const auto recovered_path = session / "recording.m4a";
+    Error error = Error::Ok;
+    std::string detail;
+    auto writer = Writer::Create(backup_path, 128'000U, &error, &detail);
+    Expect(writer != nullptr && error == Error::Ok,
+           "fault-recovery writer creation failed");
+
+    std::vector<float> frames(960U * 2U, 0.0F);
+    for (std::uint32_t block = 0; block < options.iterations; ++block) {
+        frames[static_cast<std::size_t>(block % 960U) * 2U] = 0.25F;
+        Expect(writer->WriteFrames(
+                   frames.data(),
+                   960U,
+                   static_cast<std::uint64_t>(block) * 200'000U,
+                   &detail) == Error::Ok,
+               "fault-recovery writer could not write captured audio");
+    }
+
+    // Model a source/capture fault after N blocks: ingress has stopped, so
+    // this is the single bounded-drain/close path available to the mixer.
+    Expect(writer->FinalizeForRecovery(&detail) == Error::Ok,
+           "fault-recovery writer could not finalize accumulated audio");
+    writer.reset();
+    ExpectDecodableAacStream(backup_path);
+
+    // This is the same non-overwriting promotion performed by startup
+    // recovery once it sees a valid recording.audio-backup.m4a artifact.
+    std::filesystem::rename(backup_path, recovered_path, create_error);
+    Expect(!create_error && !std::filesystem::exists(backup_path),
+           "startup recovery could not promote the retained backup");
+    ExpectDecodableAacStream(recovered_path);
 }
 
 void CreateThenAbortCleanly(const std::filesystem::path& directory) {
@@ -448,6 +489,8 @@ int main(int argc, char** argv) {
                     AbortStateIsIdempotentAndClosed(directory);
                 } else if (options.test == "publish-failure") {
                     PublishFailureRetainsDecodablePartial(directory);
+                } else if (options.test == "fault-after") {
+                    FaultAfterBlocksFinalizesRecoverableBackup(directory, options);
                 } else if (options.test == "create") {
                     CreateThenAbortCleanly(directory);
                 } else {

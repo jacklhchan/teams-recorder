@@ -4,6 +4,7 @@
 #include "m4a_writer.h"
 #include "mix_format_decoder.h"
 #include "wasapi_capture.h"
+#include "canonical_timeline.h"
 
 #include <windows.h>
 
@@ -57,19 +58,16 @@ std::string WideToUtf8(const std::wstring& value) {
     return result;
 }
 
-struct Chunk {
-    std::vector<float> samples;
-    std::size_t offset_frames = 0;
-};
-
 struct Source {
     std::unique_ptr<recorder::audio::WasapiCapture> capture;
     std::unique_ptr<recorder::format::MixFormat> format;
     std::unique_ptr<recorder::resample::LinearResampler> resampler;
     std::vector<std::uint8_t> format_bytes;
-    std::deque<Chunk> queue;
+    std::deque<recorder::timeline::AudioChunk> queue;
     std::size_t queued_frames = 0;
     bool received_audio = false;
+    bool disconnect_accounted = false;
+    recorder::timeline::Source timeline_source = recorder::timeline::Source::Render;
 };
 
 }  // namespace
@@ -94,6 +92,10 @@ public:
             config_ = std::move(config);
             render_ = {};
             microphone_ = {};
+            render_.timeline_source = recorder::timeline::Source::Render;
+            microphone_.timeline_source = recorder::timeline::Source::Microphone;
+            timeline_ = {};
+            next_output_frame_ = 0;
             stats_ = {};
             stats_.struct_size = sizeof(stats_);
             stats_.mode = RECORDER_NATIVE_CAPTURE_MIXED;
@@ -104,6 +106,9 @@ public:
             error_.clear();
             stop_requested_ = false;
             writer_ready_ = false;
+            // Mute is a per-session routing choice.  A previous recording
+            // must never leave the next session's selected microphone muted.
+            microphone_muted_ = false;
         }
 
         mixer_ = std::thread([this] { MixerThread(); });
@@ -169,9 +174,17 @@ public:
 
         if (render_.capture) {
             render_.capture->Stop();
+            if (render_.capture->last_error().device_invalidated) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                timeline_.MarkDisconnected(render_.timeline_source);
+            }
         }
         if (microphone_.capture) {
             microphone_.capture->Stop();
+            if (microphone_.capture->last_error().device_invalidated) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                timeline_.MarkDisconnected(microphone_.timeline_source);
+            }
         }
         if (mixer_.joinable()) {
             mixer_.join();
@@ -208,7 +221,22 @@ public:
 
     RecorderNativeStats stats() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return stats_;
+        RecorderNativeStats result = stats_;
+        const auto& render_counters = timeline_.counters(recorder::timeline::Source::Render);
+        result.render_drift_corrections = render_counters.drift_corrections;
+        result.render_late_packets = render_counters.late_packets;
+        result.render_late_frames_dropped = render_counters.late_frames_dropped;
+        result.render_queue_overflows = render_counters.queue_overflows;
+        result.render_source_disconnects = render_counters.source_disconnects;
+        result.render_discontinuities = render_counters.discontinuities;
+        const auto& microphone_counters = timeline_.counters(recorder::timeline::Source::Microphone);
+        result.microphone_drift_corrections = microphone_counters.drift_corrections;
+        result.microphone_late_packets = microphone_counters.late_packets;
+        result.microphone_late_frames_dropped = microphone_counters.late_frames_dropped;
+        result.microphone_queue_overflows = microphone_counters.queue_overflows;
+        result.microphone_source_disconnects = microphone_counters.source_disconnects;
+        result.microphone_discontinuities = microphone_counters.discontinuities;
+        return result;
     }
 
     std::string last_error() const {
@@ -239,6 +267,10 @@ private:
         if (failure_ == RECORDER_NATIVE_OK) {
             failure_ = result;
             error_ = std::move(text);
+            // Stop accepting ingress immediately.  The mixer is still allowed
+            // to drain the bounded queues below before it closes the backup.
+            stop_requested_ = true;
+            cv_.notify_all();
         }
         return result;
     }
@@ -329,27 +361,50 @@ private:
 
             if (!normalized.empty()) {
                 const std::size_t frame_count = normalized.size() / 2U;
-                while (source.queued_frames + frame_count > kMaxQueuedFrames &&
+                const auto placement = timeline_.Place(
+                    source.timeline_source,
+                    block.qpc_position,
+                    block.device_position_frames,
+                    source.format->sample_rate,
+                    frame_count,
+                    block.discontinuity);
+                if (placement.late_frames_dropped >= frame_count) {
+                    // This packet belongs wholly to media already emitted.
+                    // Never move it forward: doing so would duplicate audio.
+                    normalized.clear();
+                }
+                if (placement.late_frames_dropped > 0 &&
+                    placement.late_frames_dropped < frame_count) {
+                    normalized.erase(
+                        normalized.begin(),
+                        normalized.begin() + static_cast<std::ptrdiff_t>(
+                            placement.late_frames_dropped * 2U));
+                }
+                const std::size_t accepted_frame_count = normalized.size() / 2U;
+                while (source.queued_frames + accepted_frame_count > kMaxQueuedFrames &&
                        !source.queue.empty()) {
-                    const Chunk& discarded = source.queue.front();
+                    const recorder::timeline::AudioChunk& discarded = source.queue.front();
                     source.queued_frames -=
                         discarded.samples.size() / 2U - discarded.offset_frames;
                     source.queue.pop_front();
                     ++stats_.discontinuities;
+                    timeline_.MarkQueueOverflow(source.timeline_source);
                 }
 
-                if (frame_count > kMaxQueuedFrames ||
-                    source.queued_frames + frame_count > kMaxQueuedFrames) {
+                if (accepted_frame_count > kMaxQueuedFrames ||
+                    source.queued_frames + accepted_frame_count > kMaxQueuedFrames) {
                     FailLocked(
                         RECORDER_NATIVE_INTERNAL_ERROR,
                         "The mixed audio queue exceeded its bounded capacity.");
                     return;
                 }
 
-                source.queued_frames += frame_count;
-                source.queue.push_back({std::move(normalized), 0});
-                source.received_audio = true;
-                cv_.notify_one();
+                if (accepted_frame_count > 0) {
+                    source.queued_frames += accepted_frame_count;
+                    source.queue.push_back({std::move(normalized), placement.frame, 0});
+                    source.received_audio = true;
+                    cv_.notify_one();
+                }
             }
 
             if (stats_.packets == 0) {
@@ -371,46 +426,38 @@ private:
         }
     }
 
-    static void PullFrames(Source& source, float* target) {
-        std::size_t remaining = kFramesPerBlock;
-        while (remaining > 0 && !source.queue.empty()) {
-            Chunk& chunk = source.queue.front();
-            const std::size_t available =
-                chunk.samples.size() / 2U - chunk.offset_frames;
-            const std::size_t count = (std::min)(remaining, available);
-            for (std::size_t sample = 0; sample < count * 2U; ++sample) {
-                target[sample] +=
-                    chunk.samples[chunk.offset_frames * 2U + sample];
-            }
-            chunk.offset_frames += count;
-            source.queued_frames -= count;
-            target += count * 2U;
-            remaining -= count;
-            if (chunk.offset_frames == chunk.samples.size() / 2U) {
-                source.queue.pop_front();
-            }
-        }
-    }
-
     bool CanEmitBlockLocked() const {
         // System loopback is the normal master clock. If it has not emitted a
         // packet yet, permit an active microphone to establish the recording
         // clock instead of stalling an otherwise valid mic-only signal.
-        return render_.queued_frames >= kFramesPerBlock ||
-            (!render_.received_audio &&
-             microphone_.queued_frames >= kFramesPerBlock);
+        return !render_.queue.empty() ||
+            (!render_.received_audio && !microphone_.queue.empty());
     }
 
     bool CanUseMicrophoneFallbackLocked() const {
         // If a loopback endpoint goes quiet, Windows may stop delivering
         // packets. A bounded wait below makes the mic the temporary master
         // rather than doubling or freezing its timeline.
-        return microphone_.queued_frames >= kFramesPerBlock &&
-            render_.queued_frames < kFramesPerBlock;
+        return !microphone_.queue.empty() && render_.queue.empty();
     }
 
     std::size_t QueuedFramesLocked() const {
         return render_.queued_frames + microphone_.queued_frames;
+    }
+
+    void DetectUnexpectedDisconnectLocked(Source& source) {
+        if (!source.capture || source.capture->is_running() || stop_requested_ ||
+            source.disconnect_accounted) {
+            return;
+        }
+        source.disconnect_accounted = true;
+        timeline_.MarkDisconnected(source.timeline_source);
+        const auto capture_error = source.capture->last_error();
+        FailLocked(
+            RECORDER_NATIVE_CAPTURE_ERROR,
+            capture_error.message.empty()
+                ? "A mixed audio source stopped unexpectedly."
+                : WideToUtf8(capture_error.message));
     }
 
     void MixerThread() {
@@ -444,6 +491,12 @@ private:
                         CanEmitBlockLocked();
                 });
 
+                // WASAPI owns the worker thread, so a device invalidation can
+                // occur without another packet arriving to wake the mixer.
+                // Poll at the same bounded interval used for silence handling.
+                DetectUnexpectedDisconnectLocked(render_);
+                DetectUnexpectedDisconnectLocked(microphone_);
+
                 bool should_emit = CanEmitBlockLocked();
                 if (!should_emit && CanUseMicrophoneFallbackLocked()) {
                     should_emit = true;
@@ -458,8 +511,10 @@ private:
                     continue;
                 }
 
-                PullFrames(render_, block.data());
-                PullFrames(microphone_, block.data());
+                recorder::timeline::MixFrames(&render_.queue, &render_.queued_frames,
+                                               next_output_frame_, block.data(), kFramesPerBlock);
+                recorder::timeline::MixFrames(&microphone_.queue, &microphone_.queued_frames,
+                                               next_output_frame_, block.data(), kFramesPerBlock);
             }
 
             for (float& sample : block) {
@@ -472,6 +527,9 @@ private:
                     &detail) != recorder::m4a::Error::Ok) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
+                // The writer may already have accepted earlier access units;
+                // run the recovery close path rather than discarding them.
+                wrote_block = true;
                 break;
             }
 
@@ -480,15 +538,33 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 stats_.output_frames += kFramesPerBlock;
+                next_output_frame_ += kFramesPerBlock;
                 for (const float sample : block) {
                     stats_.peak = (std::max)(stats_.peak, std::abs(sample));
                 }
             }
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (failure_ != RECORDER_NATIVE_OK) {
-            writer->Abort();
+        bool failed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            failed = failure_ != RECORDER_NATIVE_OK;
+        }
+        if (failed) {
+            if (wrote_block &&
+                writer->FinalizeForRecovery(&detail) != recorder::m4a::Error::Ok) {
+                // Keep the first capture/source fault as the externally
+                // reported cause; the writer retains its named .partial
+                // artifact for startup inspection if this close also fails.
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (error_.empty()) {
+                    error_ = detail;
+                }
+            } else if (!wrote_block) {
+                // No accumulated media exists, so the normal destructive
+                // cleanup is safe and allows owned-folder cleanup upstream.
+                writer->Abort();
+            }
             return;
         }
 
@@ -502,15 +578,23 @@ private:
                     kFramesPerBlock,
                     0,
                     &detail) != recorder::m4a::Error::Ok) {
-                FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
-                writer->Abort();
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
+                }
+                writer->FinalizeForRecovery(&detail);
                 return;
             }
+            std::lock_guard<std::mutex> lock(mutex_);
             stats_.output_frames += kFramesPerBlock;
         }
 
         if (writer->Finalize(&detail) != recorder::m4a::Error::Ok) {
-            FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
+            }
+            writer->FinalizeForRecovery(&detail);
         }
     }
 
@@ -520,6 +604,8 @@ private:
     MixedCaptureSessionConfig config_;
     Source render_;
     Source microphone_;
+    recorder::timeline::CanonicalTimeline timeline_;
+    std::uint64_t next_output_frame_ = 0;
     std::thread mixer_;
     RecorderNativeStats stats_{};
     RecorderNativeResult failure_ = RECORDER_NATIVE_OK;

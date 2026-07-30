@@ -574,14 +574,23 @@ extern "C" RecorderNativeResult recorder_native_get_stats(
     const RecorderNativeBridge* bridge,
     RecorderNativeStats* stats) {
     if (bridge == nullptr || stats == nullptr ||
-        stats->struct_size < sizeof(RecorderNativeStats)) {
+        stats->struct_size < RECORDER_NATIVE_STATS_V1_SIZE) {
         return RECORDER_NATIVE_INVALID_ARGUMENT;
     }
+    const std::uint32_t caller_size = stats->struct_size;
+    const auto copy_stats = [stats, caller_size](const RecorderNativeStats& source) {
+        const std::size_t bytes = caller_size < sizeof(RecorderNativeStats)
+            ? caller_size : sizeof(RecorderNativeStats);
+        std::memcpy(stats, &source, bytes);
+        // struct_size describes the caller-owned buffer, not the native
+        // implementation's newest layout. This keeps v1 callers stable.
+        stats->struct_size = caller_size;
+    };
 
     std::lock_guard<std::mutex> lock(bridge->mutex);
 #if defined(_WIN32)
     if (bridge->session) {
-        *stats = bridge->session->stats();
+        copy_stats(bridge->session->stats());
         const RecorderNativeResult health = bridge->session->health_result();
         if (health != RECORDER_NATIVE_OK) {
             const std::string session_error = bridge->session->last_error();
@@ -593,7 +602,7 @@ extern "C" RecorderNativeResult recorder_native_get_stats(
         return RECORDER_NATIVE_OK;
     }
     if (bridge->mixed_session) {
-        *stats = bridge->mixed_session->stats();
+        copy_stats(bridge->mixed_session->stats());
         const RecorderNativeResult health = bridge->mixed_session->health_result();
         if (health != RECORDER_NATIVE_OK) {
             const std::string session_error = bridge->mixed_session->last_error();
@@ -603,7 +612,7 @@ extern "C" RecorderNativeResult recorder_native_get_stats(
         return RECORDER_NATIVE_OK;
     }
 #endif
-    *stats = bridge->last_stats;
+    copy_stats(bridge->last_stats);
     return RECORDER_NATIVE_OK;
 }
 

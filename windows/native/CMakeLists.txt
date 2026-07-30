@@ -58,6 +58,13 @@ if(WIN32)
     target_link_libraries(Recorder.Resample PUBLIC Recorder.Downmix)
     recorder_enable_strict_warnings(Recorder.Resample)
 
+    add_library(Recorder.Timeline STATIC
+        timeline/canonical_timeline.cpp
+    )
+    target_compile_features(Recorder.Timeline PUBLIC cxx_std_17)
+    target_include_directories(Recorder.Timeline PUBLIC timeline)
+    recorder_enable_strict_warnings(Recorder.Timeline)
+
     add_library(Recorder.WasapiCapture STATIC
         audio/wasapi_capture.cpp
     )
@@ -90,6 +97,7 @@ if(WIN32)
             Recorder.Format
             Recorder.ProcessLoopback
             Recorder.Resample
+            Recorder.Timeline
             Recorder.WasapiCapture
             Recorder.Wav
             mfplat
@@ -188,6 +196,10 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         COMMAND Recorder.M4aWriter.Tests abort-state)
     add_test(NAME Recorder.M4aWriter.PublishFailureRetention
         COMMAND Recorder.M4aWriter.Tests publish-failure)
+    add_test(NAME Recorder.M4aWriter.FaultAfterOneBlockRecovery
+        COMMAND Recorder.M4aWriter.Tests fault-after --iterations 1)
+    add_test(NAME Recorder.M4aWriter.FaultAfterSevenBlocksRecovery
+        COMMAND Recorder.M4aWriter.Tests fault-after --iterations 7)
     set_tests_properties(
         Recorder.M4aWriter.Container
         Recorder.M4aWriter.TailOneFrame
@@ -202,6 +214,8 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         Recorder.M4aWriter.Split960Plus64
         Recorder.M4aWriter.AbortState
         Recorder.M4aWriter.PublishFailureRetention
+        Recorder.M4aWriter.FaultAfterOneBlockRecovery
+        Recorder.M4aWriter.FaultAfterSevenBlocksRecovery
         PROPERTIES
             LABELS "m4a;media-foundation"
             RUN_SERIAL TRUE
@@ -248,6 +262,14 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         target_link_libraries(Recorder.Downmix.Tests PRIVATE Recorder.Downmix)
         recorder_enable_strict_warnings(Recorder.Downmix.Tests)
         add_test(NAME Recorder.Downmix.Tests COMMAND Recorder.Downmix.Tests)
+
+        add_executable(Recorder.Timeline.Tests
+            timeline/tests/canonical_timeline_tests.cpp
+        )
+        target_compile_features(Recorder.Timeline.Tests PRIVATE cxx_std_17)
+        target_link_libraries(Recorder.Timeline.Tests PRIVATE Recorder.Timeline)
+        recorder_enable_strict_warnings(Recorder.Timeline.Tests)
+        add_test(NAME Recorder.Timeline.Tests COMMAND Recorder.Timeline.Tests)
 
     endif()
 endif()

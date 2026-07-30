@@ -12,9 +12,11 @@ static_assert(sizeof(RecorderNativeStartOptions) == 32U, "x64 start options layo
 static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8U, "output path offset changed");
 static_assert(offsetof(RecorderNativeStartOptions, endpoint_id_utf8) == 16U, "endpoint ID offset changed");
 static_assert(offsetof(RecorderNativeStartOptions, target_process_id) == 24U, "target PID offset changed");
-static_assert(sizeof(RecorderNativeStats) == 96U, "x64 stats layout changed");
+static_assert(sizeof(RecorderNativeStats) == 192U, "x64 stats layout changed");
 static_assert(offsetof(RecorderNativeStats, packets) == 32U, "packet counter offset changed");
 static_assert(offsetof(RecorderNativeStats, peak) == 88U, "peak offset changed");
+static_assert(offsetof(RecorderNativeStats, render_drift_corrections) == 96U, "timeline stats must be additive");
+static_assert(RECORDER_NATIVE_STATS_V1_SIZE == 96U, "v1 stats prefix changed");
 static_assert(RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK == 0, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_MICROPHONE == 1, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK == 2, "capture mode ABI value changed");
@@ -69,6 +71,8 @@ int main() {
 
     RecorderNativeStats stats{};
     stats.struct_size = sizeof(stats);
+    RecorderNativeStats legacy_stats{};
+    legacy_stats.struct_size = RECORDER_NATIVE_STATS_V1_SIZE;
     RecorderNativeStartOptions options = ValidOptions();
     RecorderNativeMixedStartOptions mixed{};
     mixed.struct_size = sizeof(mixed);
@@ -87,6 +91,8 @@ int main() {
         Expect((mixed.struct_size = sizeof(mixed), mixed.output_path_utf8 = "not-m4a.wav", recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect((mixed.output_path_utf8 = "contract-test.m4a", mixed.aac_bitrate_bps = 1000U, recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_get_stats(bridge, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_get_stats(bridge, &legacy_stats) == RECORDER_NATIVE_OK) &&
+        Expect(legacy_stats.struct_size == RECORDER_NATIVE_STATS_V1_SIZE) &&
         Expect(recorder_native_get_stats(bridge, &stats) == RECORDER_NATIVE_OK) &&
         Expect(stats.struct_size == sizeof(stats)) &&
         Expect(stats.event_driven == 0U) &&

@@ -175,9 +175,27 @@ Error Writer::Finalize(std::string* detail) {
     finalized_ = true;
     return Error::Ok;
 }
+Error Writer::FinalizeForRecovery(std::string* detail) {
+    const Error result = Finalize(detail);
+    if (result == Error::Ok) {
+        return result;
+    }
+
+    // A failure after capture must not turn accumulated audio into an
+    // unconditional destructive abort.  In particular, a failed same-volume
+    // publish leaves a finalized, decodable .partial file.  For earlier sink
+    // failures we still retain the explicitly named work file for conservative
+    // inspection/recovery rather than deleting the only evidence.
+    preserve_partial_ = true;
+    if (impl_) {
+        impl_->sink.Reset();
+    }
+    return result;
+}
 void Writer::Abort() noexcept {
     if (aborted_ || finalized_) return;
-    const bool preserve_finalized_partial = impl_ && impl_->sink_finalized;
+    const bool preserve_partial = preserve_partial_ ||
+        (impl_ && impl_->sink_finalized);
     if (impl_ && impl_->sink && impl_->begun_writing &&
         !impl_->finalize_attempted) {
         // Follow the same primed sink-drain route as Finalize before release.
@@ -191,7 +209,7 @@ void Writer::Abort() noexcept {
     }
     if (impl_) impl_->sink.Reset();
     std::error_code ec;
-    if (!preserve_finalized_partial) std::filesystem::remove(partial_path_, ec);
+    if (!preserve_partial) std::filesystem::remove(partial_path_, ec);
     aborted_ = true;
 }
 }

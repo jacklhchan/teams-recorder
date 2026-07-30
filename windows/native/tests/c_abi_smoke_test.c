@@ -18,9 +18,11 @@ _Static_assert(sizeof(RecorderNativeStartOptions) == 32u, "x64 start options lay
 _Static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8u, "output path offset changed");
 _Static_assert(offsetof(RecorderNativeStartOptions, endpoint_id_utf8) == 16u, "endpoint ID offset changed");
 _Static_assert(offsetof(RecorderNativeStartOptions, target_process_id) == 24u, "target PID offset changed");
-_Static_assert(sizeof(RecorderNativeStats) == 96u, "x64 stats layout changed");
+_Static_assert(sizeof(RecorderNativeStats) == 192u, "x64 stats layout changed");
 _Static_assert(offsetof(RecorderNativeStats, packets) == 32u, "packet counter offset changed");
 _Static_assert(offsetof(RecorderNativeStats, peak) == 88u, "peak offset changed");
+_Static_assert(offsetof(RecorderNativeStats, render_drift_corrections) == 96u, "timeline stats must be additive");
+_Static_assert(RECORDER_NATIVE_STATS_V1_SIZE == 96u, "v1 stats prefix changed");
 
 static int expect(int condition, const char* message) {
     if (!condition) {
@@ -43,6 +45,7 @@ int main(void) {
     RecorderNativeEndpointList* endpoint_list = (RecorderNativeEndpointList*)(uintptr_t)1;
     RecorderNativeStartOptions options;
     RecorderNativeStats stats = {0};
+    RecorderNativeStats legacy_stats = {0};
     uint32_t endpoint_count = 0;
 
     recorder_native_endpoint_list_destroy(NULL);
@@ -76,6 +79,7 @@ int main(void) {
     if (!expect(bridge != NULL, "create must return a handle")) { return 1; }
 
     stats.struct_size = (uint32_t)sizeof(stats);
+    legacy_stats.struct_size = RECORDER_NATIVE_STATS_V1_SIZE;
     options = valid_options();
     if (!expect(recorder_native_start(bridge) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "legacy start must require an output path") ||
@@ -87,6 +91,8 @@ int main(void) {
                 "NULL options must be rejected") ||
         !expect(recorder_native_get_stats(bridge, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "NULL stats must be rejected") ||
+        !expect(recorder_native_get_stats(bridge, &legacy_stats) == RECORDER_NATIVE_OK,
+                "v1 stats prefix must remain accepted") ||
         !expect(recorder_native_get_stats(bridge, &stats) == RECORDER_NATIVE_OK,
                 "fresh stats must be available") ||
         !expect(stats.struct_size == sizeof(stats) && stats.packets == 0U && stats.output_frames == 0U,

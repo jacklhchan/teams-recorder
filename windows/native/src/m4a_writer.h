@@ -20,6 +20,11 @@ public:
     Error WriteFrames(const float* samples, std::uint32_t frames, std::uint64_t start_100ns,
                       std::string* detail);
     Error Finalize(std::string* detail);
+    // Used by capture-fault paths.  Unlike Abort(), this makes one best-effort
+    // attempt to close the AAC container and retains the .partial work file if
+    // close or publish cannot complete.  The caller can then recover a valid
+    // backup on the next startup, or retain the partial as evidence.
+    Error FinalizeForRecovery(std::string* detail);
     void Abort() noexcept;
 private:
     Writer(std::filesystem::path final_path, std::uint32_t bitrate_bps);
@@ -29,7 +34,7 @@ private:
     Error DrainToMinimumAacBlocks(std::string* detail);
     std::filesystem::path final_path_, partial_path_;
     std::uint32_t bitrate_bps_;
-    bool finalized_ = false, aborted_ = false;
+    bool finalized_ = false, aborted_ = false, preserve_partial_ = false;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

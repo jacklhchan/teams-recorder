@@ -275,7 +275,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
     {
         if (Marshal.SizeOf<NativeStartOptions>() != 32 ||
             Marshal.SizeOf<NativeMixedStartOptions>() != 40 ||
-            Marshal.SizeOf<NativeStats>() != 96)
+            Marshal.SizeOf<NativeStats>() != 192)
         {
             throw new NativeRecorderInteropException(
                 "The managed native-bridge layouts do not match the x64 C ABI.");
@@ -331,7 +331,15 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         stats.Discontinuities,
         stats.FirstQpc100Nanoseconds,
         stats.LastQpc100Nanoseconds,
-        stats.Peak);
+        stats.Peak,
+        new NativeSourceTimelineStats(
+            stats.RenderDriftCorrections, stats.RenderLatePackets,
+            stats.RenderLateFramesDropped, stats.RenderQueueOverflows,
+            stats.RenderSourceDisconnects, stats.RenderDiscontinuities),
+        new NativeSourceTimelineStats(
+            stats.MicrophoneDriftCorrections, stats.MicrophoneLatePackets,
+            stats.MicrophoneLateFramesDropped, stats.MicrophoneQueueOverflows,
+            stats.MicrophoneSourceDisconnects, stats.MicrophoneDiscontinuities));
 
     private static string? NormalizeError(string? error) =>
         string.IsNullOrWhiteSpace(error) ? null : error;
@@ -388,6 +396,18 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         public ulong FirstQpc100Nanoseconds;
         public ulong LastQpc100Nanoseconds;
         public float Peak;
+        public ulong RenderDriftCorrections;
+        public ulong RenderLatePackets;
+        public ulong RenderLateFramesDropped;
+        public ulong RenderQueueOverflows;
+        public ulong RenderSourceDisconnects;
+        public ulong RenderDiscontinuities;
+        public ulong MicrophoneDriftCorrections;
+        public ulong MicrophoneLatePackets;
+        public ulong MicrophoneLateFramesDropped;
+        public ulong MicrophoneQueueOverflows;
+        public ulong MicrophoneSourceDisconnects;
+        public ulong MicrophoneDiscontinuities;
     }
 
     private sealed class NativeBridgeHandle : SafeHandleZeroOrMinusOneIsInvalid

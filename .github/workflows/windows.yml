@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - ".github/workflows/windows.yml"
+      - "contracts/**"
       - "windows/**"
   pull_request:
     paths:
       - ".github/workflows/windows.yml"
+      - "contracts/**"
       - "windows/**"
 
 jobs:

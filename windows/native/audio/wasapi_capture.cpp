@@ -293,11 +293,18 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
         REFERENCE_TIME buffer_duration_100ns;
         bool event_driven;
     };
-    constexpr std::array<InitializeAttempt, 4> attempts = {{
+    REFERENCE_TIME driver_default_period_100ns = 0;
+    const HRESULT driver_period_result = client->GetDevicePeriod(
+        &driver_default_period_100ns,
+        nullptr);
+    const std::array<InitializeAttempt, 5> attempts = {{
         { AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 1'000'000, true },
         { AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, true },
         { 0, 0, false },
         { AUDCLNT_STREAMFLAGS_NOPERSIST, 1'000'000, false },
+        // Some older capture drivers reject both zero and an arbitrary
+        // duration, but accept the endpoint's own shared-device period.
+        { AUDCLNT_STREAMFLAGS_EVENTCALLBACK, driver_default_period_100ns, true },
     }};
 
     auto initialize_attempt = [&](const InitializeAttempt& attempt, HRESULT* support_result) {
@@ -346,6 +353,7 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     std::array<HRESULT, attempts.size()> attempt_support_results{};
     std::size_t attempt_count = 0;
     HRESULT client3_result = E_NOTIMPL;
+    HRESULT communications_category_result = E_NOTIMPL;
     std::wstring original_mix_description;
     for (const InitializeAttempt& attempt : attempts) {
         HRESULT support_result = E_UNEXPECTED;
@@ -355,6 +363,44 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
         if (SUCCEEDED(result)) {
             event_driven = attempt.event_driven;
             break;
+        }
+    }
+    // Intel/USB microphone stacks can apply capture signal processing only
+    // for a communications stream. This is still the explicitly selected
+    // endpoint and exact mix format; it is a compatibility retry, never a
+    // fallback to another microphone or to system loopback.
+    if (FAILED(result) && request.flow == EndpointFlow::Capture) {
+        if (mix != nullptr) { CoTaskMemFree(mix); mix = nullptr; }
+        client.Reset();
+        result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                  reinterpret_cast<void**>(client.Put()));
+        if (SUCCEEDED(result)) result = client->GetMixFormat(&mix);
+        if (SUCCEEDED(result)) {
+            ComPtr<IAudioClient2> client2;
+            communications_category_result = client.As(
+                __uuidof(IAudioClient2), reinterpret_cast<void**>(client2.Put()));
+            if (SUCCEEDED(communications_category_result)) {
+                AudioClientProperties properties{};
+                properties.cbSize = sizeof(properties);
+                properties.bIsOffload = FALSE;
+                properties.eCategory = AudioCategory_Communications;
+                properties.Options = AUDCLNT_STREAMOPTIONS_NONE;
+                communications_category_result = client2->SetClientProperties(&properties);
+            }
+            if (SUCCEEDED(communications_category_result)) {
+                result = client->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    base_flags | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                    driver_default_period_100ns,
+                    0,
+                    mix,
+                    nullptr);
+                if (SUCCEEDED(result)) {
+                    event_driven = true;
+                }
+            } else {
+                result = communications_category_result;
+            }
         }
     }
     // Some USB/array microphones advertise an extensible multichannel float
@@ -493,6 +539,11 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
             context << L"; client3=0x" << std::hex
                     << static_cast<unsigned long>(client3_result);
         }
+        context << L"; devicePeriod=0x" << std::hex
+                << static_cast<unsigned long>(driver_period_result)
+                << L"/" << std::dec << driver_default_period_100ns
+                << L"; communicationsCategory=0x" << std::hex
+                << static_cast<unsigned long>(communications_category_result);
         context << L"; attempts=";
         for (std::size_t index = 0; index < attempt_count; ++index) {
             if (index != 0) { context << L","; }

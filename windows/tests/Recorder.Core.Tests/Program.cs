@@ -30,6 +30,7 @@ var tests = new (string Name, Action Run)[]
     ,("process capture never falls back when selection is unavailable", RecordingStartRequestTests.DoesNotFallbackWhenSelectedProcessIsUnavailable)
     ,("source selection maps system and microphone modes without fallback", RecordingStartRequestTests.MapsSystemAndMicrophoneWithoutInventingEndpoints)
     ,("process targets and metadata share one executable-basename policy", RecordingStartRequestTests.UsesOneExecutableBasenamePolicyForProcessTargetsAndMetadata)
+    ,("Teams picker excludes unrelated process windows", TeamsProcessCatalogPolicyTests.ExposesOnlyMicrosoftTeamsWithoutUsingWindowTitles)
     ,("Windows capture metadata round trips its approved envelope", MetadataPrivacyTests.WindowsCaptureMetadataRoundTripsTheApprovedEnvelope)
     ,("Windows capture metadata removes transient process identifiers", MetadataPrivacyTests.MetadataPrivacyDropsTransientProcessIdentifiers)
     ,("Windows executable basenames retain ordinary spaces and Unicode provenance", MetadataPrivacyTests.ExecutableBasenamesSupportOrdinarySpacesAndUnicodeWithoutDroppingProvenance)

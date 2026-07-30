@@ -522,7 +522,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     {
         { IsAvailable: false } => "麥克風：裝置中斷，已封鎖開始錄製。",
         { EndpointId: null } => "麥克風：未選取（不錄製）。",
-        _ => "麥克風：已選取並會納入 mixed 錄音；來源別統計待 bridge 擴充。",
+        _ when snapshot.Stats.MicrophoneTimeline.SourceDisconnects > 0 =>
+            $"麥克風：錄音期間中斷 {snapshot.Stats.MicrophoneTimeline.SourceDisconnects:N0} 次；Teams 主音訊會繼續，缺失區段已保留為靜音。",
+        _ => "麥克風：已選取並會納入 mixed 錄音。",
     };
 
     public string StorageReadinessText => storageCapacity switch
@@ -1309,7 +1311,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     {
         // Process enumeration can be slow or deny access to individual processes.
         // The Application catalog filters those cases and exposes no paths or command lines.
-        var entries = await Task.Run(processCatalog.GetProcesses);
+        var entries = TeamsProcessCatalogPolicy.FilterForTeams(
+            await Task.Run(processCatalog.GetProcesses));
         var previous = SelectedProcess;
 
         ProcessCatalog.Clear();
@@ -1328,8 +1331,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         SelectedProcess = ProcessCatalog.FirstOrDefault(candidate =>
             candidate.HasSameIdentity(previous));
         ProcessCatalogStatusText = ProcessCatalog.Count == 0
-            ? "沒有可選的應用程式；請在停止錄製後重新整理。"
-            : $"已列出 {ProcessCatalog.Count} 個應用程式程序。";
+            ? "找不到可用的 Teams 程序；請先開啟 Microsoft Teams，然後重新整理。"
+            : $"已列出 {ProcessCatalog.Count} 個可用的 Teams 程序。";
     }
 
     private Task RefreshLibraryAsync() => RunOperationAsync(RefreshLibraryCoreAsync);

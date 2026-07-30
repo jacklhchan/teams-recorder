@@ -56,10 +56,10 @@
                         Visibility="{Binding SelectedApplicationPanelVisibility}">
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <TextBlock Text="應用程式音訊來源" VerticalAlignment="Center" />
-                            <Button Command="{Binding RefreshProcessCatalogCommand}" Content="重新整理應用程式" />
+                            <Button Command="{Binding RefreshProcessCatalogCommand}" Content="重新整理 Teams" />
                         </StackPanel>
                         <TextBlock
-                            Text="選擇可用的應用程式或背景程序；有頂層視窗的項目會優先顯示。只顯示應用程式名稱、處理程序名稱、PID 與視窗資訊；不會儲存路徑或命令列。"
+                            Text="只列出可用的 Microsoft Teams 程序。只顯示應用程式名稱、處理程序名稱、PID 與視窗資訊；不會儲存路徑或命令列。"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                             TextWrapping="Wrap" />
                         <ListView

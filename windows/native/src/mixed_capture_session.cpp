@@ -71,6 +71,7 @@ struct Source {
     bool received_audio = false;
     bool disconnect_accounted = false;
     std::uint64_t generation = 0;
+    selected_audio::MixedSourceRole role = selected_audio::MixedSourceRole::Primary;
     recorder::timeline::Source timeline_source = recorder::timeline::Source::Render;
 };
 
@@ -122,6 +123,8 @@ public:
             microphone_ = {};
             render_.timeline_source = recorder::timeline::Source::Render;
             microphone_.timeline_source = recorder::timeline::Source::Microphone;
+            render_.role = selected_audio::MixedSourceRole::Primary;
+            microphone_.role = selected_audio::MixedSourceRole::OptionalMicrophone;
             render_.timeline_source = selected_audio::PrimaryFor(config_.target_process_id) ==
                     selected_audio::PrimarySource::SystemRender
                 ? recorder::timeline::Source::Render
@@ -534,10 +537,17 @@ private:
         }
         source.disconnect_accounted = true;
         timeline_.MarkDisconnected(source.timeline_source);
+        // The microphone was explicitly optional at start. It can be removed,
+        // disabled, or rejected by a driver after a valid start; preserve the
+        // completed Teams/system audio and leave missing microphone frames as
+        // silence rather than converting this into a destructive session fault.
+        if (!selected_audio::DisconnectFailsSession(source.role)) {
+            return;
+        }
         FailLocked(
             RECORDER_NATIVE_CAPTURE_ERROR,
             SourceErrorText(source).empty()
-                ? "A mixed audio source stopped unexpectedly."
+                ? "The primary mixed audio source stopped unexpectedly."
                 : SourceErrorText(source));
     }
 

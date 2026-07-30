@@ -5,101 +5,100 @@ struct RecorderSettingsView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                RecorderSettingsSection("Capture") {
-                    PermissionStatusView(
-                        systemPermission: model.systemAudioPermission,
-                        microphonePermission: model.microphonePermission,
-                        requestSystem: model.requestSystemAudioPermission,
-                        requestMicrophone: model.requestMicrophonePermission,
-                        openSystemSettings: model.openScreenCaptureSettings,
-                        openMicrophoneSettings: model.openMicrophoneSettings
-                    )
-                    CaptureSourceControlsView(model: model)
-                }
-                .accessibilityIdentifier("recorder.settings.capture-section")
-                .background(
-                    RecorderDestinationAccessibilityMarker(
-                        identifier: "recorder.settings.capture-section"
-                    )
+        Form {
+            Section("Capture") {
+                PermissionStatusView(
+                    systemPermission: model.systemAudioPermission,
+                    microphonePermission: model.microphonePermission,
+                    requestSystem: model.requestSystemAudioPermission,
+                    requestMicrophone: model.requestMicrophonePermission,
+                    openSystemSettings: model.openScreenCaptureSettings,
+                    openMicrophoneSettings: model.openMicrophoneSettings
                 )
-
-                RecorderSettingsSection("Teams") {
-                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
-                        if model.showsTeamsScreenCaptureControls {
-                            TeamsScreenCaptureControlsView(model: model)
-                        }
-                        GridRow {
-                            Label("Teams Auto Recording", systemImage: "record.circle")
-                                .font(.headline)
-                            TeamsAutoMeetingDetailView(
-                                presentation: autoMeetingPresentation,
-                                isEnabled: Binding(
-                                    get: { model.teamsAutoMeetingEnabled },
-                                    set: { model.setTeamsAutoMeetingEnabled($0) }
-                                )
-                            )
-                            TeamsAutoMeetingStateView(
-                                presentation: autoMeetingPresentation,
-                                cancel: model.cancelTeamsAutoMeetingCountdown
-                            )
-                        }
-                        GridRow {
-                            Label("Teams Mute Sync", systemImage: "person.2.wave.2")
-                                .font(.headline)
-                            TeamsMuteSyncDetailView(
-                                status: model.teamsMuteSyncStatus,
-                                isEnabled: Binding(
-                                    get: { model.teamsMuteSyncEnabled },
-                                    set: { model.setTeamsMuteSyncEnabled($0) }
-                                )
-                            )
-                            TeamsMuteSyncStateView(
-                                status: model.teamsMuteSyncStatus,
-                                retry: model.retryTeamsMuteSync,
-                                requestPairing: model.requestTeamsPairing
-                            )
-                        }
-                    }
-                }
-
-                RecorderSettingsSection("Audio Integration") {
-                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
-                        GridRow {
-                            Label("Virtual Mic", systemImage: "person.wave.2").font(.headline)
-                            VirtualMicIdentityView(
-                                recorder: model.recorder,
-                                installationState: model.virtualMicInstallationState,
-                                inputMuteControlAvailable: model.inputMuteControlAvailable
-                            )
-                            VirtualMicStateView(
-                                recorder: model.recorder,
-                                installationState: model.virtualMicInstallationState,
-                                inputMuteControlAvailable: model.inputMuteControlAvailable
-                            )
-                        }
-                    }
-                }
-                .accessibilityIdentifier("recorder.settings.audio-integration-section")
-                .background(
-                    RecorderSettingsAccessibilityMarker(
-                        identifier: "recorder.settings.audio-integration-section"
-                    )
-                )
-
-                RecorderSettingsSection("Transcription") {
-                    AIProviderSettingsView(model: model.aiProviderSettingsModel)
-                }
-                .accessibilityIdentifier("recorder.settings.transcription-section")
-                .background(
-                    RecorderSettingsAccessibilityMarker(
-                        identifier: "recorder.settings.transcription-section"
-                    )
-                )
+                CaptureSourceControlsView(model: model)
             }
-            .padding(20)
+            .accessibilityIdentifier("recorder.settings.capture-section")
+            .background(
+                RecorderDestinationAccessibilityMarker(
+                    identifier: "recorder.settings.capture-section"
+                )
+            )
+
+            Section("Teams") {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
+                    if model.showsTeamsScreenCaptureControls {
+                        TeamsScreenCaptureControlsView(model: model)
+                    }
+                    GridRow {
+                        Label("Teams Auto Recording", systemImage: "record.circle")
+                            .font(.headline)
+                        TeamsAutoMeetingDetailView(
+                            presentation: autoMeetingPresentation,
+                            isEnabled: Binding(
+                                get: { model.teamsAutoMeetingEnabled },
+                                set: { model.setTeamsAutoMeetingEnabled($0) }
+                            )
+                        )
+                        TeamsAutoMeetingStateView(
+                            presentation: autoMeetingPresentation,
+                            cancel: model.cancelTeamsAutoMeetingCountdown
+                        )
+                    }
+                    GridRow {
+                        Label("Teams Mute Sync", systemImage: "person.2.wave.2")
+                            .font(.headline)
+                        TeamsMuteSyncDetailView(
+                            status: model.teamsMuteSyncStatus,
+                            isEnabled: Binding(
+                                get: { model.teamsMuteSyncEnabled },
+                                set: { model.setTeamsMuteSyncEnabled($0) }
+                            )
+                        )
+                        TeamsMuteSyncStateView(
+                            status: model.teamsMuteSyncStatus,
+                            retry: model.retryTeamsMuteSync,
+                            requestPairing: model.requestTeamsPairing
+                        )
+                    }
+                }
+            }
+
+            Section("Audio Integration") {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
+                    GridRow {
+                        Label("Virtual Mic", systemImage: "person.wave.2").font(.headline)
+                        VirtualMicIdentityView(
+                            recorder: model.recorder,
+                            installationState: model.virtualMicInstallationState,
+                            inputMuteControlAvailable: model.inputMuteControlAvailable
+                        )
+                        VirtualMicStateView(
+                            recorder: model.recorder,
+                            installationState: model.virtualMicInstallationState,
+                            inputMuteControlAvailable: model.inputMuteControlAvailable
+                        )
+                    }
+                }
+            }
+            .accessibilityIdentifier("recorder.settings.audio-integration-section")
+            .background(
+                RecorderSettingsAccessibilityMarker(
+                    identifier: "recorder.settings.audio-integration-section"
+                )
+            )
+
+            Section("Transcription") {
+                AIProviderSettingsView(model: model.aiProviderSettingsModel)
+            }
+            .accessibilityIdentifier("recorder.settings.transcription-section")
+            .background(
+                RecorderSettingsAccessibilityMarker(
+                    identifier: "recorder.settings.transcription-section"
+                )
+            )
         }
+        .formStyle(.grouped)
+        .navigationTitle("Settings")
         .background(
             RecorderDestinationAccessibilityMarker(
                 identifier: "recorder.destination.settings"
@@ -113,26 +112,6 @@ struct RecorderSettingsView: View {
             state: model.teamsAutoMeetingState,
             connectionStatus: model.teamsConnectionStatus
         )
-    }
-}
-
-private struct RecorderSettingsSection<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: Content
-
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.title3.weight(.semibold))
-            content
-        }
-        .padding(14)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -157,8 +136,6 @@ private struct PermissionStatusView: View {
                 action: microphonePermission == .denied || microphonePermission == .restricted ? openMicrophoneSettings : requestMicrophone
             )
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var microphoneRow: CaptureStatusRow {

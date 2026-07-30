@@ -71,9 +71,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastRecordingSavedAsM4A = false
     @Published var isRunningTestRecording = false
     @Published var playingSessionID: RecordingSession.ID?
-    @Published var playbackProgress: TimeInterval = 0
-    @Published var playbackDuration: TimeInterval = 0
-    @Published var isPlaybackActive = false
     @Published private(set) var inputMuteControlAvailable = false
     @Published private(set) var virtualMicInstallationState: VirtualMicInstallationState = .absent
     @Published private(set) var teamsMuteSyncStatus: TeamsMuteSyncStatus = .disabled
@@ -157,6 +154,7 @@ final class AppModel: ObservableObject {
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
     private let playbackCoordinator: any PlaybackCoordinating
+    let playbackPresentation: PlaybackPresentationModel
     private var playbackLoadTask: Task<Void, Never>?
     private var playbackGeneration: UInt64 = 0
     private var playbackSessionID: RecordingSession.ID?
@@ -366,7 +364,12 @@ final class AppModel: ObservableObject {
         self.teamsScreenRefreshTick = teamsScreenRefreshTick
         self.teamsScreenDisconnectCleanupScheduler =
             teamsScreenDisconnectCleanupScheduler
-        self.playbackCoordinator = playbackCoordinator ?? PlaybackCoordinator()
+        let activePlaybackCoordinator =
+            playbackCoordinator ?? PlaybackCoordinator()
+        self.playbackCoordinator = activePlaybackCoordinator
+        playbackPresentation = PlaybackPresentationModel(
+            player: activePlaybackCoordinator.player
+        )
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
@@ -1292,7 +1295,10 @@ final class AppModel: ObservableObject {
         return projected
     }
 
-    var playbackPlayer: AVPlayer { playbackCoordinator.player }
+    var playbackPlayer: AVPlayer { playbackPresentation.player }
+    var playbackProgress: TimeInterval { playbackPresentation.progress }
+    var playbackDuration: TimeInterval { playbackPresentation.duration }
+    var isPlaybackActive: Bool { playbackPresentation.isPlaying }
 
     func play(session: RecordingSession) {
         startPlayback(session: session, successStatus: "Playing \(session.displayName)")
@@ -1314,9 +1320,7 @@ final class AppModel: ObservableObject {
         playbackSessionID = nil
         playbackCoordinator.stop()
         playingSessionID = nil
-        playbackProgress = 0
-        playbackDuration = 0
-        isPlaybackActive = false
+        playbackPresentation.clear()
         if resetStatus {
             statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
         }
@@ -1790,10 +1794,8 @@ final class AppModel: ObservableObject {
         playbackLoadTask?.cancel()
         playbackCoordinator.stop()
         playbackSessionID = session.id
+        playbackPresentation.begin(session: session)
         playingSessionID = session.id
-        playbackProgress = 0
-        playbackDuration = 0
-        isPlaybackActive = false
         let coordinator = playbackCoordinator
         playbackLoadTask = Task { [weak self, coordinator] in
             do {
@@ -1813,9 +1815,7 @@ final class AppModel: ObservableObject {
                 self.playbackLoadTask = nil
                 self.playbackSessionID = nil
                 self.playingSessionID = nil
-                self.playbackProgress = 0
-                self.playbackDuration = 0
-                self.isPlaybackActive = false
+                self.playbackPresentation.clear()
                 self.statusMessage = "Playback failed: \(error.localizedDescription)"
             }
         }
@@ -1823,10 +1823,10 @@ final class AppModel: ObservableObject {
 
     private func handlePlaybackSnapshot(_ snapshot: PlaybackSnapshot) {
         guard snapshot.sessionID == playbackSessionID else { return }
-        playingSessionID = snapshot.sessionID
-        playbackProgress = snapshot.progress
-        playbackDuration = snapshot.duration
-        isPlaybackActive = snapshot.isPlaying
+        if playingSessionID != snapshot.sessionID {
+            playingSessionID = snapshot.sessionID
+        }
+        playbackPresentation.apply(snapshot)
     }
 
     func requestSystemAudioPermission() {

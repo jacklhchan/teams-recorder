@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import Combine
 import Foundation
 
 struct PlaybackSnapshot: Equatable {
@@ -8,6 +9,42 @@ struct PlaybackSnapshot: Equatable {
     let isPlaying: Bool
 
     static let empty = PlaybackSnapshot(sessionID: nil, progress: 0, duration: 0, isPlaying: false)
+}
+
+@MainActor
+final class PlaybackPresentationModel: ObservableObject {
+    let player: AVPlayer
+
+    @Published private(set) var session: RecordingSession?
+    @Published private(set) var snapshot = PlaybackSnapshot.empty
+
+    var progress: TimeInterval { snapshot.progress }
+    var duration: TimeInterval { snapshot.duration }
+    var isPlaying: Bool { snapshot.isPlaying }
+
+    init(player: AVPlayer) {
+        self.player = player
+    }
+
+    func begin(session: RecordingSession) {
+        self.session = session
+        snapshot = PlaybackSnapshot(
+            sessionID: session.id,
+            progress: 0,
+            duration: 0,
+            isPlaying: false
+        )
+    }
+
+    func apply(_ snapshot: PlaybackSnapshot) {
+        guard snapshot.sessionID == session?.id else { return }
+        self.snapshot = snapshot
+    }
+
+    func clear() {
+        session = nil
+        snapshot = .empty
+    }
 }
 
 @MainActor

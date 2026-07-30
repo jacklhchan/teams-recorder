@@ -139,6 +139,46 @@
                             <StackPanel><TextBlock Text="經過時間" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><TextBlock Text="{Binding ElapsedText}" Style="{StaticResource TitleTextBlockStyle}" /></StackPanel>
                             <StackPanel Grid.Column="1"><TextBlock Text="峰值 / 剪裁" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><TextBlock Text="{Binding PeakText}" Style="{StaticResource TitleTextBlockStyle}" /><ProgressBar Maximum="100" Value="{Binding PeakPercent}" /></StackPanel>
                         </Grid>
+                        <StackPanel Spacing="5">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="Teams／輸出即時波形" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding OutputLevelText}" />
+                            </StackPanel>
+                            <Border Height="56" Padding="6" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="6">
+                                <ItemsControl ItemsSource="{Binding OutputWaveformBars}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="local:WaveformBar">
+                                            <Border Width="3" Height="{Binding Height}" Opacity="{Binding Opacity}" Background="{ThemeResource AccentFillColorDefaultBrush}" VerticalAlignment="Center" CornerRadius="2" />
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Border>
+                        </StackPanel>
+                        <StackPanel Spacing="5">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="麥克風輸入即時波形" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding InputLevelText}" />
+                            </StackPanel>
+                            <Border Height="56" Padding="6" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="6">
+                                <ItemsControl ItemsSource="{Binding InputWaveformBars}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="local:WaveformBar">
+                                            <Border Width="3" Height="{Binding Height}" Opacity="{Binding Opacity}" Background="{ThemeResource SystemFillColorCautionBrush}" VerticalAlignment="Center" CornerRadius="2" />
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Border>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
                 <Border Grid.Column="1" Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">

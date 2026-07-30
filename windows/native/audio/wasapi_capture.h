@@ -77,6 +77,11 @@ public:
 
 private:
     void CaptureThread(CaptureRequest request, AudioBlockCallback callback, HANDLE started_event);
+    void CaptureWithMediaFoundationFallback(
+        const CaptureRequest& request,
+        const AudioBlockCallback& callback,
+        HANDLE started_event,
+        const std::wstring& wasapi_error);
     void SetError(HRESULT hresult, const wchar_t* context);
 
     mutable std::mutex mutex_;

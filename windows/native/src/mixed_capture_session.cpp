@@ -70,6 +70,8 @@ struct Source {
     std::size_t queued_frames = 0;
     bool received_audio = false;
     bool disconnect_accounted = false;
+    float level_peak = 0.0F;
+    float level_rms = 0.0F;
     std::uint64_t generation = 0;
     selected_audio::MixedSourceRole role = selected_audio::MixedSourceRole::Primary;
     recorder::timeline::Source timeline_source = recorder::timeline::Source::Render;
@@ -270,6 +272,10 @@ public:
         result.microphone_queue_overflows = microphone_counters.queue_overflows;
         result.microphone_source_disconnects = microphone_counters.source_disconnects;
         result.microphone_discontinuities = microphone_counters.discontinuities;
+        result.primary_level_peak = render_.level_peak;
+        result.primary_level_rms = render_.level_rms;
+        result.microphone_level_peak = microphone_.level_peak;
+        result.microphone_level_rms = microphone_.level_rms;
         return result;
     }
 
@@ -383,6 +389,8 @@ private:
                 stats_.event_driven = stats_.event_driven != 0 && block.event_driven
                     ? 1U
                     : 0U;
+                source.level_peak = 0.0F;
+                source.level_rms = 0.0F;
                 return;
             }
 
@@ -443,6 +451,15 @@ private:
             }
 
             if (!normalized.empty()) {
+                double sum_of_squares = 0.0;
+                source.level_peak = 0.0F;
+                for (const float sample : normalized) {
+                    const float magnitude = std::abs(sample);
+                    source.level_peak = std::max(source.level_peak, magnitude);
+                    sum_of_squares += static_cast<double>(sample) * sample;
+                }
+                source.level_rms = static_cast<float>(std::sqrt(
+                    sum_of_squares / static_cast<double>(normalized.size())));
                 const std::size_t frame_count = normalized.size() / 2U;
                 const auto placement = timeline_.Place(
                     source.timeline_source,
@@ -488,6 +505,9 @@ private:
                     source.received_audio = true;
                     cv_.notify_one();
                 }
+            } else {
+                source.level_peak = 0.0F;
+                source.level_rms = 0.0F;
             }
 
             if (stats_.packets == 0) {

@@ -1,6 +1,9 @@
 #include "wasapi_capture.h"
 
 #include <audioclient.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 #include <propkey.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <mmdeviceapi.h>
@@ -11,6 +14,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -44,6 +48,15 @@ private:
     HRESULT result_;
 };
 
+class ScopedMfStartup final {
+public:
+    ScopedMfStartup() : result_(MFStartup(MF_VERSION, MFSTARTUP_LITE)) {}
+    ~ScopedMfStartup() { if (SUCCEEDED(result_)) { MFShutdown(); } }
+    HRESULT result() const { return result_; }
+private:
+    HRESULT result_;
+};
+
 class ScopedHandle final {
 public:
     explicit ScopedHandle(HANDLE value = nullptr) : value_(value) {}
@@ -56,6 +69,20 @@ private:
 
 bool IsDeviceInvalidated(HRESULT result) {
     return result == AUDCLNT_E_DEVICE_INVALIDATED;
+}
+
+std::uint64_t CurrentQpc100ns() {
+    LARGE_INTEGER frequency{};
+    LARGE_INTEGER counter{};
+    if (QueryPerformanceFrequency(&frequency) == 0 ||
+        QueryPerformanceCounter(&counter) == 0 || frequency.QuadPart <= 0) {
+        return 0;
+    }
+    const auto ticks = static_cast<std::uint64_t>(counter.QuadPart);
+    const auto rate = static_cast<std::uint64_t>(frequency.QuadPart);
+    return ticks > (std::numeric_limits<std::uint64_t>::max)() / 10'000'000U
+        ? ticks / rate * 10'000'000U
+        : ticks * 10'000'000U / rate;
 }
 
 std::wstring DescribeHresult(HRESULT result) {
@@ -231,6 +258,196 @@ void WasapiCapture::Stop() {
 bool WasapiCapture::is_running() const { std::lock_guard<std::mutex> lock(mutex_); return running_; }
 CaptureError WasapiCapture::last_error() const { std::lock_guard<std::mutex> lock(mutex_); return last_error_; }
 
+void WasapiCapture::CaptureWithMediaFoundationFallback(
+    const CaptureRequest& request,
+    const AudioBlockCallback& callback,
+    HANDLE started_event,
+    const std::wstring& wasapi_error) {
+    ScopedMfStartup media_foundation;
+    ComPtr<IMFAttributes> device_attributes;
+    ComPtr<IMFMediaSource> media_source;
+    ComPtr<IMFSourceReader> reader;
+    WAVEFORMATEX* wave_format = nullptr;
+    std::vector<std::uint8_t> format_bytes;
+    std::uint64_t device_position_frames = 0;
+    const wchar_t* phase = L"starting Media Foundation";
+
+    auto fail = [&](HRESULT result, const wchar_t* context) {
+        std::wstring diagnostic = L"Media Foundation microphone fallback failed after WASAPI rejected the selected endpoint";
+        if (!wasapi_error.empty()) {
+            diagnostic += L" (" + wasapi_error + L")";
+        }
+        diagnostic += L" at ";
+        diagnostic += phase;
+        diagnostic += L": ";
+        diagnostic += context;
+        SetError(result, diagnostic.c_str());
+        SetEvent(started_event);
+    };
+    auto cleanup = [&] {
+        if (wave_format != nullptr) {
+            CoTaskMemFree(wave_format);
+            wave_format = nullptr;
+        }
+        reader.Reset();
+        if (media_source.Get() != nullptr) {
+            (void)media_source->Shutdown();
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_ = false;
+    };
+
+    HRESULT result = media_foundation.result();
+    if (FAILED(result)) {
+        fail(result, L"MFStartup failed");
+        cleanup();
+        return;
+    }
+    phase = L"creating device attributes";
+    result = MFCreateAttributes(device_attributes.Put(), 2);
+    if (SUCCEEDED(result)) {
+        phase = L"setting capture source type";
+        result = device_attributes->SetGUID(
+            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_AUDCAP_GUID);
+    }
+    if (SUCCEEDED(result) && !request.endpoint_id.empty()) {
+        phase = L"setting capture endpoint id";
+        result = device_attributes->SetString(
+            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_AUDCAP_ENDPOINT_ID,
+            request.endpoint_id.c_str());
+    }
+    if (SUCCEEDED(result)) {
+        phase = L"creating capture device source";
+        result = MFCreateDeviceSource(device_attributes.Get(), media_source.Put());
+    }
+    if (SUCCEEDED(result)) {
+        phase = L"creating capture source reader";
+        result = MFCreateSourceReaderFromMediaSource(media_source.Get(), nullptr, reader.Put());
+    }
+    if (SUCCEEDED(result)) {
+        phase = L"disabling unrelated source streams";
+        result = reader->SetStreamSelection(
+            static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE);
+    }
+    if (SUCCEEDED(result)) {
+        phase = L"selecting the audio stream";
+        result = reader->SetStreamSelection(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), TRUE);
+    }
+    ComPtr<IMFMediaType> media_type;
+    if (SUCCEEDED(result)) {
+        phase = L"reading the audio stream format";
+        result = reader->GetCurrentMediaType(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), media_type.Put());
+    }
+    UINT32 wave_format_bytes = 0;
+    if (SUCCEEDED(result)) {
+        phase = L"converting the audio stream format";
+        result = MFCreateWaveFormatExFromMFMediaType(
+            media_type.Get(),
+            &wave_format,
+            &wave_format_bytes,
+            MFWaveFormatExConvertFlag_Normal);
+    }
+    if (FAILED(result) || wave_format == nullptr || wave_format->nBlockAlign == 0 ||
+        wave_format->nSamplesPerSec == 0 || wave_format_bytes < sizeof(WAVEFORMATEX)) {
+        fail(FAILED(result) ? result : E_INVALIDARG,
+             L"Opening the selected capture endpoint failed");
+        cleanup();
+        return;
+    }
+    format_bytes.assign(
+        reinterpret_cast<const std::uint8_t*>(wave_format),
+        reinterpret_cast<const std::uint8_t*>(wave_format) + wave_format_bytes);
+    const WORD block_align = wave_format->nBlockAlign;
+    CoTaskMemFree(wave_format);
+    wave_format = nullptr;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_ = true;
+    }
+    SetEvent(started_event);
+
+    while (WaitForSingleObject(stop_event_, 0) != WAIT_OBJECT_0) {
+        DWORD stream_index = 0;
+        DWORD stream_flags = 0;
+        LONGLONG sample_time = 0;
+        ComPtr<IMFSample> sample;
+        result = reader->ReadSample(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM),
+            0,
+            &stream_index,
+            &stream_flags,
+            &sample_time,
+            sample.Put());
+        if (FAILED(result)) {
+            if (WaitForSingleObject(stop_event_, 0) != WAIT_OBJECT_0) {
+                SetError(result, L"Reading Media Foundation microphone sample failed");
+            }
+            break;
+        }
+        if ((stream_flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
+            if (WaitForSingleObject(stop_event_, 0) != WAIT_OBJECT_0) {
+                SetError(E_FAIL, L"Media Foundation microphone stream ended unexpectedly");
+            }
+            break;
+        }
+        if ((stream_flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0) {
+            SetError(E_FAIL, L"Media Foundation microphone format changed during capture");
+            break;
+        }
+        if (sample.Get() == nullptr) {
+            continue;
+        }
+        ComPtr<IMFMediaBuffer> buffer;
+        result = sample->ConvertToContiguousBuffer(buffer.Put());
+        if (FAILED(result)) {
+            SetError(result, L"Combining Media Foundation microphone buffers failed");
+            break;
+        }
+        BYTE* bytes = nullptr;
+        DWORD capacity = 0;
+        DWORD byte_count = 0;
+        result = buffer->Lock(&bytes, &capacity, &byte_count);
+        if (FAILED(result)) {
+            SetError(result, L"Locking Media Foundation microphone buffer failed");
+            break;
+        }
+        if (byte_count % block_align != 0) {
+            (void)buffer->Unlock();
+            SetError(E_INVALIDARG, L"Media Foundation microphone packet has invalid block alignment");
+            break;
+        }
+        AudioBlock block;
+        block.mix_format_bytes = format_bytes;
+        block.frame_count = byte_count / block_align;
+        block.device_position_frames = device_position_frames;
+        block.qpc_position = CurrentQpc100ns();
+        block.silent = byte_count == 0;
+        block.discontinuity = (stream_flags & MF_SOURCE_READERF_STREAMTICK) != 0;
+        block.event_driven = false;
+        if (!block.silent && bytes != nullptr) {
+            block.bytes.assign(bytes, bytes + byte_count);
+        }
+        const HRESULT unlock_result = buffer->Unlock();
+        if (FAILED(unlock_result)) {
+            SetError(unlock_result, L"Unlocking Media Foundation microphone buffer failed");
+            break;
+        }
+        try {
+            callback(std::move(block));
+        }
+        catch (...) {
+            SetError(E_FAIL, L"Media Foundation microphone callback failed");
+            break;
+        }
+        device_position_frames += byte_count / block_align;
+    }
+    cleanup();
+}
+
 void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback callback, HANDLE started_event) {
     ScopedCoInitialize com;
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -278,9 +495,32 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     }
     (void)GetFriendlyName(device.Get(), &selected_friendly_name);
     result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(client.Put()));
-    if (FAILED(result)) { fail(result, L"Activating IAudioClient failed"); return; }
+    if (FAILED(result)) {
+        if (request.flow == EndpointFlow::Capture && IsDeviceInvalidated(result)) {
+            // An active-enumeration entry can become stale when a Bluetooth
+            // headset switches profile or disconnects.  It is not safe to
+            // substitute another endpoint, especially not system loopback.
+            fail(
+                result,
+                L"The selected microphone was invalidated by Windows. Reconnect the headset, then refresh and select its current Headset microphone");
+        } else if (request.flow == EndpointFlow::Capture) {
+            CaptureWithMediaFoundationFallback(
+                request, callback, started_event, L"Activating IAudioClient failed");
+        } else {
+            fail(result, L"Activating IAudioClient failed");
+        }
+        return;
+    }
     result = client->GetMixFormat(&mix);
-    if (FAILED(result)) { fail(result, L"Getting endpoint mix format failed"); return; }
+    if (FAILED(result)) {
+        if (request.flow == EndpointFlow::Capture) {
+            CaptureWithMediaFoundationFallback(
+                request, callback, started_event, L"Getting endpoint mix format failed");
+        } else {
+            fail(result, L"Getting endpoint mix format failed");
+        }
+        return;
+    }
     remember_endpoint_format();
     const DWORD base_flags = request.flow == EndpointFlow::Render
         ? AUDCLNT_STREAMFLAGS_LOOPBACK
@@ -554,6 +794,10 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
         const std::wstring message = context.str();
         if (mix != nullptr) {
             CoTaskMemFree(mix);
+        }
+        if (request.flow == EndpointFlow::Capture) {
+            CaptureWithMediaFoundationFallback(request, callback, started_event, message);
+            return;
         }
         fail(result, message.c_str());
         return;

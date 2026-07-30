@@ -70,7 +70,7 @@ if(WIN32)
     )
     target_compile_features(Recorder.WasapiCapture PUBLIC cxx_std_17)
     target_include_directories(Recorder.WasapiCapture PUBLIC audio)
-    target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid)
+target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadwrite mfuuid)
     recorder_enable_strict_warnings(Recorder.WasapiCapture)
 
     add_library(Recorder.ProcessLoopback STATIC

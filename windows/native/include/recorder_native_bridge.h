@@ -163,9 +163,18 @@ typedef struct RecorderNativeStats {
     uint64_t microphone_queue_overflows;
     uint64_t microphone_source_disconnects;
     uint64_t microphone_discontinuities;
+    /* Additive v3 live per-source level envelopes, normalized to 0..1.
+       These are instantaneous post-normalization values for UI metering,
+       not a replacement for the session-wide peak above. */
+    float primary_level_peak;
+    float primary_level_rms;
+    float microphone_level_peak;
+    float microphone_level_rms;
 } RecorderNativeStats;
 
 #define RECORDER_NATIVE_STATS_V1_SIZE 96u
+#define RECORDER_NATIVE_STATS_V2_SIZE 192u
+#define RECORDER_NATIVE_STATS_V3_SIZE 208u
 
 RECORDER_NATIVE_API RecorderNativeBridge* recorder_native_create(void);
 

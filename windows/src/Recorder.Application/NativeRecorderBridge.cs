@@ -317,7 +317,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         if (Marshal.SizeOf<NativeStartOptions>() != 32 ||
             Marshal.SizeOf<NativeMixedStartOptions>() != 40 ||
             Marshal.SizeOf<NativeSelectedAudioStartOptions>() != 56 ||
-            Marshal.SizeOf<NativeStats>() != 192)
+            Marshal.SizeOf<NativeStats>() != 208)
         {
             throw new NativeRecorderInteropException(
                 "The managed native-bridge layouts do not match the x64 C ABI.");
@@ -381,7 +381,13 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         new NativeSourceTimelineStats(
             stats.MicrophoneDriftCorrections, stats.MicrophoneLatePackets,
             stats.MicrophoneLateFramesDropped, stats.MicrophoneQueueOverflows,
-            stats.MicrophoneSourceDisconnects, stats.MicrophoneDiscontinuities));
+            stats.MicrophoneSourceDisconnects, stats.MicrophoneDiscontinuities))
+    {
+        PrimaryLevelPeak = stats.PrimaryLevelPeak,
+        PrimaryLevelRms = stats.PrimaryLevelRms,
+        MicrophoneLevelPeak = stats.MicrophoneLevelPeak,
+        MicrophoneLevelRms = stats.MicrophoneLevelRms,
+    };
 
     private static string? NormalizeError(string? error) =>
         string.IsNullOrWhiteSpace(error) ? null : error;
@@ -465,6 +471,10 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         public ulong MicrophoneQueueOverflows;
         public ulong MicrophoneSourceDisconnects;
         public ulong MicrophoneDiscontinuities;
+        public float PrimaryLevelPeak;
+        public float PrimaryLevelRms;
+        public float MicrophoneLevelPeak;
+        public float MicrophoneLevelRms;
     }
 
     private sealed class NativeBridgeHandle : SafeHandleZeroOrMinusOneIsInvalid

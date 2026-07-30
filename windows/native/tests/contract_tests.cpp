@@ -13,11 +13,13 @@ static_assert(sizeof(RecorderNativeStartOptions) == 32U, "x64 start options layo
 static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8U, "output path offset changed");
 static_assert(offsetof(RecorderNativeStartOptions, endpoint_id_utf8) == 16U, "endpoint ID offset changed");
 static_assert(offsetof(RecorderNativeStartOptions, target_process_id) == 24U, "target PID offset changed");
-static_assert(sizeof(RecorderNativeStats) == 192U, "x64 stats layout changed");
+static_assert(sizeof(RecorderNativeStats) == RECORDER_NATIVE_STATS_V3_SIZE, "x64 stats layout changed");
 static_assert(offsetof(RecorderNativeStats, packets) == 32U, "packet counter offset changed");
 static_assert(offsetof(RecorderNativeStats, peak) == 88U, "peak offset changed");
 static_assert(offsetof(RecorderNativeStats, render_drift_corrections) == 96U, "timeline stats must be additive");
 static_assert(RECORDER_NATIVE_STATS_V1_SIZE == 96U, "v1 stats prefix changed");
+static_assert(RECORDER_NATIVE_STATS_V2_SIZE == 192U, "v2 stats prefix changed");
+static_assert(offsetof(RecorderNativeStats, primary_level_peak) == RECORDER_NATIVE_STATS_V2_SIZE, "live levels must be additive");
 static_assert(RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK == 0, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_MICROPHONE == 1, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK == 2, "capture mode ABI value changed");
@@ -146,6 +148,8 @@ int main() {
         Expect(stats.struct_size == sizeof(stats)) &&
         Expect(stats.event_driven == 0U) &&
         Expect(stats.packets == 0U && stats.input_frames == 0U && stats.output_frames == 0U) &&
+        Expect(stats.primary_level_peak == 0.0F && stats.primary_level_rms == 0.0F &&
+               stats.microphone_level_peak == 0.0F && stats.microphone_level_rms == 0.0F) &&
         Expect((options.struct_size = 0U, recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect((options = ValidOptions(), options.output_path_utf8 = nullptr,
                 recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&

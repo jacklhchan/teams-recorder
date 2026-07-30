@@ -283,6 +283,13 @@ public sealed record NativeCaptureStats(
     NativeSourceTimelineStats RenderTimeline,
     NativeSourceTimelineStats MicrophoneTimeline)
 {
+    /// <summary>Latest normalized output/primary-source envelope for live UI metering.</summary>
+    public float PrimaryLevelPeak { get; init; }
+    public float PrimaryLevelRms { get; init; }
+    /// <summary>Latest normalized optional-microphone envelope for live UI metering.</summary>
+    public float MicrophoneLevelPeak { get; init; }
+    public float MicrophoneLevelRms { get; init; }
+
     public static NativeCaptureStats Empty(RecordingCaptureMode mode) => new(
         mode,
         SourceSampleRate: 0,

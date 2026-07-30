@@ -22,6 +22,7 @@ namespace TeamsRecorder.Windows.WinUI;
 /// </summary>
 public sealed class RecordingViewModel : INotifyPropertyChanged
 {
+    private const int WaveformBarCount = 48;
     private readonly DispatcherQueue dispatcherQueue;
     private readonly DispatcherQueueTimer telemetryTimer;
     private readonly DispatcherQueueTimer playbackTimer;
@@ -82,7 +83,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         dispatcherQueue = DispatcherQueue.GetForCurrentThread()
             ?? throw new InvalidOperationException("Teams Recorder 必須在 WinUI 執行緒上建立。");
         telemetryTimer = dispatcherQueue.CreateTimer();
-        telemetryTimer.Interval = TimeSpan.FromMilliseconds(400);
+        // The native bridge publishes compact level envelopes, so a 10 Hz UI
+        // refresh gives a useful live waveform without moving raw PCM across
+        // the C ABI or blocking the audio mixer.
+        telemetryTimer.Interval = TimeSpan.FromMilliseconds(100);
         telemetryTimer.Tick += OnTelemetryTimerTick;
         playbackTimer = dispatcherQueue.CreateTimer();
         playbackTimer.Interval = TimeSpan.FromMilliseconds(250);
@@ -117,6 +121,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         CaptureSources.Add(CaptureSourceChoice.SystemAudio);
         CaptureSources.Add(CaptureSourceChoice.SelectedApplication);
         selectedCaptureSource = CaptureSourceChoice.SystemAudio;
+        ResetWaveforms();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -130,6 +135,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     public ObservableCollection<ProcessSelectionChoice> ProcessCatalog { get; } = [];
 
     public ObservableCollection<LibraryRecording> LibraryItems { get; } = [];
+
+    /// <summary>Recent post-normalization Teams/system output peaks, oldest first.</summary>
+    public ObservableCollection<WaveformBar> OutputWaveformBars { get; } = [];
+
+    /// <summary>Recent post-normalization microphone peaks, oldest first.</summary>
+    public ObservableCollection<WaveformBar> InputWaveformBars { get; } = [];
 
     public AsyncRelayCommand StartCommand { get; }
 
@@ -501,6 +512,16 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     public double PeakPercent => Math.Clamp(snapshot.Stats.Peak * 100d, 0d, 100d);
 
     public string PeakText => $"{PeakPercent:0.0}% / {(PeakPercent >= 99 ? "可能剪裁" : "未偵測剪裁")}";
+
+    public double OutputLevelPercent => Math.Clamp(snapshot.Stats.PrimaryLevelRms * 100d, 0d, 100d);
+
+    public string OutputLevelText => $"{OutputLevelPercent:0.0}%";
+
+    public double InputLevelPercent => Math.Clamp(snapshot.Stats.MicrophoneLevelRms * 100d, 0d, 100d);
+
+    public string InputLevelText => SelectedMicrophoneEndpoint?.EndpointId is null
+        ? "未啟用"
+        : $"{InputLevelPercent:0.0}%";
 
     public string AggregateHealthText =>
         $"彙總：{snapshot.Stats.Packets:N0} 音訊封包、{snapshot.Stats.Discontinuities:N0} 次中斷；" +
@@ -1765,6 +1786,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         RefreshElapsed();
         if (changed.State == RecordingCoordinatorState.Recording)
         {
+            AppendWaveform(OutputWaveformBars, changed.Stats.PrimaryLevelPeak);
+            AppendWaveform(InputWaveformBars, changed.Stats.MicrophoneLevelPeak);
             ApplyRecordingMicrophoneMute(teamsInputMute.IsMuted);
             if (!telemetryTimer.IsRunning)
             {
@@ -1774,6 +1797,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         else
         {
             telemetryTimer.Stop();
+            ResetWaveforms();
         }
 
         if (changed.State is RecordingCoordinatorState.Stopped or
@@ -1801,11 +1825,36 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ElapsedText));
         OnPropertyChanged(nameof(PeakPercent));
         OnPropertyChanged(nameof(PeakText));
+        OnPropertyChanged(nameof(OutputLevelPercent));
+        OnPropertyChanged(nameof(OutputLevelText));
+        OnPropertyChanged(nameof(InputLevelPercent));
+        OnPropertyChanged(nameof(InputLevelText));
         OnPropertyChanged(nameof(AggregateHealthText));
         OnPropertyChanged(nameof(RenderHealthText));
         OnPropertyChanged(nameof(MicrophoneHealthText));
         OnPropertyChanged(nameof(ResultText));
         UpdateCommandStates();
+    }
+
+    private static void AppendWaveform(ObservableCollection<WaveformBar> bars, float peak)
+    {
+        if (bars.Count >= WaveformBarCount)
+        {
+            bars.RemoveAt(0);
+        }
+
+        bars.Add(WaveformBar.FromPeak(peak));
+    }
+
+    private void ResetWaveforms()
+    {
+        OutputWaveformBars.Clear();
+        InputWaveformBars.Clear();
+        for (var index = 0; index < WaveformBarCount; index++)
+        {
+            OutputWaveformBars.Add(WaveformBar.Silence);
+            InputWaveformBars.Add(WaveformBar.Silence);
+        }
     }
 
     private async Task FinalizeFaultedSessionAsync()
@@ -2013,6 +2062,23 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+}
+
+/// <summary>
+/// One column in the lightweight live level waveform.  The height keeps a
+/// visible floor so silence is distinguishable from a missing UI control.
+/// </summary>
+public sealed record WaveformBar(double Height, double Opacity)
+{
+    public static WaveformBar Silence { get; } = new(4, 0.25);
+
+    public static WaveformBar FromPeak(float peak)
+    {
+        var normalized = Math.Clamp(peak, 0F, 1F);
+        return new(
+            Height: 4 + normalized * 44,
+            Opacity: 0.3 + normalized * 0.7);
+    }
 }
 
 public sealed record EndpointChoice(

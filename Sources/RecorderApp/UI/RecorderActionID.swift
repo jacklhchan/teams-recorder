@@ -8,6 +8,7 @@ enum RecorderActionID {
     static let openOutputFolder = "recorder.action.open-output-folder"
     static let uploadAudio = "recorder.action.upload-audio"
     static let refreshRecordings = "recorder.action.refresh-recordings"
+    static let filterFavorites = "recorder.action.filter-favorites"
     static let openTranscript = "recorder.action.open-transcript"
     static let saveTranscript = "recorder.action.save-transcript"
     static let captureRecovery = "recorder.action.capture-recovery"
@@ -22,6 +23,7 @@ enum RecorderActionID {
         openOutputFolder,
         uploadAudio,
         refreshRecordings,
+        filterFavorites,
         openTranscript,
         saveTranscript,
         captureRecovery

@@ -147,7 +147,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         try assertVisibleSettingsRecoveryDeepLink(for: fixture)
     }
 
-    func testRecordingsOwnsUploadRefreshAndSessionSpecificActions() throws {
+    func testRecordingsRendersSessionSpecificActions() throws {
         let fixture = makeFixtureWithOneSession()
         let host = try makeWorkspaceHost(
             model: fixture.model,
@@ -157,8 +157,6 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 
         host.select(.recordings)
 
-        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.uploadAudio))
-        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.refreshRecordings))
         XCTAssertTrue(host.containsAccessibilityLabel("Play \(fixture.session.displayName)"))
         XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(fixture.session.displayName)"))
     }

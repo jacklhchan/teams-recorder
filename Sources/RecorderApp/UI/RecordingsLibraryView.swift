@@ -2,65 +2,73 @@ import SwiftUI
 
 struct RecordingsLibraryView: View {
     @ObservedObject var model: AppModel
+    @State private var searchText = ""
+    @State private var favoritesOnly = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Label("Recordings", systemImage: "list.bullet.rectangle")
-                        .font(.headline)
-                    Spacer()
-                    Button {
-                        model.chooseAudioFileForTranscription()
-                    } label: {
-                        Label("Upload Audio", systemImage: "square.and.arrow.up")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.transcribingSessionID != nil)
-                    .accessibilityIdentifier(RecorderActionID.uploadAudio)
-                    .background(
-                        RecorderDestinationAccessibilityMarker(
-                            identifier: RecorderActionID.uploadAudio
-                        )
-                    )
-                    Button {
-                        model.refreshSessions()
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier(RecorderActionID.refreshRecordings)
-                    .background(
-                        RecorderDestinationAccessibilityMarker(
-                            identifier: RecorderActionID.refreshRecordings
-                        )
-                    )
-                }
+        let query = RecordingLibraryQuery(
+            text: searchText,
+            favoritesOnly: favoritesOnly
+        )
+        let visibleSessions = query.filter(model.sessions)
 
-                SessionListView(
-                    sessions: model.sessions,
-                    transcribingSessionID: model.transcribingSessionID,
-                    transcriptionStatus: model.transcriptionStatus,
-                    lastTranscriptionSessionID: model.lastTranscriptionSessionID,
-                    lastTranscriptionStatus: model.lastTranscriptionStatus,
-                    lastTranscriptionDidFail: model.lastTranscriptionDidFail,
-                    hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
-                    transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
-                    play: model.play,
-                    open: model.open,
-                    transcribe: model.transcribe,
-                    cancelTranscription: model.cancelTranscription,
-                    openTranscript: model.openTranscript,
-                    openTranscriptLog: model.openTranscriptLog,
-                    transcriptText: model.transcriptText,
-                    saveTranscript: model.saveTranscript,
-                    exportTranscript: model.exportTranscript,
-                    copyTranscript: model.copyTranscript,
-                    saveMetadata: model.saveMetadata,
-                    moveToTrash: model.moveSessionToTrash
-                )
+        SessionListView(
+            sessions: visibleSessions,
+            query: query,
+            transcribingSessionID: model.transcribingSessionID,
+            transcriptionStatus: model.transcriptionStatus,
+            lastTranscriptionSessionID: model.lastTranscriptionSessionID,
+            lastTranscriptionStatus: model.lastTranscriptionStatus,
+            lastTranscriptionDidFail: model.lastTranscriptionDidFail,
+            hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
+            transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
+            play: model.play,
+            open: model.open,
+            transcribe: model.transcribe,
+            cancelTranscription: model.cancelTranscription,
+            openTranscript: model.openTranscript,
+            openTranscriptLog: model.openTranscriptLog,
+            transcriptText: model.transcriptText,
+            saveTranscript: model.saveTranscript,
+            exportTranscript: model.exportTranscript,
+            copyTranscript: model.copyTranscript,
+            saveMetadata: model.saveMetadata,
+            moveToTrash: model.moveSessionToTrash
+        )
+        .navigationTitle("Recordings")
+        .searchable(
+            text: $searchText,
+            placement: .toolbar,
+            prompt: "Search recordings"
+        )
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    model.chooseAudioFileForTranscription()
+                } label: {
+                    Label("Upload Audio", systemImage: "square.and.arrow.up")
+                }
+                .disabled(model.transcribingSessionID != nil)
+                .accessibilityIdentifier(RecorderActionID.uploadAudio)
+
+                Button {
+                    model.refreshSessions()
+                } label: {
+                    Label("Refresh Recordings", systemImage: "arrow.clockwise")
+                }
+                .accessibilityIdentifier(RecorderActionID.refreshRecordings)
             }
-            .padding(20)
+
+            ToolbarSpacer(.fixed)
+
+            ToolbarItem(placement: .primaryAction) {
+                Toggle(isOn: $favoritesOnly) {
+                    Label("Favorites", systemImage: "star.fill")
+                }
+                .toggleStyle(.button)
+                .help("Show favorites only")
+                .accessibilityIdentifier(RecorderActionID.filterFavorites)
+            }
         }
         .background(
             RecorderDestinationAccessibilityMarker(
@@ -73,6 +81,7 @@ struct RecordingsLibraryView: View {
 
 private struct SessionListView: View {
     let sessions: [RecordingSession]
+    let query: RecordingLibraryQuery
     let transcribingSessionID: RecordingSession.ID?
     let transcriptionStatus: String
     let lastTranscriptionSessionID: RecordingSession.ID?
@@ -93,128 +102,111 @@ private struct SessionListView: View {
     let saveMetadata: (String, String, Bool, RecordingSession) -> Void
     let moveToTrash: (RecordingSession) -> Void
 
-    @State private var searchText = ""
-    @State private var favoritesOnly = false
     @State private var transcriptSession: RecordingSession?
     @State private var metadataSession: RecordingSession?
     @State private var sessionPendingTrash: RecordingSession?
 
     var body: some View {
-        let query = RecordingLibraryQuery(text: searchText, favoritesOnly: favoritesOnly)
-        let visibleSessions = query.filter(sessions)
-        let lastVisibleSessionID = visibleSessions.last?.id
-
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                TextField("Search recordings", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                Toggle(isOn: $favoritesOnly) {
-                    Image(systemName: "star.fill")
-                }
-                .toggleStyle(.button)
-                .help("Show favorites only")
-            }
-
-            if visibleSessions.isEmpty {
-                Text("No recordings in the selected folder yet.")
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 8)
+        Group {
+            if sessions.isEmpty {
+                ContentUnavailableView(
+                    "No Recordings",
+                    systemImage: "list.bullet.rectangle",
+                    description: Text(
+                        "No recordings match the current folder and filters."
+                    )
+                )
             } else {
-                LazyVStack(spacing: 0) {
-                    ForEach(visibleSessions) { session in
-                        VStack(spacing: 8) {
-                            HStack(spacing: 12) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(session.displayName).font(.callout.weight(.medium))
-                                    Text("\(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(session.durationText) · \(session.fileSizeText)")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    if !session.tags.isEmpty {
-                                        Text(session.tags.map { "#\($0)" }.joined(separator: "  "))
-                                            .font(.caption).foregroundStyle(.tint).lineLimit(1)
-                                    }
-                                    if let snippet = query.transcriptSnippet(for: session) {
-                                        Text(snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                    }
+                List(sessions) { session in
+                    VStack(spacing: 8) {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(session.displayName).font(.callout.weight(.medium))
+                                Text("\(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(session.durationText) · \(session.fileSizeText)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                if !session.tags.isEmpty {
+                                    Text(session.tags.map { "#\($0)" }.joined(separator: "  "))
+                                        .font(.caption).foregroundStyle(.tint).lineLimit(1)
                                 }
-                                Spacer()
-                                Button { play(session) } label: { Image(systemName: "play.fill") }
-                                    .buttonStyle(.bordered)
-                                    .help("Play recording in a separate window")
-                                    .accessibilityLabel("Play \(session.displayName)")
-                                    .background(
-                                        RecorderDestinationAccessibilityMarker(
-                                            identifier: "recorder.row.play.\(session.id.lastPathComponent)",
-                                            label: "Play \(session.displayName)"
-                                        )
-                                    )
-                                Button { open(session) } label: { Image(systemName: "folder") }
-                                    .buttonStyle(.bordered)
-                                    .accessibilityLabel("Open \(session.displayName)")
-                                Button { metadataSession = session } label: {
-                                    Image(systemName: session.isFavorite ? "star.fill" : "slider.horizontal.3")
+                                if let snippet = query.transcriptSnippet(for: session) {
+                                    Text(snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                 }
+                            }
+                            Spacer()
+                            Button { play(session) } label: { Image(systemName: "play.fill") }
                                 .buttonStyle(.bordered)
-                                .help("Edit recording details")
-                                .accessibilityLabel("Edit details for \(session.displayName)")
+                                .help("Play recording in a separate window")
+                                .accessibilityLabel("Play \(session.displayName)")
                                 .background(
                                     RecorderDestinationAccessibilityMarker(
-                                        identifier: "recorder.row.edit.\(session.id.lastPathComponent)",
-                                        label: "Edit details for \(session.displayName)"
+                                        identifier: "recorder.row.play.\(session.id.lastPathComponent)",
+                                        label: "Play \(session.displayName)"
                                     )
                                 )
-                                Button { transcribe(session) } label: {
-                                    Image(systemName: transcribingSessionID == session.id ? "waveform" : "text.badge.plus")
-                                }
+                            Button { open(session) } label: { Image(systemName: "folder") }
                                 .buttonStyle(.bordered)
-                                .disabled(transcribingSessionID != nil || !hasSavedProviderProfile)
-                                .help(hasSavedProviderProfile ? "Transcribe with the configured AI provider" : "Configure an AI provider first")
-                                .accessibilityLabel("Transcribe \(session.displayName)")
-                                Button { transcriptSession = session } label: { Image(systemName: "doc.text.fill") }
-                                    .buttonStyle(.bordered)
-                                    .disabled(!hasTranscript(for: session))
-                                    .help("View and edit transcript")
-                                    .accessibilityIdentifier(RecorderActionID.openTranscript)
-                                    .accessibilityLabel("Open Transcript for \(session.displayName)")
-                                Button(role: .destructive) { sessionPendingTrash = session } label: { Image(systemName: "trash") }
-                                    .buttonStyle(.bordered)
-                                    .help("Move recording to Trash")
-                                    .accessibilityLabel("Move \(session.displayName) to Trash")
+                                .accessibilityLabel("Open \(session.displayName)")
+                            Button { metadataSession = session } label: {
+                                Image(systemName: session.isFavorite ? "star.fill" : "slider.horizontal.3")
+                            }
+                            .buttonStyle(.bordered)
+                            .help("Edit recording details")
+                            .accessibilityLabel("Edit details for \(session.displayName)")
+                            .background(
+                                RecorderDestinationAccessibilityMarker(
+                                    identifier: "recorder.row.edit.\(session.id.lastPathComponent)",
+                                    label: "Edit details for \(session.displayName)"
+                                )
+                            )
+                            Button { transcribe(session) } label: {
+                                Image(systemName: transcribingSessionID == session.id ? "waveform" : "text.badge.plus")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(transcribingSessionID != nil || !hasSavedProviderProfile)
+                            .help(hasSavedProviderProfile ? "Transcribe with the configured AI provider" : "Configure an AI provider first")
+                            .accessibilityLabel("Transcribe \(session.displayName)")
+                            Button { transcriptSession = session } label: { Image(systemName: "doc.text.fill") }
+                                .buttonStyle(.bordered)
+                                .disabled(!hasTranscript(for: session))
+                                .help("View and edit transcript")
+                                .accessibilityIdentifier(RecorderActionID.openTranscript)
+                                .accessibilityLabel("Open Transcript for \(session.displayName)")
+                            Button(role: .destructive) { sessionPendingTrash = session } label: { Image(systemName: "trash") }
+                                .buttonStyle(.bordered)
+                                .help("Move recording to Trash")
+                                .accessibilityLabel("Move \(session.displayName) to Trash")
+                            Button { openTranscriptLog(session) } label: { Image(systemName: "terminal") }
+                                .buttonStyle(.bordered)
+                                .disabled(!hasTranscriptLog(for: session))
+                                .help("Open ASR log")
+                                .accessibilityLabel("Open ASR log for \(session.displayName)")
+                        }
+
+                        if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id || transcriptionStatesBySessionID[session.id] != nil {
+                            HStack(spacing: 8) {
+                                if transcribingSessionID == session.id {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: statusIcon(for: session)).foregroundStyle(statusColor(for: session))
+                                }
+                                Text(statusText(for: session)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                Spacer()
+                                if transcribingSessionID == session.id {
+                                    Button("Cancel", action: cancelTranscription).buttonStyle(.bordered)
+                                }
                                 Button { openTranscriptLog(session) } label: { Image(systemName: "terminal") }
-                                    .buttonStyle(.bordered)
-                                    .disabled(!hasTranscriptLog(for: session))
-                                    .help("Open ASR log")
+                                    .buttonStyle(.bordered).help("Open ASR log")
                                     .accessibilityLabel("Open ASR log for \(session.displayName)")
                             }
-
-                            if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id || transcriptionStatesBySessionID[session.id] != nil {
-                                HStack(spacing: 8) {
-                                    if transcribingSessionID == session.id {
-                                        ProgressView().controlSize(.small)
-                                    } else {
-                                        Image(systemName: statusIcon(for: session)).foregroundStyle(statusColor(for: session))
-                                    }
-                                    Text(statusText(for: session)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                    Spacer()
-                                    if transcribingSessionID == session.id {
-                                        Button("Cancel", action: cancelTranscription).buttonStyle(.bordered)
-                                    }
-                                    Button { openTranscriptLog(session) } label: { Image(systemName: "terminal") }
-                                        .buttonStyle(.bordered).help("Open ASR log")
-                                        .accessibilityLabel("Open ASR log for \(session.displayName)")
-                                }
-                                .padding(10)
-                                .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 6))
-                            }
+                            .padding(10)
+                            .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 6))
                         }
-                        .padding(.vertical, 8)
-                        if session.id != lastVisibleSessionID { Divider() }
                     }
+                    .padding(.vertical, 6)
                 }
+                .listStyle(.inset)
             }
         }
-        .padding(14)
-        .background(.background, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator.opacity(0.55), lineWidth: 1))
         .sheet(item: $transcriptSession) { session in
             TranscriptEditorView(session: session, load: { transcriptText(session) }, save: { saveTranscript($0, session) }, export: { exportTranscript(session) }, copy: { copyTranscript(session) })
         }

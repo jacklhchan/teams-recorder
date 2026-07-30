@@ -18,6 +18,10 @@ final class RecorderActionIDTests: XCTestCase {
         )
         XCTAssertEqual(RecorderActionID.uploadAudio, "recorder.action.upload-audio")
         XCTAssertEqual(RecorderActionID.refreshRecordings, "recorder.action.refresh-recordings")
+        XCTAssertEqual(
+            RecorderActionID.filterFavorites,
+            "recorder.action.filter-favorites"
+        )
         XCTAssertEqual(RecorderActionID.openTranscript, "recorder.action.open-transcript")
         XCTAssertEqual(RecorderActionID.saveTranscript, "recorder.action.save-transcript")
         XCTAssertEqual(RecorderActionID.captureRecovery, "recorder.action.capture-recovery")

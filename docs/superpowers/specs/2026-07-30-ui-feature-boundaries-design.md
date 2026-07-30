@@ -97,6 +97,13 @@ PR B introduces:
 - small state snapshots and command protocols consumed by the Recordings and
   transcript UI.
 
+During PR B, the existing single `AppModel` is the temporary construction
+owner. It constructs and retains exactly one `LibraryFeatureModel`, exactly one
+`TranscriptionFeatureModel`, and exactly one playback feature boundary.
+`AppModel` may expose read-only projections and forwarding commands, but must
+not mirror those features' mutable state, tasks, generations, callback
+dictionaries, or coordinator dictionaries.
+
 Library refresh and search-document rebuild remain automatic after recording
 publication, successful transcription publication, and transcript editing.
 Transcription continues to use one immutable provider snapshot per job and one
@@ -121,7 +128,15 @@ PR C introduces:
 - `AppCoordinator` as the explicit composition boundary.
 
 `AppCoordinator` wires feature models, existing coordinators, repositories,
-and presenters. It does not implement recording or Teams state machines.
+and platform adapters. It does not implement recording or Teams state machines
+and does not construct AppKit presenter instances.
+
+PR C moves construction of the three PR B feature boundaries from `AppModel`
+to `AppCoordinator`. This is an ownership handoff, not a state migration:
+PR C creates one instance of each feature at composition time, injects those
+same instances into the narrow `AppModel` compatibility adapter, and removes
+the corresponding `AppModel` construction. It never copies feature state or
+allows parallel old/new instances.
 
 At the end of PR C, one narrow `AppModel` compatibility adapter remains because
 the current `AppRuntime.model`, application entry point, and floating
@@ -130,9 +145,10 @@ duplicated tasks, generations, timers, lifecycle gates, persistence, or
 business rules. Removing that concrete type coupling requires a later bounded
 PR that changes the runtime and floating-panel presenter protocols together.
 
-`AIProviderSettingsModel` is constructed exactly once by `AppCoordinator`
-using the shared provider repository. `SettingsFeatureModel` owns its Settings
-UI projection and delegates provider edits to that model.
+`AIProviderSettingsModel` is constructed exactly once: by `AppModel` during
+PR B and by `AppCoordinator` after the PR C construction handoff, always using
+the shared provider repository. `SettingsFeatureModel` owns its persisted
+Settings UI projection and delegates provider edits to that model.
 `TranscriptionFeatureModel` reads only repository/job-coordinator results and
 never creates or owns a second editable provider draft.
 
@@ -175,43 +191,105 @@ Feature models may communicate only through typed commands or events. They
 must not read or mutate a sibling feature model's private tasks, generations,
 timers, or coordinator dictionaries.
 
+The diagram is the PR C target. PR B uses `AppModel` as the temporary
+construction shell for the three PR B feature boundaries; it does not
+introduce `AppCoordinator` early.
+
+All UI-facing feature models and `AppCoordinator` are `@MainActor`.
+Long-running or blocking work remains behind existing asynchronous
+coordinators, repositories, and worker queues and returns immutable results to
+the main actor.
+
 ## 6. State Ownership
 
 | State or resource | Single owner after the program | Mutation path |
 |---|---|---|
 | App lifetime and shutdown | `AppRuntime` | application lifecycle only |
-| Feature construction and wiring | `AppCoordinator` | initializer/composition only |
+| Feature construction and wiring | PR B: single `AppModel`; PR C: `AppCoordinator` | initializer/composition only; never parallel instances |
 | Active capture attempt, lifecycle generation, and auto/manual recording ownership | `RecordingSessionCoordinator` | typed recording commands |
-| `RecordingEngine` instance lifetime and construction | `AppCoordinator` | composition only; exactly one injected instance |
-| `RecordingEngine` commands and UI projection | `RecordFeatureModel` | record commands only |
+| Stop orchestration, media/metadata finalization settlement, and semantic finalization outcome | `RecordingSessionCoordinator` using injected engine/repository operations | one typed stop/finalize command and one outcome |
+| `RecordingEngine` instance lifetime and construction | PR A/B: single `AppModel`; PR C: `AppCoordinator` | composition only; exactly one injected instance |
+| Runtime capture selection, resolved application, selected microphone, permissions, source-control gating, recording commands, meters, health, storage warnings, and effective recorder-mute presentation | `RecordFeatureModel` | typed record/capture commands and recorder/coordinator events |
 | Teams event ordering | `TeamsIntegrationIngress` | serialized ingress drain |
 | Teams countdown, debounce, and automation intent | `TeamsAutoMeetingCoordinator` | Teams events and semantic recording-outcome callbacks |
-| Teams UI connection/mute projections | `IntegrationsFeatureModel` | Teams adapters/coordinator events |
+| Teams connection, pairing, Auto Meeting, and mute-sync integration projections | `IntegrationsFeatureModel` | Teams adapters, ingress, and coordinator events |
 | Library sessions, refresh generation, search documents | `LibraryFeatureModel` | library commands and publication events |
 | Active transcription task, generation, state, result publication | `TranscriptionJobCoordinator` exposed by `TranscriptionFeatureModel` | start/cancel and coordinator callbacks |
 | Provider profile and secret persistence | one shared provider repository | repository methods only |
 | Immutable provider job snapshot | `TranscriptionJobCoordinator` | captured before preparation starts |
 | Playback loading/session generation | focused playback feature boundary | playback commands only |
 | Playback UI snapshot | `PlaybackPresentationModel` | playback coordinator snapshots |
-| Capture and user-preference UI projection | `SettingsFeatureModel` backed by existing repositories | settings commands only |
-| Editable provider settings draft | one `AIProviderSettingsModel` constructed by `AppCoordinator` | delegated settings commands only |
+| Persisted preference and provider UI projection | `SettingsFeatureModel` backed by existing repositories | settings commands only; no duplicated runtime capture state |
+| Editable provider settings draft | one `AIProviderSettingsModel`; PR B constructed by `AppModel`, PR C by `AppCoordinator` | delegated settings commands only |
+| Selected output/workspace folder and folder revision | one `WorkspaceFolderRepository` | repository command and change stream only |
 | Floating recording-panel lifetime | `AppRuntime.recordingController` | recorder-state observation and runtime shutdown |
 | Playback-window presenter lifetime | workspace shell (`ContentView`) | `playingSessionID` presentation events |
 | Teams-countdown presenter lifetime | workspace shell (`ContentView`) | auto-meeting presentation events |
+
+The Settings destination is a composition surface, not a state owner. It may
+render sections backed by `RecordFeatureModel`, `IntegrationsFeatureModel`,
+`SettingsFeatureModel`, and `TranscriptionFeatureModel`. A section sends typed
+commands to the feature that owns the state it displays.
+
+`SettingsFeatureModel` does not retain a second live capture selection,
+resolved application, microphone choice, permission state, source readiness,
+Teams connection, or recorder-mute state. It renders immutable snapshots from
+the owning feature only when those values are needed in Settings.
+
+`IntegrationsFeatureModel` owns only the Teams-facing UI projection and typed
+commands for connection, pairing, Auto Meeting, and mute sync. Existing Teams
+adapters, transport, authorization, serialized `TeamsIntegrationIngress`,
+relay callbacks, and `TeamsAutoMeetingCoordinator` retain their integration
+and lifecycle ownership. The feature may invoke a narrow microphone-gate
+command and publish an immutable meeting/mute context for Record.
+Teams-window refresh remains a Record command consuming that context; Teams
+meeting state is not mirrored inside Record.
+
+`WorkspaceFolderRepository` is the repository-level source of truth for the
+selected output/workspace folder. It publishes a monotonically increasing
+folder revision. Record reads the current folder when starting or finalizing;
+Library scopes loading, recovery, and search indexes to the same revision; and
+Settings sends folder-selection commands. No feature maintains an independent
+mutable folder URL. Before PR C introduces this repository, the existing
+single `AppModel.outputFolder` remains the compatibility source of truth.
 
 ## 7. Cross-feature Commands and Events
 
 Cross-feature communication is explicit:
 
 ```text
-recording finalised
-  -> LibraryFeatureModel.refresh()
-
 transcription published
   -> LibraryFeatureModel.rebuildSearchDocument(for:)
 
 transcript edited
   -> LibraryFeatureModel.rebuildSearchDocument(for:)
+
+LibraryFeatureModel.importAudio(url:, workspaceRevision:)
+  -> ImportedAudioSessionReady(session, workspaceRevision)
+  -> TranscriptionFeatureModel.requestStart(session:)
+       provider eligible -> start exactly one job
+       provider ineligible -> retain session, start zero jobs, publish recovery
+
+SettingsFeatureModel.selectWorkspaceFolder(url:)
+  -> WorkspaceFolderRepository.setFolder(url:)
+  -> WorkspaceFolderChanged(folder, revision)
+       -> RecordFeatureModel.invalidateFolderDependentReadiness(revision:)
+       -> LibraryFeatureModel.invalidateAndRefresh(folder:, revision:)
+
+SettingsFeatureModel.saveProviderSettings(...)
+  -> ProviderSettingsSaved(profileRevision)
+       -> future TranscriptionFeatureModel jobs use the new revision
+       -> active TranscriptionJobCoordinator snapshot remains unchanged
+
+RecordFeatureModel requests stop/finalization
+  -> RecordingSessionCoordinator settles media finalization
+     and the source-metadata publication attempt
+  -> RecordingFinalizationOutcome(
+       folder, workspaceRevision, recordingURL, health, metadataOutcome, source
+     )
+  -> RecordFeatureModel projects outcome and user-facing status
+  -> LibraryFeatureModel.refreshAfterFinalization(outcome:)
+     exactly once
 
 TeamsAutoMeetingCoordinator.onCommand(.startRecording)
   -> RecordFeatureModel.start(source: .automatic)
@@ -228,8 +306,82 @@ TeamsAutoMeetingCoordinator.onCommand(.transferRecordingToManual)
 An event must not be implemented by a feature mutating another feature's
 published property.
 
+`ImportedAudioSessionReady` is emitted only after the file import has
+successfully created a valid session in the current workspace revision.
+Transcription is not started by the view. When provider eligibility is
+satisfied, the typed request starts exactly one job. Without a saved eligible
+provider, the imported session remains in Library, no job starts, and the
+existing configure-and-save-provider recovery is shown. An import failure
+creates no session and emits no start request.
+
+`WorkspaceFolderChanged` is the only folder-change invalidation event. Record
+must reject a pending start that has not begun capture and captured an obsolete
+folder revision. An active recording retains an immutable
+`RecordingWorkspaceSnapshot(folder, revision)` through media and metadata
+finalization, so a folder change cannot redirect or discard its output.
+Library clears folder-scoped sessions, transcription projections,
+transcript/log caches, recovery state, and search generations before one
+refresh for the new revision.
+
+An active transcription continues against its original session folder and
+immutable provider snapshot. Its publication event carries the originating
+workspace revision; Library updates the matching folder index and changes the
+visible list only when that revision is still selected.
+
+`ProviderSettingsSaved` affects only jobs started after the repository save.
+An active job continues with its immutable profile and credential snapshot,
+even if the user changes or removes the saved settings.
+
+`RecordingFinalizationOutcome` is semantic and emitted once after media
+finalization and the source-metadata write attempt have both settled. A
+metadata warning remains part of the outcome and user-facing status, but does
+not trigger a second Library refresh. Library performs exactly one targeted
+refresh/index update for the outcome's immutable workspace revision and
+changes the visible list only if that revision is selected. A
+no-active-recording result emits no Library refresh.
+
+`RecordFeatureModel` never performs media or metadata finalization itself. It
+issues the typed stop command and projects the coordinator outcome. The
+`RecordingSessionCoordinator` remains the business-rule owner and uses the
+injected engine and metadata repository operations; the cross-feature bridge
+forwards its single semantic outcome to Library.
+
 Disabling Auto Meeting may request the same ownership transfer without the
 additional `manualRecordingStarted()` suppression callback.
+
+### Presenter and concurrency lifetime
+
+`ContentView` alone calls the playback-window and Teams-countdown presenter
+factories and retains those two presenter instances for the workspace
+lifetime. `AppCoordinator` exposes the presentation state and typed
+playback/countdown commands consumed by the shell, but never constructs,
+retains, dismisses, or passes through either presenter instance.
+
+`AppRuntime` remains the owner of the separate floating recording-panel
+coordinator. Runtime shutdown dismisses that floating panel; the workspace
+shell dismisses playback and countdown presenters on disappearance and
+application termination and clears their action closures before releasing
+feature references.
+
+All UI feature models and `AppCoordinator` are `@MainActor`.
+`AppCoordinator` owns every cross-feature subscription, event bridge, and
+callback registration that it creates. Its shutdown is explicit and
+idempotent:
+
+1. stop accepting cross-feature events and invalidate subscription
+   generations;
+2. cancel cross-feature tasks and subscriptions;
+3. unregister or replace playback, transcription, Teams coordinator, and Teams
+   ingress callbacks;
+4. tear down feature models and then their coordinators/adapters;
+5. allow `AppRuntime` and `ContentView` to dismiss only the presenters they
+   respectively own.
+
+`AppRuntime.shutdown()` first shuts down the floating recording-controller
+observer, then calls `AppCoordinator.shutdown()` exactly once after PR C.
+No queued Teams ingress event, playback snapshot, transcription callback, or
+folder-change event may target a feature or compatibility adapter after its
+teardown begins.
 
 ## 8. Recording Ownership Contract
 
@@ -352,17 +504,17 @@ PR A uses an action-parity matrix during implementation and review:
 
 | Existing action or state | Destination | Stable accessibility contract |
 |---|---|---|
-| `startRecording` / `stopRecording` | Record primary control | `recorder.action.start-stop` |
-| local/native/Teams mute | Record primary control | `recorder.action.mute-mic` plus explicit state value |
-| `startTestRecording` | Record | `recorder.action.test-audio` |
-| `chooseAudioFileForTranscription` | Recordings | `recorder.action.upload-audio` |
-| `refreshSessions` | Recordings | `recorder.action.refresh-recordings` |
+| `AppModel.startOrStop()` | Record primary control | `recorder.action.start-stop` |
+| `AppModel.toggleRecorderMicMute()` plus local/native/Teams state | Record primary control | `recorder.action.mute-mic` plus explicit state value |
+| `AppModel.runTestRecording()` | Record | `recorder.action.test-audio` |
+| `AppModel.chooseAudioFileForTranscription()` | Recordings | `recorder.action.upload-audio` |
+| `AppModel.refreshSessions()` | Recordings | `recorder.action.refresh-recordings` |
 | session transcript open/edit | Recordings/session action | `recorder.action.open-transcript` plus session-specific label |
 | `saveTranscript` | transcript editor | `recorder.action.save-transcript` |
 | transcript/log open | Recordings/session action | session-specific Open Transcript/Open Log labels |
 | metadata/favorite edit | Recordings/session action | explicit session-specific label |
 | trash confirmation | Recordings/session action | destructive role and session-specific label |
-| output-folder choose/open | Record or Settings storage | existing choose/open-folder identifiers |
+| `AppModel.chooseOutputFolder()` / `openRecordingFolder()` | Record or Settings storage | existing choose/open-folder identifiers |
 | capture mode/application reconnect | Settings capture | existing capture-mode and reconnect identifiers |
 | Teams Auto Meeting/mute sync | Settings Teams | existing Teams identifiers and state values |
 
@@ -386,8 +538,9 @@ description with:
 |---|---|
 | old owner | exact `AppModel` state, task, generation, callback, or resource |
 | new owner | one feature model or existing coordinator |
-| construction | the single instance created by `AppCoordinator` |
+| construction owner by phase | PR B: the existing single `AppModel` constructs and retains the sole Library, Transcription, and playback feature instances. PR C: `AppCoordinator` constructs the sole instances and injects them into the narrow `AppModel` adapter after removing the PR B construction path. No state is copied and no parallel instance exists. |
 | callback cutover | unregister/replace old callback before enabling the new path |
+| subscription owner by phase | PR B: `AppModel` temporarily owns only the bridges needed by the PR B features. PR C: `AppCoordinator` owns all cross-feature subscriptions and cancels them before feature/coordinator teardown. |
 | shutdown/cancel order | deterministic teardown with no callback into a released owner |
 | temporary forwarder | read/command delegation only; no mirrored mutable state |
 | removal condition | tests and reference search proving the old path is gone |
@@ -396,6 +549,11 @@ Each cutover adds a single-instance or single-publication assertion where
 practical. `GlobalHotKeyManager`, `AppRuntime.shutdown`, Teams ingress,
 recording finalization, playback snapshots, and transcription callbacks must
 continue to enter one command path only.
+
+PR B assertions prove `AppModel` retains one instance of each PR B feature and
+contains no parallel mutable state, task, generation, or dictionary for that
+feature. PR C assertions prove construction and subscription ownership moved
+to `AppCoordinator` and the narrow adapter references those same instances.
 
 PR B defines immutable feature snapshots with per-feature revisions. Observer
 spies verify the allowed publication scope:
@@ -407,6 +565,9 @@ spies verify the allowed publication scope:
 | transcription job state | Transcription and affected Library session | Record, Settings |
 | playback position snapshot | Playback | Record, Library, Settings, Transcription |
 | provider draft edit | Settings | Record, Library |
+| provider settings saved | Settings and future job eligibility | active Transcription job snapshot, Record, Library |
+| workspace folder changed | Record folder readiness and Library folder scope | Integrations, active immutable Transcription job |
+| recording finalization outcome | Record status and one Library refresh | Settings, Integrations, duplicate Library refresh |
 
 ## 12. Runtime Wiring That Must Not Change in PR A
 
@@ -453,6 +614,38 @@ replace a specific blocking state with an unrelated global status message.
 - current runtime constructs one model and one presenter;
 - capture, Teams auto-meeting, mute, and floating-controller regressions.
 
+PR A adds `RecorderWorkspaceRenderTests` where the supported macOS
+XCTest/AppKit runtime can create a hosting window:
+
+1. construct a deterministic, startup-disabled fixture `AppModel`;
+2. host the actual workspace in an `NSHostingView` and `NSWindow` with an
+   860×680 content rect, disable animations, and force main-actor layout;
+3. assert the initial Record viewport contains non-zero, non-clipped frames for
+   recording state/timer, Start-or-Stop, microphone mute, both audio meters,
+   and immediate capture health without scrolling;
+4. drive an injectable internal workspace navigation boundary through Record,
+   Recordings, and Settings for at least 25 repeated cycles, asserting each
+   destination renders and no clean-navigation pending state leaks;
+5. repeat the structural layout at a representative wide size;
+6. after exercising video playback and the destination-switching cycle,
+   recursively assert that no `AVPlayerView` exists in the main workspace
+   hierarchy. Playback remains in its independent window presenter.
+
+The render regression uses stable accessibility identifiers or explicit layout
+probes. It may attach a PNG on failure for diagnosis, but PR A does not add a
+pixel-golden comparison for OS-dependent Glass, material, font, or dynamic
+meter rendering.
+
+If the test target cannot create the AppKit host on a supported CI/runtime, the
+PR report records `not run` with the concrete host limitation and includes the
+focused pure layout/navigation results. This does not replace the mandatory
+manual 860×680 smoke before merge.
+
+`RecorderNavigationTests` also repeat the pure
+Record → Recordings → Settings → Record transition at least 100 times and
+cover clean navigation, pending dirty navigation, Keep Editing, and one-time
+Discard application without an engine, presenter, or filesystem dependency.
+
 Required existing focused suites include:
 
 - `RecordingControllerPresentationTests`;
@@ -460,7 +653,8 @@ Required existing focused suites include:
 - `RecordingControllerPanelTests`;
 - `AppRuntimeTests`;
 - `AppModelPlaybackTests`, including periodic snapshot publication and
-  non-embedded video playback regressions.
+  `testVideoPlaybackIsNotEmbeddedInMainContentHierarchy`, updated to retain the
+  rendered 860×680 workspace and destination-switching coverage.
 
 ### PR B focused tests
 
@@ -469,6 +663,12 @@ Required existing focused suites include:
 - playback snapshots do not republish the whole workspace;
 - successful transcription and transcript edits immediately rebuild the
   searchable document;
+- successful eligible imported-audio publication starts exactly one
+  transcription job; successful ineligible import retains one Library session
+  and starts zero jobs with provider recovery; failed import creates no session
+  and starts no job;
+- provider settings saved during an active job affect future jobs only and do
+  not mutate the active job snapshot;
 - favorites and transcript snippets remain available;
 - current transcription cancellation, stale-callback, retention, provider
   snapshot, and error behavior remains unchanged.
@@ -482,10 +682,20 @@ Required existing focused suites also include
 - meter/health updates do not publish library/settings/transcription changes;
 - Teams state enters through serialized ingress;
 - automatic and manual recording ownership remains correct;
+- workspace-folder changes invalidate Record readiness and Library
+  folder-scoped caches once, while active recording/transcription snapshots
+  remain bound to their originating folder revision;
+- each semantic recording-finalization outcome triggers exactly one targeted
+  Library refresh after media and metadata finalization settle;
 - exactly one recording coordinator, Teams auto-meeting coordinator, engine,
   provider repository, transcription coordinator, and playback coordinator
   exists per runtime;
-- shutdown remains idempotent.
+- shutdown remains idempotent;
+- runtime shutdown while floating-panel observation is active;
+- playback-window close during feature teardown;
+- countdown cancel while Teams callbacks are being replaced;
+- delayed Teams ingress, playback snapshot, transcription callback, and
+  workspace-folder event after coordinator teardown are ignored.
 
 Required existing focused suites also include
 `AppModelScreenCaptureTests`, `AppModelTeamsAutoMeetingTests`, and
@@ -523,7 +733,11 @@ Each PR report distinguishes automated coverage from manual acceptance.
 
 Required PR A smoke tests before merge:
 
-- 860×680 and wide-window resizing;
+- 860×680 and wide-window resizing. At exactly 860×680, with Record selected
+  and without scrolling, the initial operational region visibly contains
+  recording state/timer, Start or Stop, microphone mute, both audio meters,
+  and capture health. Record `passed` with tester, OS version, date, and
+  screenshot/window evidence; `not run` is not `passed`;
 - Record, Recordings, and Settings navigation;
 - simultaneous visibility and operability of Start/Stop, Mute, meters, and
   health;

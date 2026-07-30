@@ -1,19 +1,11 @@
 #include "linear_resampler.h"
+#include "stereo_downmix.h"
 
 #include <cstddef>
-#include <cmath>
 #include <limits>
 #include <new>
 
 namespace recorder::resample {
-namespace {
-
-float FiniteOrSilence(float sample) {
-    return std::isfinite(sample) ? sample : 0.0F;
-}
-
-}  // namespace
-
 LinearResampler::LinearResampler(std::uint32_t source_sample_rate, std::uint16_t source_channels)
     : source_sample_rate_(source_sample_rate), source_channels_(source_channels) {}
 
@@ -31,8 +23,12 @@ Error LinearResampler::Process(const float* interleaved_frames, std::uint64_t fr
 
     for (std::uint64_t offset = 0; offset != frame_count; ++offset) {
         const auto sample_offset = offset * source_channels_;
-        const float left = FiniteOrSilence(interleaved_frames[sample_offset]);
-        const float right = source_channels_ == 1 ? left : FiniteOrSilence(interleaved_frames[sample_offset + 1]);
+        float left = 0.0F;
+        float right = 0.0F;
+        if (!recorder::downmix::DownmixFrameToStereo(
+                interleaved_frames + sample_offset, source_channels_, &left, &right)) {
+            return Error::InvalidArgument;
+        }
         if (!has_previous_) {
             previous_left_ = left;
             previous_right_ = right;

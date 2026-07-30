@@ -24,6 +24,9 @@ public:
 private:
     Writer(std::filesystem::path final_path, std::uint32_t bitrate_bps);
     Error Open(std::string* detail);
+    Error WriteCanonicalBlock(const float* samples, std::uint64_t start_100ns,
+                              std::uint64_t duration_100ns, std::string* detail);
+    Error DrainToMinimumAacBlocks(std::string* detail);
     std::filesystem::path final_path_, partial_path_;
     std::uint32_t bitrate_bps_;
     bool finalized_ = false, aborted_ = false;

@@ -8,6 +8,7 @@ var tests = new (string Name, Action Run)[]
     ("manual recording suppresses Teams until end", ManualRecordingSuppressesTeamsUntilEnd),
     ("meeting rejoin cancels stop debounce", MeetingRejoinCancelsStopDebounce),
     ("suppression during stop debounce survives a transient rejoin", SuppressionDuringStopDebounceSurvivesRejoin),
+    ("explicit user stop releases automatic recording ownership", ExplicitUserStopReleasesAutomaticOwnership),
     ("meeting end commits exactly one stop", MeetingEndCommitsOneStop),
     ("committed stop waits for completion before restarting", CommittedStopWaitsForCompletion),
     ("disabling automatic recording transfers ownership", DisableTransfersOwnership),
@@ -31,8 +32,33 @@ var tests = new (string Name, Action Run)[]
     ,("session recovery is idempotent and never clobbers", SessionStorageTests.RecoveryIsIdempotentAndNeverClobbers)
     ,("session storage blocks unavailable capacity", SessionStorageTests.CapacityUnavailableBlocksStart)
     ,("session metadata normalizes malformed optional fields", SessionStorageTests.MetadataNormalizesMalformedOptionalFields)
+    ,("session metadata edits preserve media and unknown fields", SessionStorageTests.MetadataEditsPreserveMediaAndUnknownFields)
+    ,("session recycle rejects foreign and incomplete folders", SessionStorageTests.RecycleRejectsForeignAndIncompleteFolders)
     ,("session folder names are whitelisted", SessionStorageTests.FolderNamesAreWhitelisted)
     ,("session allocation uses deterministic collision suffixes", SessionStorageTests.AllocatesDeterministicCollisionSuffix)
+    ,("video capture is gated until a frame pipeline is verified", VideoCaptureTests.FeatureGateFailsClosedUntilFramePipelineExists)
+    ,("video capture target selection requires the same live window", VideoCaptureTests.TargetSelectionRequiresTheSameLiveWindow)
+    ,("Teams protocol uses a local endpoint and absolute commands", TeamsIntegrationTests.ProtocolUsesLocalEndpointAndAbsoluteCommands)
+    ,("Teams protocol rejects partial meeting state", TeamsIntegrationTests.ProtocolDecodesCompleteMeetingStateOnly)
+    ,("Teams mute sync applies absolute state and fails closed", TeamsIntegrationTests.MuteCoordinatorUsesAbsoluteStateAndFailsClosed)
+    ,("Teams mute sync ignores out-of-meeting mute state", TeamsIntegrationTests.MuteCoordinatorDoesNotChangeMicForOutOfMeetingState)
+    ,("Teams WebSocket client queries state and sends pairing", TeamsTransportTests.ClientQueriesStateAfterConnectAndTokenRefreshThenSendsPairing)
+    ,("Teams WebSocket client drops events after stop", TeamsTransportTests.ClientDropsLateEventsAfterStop)
+    ,("Teams WebSocket client bounds fragmented payloads", TeamsTransportTests.ClientClosesAndReconnectsAfterOversizedFragmentedPayload)
+    ,("Teams WebSocket client clears an invalid pairing token", TeamsTransportTests.ClientClearsAnInvalidPairingTokenBeforeReconnecting)
+    ,("Teams pairing requires an enabled, connected client", TeamsIntegrationTests.MuteCoordinatorOnlyReportsPairingAfterEnabledClientAcceptsIt)
+    ,("Windows global hotkey routes messages and unregisters once", WindowsGlobalHotKeyRegistrarTests.RoutesCtrlAltMAndUnregistersExactlyOnce)
+    ,("Windows global hotkey reports unavailable registrations", WindowsGlobalHotKeyRegistrarTests.FailsWithWin32ErrorWhenCtrlAltMIsUnavailable)
+    ,("input mute only publishes effective transitions", InputMuteTests.IndependentMuteCausesOnlyPublishEffectiveTransitions)
+    ,("global mute hotkey preserves Teams input mute", InputMuteTests.HotKeyTogglesLocalMuteWithoutClearingInputMute)
+    ,("virtual microphone accepts the trusted endpoint", VirtualMicCapabilityTests.TrustedCaptureEndpointIsAvailable)
+    ,("virtual microphone rejects a missing trusted endpoint", VirtualMicCapabilityTests.MissingTrustedIdentityFailsClosed)
+    ,("virtual microphone rejects an identity/name mismatch", VirtualMicCapabilityTests.MismatchedFriendlyNameForTrustedIdentityFailsClosed)
+    ,("virtual microphone rejects a friendly-name spoof", VirtualMicCapabilityTests.FriendlyNameSpoofWithoutTrustedIdentityFailsClosed)
+    ,("Teams automatic recorder starts and debounces stop", TeamsAutomaticRecordingControllerTests.StartsAfterCountdownAndStopsAfterDebounce)
+    ,("Teams automatic recorder cleans up a late start", TeamsAutomaticRecordingControllerTests.CancelsLateAutomaticStartAndStopsLateCapture)
+    ,("Teams automatic recorder permits snapshot reentry", TeamsAutomaticRecordingControllerTests.SnapshotHandlerCanSynchronouslyReenterWithoutDeadlock)
+    ,("Teams automatic recorder safely disposes late work", TeamsAutomaticRecordingControllerTests.DisposeDoesNotWaitForAnUncooperativeStartAndStillStopsItLater)
 };
 
 var failed = 0;
@@ -113,6 +139,15 @@ static void SuppressionDuringStopDebounceSurvivesRejoin()
     Equal(new TeamsAutoMeetingState.SuppressedUntilMeetingEnd(), snapshot.State);
     snapshot = machine.Reduce(snapshot, new TeamsAutoMeetingEvent.MeetingPresenceChanged(false)).Snapshot;
     Equal(new TeamsAutoMeetingState.WaitingForMeeting(), snapshot.State);
+}
+
+static void ExplicitUserStopReleasesAutomaticOwnership()
+{
+    var machine = new TeamsAutoMeetingMachine(startCountdownSeconds: 1);
+    var snapshot = StartAutomaticRecording(machine);
+    snapshot = machine.Reduce(snapshot, new TeamsAutoMeetingEvent.SuppressUntilMeetingEnd()).Snapshot;
+    Equal(RecordingOwner.None, snapshot.RecordingOwner);
+    Equal(new TeamsAutoMeetingState.SuppressedUntilMeetingEnd(), snapshot.State);
 }
 
 static void CommittedStopWaitsForCompletion()

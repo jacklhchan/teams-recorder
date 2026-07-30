@@ -101,6 +101,71 @@ internal static class SessionStorageTests
             throw new InvalidOperationException("Malformed optional metadata was not normalized safely.");
     }
 
+    public static void MetadataEditsPreserveMediaAndUnknownFields()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+        var folder = Path.Combine(root.Path, "manual-20260729-120000000");
+        Directory.CreateDirectory(folder);
+        var audioPath = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
+        File.WriteAllBytes(audioPath, [4, 5, 6]);
+        File.WriteAllText(
+            Path.Combine(folder, RecordingSessionLayout.MetadataFileName),
+            "{\"unknown\":{\"keep\":true},\"mediaKind\":\"audio\",\"tags\":[\"old\"]}");
+
+        var updated = service.UpdateMetadataAsync(
+            folder,
+            "  Important meeting  ",
+            ["Sales", "sales", "  "],
+            true).GetAwaiter().GetResult();
+
+        if (updated.Title != "Important meeting" || !updated.IsFavorite || updated.Tags.Count != 1 || updated.Tags[0] != "Sales")
+            throw new InvalidOperationException("Session metadata edit was not normalized.");
+        if (updated.Document["unknown"] is null || !File.Exists(audioPath) || File.ReadAllBytes(audioPath).Length != 3)
+            throw new InvalidOperationException("Session metadata edit altered media or discarded an unknown field.");
+
+        var listed = service.ListSessions().Single();
+        if (listed.Metadata.Title != "Important meeting" || !listed.Metadata.IsFavorite || listed.Metadata.Tags.Single() != "Sales")
+            throw new InvalidOperationException("The library did not reload edited metadata.");
+
+        Throws<InvalidOperationException>(() => service.UpdateMetadataAsync(Path.Combine(root.Path, "outside"), "x", [], false).GetAwaiter().GetResult());
+        ConcurrentMetadataWritesDoNotShareTemporaryFiles();
+    }
+
+    private static void ConcurrentMetadataWritesDoNotShareTemporaryFiles()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+        var folder = Path.Combine(root.Path, "manual-20260729-120000000");
+        Directory.CreateDirectory(folder);
+        File.WriteAllBytes(Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName), [1]);
+        var metadataPath = Path.Combine(folder, RecordingSessionLayout.MetadataFileName);
+
+        var writes = Enumerable.Range(0, 32)
+            .Select(i => service.UpdateMetadataAsync(folder, $"Writer {i}", null, null, CancellationToken.None));
+        Task.WhenAll(writes).GetAwaiter().GetResult();
+
+        var stored = RecordingInfoJson.Parse(File.ReadAllText(metadataPath));
+        if (stored.Title is null || !stored.Title.StartsWith("Writer ", StringComparison.Ordinal))
+            throw new InvalidOperationException("Concurrent metadata writes left malformed metadata.");
+        if (Directory.EnumerateFiles(folder, "*.tmp").Any())
+            throw new InvalidOperationException("Concurrent metadata writes left temporary files behind.");
+    }
+
+    public static void RecycleRejectsForeignAndIncompleteFolders()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+        var foreign = Path.Combine(root.Path, "foreign-20260729-120000000");
+        var incomplete = Path.Combine(root.Path, "manual-20260729-120000000");
+        Directory.CreateDirectory(foreign);
+        Directory.CreateDirectory(incomplete);
+
+        Throws<InvalidOperationException>(() => service.RecycleSession(foreign));
+        Throws<IOException>(() => service.RecycleSession(incomplete));
+        if (!Directory.Exists(incomplete)) throw new InvalidOperationException("Rejected recycle changed the incomplete folder.");
+    }
+
     public static void FolderNamesAreWhitelisted()
     {
         if (!RecordingSessionLayout.TryGetKind("meeting-20260729-120000000", out var kind) || kind != RecordingSessionKind.Meeting)
@@ -119,6 +184,38 @@ internal static class SessionStorageTests
             Directory.CreateDirectory(Path.Combine(root, RecordingSessionLayout.FolderName(RecordingSessionKind.Manual, timestamp)));
             var plan = service.CreateSessionPlan(RecordingSessionKind.Manual);
             if (!plan.FolderPath.EndsWith("-1", StringComparison.Ordinal)) throw new InvalidOperationException("Expected the first collision suffix.");
+
+            using var workersReady = new CountdownEvent(32);
+            using var startWorkers = new ManualResetEventSlim(false);
+            var concurrent = Enumerable.Range(0, 32)
+                .Select(_ => Task.Factory.StartNew(
+                    () =>
+                    {
+                        workersReady.Signal();
+                        startWorkers.Wait();
+                        // Use independent service instances so this exercises the filesystem claim,
+                        // rather than relying on any process-local synchronization.
+                        return new SessionStorageService(
+                            root,
+                            capacityProvider: new FixedCapacity(RecordingStoragePolicy.WarningBytes),
+                            clock: new FixedClock(timestamp))
+                            .CreateSessionPlan(RecordingSessionKind.Manual);
+                    },
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default))
+                .ToArray();
+            if (!workersReady.Wait(TimeSpan.FromSeconds(10)))
+                throw new InvalidOperationException("Concurrent allocation workers did not become ready.");
+            startWorkers.Set();
+            var plans = Task.WhenAll(concurrent).GetAwaiter().GetResult();
+            if (plans.Select(x => x.FolderPath).Distinct(StringComparer.OrdinalIgnoreCase).Count() != plans.Length)
+                throw new InvalidOperationException("Concurrent allocation returned the same session folder more than once.");
+            var allocatedNames = plans.Select(x => Path.GetFileName(x.FolderPath)).ToHashSet(StringComparer.Ordinal);
+            var expectedNames = Enumerable.Range(2, plans.Length)
+                .Select(attempt => RecordingSessionLayout.FolderName(RecordingSessionKind.Manual, timestamp, attempt));
+            if (!allocatedNames.SetEquals(expectedNames))
+                throw new InvalidOperationException("Concurrent allocation did not preserve deterministic collision suffixes.");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

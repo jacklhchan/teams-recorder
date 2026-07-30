@@ -18,6 +18,7 @@ public:
     MixedCaptureSession& operator=(const MixedCaptureSession&) = delete;
     RecorderNativeResult Start(MixedCaptureSessionConfig config);
     RecorderNativeResult Stop();
+    RecorderNativeResult SetMicrophoneMuted(bool muted);
     RecorderNativeResult health_result() const;
     RecorderNativeStats stats() const;
     std::string last_error() const;

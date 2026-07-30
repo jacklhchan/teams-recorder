@@ -112,6 +112,15 @@ typedef struct RecorderNativeStats {
 } RecorderNativeStats;
 
 RECORDER_NATIVE_API RecorderNativeBridge* recorder_native_create(void);
+
+/*
+ * Releases a bridge handle. The caller must externally synchronize this call:
+ * call it only after it has ensured that no API call on this same handle is
+ * executing or can begin. The bridge serializes its internal state operations,
+ * but does not provide concurrent handle-lifetime safety with destruction.
+ * After this function returns, `bridge` is permanently invalid and must not be
+ * passed to any bridge API (including diagnostic or query functions).
+ */
 RECORDER_NATIVE_API void recorder_native_destroy(RecorderNativeBridge* bridge);
 
 /*
@@ -131,6 +140,15 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_with_options(
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_mixed(
     RecorderNativeBridge* bridge,
     const RecorderNativeMixedStartOptions* options);
+
+/*
+ * Sets the microphone contribution to a mixed M4A capture to an absolute
+ * state. `muted` must be 0 or 1; this is intentionally not a toggle. The
+ * call is valid only while a mixed capture with a microphone is recording.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_set_microphone_muted(
+    RecorderNativeBridge* bridge,
+    uint32_t muted);
 
 /* Stops capture, drains the source, flushes 48 kHz stereo output, and finalizes once. */
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_stop(RecorderNativeBridge* bridge);

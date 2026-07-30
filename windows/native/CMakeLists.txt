@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(RecorderNativeBridge VERSION 0.4.0 LANGUAGES C CXX)
+project(RecorderNativeBridge VERSION 0.5.0 LANGUAGES C CXX)
 
 option(RECORDER_NATIVE_BUILD_TESTS "Build native bridge contract tests" ON)
 
@@ -43,11 +43,19 @@ if(WIN32)
     target_link_libraries(Recorder.Format PUBLIC uuid)
     recorder_enable_strict_warnings(Recorder.Format)
 
+    add_library(Recorder.Downmix STATIC
+        downmix/src/stereo_downmix.cpp
+    )
+    target_compile_features(Recorder.Downmix PUBLIC cxx_std_17)
+    target_include_directories(Recorder.Downmix PUBLIC downmix/include)
+    recorder_enable_strict_warnings(Recorder.Downmix)
+
     add_library(Recorder.Resample STATIC
         resample/src/linear_resampler.cpp
     )
     target_compile_features(Recorder.Resample PUBLIC cxx_std_17)
-    target_include_directories(Recorder.Resample PUBLIC resample/include)
+    target_include_directories(Recorder.Resample PUBLIC resample/include downmix/include)
+    target_link_libraries(Recorder.Resample PUBLIC Recorder.Downmix)
     recorder_enable_strict_warnings(Recorder.Resample)
 
     add_library(Recorder.WasapiCapture STATIC
@@ -104,6 +112,19 @@ if(WIN32)
     target_link_libraries(Recorder.TonePlayer PRIVATE winmm)
     recorder_enable_strict_warnings(Recorder.TonePlayer)
 
+    add_library(Recorder.WgcCaptureProbe STATIC
+        video/wgc_capture_probe.cpp
+    )
+    target_compile_features(Recorder.WgcCaptureProbe PUBLIC cxx_std_17)
+    target_include_directories(Recorder.WgcCaptureProbe PUBLIC video)
+    target_link_libraries(Recorder.WgcCaptureProbe PUBLIC dwmapi windowsapp)
+    recorder_enable_strict_warnings(Recorder.WgcCaptureProbe)
+
+    add_executable(Recorder.WgcCaptureProbe.Tool tools/wgc_capture_probe_main.cpp)
+    target_compile_features(Recorder.WgcCaptureProbe.Tool PRIVATE cxx_std_17)
+    target_link_libraries(Recorder.WgcCaptureProbe.Tool PRIVATE Recorder.WgcCaptureProbe)
+    recorder_enable_strict_warnings(Recorder.WgcCaptureProbe.Tool)
+
     add_executable(Recorder.ProcessLoopbackProbe
         process_loopback/process_loopback_probe.cpp
     )
@@ -131,6 +152,61 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     target_link_libraries(Recorder.Wav.Tests PRIVATE Recorder.Wav)
     recorder_enable_strict_warnings(Recorder.Wav.Tests)
     add_test(NAME Recorder.Wav.Tests COMMAND Recorder.Wav.Tests)
+
+    # Keep the Media Foundation sink lifecycle independently exercised; the
+    # ABI-only contract tests cannot cover repeated AAC sink finalization.
+    add_executable(Recorder.M4aWriter.Tests
+        tests/m4a_writer_tests.cpp
+        src/m4a_writer.cpp
+    )
+    target_compile_features(Recorder.M4aWriter.Tests PRIVATE cxx_std_17)
+    target_include_directories(Recorder.M4aWriter.Tests PRIVATE src)
+    target_link_libraries(Recorder.M4aWriter.Tests PRIVATE mfplat mfreadwrite mfuuid)
+    recorder_enable_strict_warnings(Recorder.M4aWriter.Tests)
+    add_test(NAME Recorder.M4aWriter.Container COMMAND Recorder.M4aWriter.Tests container --frames 960)
+    # AAC encoders commonly consume 1024 sample access units. These tests make
+    # the writer prove that its final partial block is padded safely, rather
+    # than relying on one canonical capture block size.
+    add_test(NAME Recorder.M4aWriter.TailOneFrame COMMAND Recorder.M4aWriter.Tests tail --frames 1)
+    add_test(NAME Recorder.M4aWriter.Tail960Frames COMMAND Recorder.M4aWriter.Tests tail --frames 960)
+    add_test(NAME Recorder.M4aWriter.Tail1024Frames COMMAND Recorder.M4aWriter.Tests tail --frames 1024)
+    # One deterministic in-process exercise. For teardown isolation, repeat
+    # this CTest test from the command line so every repetition is a fresh EXE.
+    add_test(NAME Recorder.M4aWriter.Stress COMMAND Recorder.M4aWriter.Tests stress --iterations 16 --frames 960)
+    add_test(NAME Recorder.M4aWriter.Abort COMMAND Recorder.M4aWriter.Tests abort)
+    add_test(NAME Recorder.M4aWriter.AbortAfterOneFrame
+        COMMAND Recorder.M4aWriter.Tests abort-after-write --frames 1)
+    add_test(NAME Recorder.M4aWriter.AbortAfter960Frames
+        COMMAND Recorder.M4aWriter.Tests abort-after-write --frames 960)
+    add_test(NAME Recorder.M4aWriter.AbortAfter1024Frames
+        COMMAND Recorder.M4aWriter.Tests abort-after-write --frames 1024)
+    add_test(NAME Recorder.M4aWriter.SplitOnePlus1023
+        COMMAND Recorder.M4aWriter.Tests split --frames 1)
+    add_test(NAME Recorder.M4aWriter.Split960Plus64
+        COMMAND Recorder.M4aWriter.Tests split --frames 960)
+    add_test(NAME Recorder.M4aWriter.AbortState
+        COMMAND Recorder.M4aWriter.Tests abort-state)
+    add_test(NAME Recorder.M4aWriter.PublishFailureRetention
+        COMMAND Recorder.M4aWriter.Tests publish-failure)
+    set_tests_properties(
+        Recorder.M4aWriter.Container
+        Recorder.M4aWriter.TailOneFrame
+        Recorder.M4aWriter.Tail960Frames
+        Recorder.M4aWriter.Tail1024Frames
+        Recorder.M4aWriter.Stress
+        Recorder.M4aWriter.Abort
+        Recorder.M4aWriter.AbortAfterOneFrame
+        Recorder.M4aWriter.AbortAfter960Frames
+        Recorder.M4aWriter.AbortAfter1024Frames
+        Recorder.M4aWriter.SplitOnePlus1023
+        Recorder.M4aWriter.Split960Plus64
+        Recorder.M4aWriter.AbortState
+        Recorder.M4aWriter.PublishFailureRetention
+        PROPERTIES
+            LABELS "m4a;media-foundation"
+            RUN_SERIAL TRUE
+            TIMEOUT 90
+    )
 
     if(WIN32)
         add_executable(Recorder.WasapiCapture.EndpointProbe
@@ -164,6 +240,14 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         target_link_libraries(Recorder.Resample.Tests PRIVATE Recorder.Resample)
         recorder_enable_strict_warnings(Recorder.Resample.Tests)
         add_test(NAME Recorder.Resample.Tests COMMAND Recorder.Resample.Tests)
+
+        add_executable(Recorder.Downmix.Tests
+            downmix/tests/stereo_downmix_tests.cpp
+        )
+        target_compile_features(Recorder.Downmix.Tests PRIVATE cxx_std_17)
+        target_link_libraries(Recorder.Downmix.Tests PRIVATE Recorder.Downmix)
+        recorder_enable_strict_warnings(Recorder.Downmix.Tests)
+        add_test(NAME Recorder.Downmix.Tests COMMAND Recorder.Downmix.Tests)
 
     endif()
 endif()

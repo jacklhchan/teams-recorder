@@ -69,6 +69,33 @@ std::wstring DescribeHresult(HRESULT result) {
     return message;
 }
 
+std::wstring DescribeGuid(REFGUID value) {
+    wchar_t text[40]{};
+    return StringFromGUID2(value, text, static_cast<int>(std::size(text))) == 0
+        ? L"(unavailable)" : std::wstring(text);
+}
+
+std::wstring DescribeFormat(const WAVEFORMATEX* format) {
+    if (format == nullptr) { return L"unavailable"; }
+    std::wostringstream description;
+    description << L"tag=" << format->wFormatTag
+                << L", channels=" << format->nChannels
+                << L", sampleRate=" << format->nSamplesPerSec
+                << L", avgBytes=" << format->nAvgBytesPerSec
+                << L", blockAlign=" << format->nBlockAlign
+                << L", bits=" << format->wBitsPerSample
+                << L", cbSize=" << format->cbSize;
+    constexpr WORD extensible_extra_bytes =
+        static_cast<WORD>(sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX));
+    if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE && format->cbSize >= extensible_extra_bytes) {
+        const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+        description << L", validBits=" << extensible->Samples.wValidBitsPerSample
+                    << L", channelMask=0x" << std::hex << extensible->dwChannelMask
+                    << L", subFormat=" << DescribeGuid(extensible->SubFormat);
+    }
+    return description.str();
+}
+
 HRESULT CreateEnumerator(ComPtr<IMMDeviceEnumerator>* enumerator) {
     return CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                             __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(enumerator->Put()));
@@ -242,6 +269,14 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     if (request.endpoint_id.empty()) { result = enumerator->GetDefaultAudioEndpoint(flow, eConsole, device.Put()); }
     else { result = enumerator->GetDevice(request.endpoint_id.c_str(), device.Put()); }
     if (FAILED(result)) { fail(result, L"Selecting audio endpoint failed"); return; }
+    std::wstring selected_endpoint_id;
+    std::wstring selected_friendly_name;
+    LPWSTR selected_id = nullptr;
+    if (SUCCEEDED(device->GetId(&selected_id)) && selected_id != nullptr) {
+        selected_endpoint_id = selected_id;
+        CoTaskMemFree(selected_id);
+    }
+    (void)GetFriendlyName(device.Get(), &selected_friendly_name);
     result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(client.Put()));
     if (FAILED(result)) { fail(result, L"Activating IAudioClient failed"); return; }
     result = client->GetMixFormat(&mix);
@@ -265,7 +300,8 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
         { AUDCLNT_STREAMFLAGS_NOPERSIST, 1'000'000, false },
     }};
 
-    auto initialize_attempt = [&](const InitializeAttempt& attempt) {
+    auto initialize_attempt = [&](const InitializeAttempt& attempt, HRESULT* support_result) {
+        if (support_result != nullptr) { *support_result = E_UNEXPECTED; }
         if (mix != nullptr) {
             CoTaskMemFree(mix);
             mix = nullptr;
@@ -284,6 +320,7 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
             WAVEFORMATEX* closest = nullptr;
             const HRESULT support = client->IsFormatSupported(
                 AUDCLNT_SHAREMODE_SHARED, mix, &closest);
+            if (support_result != nullptr) { *support_result = support; }
             if (support == S_FALSE && closest != nullptr) {
                 CoTaskMemFree(mix);
                 mix = closest;
@@ -306,11 +343,15 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     bool event_driven = true;
     result = E_FAIL;
     std::array<HRESULT, attempts.size()> attempt_results{};
+    std::array<HRESULT, attempts.size()> attempt_support_results{};
     std::size_t attempt_count = 0;
     HRESULT client3_result = E_NOTIMPL;
+    std::wstring original_mix_description;
     for (const InitializeAttempt& attempt : attempts) {
-        result = initialize_attempt(attempt);
+        HRESULT support_result = E_UNEXPECTED;
+        result = initialize_attempt(attempt, &support_result);
         attempt_results[attempt_count++] = result;
+        attempt_support_results[attempt_count - 1] = support_result;
         if (SUCCEEDED(result)) {
             event_driven = attempt.event_driven;
             break;
@@ -324,6 +365,9 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     const bool try_client3 =
         FAILED(result) && request.flow == EndpointFlow::Capture;
     if (try_client3) {
+        if (mix != nullptr) {
+            original_mix_description = DescribeFormat(mix);
+        }
         if (mix != nullptr) { CoTaskMemFree(mix); mix = nullptr; }
         client.Reset();
         result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
@@ -390,7 +434,12 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
         canonical.wBitsPerSample = 32;
         canonical.nBlockAlign = 8;
         canonical.nAvgBytesPerSec = 384'000;
+        HRESULT canonical_support_result = E_UNEXPECTED;
         if (SUCCEEDED(result)) {
+            WAVEFORMATEX* closest = nullptr;
+            canonical_support_result = client->IsFormatSupported(
+                AUDCLNT_SHAREMODE_SHARED, &canonical, &closest);
+            if (closest != nullptr) { CoTaskMemFree(closest); }
             result = client->Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
@@ -409,19 +458,25 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
                 event_driven = false;
             }
         }
+        if (FAILED(result)) {
+            std::wostringstream support_text;
+            support_text << L"; canonical48kStereoFloatSupport=0x" << std::hex
+                         << static_cast<unsigned long>(canonical_support_result);
+            original_mix_description += support_text.str();
+        }
     }
     if (FAILED(result)) {
         std::wostringstream context;
         context << L"Initializing shared WASAPI capture failed";
-        if (mix != nullptr) {
-            context << L" (tag=" << mix->wFormatTag
-                    << L", channels=" << mix->nChannels
-                    << L", sampleRate=" << mix->nSamplesPerSec
-                    << L", avgBytes=" << mix->nAvgBytesPerSec
-                    << L", blockAlign=" << mix->nBlockAlign
-                    << L", bits=" << mix->wBitsPerSample
-                    << L", cbSize=" << mix->cbSize
-                    << L")";
+        if (!selected_friendly_name.empty()) {
+            context << L" (endpoint='" << selected_friendly_name << L"'";
+            if (!selected_endpoint_id.empty()) { context << L", id='" << selected_endpoint_id << L"'"; }
+            context << L")";
+        }
+        if (!original_mix_description.empty()) {
+            context << L" (original endpoint mix " << original_mix_description << L")";
+        } else if (mix != nullptr) {
+            context << L" (" << DescribeFormat(mix) << L")";
         } else if (endpoint_format.available) {
             context << L" (endpoint tag=" << endpoint_format.tag
                     << L", channels=" << endpoint_format.channels
@@ -441,7 +496,9 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
         context << L"; attempts=";
         for (std::size_t index = 0; index < attempt_count; ++index) {
             if (index != 0) { context << L","; }
-            context << L"0x" << std::hex << static_cast<unsigned long>(attempt_results[index]);
+            context << L"0x" << std::hex << static_cast<unsigned long>(attempt_results[index])
+                    << L"/formatSupport=0x"
+                    << static_cast<unsigned long>(attempt_support_results[index]);
         }
         const std::wstring message = context.str();
         if (mix != nullptr) {

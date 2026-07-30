@@ -32,6 +32,11 @@
                             <TextBlock Text="麥克風（可選）" />
                             <ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding CaptureEndpoints}" SelectedItem="{Binding SelectedMicrophoneEndpoint, Mode=TwoWay}" />
                             <TextBlock Text="{Binding SelectedMicrophoneDescription}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <Button Command="{Binding ToggleLocalMicrophoneMuteCommand}" Content="切換錄音麥克風靜音" />
+                                <TextBlock Text="{Binding RecordingMicrophoneMuteText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="{Binding GlobalMuteHotKeyStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                     </Grid>
                     <StackPanel Spacing="5">
@@ -46,6 +51,31 @@
                         <Button Command="{Binding RefreshDevicesCommand}" Content="重新整理裝置" />
                         <ProgressRing Width="24" Height="24" IsActive="{Binding IsBusy}" />
                     </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Teams 靜音同步（選用）" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="選擇啟用後，應用程式才會嘗試連線至本機 Teams Third-party API。請在 Teams 中完成配對；在配對成功及收到狀態前，此功能不會宣稱已可用。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding TeamsMuteStatusText}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding TeamsMuteRoutingText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button Command="{Binding EnableTeamsMuteSyncCommand}" Content="啟用 Teams 靜音同步" />
+                        <Button Command="{Binding DisableTeamsMuteSyncCommand}" Content="停用" />
+                        <Button Command="{Binding RequestTeamsPairingCommand}" Content="在 Teams 中要求配對" />
+                    </StackPanel>
+                    <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Teams 自動錄音（選用）" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="預設關閉。只有在 Teams 配對成功且收到可信會議狀態後，才能由使用者明確啟用；此功能只控制本機 M4A 工作階段，絕不向 Teams 發出錄音或靜音命令。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding TeamsAutomaticRecordingStatusText}" TextWrapping="Wrap" />
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <Button Command="{Binding EnableTeamsAutomaticRecordingCommand}" Content="啟用自動錄音" />
+                                <Button Command="{Binding DisableTeamsAutomaticRecordingCommand}" Content="停用自動錄音" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </Border>
 
@@ -77,15 +107,40 @@
             <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                 <StackPanel Spacing="12">
                     <StackPanel Orientation="Horizontal" Spacing="10"><TextBlock Text="本機 M4A 資料庫" Style="{StaticResource SubtitleTextBlockStyle}" /><TextBlock Text="{Binding LibrarySummaryText}" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>
-                    <ListView MaxHeight="220" DisplayMemberPath="DisplayName" ItemsSource="{Binding LibraryItems}" SelectedItem="{Binding SelectedLibraryItem, Mode=TwoWay}" SelectionMode="Single" />
+                    <ListView MaxHeight="220" ItemsSource="{Binding LibraryItems}" SelectedItem="{Binding SelectedLibraryItem, Mode=TwoWay}" SelectionMode="Single">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{Binding DisplayName}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{Binding KindText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Text="{Binding TagsText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <TextBlock Text="{Binding SelectedLibraryDetails}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <Grid ColumnSpacing="12" RowSpacing="8">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0" Header="名稱" IsEnabled="{Binding CanManageLibrary}" PlaceholderText="為這個工作階段命名" Text="{Binding LibraryTitle, Mode=TwoWay}" />
+                        <TextBox Grid.Column="1" Header="標籤" IsEnabled="{Binding CanManageLibrary}" PlaceholderText="以逗號分隔，例如：客戶、週會" Text="{Binding LibraryTagsText, Mode=TwoWay}" />
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <ToggleSwitch Header="最愛" IsOn="{Binding IsLibraryFavorite, Mode=TwoWay}" IsEnabled="{Binding CanManageLibrary}" />
+                        <Button Command="{Binding SaveLibraryMetadataCommand}" Content="儲存資料" />
+                        <Button Command="{Binding OpenLibraryFolderCommand}" Content="開啟資料夾" />
+                        <Button Command="{Binding RequestRecycleLibraryCommand}" Content="移至資源回收桶" />
+                        <Button Command="{Binding ConfirmRecycleLibraryCommand}" Content="確認移除" />
+                        <Button Command="{Binding CancelRecycleLibraryCommand}" Content="取消" />
+                    </StackPanel>
+                    <TextBlock Text="{Binding RecycleConfirmationText}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" TextWrapping="Wrap" />
                     <StackPanel Orientation="Horizontal" Spacing="10">
                         <Button Command="{Binding PlayCommand}" Content="播放" /><Button Command="{Binding PauseCommand}" Content="暫停" /><Button Command="{Binding StopPlaybackCommand}" Content="停止" />
                         <TextBlock Text="{Binding PlaybackText}" VerticalAlignment="Center" />
                     </StackPanel>
-                    <Slider Maximum="1" Minimum="0" Value="{Binding PlaybackProgress}" IsEnabled="False" />
+                    <Slider Maximum="1" Minimum="0" Value="{Binding PlaybackProgress}" IsEnabled="{Binding CanSeek}" />
                 </StackPanel>
             </Border>
-            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此 MVP 專注音訊工作階段與本機播放；Teams API、視訊、虛擬麥克風與逐字稿將於後續版本提供。" TextWrapping="Wrap" />
+            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此 MVP 專注音訊工作階段與本機播放；Teams 靜音同步仍需在實際 Teams 租戶完成配對才可運作，且不包含視訊、虛擬麥克風或逐字稿。" TextWrapping="Wrap" />
         </StackPanel>
     </ScrollViewer>
 </Page>

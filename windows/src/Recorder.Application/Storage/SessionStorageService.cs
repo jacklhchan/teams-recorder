@@ -1,5 +1,9 @@
 using System.Text.Json;
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.VisualBasic.FileIO;
 using Recorder.Core;
 
 namespace TeamsRecorder.Windows.Application.Storage;
@@ -28,11 +32,11 @@ public sealed record RecordingSessionLibraryItem(RecordingSessionKind Kind, stri
 public sealed class SessionStorageService
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> MetadataWriteGates = new(StringComparer.OrdinalIgnoreCase);
     private readonly string rootPath;
     private readonly RecordingStoragePolicy policy;
     private readonly IStorageCapacityProvider capacityProvider;
     private readonly IClock clock;
-    private readonly ISessionPathCollisionProvider collisions;
 
     public SessionStorageService(string rootPath, RecordingStoragePolicy? policy = null, IStorageCapacityProvider? capacityProvider = null, IClock? clock = null, ISessionPathCollisionProvider? collisions = null)
     {
@@ -41,7 +45,9 @@ public sealed class SessionStorageService
         this.policy = policy ?? new RecordingStoragePolicy();
         this.capacityProvider = capacityProvider ?? new SystemStorageCapacityProvider();
         this.clock = clock ?? new SystemClock();
-        this.collisions = collisions ?? new FileSystemCollisionProvider();
+        // Retain the optional collision provider for source compatibility. Directory creation below is
+        // the authoritative, cross-process collision check.
+        _ = collisions;
     }
 
     public StorageCapacityStatus GetCapacityStatus()
@@ -64,15 +70,13 @@ public sealed class SessionStorageService
         for (var attempt = 0; attempt < 10_000; attempt++)
         {
             var folder = Path.Combine(rootPath, RecordingSessionLayout.FolderName(kind, clock.UtcNow, attempt));
-            if (collisions.DirectoryExists(folder)) continue;
             try
             {
-                Directory.CreateDirectory(folder);
-                // Directory.CreateDirectory is not an exclusive create operation.  Claim a short-lived
-                // marker so two writers that observed the same absent folder cannot both receive it.
-                var claim = Path.Combine(folder, ".session-allocation-claim");
-                using (File.Open(claim, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
-                File.Delete(claim);
+                if (!TryCreateDirectoryAtomically(folder)) continue;
+                if (IsReparsePoint(folder))
+                {
+                    throw new IOException("The allocated recording folder cannot be a symbolic link or reparse point.");
+                }
                 return Plan(kind, folder, capacity);
             }
             catch (IOException) { }
@@ -89,6 +93,85 @@ public sealed class SessionStorageService
         File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
         var info = RecordingInfo.AudioOnly(title);
         await WriteMetadataAsync(plan.MetadataPath, info, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Updates user-editable session metadata without changing the media file or
+    /// discarding unknown fields written by another compatible client.
+    /// </summary>
+    public async Task<RecordingInfo> UpdateMetadataAsync(
+        string folderPath,
+        string? title,
+        IEnumerable<string>? tags,
+        bool? isFavorite,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureOwnedFolder(folderPath);
+        var finalAudio = Path.Combine(folderPath, RecordingSessionLayout.FinalAudioFileName);
+        if (!IsSafeFile(finalAudio))
+        {
+            throw new IOException("The selected session does not contain a safe completed recording.");
+        }
+
+        var metadataPath = Path.Combine(folderPath, RecordingSessionLayout.MetadataFileName);
+        var writeGate = MetadataWriteGates.GetOrAdd(metadataPath, static _ => new SemaphoreSlim(1, 1));
+        await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // The read-modify-write operation must be serialized in-process so two UI saves do
+            // not silently discard one another's compatible/unknown metadata fields.
+            var current = ReadMetadata(metadataPath);
+            var document = current.Document.DeepClone() as JsonObject ?? new JsonObject();
+            var normalizedTitle = NormalizeTitle(title);
+            if (normalizedTitle is null)
+            {
+                document.Remove("title");
+            }
+            else
+            {
+                document["title"] = normalizedTitle;
+            }
+
+            if (tags is not null)
+            {
+                document["tags"] = new JsonArray(NormalizeTags(tags).Select(static tag => JsonValue.Create(tag)).ToArray());
+            }
+
+            if (isFavorite is { } favorite)
+            {
+                document["isFavorite"] = favorite;
+            }
+
+            var normalized = RecordingInfoJson.Normalize(document, null, null);
+            await WriteMetadataAsync(metadataPath, normalized, cancellationToken).ConfigureAwait(false);
+            return normalized;
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Moves a completed, managed session folder to the Windows Recycle Bin.
+    /// Callers must obtain explicit user confirmation before invoking this
+    /// destructive operation. Reparse points and folders without a completed
+    /// managed recording are rejected before the shell is called.
+    /// </summary>
+    public void RecycleSession(string folderPath)
+    {
+        EnsureOwnedFolder(folderPath);
+        var finalAudio = Path.Combine(folderPath, RecordingSessionLayout.FinalAudioFileName);
+        if (!IsSafeFile(finalAudio))
+        {
+            throw new IOException("The selected session does not contain a safe completed recording.");
+        }
+
+        FileSystem.DeleteDirectory(
+            folderPath,
+            UIOption.OnlyErrorDialogs,
+            RecycleOption.SendToRecycleBin,
+            UICancelOption.ThrowException);
     }
 
     public IReadOnlyList<RecordingSessionLibraryItem> ListSessions()
@@ -121,9 +204,35 @@ public sealed class SessionStorageService
 
     internal async Task WriteMetadataAsync(string metadataPath, RecordingInfo info, CancellationToken cancellationToken)
     {
-        var temporary = metadataPath + ".tmp";
-        await File.WriteAllTextAsync(temporary, info.Document.ToJsonString(JsonOptions), cancellationToken).ConfigureAwait(false);
-        File.Move(temporary, metadataPath, true);
+        if (!IsDescendant(metadataPath) || IsReparsePoint(metadataPath))
+        {
+            throw new IOException("The metadata file cannot be a symbolic link or reparse point.");
+        }
+
+        var temporary = metadataPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var moved = false;
+        try
+        {
+            await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, useAsync: true))
+            await using (var writer = new StreamWriter(stream))
+            {
+                await writer.WriteAsync(info.Document.ToJsonString(JsonOptions).AsMemory(), cancellationToken).ConfigureAwait(false);
+            }
+
+            // The temporary file is in the destination directory, so Windows replaces the destination
+            // with a same-volume rename rather than exposing a partially-written metadata file.
+            await ReplaceMetadataAtomicallyAsync(temporary, metadataPath, cancellationToken).ConfigureAwait(false);
+            moved = true;
+        }
+        finally
+        {
+            if (!moved)
+            {
+                try { File.Delete(temporary); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
     }
 
     internal IEnumerable<(string Folder, RecordingSessionKind Kind)> EnumerateOwnedFolders()
@@ -150,6 +259,31 @@ public sealed class SessionStorageService
     }
 
     internal bool IsSafeFile(string path) => IsDescendant(path) && File.Exists(path) && !IsReparsePoint(path);
+
+    private static string? NormalizeTitle(string? title)
+    {
+        var value = title?.Trim();
+        if (string.IsNullOrEmpty(value)) return null;
+        if (value.Length > 200) throw new ArgumentException("A session title cannot exceed 200 characters.", nameof(title));
+        return value;
+    }
+
+    private static IReadOnlyList<string> NormalizeTags(IEnumerable<string> tags)
+    {
+        var normalized = new List<string>();
+        foreach (var tag in tags)
+        {
+            var value = tag?.Trim();
+            if (string.IsNullOrEmpty(value)) continue;
+            if (value.Length > 64) throw new ArgumentException("A session tag cannot exceed 64 characters.", nameof(tags));
+            if (normalized.Contains(value, StringComparer.OrdinalIgnoreCase)) continue;
+            normalized.Add(value);
+            if (normalized.Count > 20) throw new ArgumentException("A session cannot have more than 20 tags.", nameof(tags));
+        }
+
+        return normalized;
+    }
+
     private RecordingSessionPlan Plan(RecordingSessionKind kind, string folder, StorageCapacityStatus capacity) => new(kind, folder, Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName), Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName), Path.Combine(folder, RecordingSessionLayout.MetadataFileName), capacity);
     private bool TryOwnedFolder(string folder, out RecordingSessionKind kind)
     {
@@ -186,6 +320,49 @@ public sealed class SessionStorageService
         {
             throw new IOException("The selected recording folder cannot be a symbolic link or reparse point.");
         }
+    }
+
+    private static bool TryCreateDirectoryAtomically(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Atomic recording-session allocation is implemented for Windows only.");
+        }
+
+        if (CreateDirectory(path, IntPtr.Zero)) return true;
+        var error = Marshal.GetLastWin32Error();
+        if (error is 80 or 183) return false; // ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
+        throw new IOException($"Unable to create recording session folder '{path}'.", new Win32Exception(error));
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateDirectory(string lpPathName, IntPtr lpSecurityAttributes);
+
+    private static async Task ReplaceMetadataAtomicallyAsync(string temporary, string metadataPath, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.Move(temporary, metadataPath, true);
+                return;
+            }
+            catch (IOException error) when (attempt < 20 && IsTransientReplacementConflict(error))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken).ConfigureAwait(false);
+            }
+            catch (UnauthorizedAccessException error) when (attempt < 20 && IsTransientReplacementConflict(error))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static bool IsTransientReplacementConflict(Exception error)
+    {
+        var win32Error = error.HResult & 0xffff;
+        return win32Error is 5 or 32 or 33; // ERROR_ACCESS_DENIED / SHARING_VIOLATION / LOCK_VIOLATION
     }
 
     private bool IsDescendant(string path) { var full = Path.GetFullPath(path); return full.StartsWith(rootPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase); }

@@ -50,7 +50,7 @@ int main() {
     uint32_t endpoint_count = 0;
     recorder_native_endpoint_list_destroy(nullptr);
 
-    if (!Expect(std::strcmp(recorder_native_version(), "0.4.0") == 0) ||
+    if (!Expect(std::strcmp(recorder_native_version(), "0.5.0") == 0) ||
         !Expect(recorder_native_start(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_with_options(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_stop(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
@@ -79,6 +79,10 @@ int main() {
         Expect(recorder_native_start(bridge) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_start_with_options(bridge, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_start_mixed(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_muted(nullptr, 0U) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_muted(bridge, 2U) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_muted(bridge, 0U) == RECORDER_NATIVE_INVALID_STATE) &&
+        Expect(recorder_native_set_microphone_muted(bridge, 1U) == RECORDER_NATIVE_INVALID_STATE) &&
         Expect((mixed.struct_size = 0U, recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect((mixed.struct_size = sizeof(mixed), mixed.output_path_utf8 = "not-m4a.wav", recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect((mixed.output_path_utf8 = "contract-test.m4a", mixed.aac_bitrate_bps = 1000U, recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&

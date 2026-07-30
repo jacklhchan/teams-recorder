@@ -5,6 +5,7 @@
 #include "mixed_capture_session.h"
 #include "wasapi_capture.h"
 
+#include <mfapi.h>
 #include <windows.h>
 #endif
 
@@ -19,12 +20,49 @@
 #include <utility>
 #include <vector>
 
+namespace {
+
+#if defined(_WIN32)
+class MediaFoundationRuntime final {
+public:
+    MediaFoundationRuntime() = default;
+
+    HRESULT Start() noexcept {
+        const HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+        if (SUCCEEDED(hr)) {
+            started_ = true;
+        }
+        return hr;
+    }
+
+    void Shutdown() noexcept {
+        if (started_) {
+            // All capture sessions and their sink writers are explicitly
+            // destroyed before this call (see recorder_native_destroy).
+            MFShutdown();
+            started_ = false;
+        }
+    }
+
+    ~MediaFoundationRuntime() { Shutdown(); }
+
+    MediaFoundationRuntime(const MediaFoundationRuntime&) = delete;
+    MediaFoundationRuntime& operator=(const MediaFoundationRuntime&) = delete;
+
+private:
+    bool started_ = false;
+};
+#endif
+
+}  // namespace
+
 struct RecorderNativeBridge {
     mutable std::mutex mutex;
     RecorderNativeState state = RECORDER_NATIVE_STATE_READY;
     RecorderNativeStats last_stats{};
     mutable std::string last_error;
 #if defined(_WIN32)
+    MediaFoundationRuntime media_foundation;
     std::unique_ptr<recorder::bridge::CaptureSession> session;
     std::unique_ptr<recorder::bridge::MixedCaptureSession> mixed_session;
 #endif
@@ -47,7 +85,7 @@ struct RecorderNativeEndpointList {
 
 namespace {
 
-constexpr char kVersion[] = "0.4.0";
+constexpr char kVersion[] = "0.5.0";
 constexpr char kInvalidHandleError[] = "RecorderNativeBridge handle is null.";
 
 RecorderNativeStats EmptyStats(RecorderNativeCaptureMode mode) {
@@ -160,6 +198,11 @@ bool WideToUtf8(const std::wstring& value, std::string* result) {
 extern "C" RecorderNativeBridge* recorder_native_create(void) {
     try {
         auto bridge = std::make_unique<RecorderNativeBridge>();
+#if defined(_WIN32)
+        if (FAILED(bridge->media_foundation.Start())) {
+            return nullptr;
+        }
+#endif
         bridge->last_stats =
             EmptyStats(RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK);
         return bridge.release();
@@ -182,6 +225,16 @@ extern "C" void recorder_native_destroy(RecorderNativeBridge* bridge) {
     if (should_stop) {
         (void)recorder_native_stop(bridge);
     }
+
+    // A failed or interrupted start can leave a session allocated even when
+    // the public state is no longer RECORDING.  Drop every session before
+    // MFShutdown so writer/sink destruction cannot touch a shut-down runtime.
+    {
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        bridge->session.reset();
+        bridge->mixed_session.reset();
+    }
+    bridge->media_foundation.Shutdown();
 #endif
 
     delete bridge;
@@ -253,6 +306,45 @@ extern "C" RecorderNativeResult recorder_native_start_mixed(
         SetErrorLocked(bridge, "Starting mixed capture failed unexpectedly.");
         return RECORDER_NATIVE_INTERNAL_ERROR;
     }
+#endif
+}
+
+extern "C" RecorderNativeResult recorder_native_set_microphone_muted(
+    RecorderNativeBridge* bridge,
+    std::uint32_t muted) {
+    if (bridge == nullptr) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+    if (muted > 1U) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_INVALID_ARGUMENT,
+            "Microphone muted state must be 0 or 1.");
+    }
+
+#if !defined(_WIN32)
+    return Reject(
+        bridge,
+        RECORDER_NATIVE_NOT_IMPLEMENTED,
+        "Native audio capture is implemented only on Windows.");
+#else
+    std::lock_guard<std::mutex> lock(bridge->mutex);
+    if (bridge->state != RECORDER_NATIVE_STATE_RECORDING ||
+        !bridge->mixed_session) {
+        SetErrorLocked(
+            bridge,
+            "Microphone mute is available only while mixed capture is recording.");
+        return RECORDER_NATIVE_INVALID_STATE;
+    }
+
+    const RecorderNativeResult result =
+        bridge->mixed_session->SetMicrophoneMuted(muted != 0U);
+    if (result != RECORDER_NATIVE_OK) {
+        SetErrorLocked(bridge, bridge->mixed_session->last_error());
+    } else {
+        bridge->last_error.clear();
+    }
+    return result;
 #endif
 }
 

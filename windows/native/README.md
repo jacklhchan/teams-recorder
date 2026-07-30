@@ -1,7 +1,7 @@
 # Recorder.NativeBridge
 
 `Recorder.NativeBridge` is the Windows native boundary for audio capture.
-ABI version 0.3 owns the source lifecycle, normalizes captured packets to
+ABI version 0.5 owns the source lifecycle, normalizes captured packets to
 48 kHz stereo float, writes through a `.partial` recovery file, and publishes
 the final WAV only after a successful stop. The legacy no-options
 `recorder_native_start` remains exported but returns `INVALID_ARGUMENT` because
@@ -38,6 +38,15 @@ normalization to 48 kHz stereo. Process-loopback uses a requested 44.1 kHz
 16-bit stereo format because the virtual process client does not implement
 `GetMixFormat`; the bridge resamples that stream to its canonical output.
 
+For multichannel microphone float PCM, normalization downmixes before
+resampling. The capture boundary does not retain a speaker channel mask, so
+the rule is deliberately channel-index based: mono duplicates to both outputs,
+stereo is unchanged, and 3+ channels average even indices into left and odd
+indices into right. A four-channel frame `[0, 1, 2, 3]` becomes
+`[(0 + 2) / 2, (1 + 3) / 2]`; non-finite samples become silence. This is a
+predictable fallback until channel-mask-aware routing can be carried through
+the capture API.
+
 ## Bridge and tone probes
 
 `Recorder.BridgeProbe` exercises only the public C ABI, writes a final WAV, and
@@ -48,6 +57,24 @@ prints capture statistics plus the bridge diagnostic on failure:
 .\windows\out\native\Debug\Recorder.BridgeProbe.exe mic 5 .\windows\out\probes\mic.wav
 .\windows\out\native\Debug\Recorder.BridgeProbe.exe process $PID 5 .\windows\out\probes\process.wav
 ```
+
+`Recorder.WgcCaptureProbe.Tool` is a deliberately non-recording feasibility
+probe for a future window-video pipeline. It validates only a visible,
+top-level, non-cloaked, non-protected window at the same integrity level, then
+tries to create a `GraphicsCaptureItem`; it never creates a capture session,
+receives frames, or writes media. Use `--self-window` for a safe capability
+check without targeting another application:
+
+```powershell
+.\windows\out\native\Debug\Recorder.WgcCaptureProbe.Tool.exe --self-window
+.\windows\out\native\Debug\Recorder.WgcCaptureProbe.Tool.exe --self-window-sta
+```
+
+`--self-window-sta` initializes the tool thread as STA first, mirroring a WinUI
+UI thread. Its output includes `apartment` and `apartmentInitializedByProbe`;
+this mode must report `apartment=sta` or `apartment=main-sta` and
+`apartmentInitializedByProbe=false`, showing that the probe preserves an
+existing apartment instead of forcing MTA.
 
 The process form does not fall back to system capture. The checked-in probe
 report records a dual-tone run where the target 440 Hz signal was 39.3 dB above
@@ -62,7 +89,7 @@ duration. It is useful for creating the interfering or target audio signal:
 
 ## ABI and lifecycle
 
-The public C ABI is in `include/recorder_native_bridge.h`. Handles are opaque and must be destroyed with `recorder_native_destroy`. For a non-null handle, `get_last_error` returns bridge-owned memory, valid only until the next call on that handle or destruction; the null-handle diagnostic is implementation-owned. Neither pointer is caller-freeable. Calls are internally synchronized. A failed start preserves its prior non-recording state; stop drains and joins the capture thread before the format, resampler, and writer pipeline can be released.
+The public C ABI is in `include/recorder_native_bridge.h`. Handles are opaque and must be destroyed with `recorder_native_destroy`. `recorder_native_destroy` requires caller-provided external synchronization: call it only after ensuring no API call on the same handle is executing or can begin. Internal synchronization serializes bridge state operations, but does not make handle lifetime safe against concurrent destruction. Once destruction returns, the handle is permanently invalid and must not be passed to any bridge API, including diagnostic or query calls. For a non-null handle, `get_last_error` returns bridge-owned memory, valid only until the next call on that handle or destruction; the null-handle diagnostic is implementation-owned. Neither pointer is caller-freeable. A failed start preserves its prior non-recording state; stop drains and joins the capture thread before the format, resampler, and writer pipeline can be released.
 
 Endpoint enumeration uses a separate opaque `RecorderNativeEndpointList`.
 `recorder_native_enumerate_endpoints` creates an immutable snapshot of active

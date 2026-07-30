@@ -67,6 +67,19 @@ void MonoIsDuplicatedAndNonFiniteIsSilence() {
     ExpectNear(0.0F, output[4]);
 }
 
+void FourChannelInputIsDownmixedBeforeResampling() {
+    const std::vector<float> input = {
+        0.2F, 0.4F, 0.6F, -0.2F,
+        -0.8F, 0.3F, 0.4F, 0.7F,
+    };
+    const auto output = Convert(48'000, 4, input);
+    Expect(output.size() == 4, "unexpected four-channel output size");
+    ExpectNear(0.4F, output[0]);
+    ExpectNear(0.1F, output[1]);
+    ExpectNear(-0.2F, output[2]);
+    ExpectNear(0.5F, output[3]);
+}
+
 void Downsample96kUsesContinuousTimeline() {
     const std::vector<float> input = {0.0F, 10.0F, 1.0F, 11.0F, 2.0F, 12.0F,
                                       3.0F, 13.0F, 4.0F, 14.0F, 5.0F, 15.0F};
@@ -118,8 +131,9 @@ void OutputLengthStaysWithinOneFrame() {
 }  // namespace
 
 int main() {
-    const std::array<std::pair<const char*, void (*)()>, 6> tests = {{{"48k passthrough", Passthrough48k},
+    const std::array<std::pair<const char*, void (*)()>, 7> tests = {{{"48k passthrough", Passthrough48k},
         {"multi-block", MultiBlockMatchesSingleBlock}, {"mono and finite", MonoIsDuplicatedAndNonFiniteIsSilence},
+        {"four-channel downmix", FourChannelInputIsDownmixedBeforeResampling},
         {"96k downsample", Downsample96kUsesContinuousTimeline}, {"empty and invalid", EmptySingleAndInvalidInputs},
         {"length error", OutputLengthStaysWithinOneFrame}}};
     try {

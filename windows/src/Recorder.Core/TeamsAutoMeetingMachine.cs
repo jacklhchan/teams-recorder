@@ -165,7 +165,15 @@ public sealed class TeamsAutoMeetingMachine
     private TeamsAutoMeetingTransition Suppress(TeamsAutoMeetingSnapshot snapshot) => snapshot.IsEnabled && !snapshot.IsInMeeting && snapshot.State is TeamsAutoMeetingState.StopCountdown
         ? TeamsAutoMeetingTransition.NoCommand(snapshot with { SuppressesStopUntilEndDebounce = true })
         : snapshot.IsEnabled
-        ? TeamsAutoMeetingTransition.NoCommand(snapshot with { State = new TeamsAutoMeetingState.SuppressedUntilMeetingEnd(), SuppressesStopUntilEndDebounce = false })
+        // The host uses this when a user explicitly stops an automatic capture.  That capture
+        // is no longer controller-owned, so do not retain a stale TeamsAutomatic owner while
+        // suppressing re-starts for the remainder of the meeting.
+        ? TeamsAutoMeetingTransition.NoCommand(snapshot with
+        {
+            RecordingOwner = snapshot.RecordingOwner == RecordingOwner.TeamsAutomatic ? RecordingOwner.None : snapshot.RecordingOwner,
+            State = new TeamsAutoMeetingState.SuppressedUntilMeetingEnd(),
+            SuppressesStopUntilEndDebounce = false,
+        })
         : TeamsAutoMeetingTransition.NoCommand(snapshot);
 
     private TeamsAutoMeetingSnapshot WaitingOrCountdown(TeamsAutoMeetingSnapshot snapshot) => snapshot.IsEnabled && snapshot.IsInMeeting ? StartCountdown(snapshot) : snapshot with { State = new TeamsAutoMeetingState.WaitingForMeeting() };

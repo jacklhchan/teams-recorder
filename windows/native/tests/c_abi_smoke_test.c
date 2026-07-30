@@ -47,11 +47,13 @@ int main(void) {
 
     recorder_native_endpoint_list_destroy(NULL);
 
-    if (!expect(strcmp(recorder_native_version(), "0.4.0") == 0, "version must be exported") ||
+    if (!expect(strcmp(recorder_native_version(), "0.5.0") == 0, "version must be exported") ||
         !expect(recorder_native_start(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "legacy start(NULL) must reject the handle") ||
         !expect(recorder_native_start_with_options(NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "options start(NULL) must reject the handle") ||
+        !expect(recorder_native_set_microphone_muted(NULL, 0U) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "mute(NULL) must reject the handle") ||
         !expect(recorder_native_stop(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "stop(NULL) must reject the handle") ||
         !expect(recorder_native_get_stats(NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
@@ -77,6 +79,10 @@ int main(void) {
     options = valid_options();
     if (!expect(recorder_native_start(bridge) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "legacy start must require an output path") ||
+        !expect(recorder_native_set_microphone_muted(bridge, 2U) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "mute must reject states other than zero and one") ||
+        !expect(recorder_native_set_microphone_muted(bridge, 1U) == RECORDER_NATIVE_INVALID_STATE,
+                "mute must require an active mixed capture") ||
         !expect(recorder_native_start_with_options(bridge, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "NULL options must be rejected") ||
         !expect(recorder_native_get_stats(bridge, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,

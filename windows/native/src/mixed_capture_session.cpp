@@ -182,6 +182,25 @@ public:
         return failure_;
     }
 
+    RecorderNativeResult SetMicrophoneMuted(bool muted) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!started_ || !microphone_.capture) {
+            error_ = "Microphone mute is available only during mixed capture with a microphone.";
+            return RECORDER_NATIVE_INVALID_STATE;
+        }
+
+        microphone_muted_ = muted;
+        if (microphone_muted_) {
+            // WASAPI continues to deliver microphone packets. Drop any audio
+            // already waiting to be mixed, then discard future packets in the
+            // callback so the bounded queue cannot grow while muted.
+            microphone_.queue.clear();
+            microphone_.queued_frames = 0;
+        }
+        cv_.notify_one();
+        return RECORDER_NATIVE_OK;
+    }
+
     RecorderNativeResult health_result() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return failure_;
@@ -230,6 +249,25 @@ private:
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             if (failure_ != RECORDER_NATIVE_OK || stop_requested_) {
+                return;
+            }
+
+            const bool discard_muted_microphone =
+                &source == &microphone_ && microphone_muted_;
+            if (discard_muted_microphone) {
+                // Receiving this callback has drained the packet from WASAPI.
+                // Do not normalize or enqueue it while the microphone is muted.
+                if (stats_.packets == 0) {
+                    stats_.first_qpc_100ns = block.qpc_position;
+                }
+                ++stats_.packets;
+                stats_.input_frames += block.frame_count;
+                stats_.silent_packets += block.silent ? 1U : 0U;
+                stats_.discontinuities += block.discontinuity ? 1U : 0U;
+                stats_.last_qpc_100ns = block.qpc_position;
+                stats_.event_driven = stats_.event_driven != 0 && block.event_driven
+                    ? 1U
+                    : 0U;
                 return;
             }
 
@@ -489,6 +527,7 @@ private:
     bool started_ = false;
     bool stop_requested_ = false;
     bool writer_ready_ = false;
+    bool microphone_muted_ = false;
 };
 
 MixedCaptureSession::MixedCaptureSession()
@@ -502,6 +541,10 @@ RecorderNativeResult MixedCaptureSession::Start(MixedCaptureSessionConfig config
 
 RecorderNativeResult MixedCaptureSession::Stop() {
     return impl_->Stop();
+}
+
+RecorderNativeResult MixedCaptureSession::SetMicrophoneMuted(bool muted) {
+    return impl_->SetMicrophoneMuted(muted);
 }
 
 RecorderNativeResult MixedCaptureSession::health_result() const {

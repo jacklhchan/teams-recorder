@@ -12,9 +12,9 @@ public sealed class NativeRecorderInteropException : Exception
     }
 }
 
-public sealed partial class NativeRecorderBridge : INativeRecorderBridge
+public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl
 {
-    private const string RequiredAbiVersion = "0.4.0";
+    private const string RequiredAbiVersion = "0.5.0";
     private readonly object gate = new();
     private readonly NativeBridgeHandle handle;
     private bool disposed;
@@ -116,6 +116,15 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge
         {
             ThrowIfDisposed();
             return ToOperationResult(NativeMethods.Stop(handle));
+        }
+    }
+
+    public NativeOperationResult SetMicrophoneMuted(bool muted)
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            return ToOperationResult(NativeMethods.SetMicrophoneMuted(handle, muted ? 1U : 0U));
         }
     }
 
@@ -279,7 +288,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge
         if (!Version.TryParse(version, out var parsedVersion) ||
             parsedVersion is null ||
             parsedVersion.Major != 0 ||
-            parsedVersion.CompareTo(new Version(0, 4)) < 0)
+            parsedVersion.CompareTo(new Version(0, 5)) < 0)
         {
             throw new NativeRecorderInteropException(
                 $"Recorder.NativeBridge {RequiredAbiVersion} or newer is required.");
@@ -460,6 +469,12 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge
         internal static partial NativeRecorderResult StartMixed(
             NativeBridgeHandle bridge,
             ref NativeMixedStartOptions options);
+
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_set_microphone_muted")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial NativeRecorderResult SetMicrophoneMuted(
+            NativeBridgeHandle bridge,
+            uint muted);
 
         [LibraryImport(LibraryName, EntryPoint = "recorder_native_stop")]
         [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

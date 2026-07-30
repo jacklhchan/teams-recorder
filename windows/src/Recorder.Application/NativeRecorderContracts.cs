@@ -248,3 +248,14 @@ public interface INativeRecorderBridge : IDisposable
 
     NativeEndpointEnumerationResult EnumerateEndpoints();
 }
+
+/// <summary>
+/// Optional capability implemented by native bridges that can set the
+/// microphone contribution of an active mixed M4A recording. The state is
+/// absolute, never a toggle; callers that do not need this capability can
+/// continue to depend on <see cref="INativeRecorderBridge"/> alone.
+/// </summary>
+public interface INativeRecorderMicrophoneMuteControl
+{
+    NativeOperationResult SetMicrophoneMuted(bool muted);
+}

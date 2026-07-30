@@ -13,8 +13,10 @@ enum class Error {
 };
 
 /// Stateful interleaved-float streaming resampler to 48 kHz stereo.
-/// Mono input is duplicated; inputs with two or more channels use channels 0 and 1.
-/// Non-finite samples are converted to silence. Flush emits the terminal held sample
+/// Input is downmixed before resampling: mono is duplicated, stereo is
+/// preserved, and multichannel input averages even-indexed channels to left
+/// and odd-indexed channels to right. Non-finite samples are converted to
+/// silence. Flush emits the terminal held sample
 /// needed for ceil(inputFrames * 48000 / sourceRate) output frames, then requires Reset.
 class LinearResampler final {
 public:

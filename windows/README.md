@@ -13,8 +13,8 @@ The repository now contains:
 - a versioned native C ABI and a SafeHandle-backed managed coordinator for
   recording lifecycle, endpoint enumeration, test recordings, and telemetry;
 - Windows WASAPI system, microphone, and process-loopback capture modules with
-  packet-owned callbacks, 48 kHz stereo normalization, and no-replace WAV
-  output;
+  packet-owned callbacks, 48 kHz stereo normalization (including the added
+  four-channel-to-stereo downmix core), and no-replace WAV output;
 - a WinUI 3 desktop shell in `src/Recorder.WinUI` for **system render-loopback
   recording, optionally mixed with one explicitly selected microphone**. It
   lists render and capture devices, starts/stops a recording, provides a
@@ -28,12 +28,16 @@ The repository now contains:
 - deterministic native and managed tests, JSON contract fixtures, and real
   process-audio diagnostic tools.
 
-This is an audio-first MVP, not a Teams integration. The desktop shell does
-not offer process selection, Teams meeting detection or APIs, video capture,
-transcription, or a virtual microphone driver. It records the system render
-mix, which may include any audible application; it does not claim Teams-only
-process recording. Aggregate health is available, but source-specific health
-statistics are not yet exposed.
+This is an audio-first MVP, not a completed Teams integration. The desktop
+shell does not offer process selection, Teams meeting detection, video capture,
+transcription, or a virtual microphone driver. It includes a **preview** local
+Microsoft Teams Third-party App API client for pairing and absolute mute-state
+handling, but that preview has not yet been approved and exercised in a usable
+Teams tenant or meeting; it must not be presented as generally available Teams
+API support, Teams mute control, meeting detection, or automatic recording. It
+records the system render mix, which may include any audible application; it
+does not claim Teams-only process recording. Aggregate health is available, but
+source-specific health statistics are not yet exposed.
 
 The WinUI recording command allocates managed `manual-*` or `test-*` session
 folders through the storage service, writes native capture to
@@ -45,10 +49,14 @@ is covered by managed tests; it still needs end-to-end real-device validation.
 
 The technical probe record is in
 [`docs/2026-07-28-wasapi-probe-results.md`](docs/2026-07-28-wasapi-probe-results.md).
-It includes system and synthetic process-loopback evidence, but no successful
-physical-microphone run. A real Windows device with an actual microphone must
-still complete a record, stop, reopen, playback, and optional-mic-mix release
-validation before shipping.
+It includes successful system-loopback AAC-in-M4A evidence, plus synthetic
+process-loopback evidence, but no successful physical-microphone or
+optional-mic-mix run. The development machine's Intel four-channel microphone
+fails WASAPI/Media Foundation RAW initialization with `E_INVALIDARG`; the
+four-channel downmix core is present, but cannot bypass that endpoint-level
+blocker. A real Windows device with an actual microphone must still complete a
+record, stop, reopen, playback, and optional-mic-mix release validation before
+shipping.
 
 ## Supported development baseline
 
@@ -89,21 +97,55 @@ can run directly. It also retains a single-project MSIX manifest, but this
 repository intentionally does not create or trust a signing certificate and
 does not enable Windows Developer Mode. Both change machine security state.
 
-To produce an unsigned MSIX for a deployment pipeline without installing it:
+To produce an **unsigned developer-only** MSIX without installing it:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Package-Windows.ps1
 ```
 
 That creates a package under `windows\out\packages\`. It is intentionally
-unsigned and is not installable through the ordinary user workflow.
+not an end-user installer: the script never imports or trusts a certificate,
+enables Developer Mode, or installs a package.
 
-To make Teams Recorder appear in Start, create a signed MSIX whose certificate
-matches `Publisher="CN=Teams Recorder"`, trust that certificate through the
-normal organisation or release process, then install it with App Installer or
-`Add-AppxPackage`. Until that release-signing decision is made, the supported
-developer handoff is the Release executable above rather than a machine-wide
-installation.
+## Signed MSIX and safe installation
+
+The manifest publisher is `CN=Teams Recorder`. A release certificate must be a
+valid code-signing certificate with that exact subject and an accessible private
+key. Obtain and trust the certificate through the organisation's normal PKI or
+release process; do not use the package script to add a certificate to Trusted
+People or Trusted Root Certification Authorities.
+
+For a certificate already available in the personal certificate store:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Package-Windows.ps1 `
+  -CertificateThumbprint '0123456789ABCDEF0123456789ABCDEF01234567'
+```
+
+For a PFX that must not be imported, prompt for its password rather than placing
+it in shell history:
+
+```powershell
+$password = Read-Host 'PFX password' -AsSecureString
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Package-Windows.ps1 `
+  -CertificatePfxPath 'C:\secure\teams-recorder-signing.pfx' `
+  -CertificatePfxPassword $password
+```
+
+To create an App Installer feed, add an HTTPS URL where the signed MSIX and the
+generated `.appinstaller` file will be published together:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Package-Windows.ps1 `
+  -CertificateThumbprint '0123456789ABCDEF0123456789ABCDEF01234567' `
+  -AppInstallerUri 'https://releases.example.com/teams-recorder/Recorder.WinUI.appinstaller'
+```
+
+Only after the release team has published the artifacts and confirmed that the
+signing chain is trusted should users open that HTTPS `.appinstaller` link in
+App Installer. For a managed deployment, administrators may use
+`Add-AppxPackage` with the signed package and its dependencies according to
+their policy. Neither workflow requires weakening Windows security settings.
 
 ## Layout
 

@@ -1,6 +1,6 @@
 # 實作狀態更新（2026-07-29）
 
-本文件是原始 parity／驗收規格，表中的 Phase 1 目標不應視為已交付宣告。最新已實作範圍、端對端缺口和實機發行驗證請見 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md)。特別是，MVP 不聲稱 Teams-only process recording、Teams API、視訊、虛擬麥克風、轉寫、安裝程式或 Start Menu 安裝；實體麥克風的成功錄製仍需在發行前驗證。
+本文件是原始 parity／驗收規格，表中的 Phase 1 目標不應視為已交付宣告。最新已實作範圍、端對端缺口和實機發行驗證請見 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md)。特別是，MVP 不聲稱 Teams-only process recording、已驗證的 Teams API、視訊、虛擬麥克風、轉寫、安裝程式或 Start Menu 安裝；實體麥克風的成功錄製仍需在發行前驗證。Teams mute sync 與 global hotkey/mute 有預覽程式及測試，仍受 Teams 租戶配對或實體裝置／driver 前置條件限制。
 
 # Windows Migration：功能對等與 Phase 0/1 驗收規格
 
@@ -33,11 +33,11 @@ Windows 不是把 SwiftUI 或 ScreenCaptureKit 逐字移植。Phase 1 的完成�
 | 中斷後音訊復原 | `IncompleteSessionRecovery.swift` | 啟動時僅嘗試提升已驗證、同資料夾的 audio backup；不得覆寫現有 final | P1 | P1：crash fixture 能復原；目的檔存在、backup 無效、路徑重解析失敗均不覆寫 |
 | 手動匯入音訊轉寫 | `ManualTranscriptionImporter` | 先保留檔案匯入與 session shell；轉寫執行器後置 | P2 | Deferred（見下） |
 | 本機 Qwen/oMLX 檔案型轉寫 | README；`TranscriptionProcess.swift` | Windows model/runtime、FFmpeg 散布與憑證策略皆未定，不複製 macOS shell script | P2 | Deferred；先維持既有 transcript/read state JSON 相容 |
-| Teams Third-party App API mute sync | README；`TeamsThirdPartyAPI.swift`、`TeamsMuteSyncClient.swift` | 只有在 Windows Teams API/tenant policy 的實機 pairing probe 通過後才排程；WebSocket 協定邏輯可重用為獨立 client | P2 | Deferred；不得以 UI 開關宣稱支援 |
+| Teams Third-party App API mute sync | README；`TeamsThirdPartyAPI.swift`、`TeamsMuteSyncClient.swift` | Windows 已有 local WebSocket、DPAPI token、pairing 與絕對 mute/fail-closed 預覽層；仍必須在可用 Teams tenant/client 完成 pairing 核准與會議實測 | P2 | Preview，非 MVP release gate；不得以 UI 開關宣稱已支援 Teams API 或 Teams mute 控制 |
 | Teams 自動錄製 | `TeamsAutoMeetingCoordinator` 與其設計規格 | 依賴上一項 authoritative meeting state，且不屬錄音核心 | P2 | Deferred |
-| Teams 視窗錄影與 runtime 切換 | `ScreenCaptureSource.swift`、`RecordingMediaCoordinator.swift`、viability gate | Windows.Graphics.Capture + Media Foundation 的可行性須獨立驗證；Phase 1 不交付 | P2 | Deferred；Phase 0 僅可建立技術風險報告，不能標記 feature complete |
-| 虛擬麥克風與硬體 mute | README；`VirtualMic/**`、`MicrophoneMuteCoordinator.swift` | 需要簽署的 Windows audio driver / virtual endpoint，與 app 進程分離 | P3 | Deferred |
-| 全域 hotkey | README；`GlobalHotKeyManager.swift` | Windows RegisterHotKey 或等效抽象，待核心錄音穩定後 | P3 | Deferred |
+| Teams 視窗錄影與 runtime 切換 | `ScreenCaptureSource.swift`、`RecordingMediaCoordinator.swift`、viability gate | Windows.Graphics.Capture + Media Foundation 的可行性須獨立驗證；此主機的 WGC probe 已失敗，Phase 1 不交付 | P2 | Deferred；目前僅有失敗的可行性證據，不能標記 feature complete 或泛化到其他主機 |
+| 虛擬麥克風與硬體 mute | README；`VirtualMic/**`、`MicrophoneMuteCoordinator.swift` | app 可偵測受信任 endpoint identity，但需要簽署並已安裝的 Windows audio driver / virtual endpoint，且與 app 進程分離 | P3 | Deferred；driver 供應、安裝、音訊路由與硬體 mute 實測皆為必要前置條件 |
+| 全域 hotkey | README；`GlobalHotKeyManager.swift` | Windows `RegisterHotKey` 的 `Ctrl+Alt+M` registrar 與獨立 local/input mute 狀態已有程式和測試 | P3 | Preview；尚未作為硬體 mute、Teams sync 或虛擬麥克風可用性的證據 |
 
 P0 表示「無此能力不能聲稱 Windows MVP 可錄音」；P1 表示第一個可交付的 Windows MVP；P2/P3 不是拒絕，而是有明確前置條件後的後續工作。
 
@@ -73,10 +73,10 @@ Phase 0 只產出探針程式、測試、決策紀錄及空的可替換 adapter�
 
 ## 明確 deferred（不屬 Phase 0/1）
 
-- Teams pairing、mute sync、meeting-state auto recording。
+- Teams pairing／tenant 核准與實機 mute sync、meeting-state auto recording。現有 Teams mute UI 是受限預覽，不可當作已驗證的整合。
 - Teams / 任意視窗影像錄製、影像與音訊 mux、動態 capture filter、screen interval metadata 的產生。
-- Windows 虛擬麥克風 driver、裝置 mute 手勢同步與安裝器權限提升。
-- Qwen ASR、本機／遠端模型散布、FFmpeg packaging、串流轉寫、speaker diarization。
-- 全域 hotkey、企業部署／簽章／自動更新、跨裝置同步或雲端上傳。
+- Windows 虛擬麥克風 driver、裝置 mute 手勢同步與安裝器權限提升；driver 已簽署／安裝及 endpoint 可用是任何整合的必要前置條件。
+- **刻意 deferred：** Qwen ASR、本機／遠端模型散布、FFmpeg packaging、串流轉寫、speaker diarization。
+- 全域 hotkey 的產品化／實機驗證、企業部署／簽章／自動更新、跨裝置同步或雲端上傳。
 
 Deferred 功能可讀取既有相容 metadata，但不會在 Phase 1 產生其宣稱的資料。例如 audio-only session 必須寫 `mediaKind: "audio"`、空 `screenIntervals`，且沒有 `capturedTeamsWindow`。

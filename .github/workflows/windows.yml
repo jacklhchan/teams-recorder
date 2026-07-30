@@ -12,7 +12,9 @@ on:
 
 jobs:
   portable-core:
-    runs-on: windows-latest
+    # CMake presets intentionally target the VS 2022 generator. Pin the
+    # runner rather than allowing windows-latest to move to a newer VS image.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -21,6 +23,12 @@ jobs:
       - name: Validate contracts
         shell: pwsh
         run: ./windows/scripts/Test-Contracts.ps1
+      - name: Build Release native bridge
+        working-directory: windows/native
+        shell: pwsh
+        run: |
+          cmake --preset windows-x64
+          cmake --build --preset windows-x64-release --target Recorder.NativeBridge
       - name: Build
         working-directory: windows
         run: dotnet build ./TeamsRecorder.Windows.sln --configuration Release
@@ -29,7 +37,8 @@ jobs:
         run: dotnet run --project ./tests/Recorder.Core.Tests/Recorder.Core.Tests.csproj --configuration Release --no-build
 
   native-contract:
-    runs-on: windows-latest
+    # See portable-core: the native preset requires Visual Studio 2022.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - name: Configure

@@ -1,7 +1,7 @@
 # Selected App 音訊隔離：人工驗收紀錄
 
-**狀態：** PR Draft；未驗證，非 GA。  
-**適用範圍：** Windows process-loopback 的 Selected App 音訊隔離。  
+**狀態：** PR Draft；未驗證，非 GA。
+**適用範圍：** Windows process-loopback 的 Selected App 音訊隔離。
 **不適用：** Teams-only 宣稱、全系統錄音 fallback、視窗錄影、Teams API 或任何自動化認證流程。
 
 ## 通過條件

@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var playbackWindow:
         any PlaybackWindowPresenting
     @State private var navigation = RecorderNavigationState(selection: .record)
+    private let navigationOverride: Binding<RecorderNavigationState>?
 
     @MainActor
     init(
@@ -16,7 +17,10 @@ struct ContentView: View {
                 TeamsAutoMeetingCountdownPanelFactory(),
         playbackWindowPresenterFactory:
             any PlaybackWindowPresenterFactory =
-                PlaybackWindowControllerFactory()
+                PlaybackWindowControllerFactory(),
+        // Internal deterministic presentation-test seam. Production passes nil
+        // and ContentView remains the sole owner of its navigation state.
+        navigationOverride: Binding<RecorderNavigationState>? = nil
     ) {
         self.model = model
         _autoMeetingPanel = State(
@@ -26,10 +30,14 @@ struct ContentView: View {
             initialValue:
                 playbackWindowPresenterFactory.makePresenter()
         )
+        self.navigationOverride = navigationOverride
     }
 
     var body: some View {
-        RecorderWorkspaceContent(model: model, navigation: $navigation)
+        RecorderWorkspaceContent(
+            model: model,
+            navigation: workspaceNavigation
+        )
         .onChange(
             of: model.teamsAutoMeetingState,
             initial: true
@@ -72,6 +80,10 @@ struct ContentView: View {
             autoMeetingPanel.dismiss()
             playbackWindow.dismiss()
         }
+    }
+
+    private var workspaceNavigation: Binding<RecorderNavigationState> {
+        navigationOverride ?? $navigation
     }
 
 }
@@ -117,38 +129,7 @@ struct RecorderWorkspaceContent: View {
     }
 
     private var baselineRecordingsDestination: some View {
-        ScrollView {
-            SessionListView(
-                sessions: model.sessions,
-                transcribingSessionID: model.transcribingSessionID,
-                transcriptionStatus: model.transcriptionStatus,
-                lastTranscriptionSessionID: model.lastTranscriptionSessionID,
-                lastTranscriptionStatus: model.lastTranscriptionStatus,
-                lastTranscriptionDidFail: model.lastTranscriptionDidFail,
-                hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
-                transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
-                refresh: model.refreshSessions,
-                play: model.play,
-                open: model.open,
-                transcribe: model.transcribe,
-                cancelTranscription: model.cancelTranscription,
-                openTranscript: model.openTranscript,
-                openTranscriptLog: model.openTranscriptLog,
-                transcriptText: model.transcriptText,
-                saveTranscript: model.saveTranscript,
-                exportTranscript: model.exportTranscript,
-                copyTranscript: model.copyTranscript,
-                saveMetadata: model.saveMetadata,
-                moveToTrash: model.moveSessionToTrash
-            )
-            .padding(20)
-        }
-        .background(
-            RecorderDestinationAccessibilityMarker(
-                identifier: "recorder.destination.recordings"
-            )
-        )
-        .accessibilityIdentifier("recorder.destination.recordings")
+        RecordingsLibraryView(model: model)
     }
 
     private var baselineSettingsDestination: some View {

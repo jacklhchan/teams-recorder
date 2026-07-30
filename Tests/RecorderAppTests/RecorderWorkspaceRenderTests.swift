@@ -10,7 +10,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         let host = try makeWorkspaceHost(
             model: fixture.model,
             size: .init(width: 860, height: 680)
-            )
+        )
         defer { host.close() }
 
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.record"))
@@ -73,6 +73,73 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         try assertVisibleSettingsRecoveryDeepLink(for: fixture)
     }
 
+    func testRecordingsOwnsUploadRefreshAndSessionSpecificActions() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.uploadAudio))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.refreshRecordings))
+        XCTAssertTrue(host.containsAccessibilityLabel("Play \(fixture.session.displayName)"))
+        XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(fixture.session.displayName)"))
+    }
+
+    func testSessionActionMarkersUpdateWhenMetadataProjectionRenamesSameSession() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let originalName = fixture.session.displayName
+        let renamedName = "Renamed workspace recording"
+        XCTAssertTrue(host.containsAccessibilityLabel("Play \(originalName)"))
+        XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(originalName)"))
+
+        fixture.model.sessions = [
+            RecordingSession(
+                id: fixture.session.id,
+                folderURL: fixture.session.folderURL,
+                recordingURL: fixture.session.recordingURL,
+                createdAt: fixture.session.createdAt,
+                duration: fixture.session.duration,
+                fileSize: fixture.session.fileSize,
+                metadata: .init(title: renamedName),
+                searchDocument: fixture.session.searchDocument
+            )
+        ]
+        host.render()
+
+        XCTAssertTrue(host.containsAccessibilityLabel("Play \(renamedName)"))
+        XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(renamedName)"))
+        XCTAssertFalse(host.containsAccessibilityLabel("Play \(originalName)"))
+        XCTAssertFalse(host.containsAccessibilityLabel("Edit details for \(originalName)"))
+    }
+
+    func testTwentyFiveRecordRecordingsCyclesRenderWithoutPendingLeak() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        for _ in 0 ..< 25 {
+            host.select(.recordings)
+            XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.recordings"))
+            host.select(.record)
+            XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.record"))
+            XCTAssertNil(host.navigationState.pendingDestination)
+        }
+    }
+
     private func assertVisibleSettingsRecoveryDeepLink(
         for fixture: StartupDisabledFixture
     ) throws {
@@ -126,6 +193,28 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
+    private func makeFixtureWithOneSession() -> SessionFixture {
+        let fixture = makeStartupDisabledFixture(
+            systemPermission: .granted,
+            microphonePermission: .granted
+        )
+        let folder = URL(
+            fileURLWithPath: "/tmp/recorder-render-session-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let session = RecordingSession(
+            id: folder,
+            folderURL: folder,
+            recordingURL: folder.appendingPathComponent("recording.m4a"),
+            createdAt: .now,
+            duration: 12,
+            fileSize: 0,
+            metadata: .init(title: "Workspace recording")
+        )
+        fixture.model.sessions = [session]
+        return .init(model: fixture.model, defaults: fixture.defaults, session: session)
+    }
+
     private func makeWorkspaceHost(model: AppModel, size: CGSize) throws -> WorkspaceHost {
         try WorkspaceHost(model: model, size: size)
     }
@@ -135,6 +224,13 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 private struct StartupDisabledFixture {
     let model: AppModel
     let defaults: UserDefaults
+}
+
+@MainActor
+private struct SessionFixture {
+    let model: AppModel
+    let defaults: UserDefaults
+    let session: RecordingSession
 }
 
 @MainActor
@@ -195,6 +291,14 @@ private final class WorkspaceHost {
             || accessibilityElement(forAccessibilityIdentifier: identifier) != nil
     }
 
+    func containsAccessibilityLabel(_ label: String) -> Bool {
+        view(withAccessibilityLabel: label) != nil
+    }
+
+    var navigationState: RecorderNavigationState {
+        navigationDriver.navigation
+    }
+
     var visibleContentRect: CGRect {
         hostingView.accessibilityFrame()
     }
@@ -250,6 +354,11 @@ private final class WorkspaceHost {
         window.contentView = nil
     }
 
+    func render() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        layout()
+    }
+
     private func layout() {
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
@@ -286,6 +395,20 @@ private final class WorkspaceHost {
             return hostingView
         }
         return find(in: hostingView.accessibilityChildren() ?? [])
+    }
+
+    private func view(
+        withAccessibilityLabel label: String,
+        in root: NSView? = nil
+    ) -> NSView? {
+        let candidate = root ?? hostingView
+        if candidate.accessibilityLabel() == label { return candidate }
+        for subview in candidate.subviews {
+            if let found = view(withAccessibilityLabel: label, in: subview) {
+                return found
+            }
+        }
+        return nil
     }
 
 }

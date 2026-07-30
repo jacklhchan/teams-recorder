@@ -231,16 +231,6 @@ private struct RecordDashboardControls: View {
                 .accessibilityIdentifier(RecorderActionID.testAudio)
                 .disabled(model.recorder.isRecording || model.isRunningTestRecording || model.isCaptureLifecycleWorking)
 
-                Button {
-                    model.chooseAudioFileForTranscription()
-                } label: {
-                    Label("Upload Audio", systemImage: "square.and.arrow.up")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(model.transcribingSessionID != nil)
-                .accessibilityIdentifier(RecorderActionID.uploadAudio)
-
                 Button { model.toggleRecorderMicMute() } label: {
                     Label(micMuteTitle, systemImage: model.localMicMuted ? "mic.fill" : "mic.slash.fill")
                 }

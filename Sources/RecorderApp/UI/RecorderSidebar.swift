@@ -7,6 +7,7 @@ struct RecorderSidebar: View {
         List(RecorderDestination.allCases, selection: $selection) { destination in
             Label(destination.title, systemImage: destination.systemImage)
                 .tag(destination)
+                .accessibilityIdentifier("recorder.navigation.\(destination.rawValue)")
         }
         .listStyle(.sidebar)
         .accessibilityIdentifier("recorder.workspace.sidebar")

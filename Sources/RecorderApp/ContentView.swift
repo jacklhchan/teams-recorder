@@ -6,6 +6,7 @@ struct ContentView: View {
         any TeamsAutoMeetingCountdownPresenting
     @State private var playbackWindow:
         any PlaybackWindowPresenting
+    @State private var navigation = RecorderNavigationState(selection: .record)
 
     @MainActor
     init(
@@ -28,77 +29,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HeaderView(recorder: model.recorder, statusMessage: model.statusMessage) {
-                model.refreshAllCaptureState()
-            }
-            .environment(\.isEnabled, model.sourceControlsEnabled)
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    permissionRow
-                    deviceSection
-                    MeterSectionView(
-                        recorder: model.recorder,
-                        systemDeviceName: model.systemAudioSubtitle,
-                        micDeviceName: model.selectedMicDevice?.name
-                    )
-                    LiveAudioHealthView(recorder: model.recorder)
-                    ControlsView(
-                        recorder: model.recorder,
-                        startOrStop: model.startOrStop,
-                        runTestRecording: model.runTestRecording,
-                        toggleRecorderMicMute: {
-                            model.toggleRecorderMicMute()
-                        },
-                        chooseAudioFileForTranscription: model.chooseAudioFileForTranscription,
-                        chooseOutputFolder: model.chooseOutputFolder,
-                        openRecordingFolder: model.openRecordingFolder,
-                        isRunningTestRecording: model.isRunningTestRecording,
-                        isTranscribing: model.transcribingSessionID != nil,
-                        isCaptureLifecycleWorking: model.isCaptureLifecycleWorking,
-                        localMicMuted: model.localMicMuted,
-                        nativeInputMicMuted: model.nativeInputMicMuted,
-                        teamsMicMuted: model.teamsMicMuted
-                    )
-                    if let report = model.lastHealthReport {
-                        HealthSummaryView(report: report)
-                    }
-                    AIProviderSettingsView(model: model.aiProviderSettingsModel)
-                    SessionListView(
-                        sessions: model.sessions,
-                        transcribingSessionID: model.transcribingSessionID,
-                        transcriptionStatus: model.transcriptionStatus,
-                        lastTranscriptionSessionID: model.lastTranscriptionSessionID,
-                        lastTranscriptionStatus: model.lastTranscriptionStatus,
-                        lastTranscriptionDidFail: model.lastTranscriptionDidFail,
-                        hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
-                        transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
-                        refresh: model.refreshSessions,
-                        play: model.play,
-                        open: model.open,
-                        transcribe: model.transcribe,
-                        cancelTranscription: model.cancelTranscription,
-                        openTranscript: model.openTranscript,
-                        openTranscriptLog: model.openTranscriptLog,
-                        transcriptText: model.transcriptText,
-                        saveTranscript: model.saveTranscript,
-                        exportTranscript: model.exportTranscript,
-                        copyTranscript: model.copyTranscript,
-                        saveMetadata: model.saveMetadata,
-                        moveToTrash: model.moveSessionToTrash
-                    )
-                    FooterView(
-                        recorder: model.recorder,
-                        outputFolder: model.outputFolder,
-                        lastRecordingSavedAsM4A: model.lastRecordingSavedAsM4A
-                    )
-                }
-                .padding(20)
-            }
-        }
-        .frame(minWidth: 860, minHeight: 680)
-        .background(Color(nsColor: .windowBackgroundColor))
+        RecorderWorkspaceContent(model: model, navigation: $navigation)
         .onChange(
             of: model.teamsAutoMeetingState,
             initial: true
@@ -143,6 +74,146 @@ struct ContentView: View {
         }
     }
 
+}
+
+struct RecorderWorkspaceContent: View {
+    @ObservedObject var model: AppModel
+    @Binding var navigation: RecorderNavigationState
+
+    var body: some View {
+        HStack(spacing: 0) {
+            RecorderSidebar(selection: selection)
+                .frame(minWidth: 180, idealWidth: 200, maxWidth: 240)
+            Divider()
+            destinationContent
+        }
+        .frame(minWidth: 860, minHeight: 680)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var selection: Binding<RecorderDestination> {
+        Binding(
+            get: { navigation.selection },
+            set: { navigation.select($0, hasUnsavedChanges: false) }
+        )
+    }
+
+    @ViewBuilder
+    private var destinationContent: some View {
+        switch navigation.selection {
+        case .record:
+            baselineRecordDestination
+        case .recordings:
+            baselineRecordingsDestination
+        case .settings:
+            baselineSettingsDestination
+        }
+    }
+
+    private var baselineRecordDestination: some View {
+        VStack(spacing: 0) {
+            HeaderView(recorder: model.recorder, statusMessage: model.statusMessage) {
+                model.refreshAllCaptureState()
+            }
+            .environment(\.isEnabled, model.sourceControlsEnabled)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    MeterSectionView(
+                        recorder: model.recorder,
+                        systemDeviceName: model.systemAudioSubtitle,
+                        micDeviceName: model.selectedMicDevice?.name
+                    )
+                    LiveAudioHealthView(recorder: model.recorder)
+                    ControlsView(
+                        recorder: model.recorder,
+                        startOrStop: model.startOrStop,
+                        runTestRecording: model.runTestRecording,
+                        toggleRecorderMicMute: {
+                            model.toggleRecorderMicMute()
+                        },
+                        chooseAudioFileForTranscription: model.chooseAudioFileForTranscription,
+                        chooseOutputFolder: model.chooseOutputFolder,
+                        openRecordingFolder: model.openRecordingFolder,
+                        isRunningTestRecording: model.isRunningTestRecording,
+                        isTranscribing: model.transcribingSessionID != nil,
+                        isCaptureLifecycleWorking: model.isCaptureLifecycleWorking,
+                        localMicMuted: model.localMicMuted,
+                        nativeInputMicMuted: model.nativeInputMicMuted,
+                        teamsMicMuted: model.teamsMicMuted
+                    )
+                    if let report = model.lastHealthReport {
+                        HealthSummaryView(report: report)
+                    }
+                    FooterView(
+                        recorder: model.recorder,
+                        outputFolder: model.outputFolder,
+                        lastRecordingSavedAsM4A: model.lastRecordingSavedAsM4A
+                    )
+                }
+                .padding(20)
+            }
+        }
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: "recorder.destination.record"
+            )
+        )
+        .accessibilityIdentifier("recorder.destination.record")
+    }
+
+    private var baselineRecordingsDestination: some View {
+        ScrollView {
+            SessionListView(
+                sessions: model.sessions,
+                transcribingSessionID: model.transcribingSessionID,
+                transcriptionStatus: model.transcriptionStatus,
+                lastTranscriptionSessionID: model.lastTranscriptionSessionID,
+                lastTranscriptionStatus: model.lastTranscriptionStatus,
+                lastTranscriptionDidFail: model.lastTranscriptionDidFail,
+                hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
+                transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
+                refresh: model.refreshSessions,
+                play: model.play,
+                open: model.open,
+                transcribe: model.transcribe,
+                cancelTranscription: model.cancelTranscription,
+                openTranscript: model.openTranscript,
+                openTranscriptLog: model.openTranscriptLog,
+                transcriptText: model.transcriptText,
+                saveTranscript: model.saveTranscript,
+                exportTranscript: model.exportTranscript,
+                copyTranscript: model.copyTranscript,
+                saveMetadata: model.saveMetadata,
+                moveToTrash: model.moveSessionToTrash
+            )
+            .padding(20)
+        }
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: "recorder.destination.recordings"
+            )
+        )
+        .accessibilityIdentifier("recorder.destination.recordings")
+    }
+
+    private var baselineSettingsDestination: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                permissionRow
+                deviceSection
+                AIProviderSettingsView(model: model.aiProviderSettingsModel)
+            }
+            .padding(20)
+        }
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: "recorder.destination.settings"
+            )
+        )
+        .accessibilityIdentifier("recorder.destination.settings")
+    }
+
     private var permissionRow: some View {
         PermissionStatusView(
             systemPermission: model.systemAudioPermission,
@@ -158,8 +229,8 @@ struct ContentView: View {
 
     private var deviceSection: some View {
         CaptureControlsView(model: model)
+            .accessibilityIdentifier("recorder.settings.capture-section")
     }
-
 }
 
 private struct PermissionStatusView: View {
@@ -704,6 +775,7 @@ private struct ControlsView: View {
             .controlSize(.large)
             .tint(recorder.isRecording ? .red : .accentColor)
             .disabled(!recorder.isRecording && isCaptureLifecycleWorking)
+            .accessibilityIdentifier(RecorderActionID.startStop)
 
             Button {
                 runTestRecording()
@@ -713,6 +785,7 @@ private struct ControlsView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
             .disabled(recorder.isRecording || isRunningTestRecording || isCaptureLifecycleWorking)
+            .accessibilityIdentifier(RecorderActionID.testAudio)
 
             Button {
                 chooseAudioFileForTranscription()
@@ -722,6 +795,7 @@ private struct ControlsView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
             .disabled(isTranscribing)
+            .accessibilityIdentifier(RecorderActionID.uploadAudio)
 
             Button {
                 toggleRecorderMicMute()
@@ -731,6 +805,7 @@ private struct ControlsView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
             .disabled((teamsMicMuted || nativeInputMicMuted) && !localMicMuted)
+            .accessibilityIdentifier(RecorderActionID.muteMic)
 
             Button {
                 toggleRecorderMicMute()
@@ -890,6 +965,7 @@ private struct SessionListView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
+                .accessibilityIdentifier(RecorderActionID.refreshRecordings)
                 Toggle(isOn: $favoritesOnly) {
                     Image(systemName: "star.fill")
                 }
@@ -970,6 +1046,7 @@ private struct SessionListView: View {
                                 .buttonStyle(.bordered)
                                 .disabled(!hasTranscript(for: session))
                                 .help("View and edit transcript")
+                                .accessibilityIdentifier(RecorderActionID.openTranscript)
                                 Button(role: .destructive) {
                                     sessionPendingTrash = session
                                 } label: {
@@ -1119,6 +1196,7 @@ private struct TranscriptEditorView: View {
                 Button("Cancel") { dismiss() }
                 Button("Save") { save(text); dismiss() }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier(RecorderActionID.saveTranscript)
             }
         }
         .padding(20)

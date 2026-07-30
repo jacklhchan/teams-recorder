@@ -371,12 +371,6 @@ private struct RecordDashboardFooter: View {
     }
 }
 
-extension AudioDevice {
-    var channelText: String {
-        "\(channelCount) channel\(channelCount == 1 ? "" : "s")"
-    }
-}
-
 private struct RecordDashboardFrameMarker: NSViewRepresentable {
     let identifier: String
 

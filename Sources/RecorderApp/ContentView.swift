@@ -133,43 +133,7 @@ struct RecorderWorkspaceContent: View {
     }
 
     private var baselineSettingsDestination: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                permissionRow
-                deviceSection
-                AIProviderSettingsView(model: model.aiProviderSettingsModel)
-            }
-            .padding(20)
-        }
-        .background(
-            RecorderDestinationAccessibilityMarker(
-                identifier: "recorder.destination.settings"
-            )
-        )
-        .accessibilityIdentifier("recorder.destination.settings")
-    }
-
-    private var permissionRow: some View {
-        PermissionStatusView(
-            systemPermission: model.systemAudioPermission,
-            microphonePermission: model.microphonePermission,
-            requestSystem: model.requestSystemAudioPermission,
-            requestMicrophone: model.requestMicrophonePermission,
-            openSystemSettings: model.openScreenCaptureSettings,
-            openMicrophoneSettings: model.openMicrophoneSettings
-        )
-        .padding(14)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var deviceSection: some View {
-        CaptureControlsView(model: model)
-            .accessibilityIdentifier("recorder.settings.capture-section")
-            .background(
-                RecorderDestinationAccessibilityMarker(
-                    identifier: "recorder.settings.capture-section"
-                )
-            )
+        RecorderSettingsView(model: model)
     }
 }
 
@@ -292,7 +256,12 @@ private struct CaptureControlsView: View {
                 }
                 .labelsHidden().frame(minWidth: 380)
                 .disabled(!model.sourceControlsEnabled)
-                Text(model.selectedMicDevice?.channelText ?? "Unavailable").foregroundStyle(.secondary)
+                Text(
+                    model.selectedMicDevice.map {
+                        "\($0.channelCount) channel\($0.channelCount == 1 ? "" : "s")"
+                    } ?? "Unavailable"
+                )
+                .foregroundStyle(.secondary)
             }
 
             GridRow {

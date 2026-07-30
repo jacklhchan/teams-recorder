@@ -5,6 +5,16 @@ import XCTest
 
 @MainActor
 final class RecorderWorkspaceRenderTests: XCTestCase {
+    func testSettingsAccessibilityMarkerReadsInheritedEnabledEnvironment() throws {
+        let enabledHost = try MarkerHarnessHost(isEnabled: true)
+        defer { enabledHost.close() }
+        XCTAssertTrue(try enabledHost.isEnabled("recorder.test.settings-marker"))
+
+        let disabledHost = try MarkerHarnessHost(isEnabled: false)
+        defer { disabledHost.close() }
+        XCTAssertFalse(try disabledHost.isEnabled("recorder.test.settings-marker"))
+    }
+
     func testNavigationShellStartsOnRecordAndCanRenderBaselineDestinations() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
@@ -140,6 +150,44 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         }
     }
 
+    func testSettingsRendersExistingCaptureTeamsVirtualMicAndProviderSections() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.settings)
+
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.settings"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.capture-section"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("capture-mode-picker"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("teams-auto-recording-toggle"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.audio-integration-section"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.transcription-section"))
+    }
+
+    func testSourceControlGatesRemainDisabledDuringLifecycleWork() throws {
+        let fixture = makeLifecycleWorkingFixture()
+        defer { fixture.source.resumeRefresh() }
+        fixture.model.refreshCaptureApplications()
+        try waitUntil(timeout: 1) { fixture.source.refreshStarted }
+        XCTAssertTrue(fixture.model.isCaptureLifecycleWorking)
+
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.settings)
+
+        XCTAssertFalse(try host.isEnabled("capture-mode-picker"))
+        XCTAssertFalse(try host.isEnabled("recorder.settings.capture-application-picker"))
+        XCTAssertFalse(try host.isEnabled("recorder.settings.capture-refresh"))
+        XCTAssertFalse(try host.isEnabled("recorder.settings.microphone-picker"))
+    }
+
     private func assertVisibleSettingsRecoveryDeepLink(
         for fixture: StartupDisabledFixture
     ) throws {
@@ -215,6 +263,39 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         return .init(model: fixture.model, defaults: fixture.defaults, session: session)
     }
 
+    private func makeLifecycleWorkingFixture() -> LifecycleWorkingFixture {
+        let suiteName = "RecorderWorkspaceRenderTests.lifecycle.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let source = PausedRefreshCaptureSource()
+        let recorder = RecordingEngine(captureSource: source)
+        let model = AppModel(
+            defaults: defaults,
+            recorder: recorder,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false
+        )
+        model.systemAudioPermission = .granted
+        model.microphonePermission = .granted
+        model.captureSelection = .init(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: "com.example.capture"
+        )
+        return .init(model: model, defaults: defaults, source: source)
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval,
+        condition: @escaping () -> Bool
+    ) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertTrue(condition(), "Timed out waiting for expected lifecycle state")
+    }
+
     private func makeWorkspaceHost(model: AppModel, size: CGSize) throws -> WorkspaceHost {
         try WorkspaceHost(model: model, size: size)
     }
@@ -231,6 +312,13 @@ private struct SessionFixture {
     let model: AppModel
     let defaults: UserDefaults
     let session: RecordingSession
+}
+
+@MainActor
+private struct LifecycleWorkingFixture {
+    let model: AppModel
+    let defaults: UserDefaults
+    let source: PausedRefreshCaptureSource
 }
 
 @MainActor
@@ -251,6 +339,66 @@ private struct WorkspaceHostRoot: View {
                 set: { navigationDriver.navigation = $0 }
             )
         )
+    }
+}
+
+@MainActor
+private struct MarkerHarnessRoot: View {
+    let isEnabled: Bool
+
+    var body: some View {
+        Color.clear
+            .frame(width: 20, height: 20)
+            .background(
+                RecorderSettingsAccessibilityMarker(
+                    identifier: "recorder.test.settings-marker"
+                )
+            )
+            .disabled(!isEnabled)
+    }
+}
+
+@MainActor
+private final class MarkerHarnessHost {
+    private let hostingView: NSHostingView<MarkerHarnessRoot>
+    private let window: NSWindow
+
+    init(isEnabled: Bool) throws {
+        hostingView = NSHostingView(rootView: MarkerHarnessRoot(isEnabled: isEnabled))
+        let frame = NSRect(x: 0, y: 0, width: 100, height: 100)
+        hostingView.frame = frame
+        window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    func isEnabled(_ identifier: String) throws -> Bool {
+        guard let marker = findMarker(in: hostingView, identifier: identifier) else {
+            throw WorkspaceHostError.missingAccessibilityElement(identifier)
+        }
+        return marker.isAccessibilityEnabled()
+    }
+
+    func close() {
+        window.orderOut(nil)
+        window.contentView = nil
+    }
+
+    private func findMarker(in view: NSView, identifier: String) -> NSView? {
+        if view.accessibilityIdentifier() == identifier { return view }
+        for subview in view.subviews {
+            if let marker = findMarker(in: subview, identifier: identifier) {
+                return marker
+            }
+        }
+        return nil
     }
 }
 
@@ -293,6 +441,21 @@ private final class WorkspaceHost {
 
     func containsAccessibilityLabel(_ label: String) -> Bool {
         view(withAccessibilityLabel: label) != nil
+    }
+
+    func isEnabled(_ identifier: String) throws -> Bool {
+        if let view = view(forAccessibilityIdentifier: identifier) {
+            return view.isAccessibilityEnabled()
+        }
+        guard let element = accessibilityElement(forAccessibilityIdentifier: identifier) else {
+            throw WorkspaceHostError.missingAccessibilityElement(identifier)
+        }
+        guard let object = element as? NSObject,
+              object.responds(to: NSSelectorFromString("accessibilityEnabled")),
+              let isEnabled = object.value(forKey: "accessibilityEnabled") as? Bool else {
+            throw WorkspaceHostError.missingAccessibilityElement(identifier)
+        }
+        return isEnabled
     }
 
     var navigationState: RecorderNavigationState {
@@ -384,8 +547,7 @@ private final class WorkspaceHost {
                    element.accessibilityIdentifier?() == identifier {
                     return element
                 }
-                if let view = child as? NSView,
-                   let found = find(in: view.accessibilityChildren() ?? []) {
+                if let found = find(in: accessibilityChildren(of: child)) {
                     return found
                 }
             }
@@ -395,6 +557,19 @@ private final class WorkspaceHost {
             return hostingView
         }
         return find(in: hostingView.accessibilityChildren() ?? [])
+    }
+
+    private func accessibilityChildren(of element: Any) -> [Any] {
+        if let view = element as? NSView {
+            return view.accessibilityChildren() ?? []
+        }
+        if let object = element as? NSObject {
+            guard object.responds(to: NSSelectorFromString("accessibilityChildren")) else {
+                return []
+            }
+            return object.value(forKey: "accessibilityChildren") as? [Any] ?? []
+        }
+        return []
     }
 
     private func view(
@@ -411,4 +586,40 @@ private final class WorkspaceHost {
         return nil
     }
 
+}
+
+private enum WorkspaceHostError: Error {
+    case missingAccessibilityElement(String)
+}
+
+@MainActor
+private final class PausedRefreshCaptureSource: CaptureSourceProtocol {
+    let screenVideoFormat = ScreenVideoFormat(width: 1_600, height: 900, pixelFormat: 0)
+    private(set) var refreshStarted = false
+    private var refreshContinuation: CheckedContinuation<Void, Never>?
+
+    func refreshContent() async throws -> [CaptureApplication] {
+        refreshStarted = true
+        await withCheckedContinuation { refreshContinuation = $0 }
+        return []
+    }
+
+    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] { [] }
+    func reconnect(selection _: ResolvedCaptureSelection) async throws {}
+    func updateVideoTarget(_: TeamsWindowIdentity?) async throws -> CaptureFilterRevision {
+        .init(sessionGeneration: 0, revision: 0)
+    }
+    func start(
+        selection _: ResolvedCaptureSelection,
+        microphoneUID _: String?,
+        onAudio _: @escaping (AudioFrameBlock) -> Void,
+        onVideo _: @escaping (ScreenVideoFrame) -> Void,
+        onEvent _: @escaping (CaptureEvent) -> Void
+    ) async throws {}
+    func stop() async {}
+
+    func resumeRefresh() {
+        refreshContinuation?.resume()
+        refreshContinuation = nil
+    }
 }

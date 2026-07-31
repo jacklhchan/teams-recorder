@@ -12,6 +12,19 @@ enum RecorderActionID {
     static let openTranscript = "recorder.action.open-transcript"
     static let saveTranscript = "recorder.action.save-transcript"
     static let captureRecovery = "recorder.action.capture-recovery"
+    static let providerKind = "recorder.provider.kind"
+    static let providerHKTGroupID = "recorder.provider.hkt-group-id"
+    static let providerHKTResolvedURL = "recorder.provider.hkt-resolved-url"
+    static let providerBaseURL = "recorder.provider.base-url"
+    static let providerAPIKey = "recorder.provider.api-key"
+    static let providerASRModel = "recorder.provider.asr-model"
+    static let providerLLMModel = "recorder.provider.llm-model"
+    static let providerLanguage = "recorder.provider.language"
+    static let providerPrompt = "recorder.provider.prompt"
+    static let providerSave = "recorder.provider.save"
+    static let providerTest = "recorder.provider.test"
+    static let providerRemoveKey = "recorder.provider.remove-key"
+    static let providerStatus = "recorder.provider.status"
 
     static let all = [
         startStop,
@@ -26,6 +39,19 @@ enum RecorderActionID {
         filterFavorites,
         openTranscript,
         saveTranscript,
-        captureRecovery
+        captureRecovery,
+        providerKind,
+        providerHKTGroupID,
+        providerHKTResolvedURL,
+        providerBaseURL,
+        providerAPIKey,
+        providerASRModel,
+        providerLLMModel,
+        providerLanguage,
+        providerPrompt,
+        providerSave,
+        providerTest,
+        providerRemoveKey,
+        providerStatus
     ]
 }

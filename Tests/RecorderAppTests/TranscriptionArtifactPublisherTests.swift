@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -10,8 +11,9 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
             maximumBackupsPerArtifact: 3
         )
 
+        var artifacts: PublishedTranscriptionArtifacts?
         for index in 0..<5 {
-            _ = try publisher.publish(
+            artifacts = try publisher.publish(
                 rawText: "raw-\(index)",
                 finalText: "final-\(index)",
                 manifest: .init(
@@ -63,6 +65,16 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
         )
         XCTAssertFalse(manifest.contains("apiKey"))
         XCTAssertFalse(manifest.contains("baseURL"))
+        let bytes = Data("final-4".utf8)
+        XCTAssertEqual(
+            artifacts?.committedTranscriptRevision,
+            .init(
+                sha256: "sha256:" + SHA256.hash(data: bytes)
+                    .map { String(format: "%02x", $0) }
+                    .joined(),
+                byteCount: bytes.count
+            )
+        )
     }
 
     func testExpiredLegacyRunsAreRemovedButRecentRunRemains() throws {

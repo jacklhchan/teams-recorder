@@ -47,6 +47,7 @@ struct TranscriptionServiceResult: Equatable, Sendable {
     let rawTranscriptURL: URL?
     let manifestURL: URL?
     let logURL: URL?
+    let committedTranscriptRevision: TranscriptDocumentRevision
 }
 
 protocol TranscriptionServicing: Sendable {
@@ -235,7 +236,8 @@ struct NativeOpenAICompatibleTranscriptionService:
             transcriptURL: artifacts.transcriptURL,
             rawTranscriptURL: artifacts.rawTranscriptURL,
             manifestURL: artifacts.manifestURL,
-            logURL: artifacts.logURL
+            logURL: artifacts.logURL,
+            committedTranscriptRevision: artifacts.committedTranscriptRevision
         )
     }
 

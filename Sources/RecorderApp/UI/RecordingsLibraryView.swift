@@ -17,6 +17,7 @@ struct RecordingsLibraryView: View {
 
         SessionListView(
             sessions: visibleSessions,
+            allSessions: model.sessions,
             query: query,
             transcribingSessionID: model.transcribingSessionID,
             transcriptionStatus: model.transcriptionStatus,
@@ -35,6 +36,13 @@ struct RecordingsLibraryView: View {
             saveTranscript: model.saveTranscript,
             exportTranscript: model.exportTranscript,
             copyTranscript: model.copyTranscript,
+            meetingIntelligencePresentation: model.meetingIntelligencePresentation,
+            checkMeetingIntelligenceAvailability: model.checkMeetingIntelligenceAvailability,
+            generateMeetingIntelligence: model.generateMeetingIntelligence,
+            regenerateMeetingIntelligence: model.regenerateMeetingIntelligence,
+            retryMeetingIntelligenceGeneration: model.retryMeetingIntelligenceGeneration,
+            cancelMeetingIntelligence: model.cancelMeetingIntelligence,
+            applyMeetingIntelligenceSuggestedTitle: model.applyMeetingIntelligenceSuggestedTitle,
             saveMetadata: model.saveMetadata,
             moveToTrash: model.moveSessionToTrash
         )
@@ -84,6 +92,7 @@ struct RecordingsLibraryView: View {
 
 private struct SessionListView: View {
     let sessions: [RecordingSession]
+    let allSessions: [RecordingSession]
     let query: RecordingLibraryQuery
     let transcribingSessionID: RecordingSession.ID?
     let transcriptionStatus: String
@@ -102,6 +111,13 @@ private struct SessionListView: View {
     let saveTranscript: (String, RecordingSession) -> Void
     let exportTranscript: (RecordingSession) -> Void
     let copyTranscript: (RecordingSession) -> Void
+    let meetingIntelligencePresentation: (RecordingSession) -> MeetingIntelligencePresentation
+    let checkMeetingIntelligenceAvailability: (RecordingSession) -> Void
+    let generateMeetingIntelligence: (RecordingSession) -> Void
+    let regenerateMeetingIntelligence: (RecordingSession) -> Void
+    let retryMeetingIntelligenceGeneration: (RecordingSession) -> Void
+    let cancelMeetingIntelligence: (RecordingSession) -> Void
+    let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
     let saveMetadata: (String, String, Bool, RecordingSession) -> Void
     let moveToTrash: (RecordingSession) -> Void
 
@@ -241,7 +257,24 @@ private struct SessionListView: View {
             }
         }
         .sheet(item: $transcriptSession) { session in
-            TranscriptEditorView(session: session, load: { transcriptText(session) }, save: { saveTranscript($0, session) }, export: { exportTranscript(session) }, copy: { copyTranscript(session) })
+            TranscriptDetailSheetView(
+                openedSession: session,
+                allSessions: allSessions,
+                load: { transcriptText(session) },
+                save: { saveTranscript($0, session) },
+                openFolder: { open(session) },
+                play: { play(session) },
+                export: { exportTranscript(session) },
+                copy: { copyTranscript(session) },
+                editDetails: { metadataSession = $0 },
+                meetingIntelligencePresentation: meetingIntelligencePresentation,
+                checkMeetingIntelligenceAvailability: checkMeetingIntelligenceAvailability,
+                generateMeetingIntelligence: generateMeetingIntelligence,
+                regenerateMeetingIntelligence: regenerateMeetingIntelligence,
+                retryMeetingIntelligenceGeneration: retryMeetingIntelligenceGeneration,
+                cancelMeetingIntelligence: cancelMeetingIntelligence,
+                applyMeetingIntelligenceSuggestedTitle: applyMeetingIntelligenceSuggestedTitle
+            )
         }
         .sheet(item: $metadataSession) { session in
             RecordingMetadataEditorView(session: session) { title, tags, favorite in
@@ -294,35 +327,319 @@ private struct SessionListView: View {
     }
 }
 
-private struct TranscriptEditorView: View {
-    let session: RecordingSession
+/// Stateless content for the transcript sheet. The sheet item remains the
+/// stable opened session, while every render resolves presentation and command
+/// routing from the latest library projection for that recording ID.
+struct TranscriptDetailSheetView: View {
+    let openedSession: RecordingSession
+    let allSessions: [RecordingSession]
     let load: () -> String
     let save: (String) -> Void
+    let openFolder: () -> Void
+    let play: () -> Void
     let export: () -> Void
     let copy: () -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var text = ""
+    let editDetails: (RecordingSession) -> Void
+    let meetingIntelligencePresentation: (RecordingSession) -> MeetingIntelligencePresentation
+    let checkMeetingIntelligenceAvailability: (RecordingSession) -> Void
+    let generateMeetingIntelligence: (RecordingSession) -> Void
+    let regenerateMeetingIntelligence: (RecordingSession) -> Void
+    let retryMeetingIntelligenceGeneration: (RecordingSession) -> Void
+    let cancelMeetingIntelligence: (RecordingSession) -> Void
+    let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text(session.displayName).font(.headline)
-                Spacer()
-                Button { copy() } label: { Image(systemName: "doc.on.doc") }.help("Copy transcript")
-                Button { export() } label: { Image(systemName: "square.and.arrow.up") }.help("Export transcript")
+        let currentSession = TranscriptDetailActionProjection.current(
+            opened: openedSession,
+            allSessions: allSessions
+        )
+        let actions = TranscriptDetailActionProjection.meetingIntelligenceActions(
+            for: currentSession,
+            checkAgain: checkMeetingIntelligenceAvailability,
+            generate: generateMeetingIntelligence,
+            regenerate: regenerateMeetingIntelligence,
+            retryGeneration: retryMeetingIntelligenceGeneration,
+            cancel: cancelMeetingIntelligence,
+            applySuggestedTitle: applyMeetingIntelligenceSuggestedTitle
+        )
+
+        return TranscriptEditorView(
+            session: openedSession,
+            resolvedSession: currentSession,
+            load: load,
+            save: save,
+            openFolder: openFolder,
+            play: play,
+            export: export,
+            copy: copy,
+            editDetails: editDetails,
+            meetingIntelligencePresentation: meetingIntelligencePresentation,
+            meetingIntelligenceActions: { _ in actions }
+        )
+    }
+}
+
+enum TranscriptEditorDraft {
+    /// The sheet owns its in-progress text. A model publication may rerender
+    /// the surrounding view but must not replace that text while still open.
+    static func loadedText(existing: String, hasLoaded: Bool, load: () -> String) -> String {
+        hasLoaded ? existing : load()
+    }
+}
+
+enum TranscriptDetailActionProjection {
+    static func current(
+        opened: RecordingSession,
+        allSessions: [RecordingSession]
+    ) -> RecordingSession {
+        current(
+            opened: opened,
+            resolved: allSessions.first(where: { $0.id == opened.id })
+        )
+    }
+
+    static func current(
+        opened: RecordingSession,
+        resolved: RecordingSession?
+    ) -> RecordingSession {
+        resolved ?? opened
+    }
+
+    static func meetingIntelligenceActions(
+        for session: RecordingSession,
+        checkAgain: @escaping (RecordingSession) -> Void,
+        generate: @escaping (RecordingSession) -> Void,
+        regenerate: @escaping (RecordingSession) -> Void,
+        retryGeneration: @escaping (RecordingSession) -> Void,
+        cancel: @escaping (RecordingSession) -> Void,
+        applySuggestedTitle: @escaping (RecordingSession) -> Void
+    ) -> MeetingIntelligenceActions {
+        .init(
+            generate: { generate(session) },
+            regenerate: { regenerate(session) },
+            checkAgain: { checkAgain(session) },
+            retryGeneration: { retryGeneration(session) },
+            cancel: { cancel(session) },
+            applySuggestedTitle: { applySuggestedTitle(session) }
+        )
+    }
+}
+
+struct TranscriptEditorView: View {
+    let session: RecordingSession
+    /// The list projection may be refreshed while this sheet is open (for
+    /// example after applying a generated title). Keep the stable session ID
+    /// and the editor draft, but render the current metadata projection.
+    let resolvedSession: RecordingSession?
+    let load: () -> String
+    let save: (String) -> Void
+    let openFolder: () -> Void
+    /// Requests playback through the existing external presenter. This sheet
+    /// never owns the playback view or player lifetime.
+    let play: () -> Void
+    let export: () -> Void
+    let copy: () -> Void
+    let editDetails: (RecordingSession) -> Void
+    private let meetingIntelligencePresentationForSession: (RecordingSession) -> MeetingIntelligencePresentation
+    private let meetingIntelligenceActionsForSession: (RecordingSession) -> MeetingIntelligenceActions
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var hasLoadedDraft = false
+
+    init(
+        session: RecordingSession,
+        resolvedSession: RecordingSession? = nil,
+        load: @escaping () -> String,
+        save: @escaping (String) -> Void,
+        openFolder: @escaping () -> Void = {},
+        play: @escaping () -> Void = {},
+        export: @escaping () -> Void,
+        copy: @escaping () -> Void,
+        editDetails: @escaping (RecordingSession) -> Void = { _ in },
+        meetingIntelligencePresentation: MeetingIntelligencePresentation = .empty,
+        meetingIntelligenceActions: MeetingIntelligenceActions = .init()
+    ) {
+        self.session = session
+        self.resolvedSession = resolvedSession
+        self.load = load
+        self.save = save
+        self.openFolder = openFolder
+        self.play = play
+        self.export = export
+        self.copy = copy
+        self.editDetails = editDetails
+        meetingIntelligencePresentationForSession = { _ in meetingIntelligencePresentation }
+        meetingIntelligenceActionsForSession = { _ in meetingIntelligenceActions }
+    }
+
+    init(
+        session: RecordingSession,
+        resolvedSession: RecordingSession? = nil,
+        load: @escaping () -> String,
+        save: @escaping (String) -> Void,
+        openFolder: @escaping () -> Void = {},
+        play: @escaping () -> Void = {},
+        export: @escaping () -> Void,
+        copy: @escaping () -> Void,
+        editDetails: @escaping (RecordingSession) -> Void = { _ in },
+        meetingIntelligencePresentation: @escaping (RecordingSession) -> MeetingIntelligencePresentation,
+        meetingIntelligenceActions: @escaping (RecordingSession) -> MeetingIntelligenceActions
+    ) {
+        self.session = session
+        self.resolvedSession = resolvedSession
+        self.load = load
+        self.save = save
+        self.openFolder = openFolder
+        self.play = play
+        self.export = export
+        self.copy = copy
+        self.editDetails = editDetails
+        meetingIntelligencePresentationForSession = meetingIntelligencePresentation
+        meetingIntelligenceActionsForSession = meetingIntelligenceActions
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    playbackControls
+                    MeetingIntelligenceSectionView(
+                        presentation: meetingIntelligencePresentationForSession(displayedSession),
+                        actions: meetingIntelligenceActionsForSession(displayedSession)
+                    )
+                    transcriptEditor
+                    details
+                }
+                .padding(20)
             }
-            TextEditor(text: $text).font(.body).frame(minHeight: 360)
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Save") { save(text); dismiss() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier(RecorderActionID.saveTranscript)
-            }
+            Divider()
+            footer
         }
-        .padding(20)
-        .frame(minWidth: 660, minHeight: 480)
-        .onAppear { text = load() }
+        .frame(
+            minWidth: 860,
+            idealWidth: 1_000,
+            maxWidth: .infinity,
+            minHeight: 680,
+            idealHeight: 720,
+            maxHeight: .infinity
+        )
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: "recorder.transcript.detail.root"
+            )
+        )
+        .onAppear {
+            text = TranscriptEditorDraft.loadedText(
+                existing: text,
+                hasLoaded: hasLoadedDraft,
+                load: load
+            )
+            hasLoadedDraft = true
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Button(action: dismiss.callAsFunction) {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            .help("Back")
+            Text(displayedSession.displayName)
+                .font(.headline)
+                .lineLimit(1)
+                .accessibilityIdentifier(RecorderActionID.transcriptDetailTitle)
+                .accessibilityLabel(displayedSession.displayName)
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: RecorderActionID.transcriptDetailTitle,
+                        label: displayedSession.displayName
+                    )
+                )
+            Spacer()
+            Button { editDetails(displayedSession) } label: {
+                Image(systemName: displayedSession.isFavorite ? "star.fill" : "star")
+            }
+            .buttonStyle(.borderless)
+            .help("Edit recording details")
+            .accessibilityIdentifier(RecorderActionID.transcriptDetailFavorite)
+            .accessibilityValue(displayedSession.isFavorite ? "favorite" : "not-favorite")
+            .background(
+                RecorderDestinationAccessibilityMarker(
+                    identifier: RecorderActionID.transcriptDetailFavorite,
+                    label: displayedSession.isFavorite ? "favorite" : "not-favorite"
+                )
+            )
+            Button { editDetails(displayedSession) } label: { Image(systemName: "pencil") }
+                .buttonStyle(.borderless)
+                .help("Edit recording details")
+            Button("Open Folder", action: openFolder).buttonStyle(.bordered)
+            Button(action: copy) { Image(systemName: "doc.on.doc") }
+                .buttonStyle(.bordered)
+                .help("Copy transcript")
+            Button(action: export) { Image(systemName: "square.and.arrow.up") }
+                .buttonStyle(.bordered)
+                .help("Export transcript")
+        }
+        .padding(.horizontal, 20)
+        .frame(height: 52)
+    }
+
+    private var playbackControls: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "waveform")
+                .foregroundStyle(.tint)
+            Text("Recording playback")
+                .font(.callout.weight(.medium))
+            Spacer()
+            Button("Play in separate window", action: play)
+                .buttonStyle(.bordered)
+        }
+        .padding(12)
+        .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var transcriptEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Transcript").font(.headline)
+            TextEditor(text: $text)
+                .font(.body)
+                .frame(minHeight: 260)
+                .accessibilityIdentifier("recorder.transcript.editor")
+        }
+    }
+
+    private var details: some View {
+        HStack {
+            Label(displayedSession.durationText, systemImage: "clock")
+            Spacer()
+            Label(displayedSession.fileSizeText, systemImage: "internaldrive")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.vertical, 4)
+    }
+
+    private var displayedSession: RecordingSession {
+        TranscriptDetailActionProjection.current(
+            opened: session,
+            resolved: resolvedSession
+        )
+    }
+
+    private var footer: some View {
+        HStack {
+            Spacer()
+            Button("Cancel") { dismiss() }
+            Button("Save") { save(text); dismiss() }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier(RecorderActionID.saveTranscript)
+                .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.saveTranscript))
+        }
+        .padding(.horizontal, 20)
+        .frame(height: 60)
     }
 }
 

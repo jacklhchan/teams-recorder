@@ -89,6 +89,7 @@ enum LegacyProcessTranscriptionServiceError:
     case completedWithoutTranscript
     case invalidArtifactPath
     case processFailed(Int32)
+    case unsupportedProviderPreset
 
     var errorDescription: String? {
         switch self {
@@ -99,6 +100,8 @@ enum LegacyProcessTranscriptionServiceError:
         case .processFailed(let status):
             "Transcription failed with exit code \(status). "
                 + "Open the ASR log for details."
+        case .unsupportedProviderPreset:
+            "The selected provider preset is not supported by legacy transcription."
         }
     }
 }
@@ -109,15 +112,19 @@ final class LegacyProcessTranscriptionService:
 {
     private let launcher: any TranscriptionProcessLaunching
     private let scriptURL: URL
+    private let transcriptReader: any TranscriptDocumentReading
     private let lock = NSLock()
     private var activeProcess: (any TranscriptionProcessing)?
 
     init(
         launcher: any TranscriptionProcessLaunching,
-        scriptURL: URL
+        scriptURL: URL,
+        transcriptReader: any TranscriptDocumentReading =
+            SecureTranscriptDocumentReader()
     ) {
         self.launcher = launcher
         self.scriptURL = scriptURL
+        self.transcriptReader = transcriptReader
     }
 
     func transcribe(
@@ -126,6 +133,9 @@ final class LegacyProcessTranscriptionService:
             TranscriptionServiceProgress
         ) -> Void
     ) async throws -> TranscriptionServiceResult {
+        guard request.snapshot.providerKind == .openAICompatible else {
+            throw LegacyProcessTranscriptionServiceError.unsupportedProviderPreset
+        }
         let configurationInput = try JSONEncoder().encode(
             OpenAICompatibleTranscriptionLaunchPayload(
                 snapshot: request.snapshot
@@ -207,6 +217,13 @@ final class LegacyProcessTranscriptionService:
                     )
                 )
             }
+            let committed = try transcriptReader.readCanonical(
+                in: request.sessionFolder,
+                allowLegacy: true
+            )
+            guard committed.url == transcriptURL else {
+                throw LegacyProcessTranscriptionServiceError.invalidArtifactPath
+            }
             return .init(
                 transcriptURL: transcriptURL,
                 rawTranscriptURL: existingCanonical(
@@ -217,7 +234,8 @@ final class LegacyProcessTranscriptionService:
                     named: TranscriptDocumentStore.manifestFileName,
                     in: request.sessionFolder
                 ),
-                logURL: logURL
+                logURL: logURL,
+                committedTranscriptRevision: committed.revision
             )
         }, onCancel: {
             process.terminate()

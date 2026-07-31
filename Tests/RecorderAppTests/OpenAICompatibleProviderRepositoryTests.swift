@@ -13,7 +13,7 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
 
         XCTAssertEqual(
             try repository.snapshot(),
-            OpenAICompatibleProviderSnapshot(
+            try OpenAICompatibleProviderSnapshot.validated(
                 profile: try XCTUnwrap(profileStore.profile),
                 apiKey: "secret-key"
             )
@@ -30,6 +30,52 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
         )
 
         XCTAssertEqual(secure.stored, Data("existing-key".utf8))
+    }
+
+    func testRejectsEmptyWhitespaceAndControlKeysForGenericAndHKTWithoutWrites() throws {
+        let profiles: [OpenAICompatibleProviderProfile] = [
+            try makeProfile(),
+            try .hktValidated(
+                groupID: "42", asrModel: "hkt-asr", llmModel: "hkt-llm",
+                language: "yue", prompt: ""
+            )
+        ]
+        for profile in profiles {
+            for key in ["", " \t ", "bad\nkey", "bad\rkey", "bad\u{7F}key"] {
+                let secure = InMemorySecureValueStore()
+                let store = InMemoryProfileStore()
+                let repository = makeRepository(profileStore: store, secureStore: secure)
+
+                XCTAssertThrowsError(
+                    try repository.save(profile: profile, replacementAPIKey: key)
+                ) { error in
+                    XCTAssertEqual(error as? ProviderRepositoryError, .invalidAPIKeyEncoding)
+                    XCTAssertFalse(error.localizedDescription.contains(key))
+                }
+                XCTAssertNil(store.profile)
+                XCTAssertTrue(secure.operations.isEmpty)
+            }
+        }
+    }
+
+    func testRejectsWhitespaceAndControlKeysWhenLoadingGenericAndHKT() throws {
+        for profile in [
+            try makeProfile(),
+            try .hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: "")
+        ] {
+            for key in [" \n", "bad\rkey", "bad\u{7F}key"] {
+                let secure = KeyedSecureValueStore()
+                secure.seed(key, for: profile.providerKind)
+                let repository = makeRepository(
+                    profileStore: InMemoryProfileStore(profile: profile),
+                    secureStore: secure
+                )
+                XCTAssertThrowsError(try repository.snapshot()) { error in
+                    XCTAssertEqual(error as? ProviderRepositoryError, .invalidAPIKeyEncoding)
+                    XCTAssertFalse(error.localizedDescription.contains(key))
+                }
+            }
+        }
     }
 
     func testExplicitRemoveDeletesKey() throws {
@@ -240,6 +286,124 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
         }
     }
 
+    func testSnapshotsUseSeparateCredentialIdentitiesAndRemainImmutableAfterSwitch() throws {
+        let store = OpenAICompatibleProviderProfileStore(defaults: makeDefaults())
+        let secure = KeyedSecureValueStore()
+        let repository = OpenAICompatibleProviderRepository(profiles: store, secureStore: secure)
+        let generic = try makeProfile()
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(groupID: "42", asrModel: "hkt-asr", llmModel: "hkt-llm", language: "en", prompt: "")
+
+        try repository.save(profile: generic, replacementAPIKey: "generic-key")
+        let captured = try repository.snapshot()
+        try repository.save(profile: hkt, replacementAPIKey: "hkt-key")
+
+        XCTAssertEqual(captured.providerKind, .openAICompatible)
+        XCTAssertEqual(captured.authentication, .bearer)
+        XCTAssertEqual(captured.apiKey, "generic-key")
+        XCTAssertEqual(captured.profile.baseURL.absoluteString, generic.baseURL.absoluteString)
+        XCTAssertEqual(captured.profile.asrModel, generic.asrModel)
+        XCTAssertEqual(captured.profile.llmModel, generic.llmModel)
+        XCTAssertEqual(try repository.snapshot().authentication, .hktAPIKey)
+        XCTAssertEqual(secure.value(for: .openAICompatible), Data("generic-key".utf8))
+        XCTAssertEqual(secure.value(for: .hktGenAI), Data("hkt-key".utf8))
+    }
+
+    func testInvalidTamperedProfileIsRejectedBeforeKeychainRead() throws {
+        let profile = try JSONDecoder().decode(
+            OpenAICompatibleProviderProfile.self,
+            from: Data(#"{"schemaVersion":1,"providerKind":"hktGenAI","baseURL":"https://evil.example/v1","groupID":"42","asrModel":"asr","llmModel":"llm","language":"yue","prompt":""}"#.utf8)
+        )
+        let secure = KeyedSecureValueStore()
+        let repository = makeRepository(profileStore: InMemoryProfileStore(profile: profile), secureStore: secure)
+        XCTAssertThrowsError(try repository.snapshot()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidProviderConfiguration)
+        }
+        XCTAssertTrue(secure.operations.isEmpty)
+    }
+
+    func testTamperedUnsupportedLanguageIsRejectedBeforeSnapshotKeychainRead() throws {
+        let profile = try JSONDecoder().decode(
+            OpenAICompatibleProviderProfile.self,
+            from: Data(#"{"schemaVersion":1,"providerKind":"hktGenAI","baseURL":"https://api.uat.bot-builder.pccw.com/v1/groups/42/openai","groupID":"42","asrModel":"asr","llmModel":"llm","language":"English","prompt":""}"#.utf8)
+        )
+        let secure = KeyedSecureValueStore()
+        let repository = makeRepository(profileStore: InMemoryProfileStore(profile: profile), secureStore: secure)
+
+        XCTAssertThrowsError(try repository.snapshot()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidLanguage)
+        }
+        XCTAssertTrue(secure.operations.isEmpty)
+    }
+
+    func testRemovingActiveHKTKeyDoesNotDeleteGenericKey() throws {
+        let store = OpenAICompatibleProviderProfileStore(defaults: makeDefaults())
+        let secure = KeyedSecureValueStore()
+        let repository = OpenAICompatibleProviderRepository(profiles: store, secureStore: secure)
+        try repository.save(profile: makeProfile(), replacementAPIKey: "generic-key")
+        try repository.save(profile: .hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: ""), replacementAPIKey: "hkt-key")
+
+        try repository.removeAPIKey()
+
+        XCTAssertEqual(secure.value(for: .openAICompatible), Data("generic-key".utf8))
+        XCTAssertNil(secure.value(for: .hktGenAI))
+        XCTAssertEqual(secure.operations.last, .delete(service: OpenAICompatibleProviderCredential.hktService, account: OpenAICompatibleProviderCredential.hktAccount))
+    }
+
+    func testSnapshotDerivesHKTAuthenticationFromProfileWithoutOverrides() throws {
+        let profile = try OpenAICompatibleProviderProfile.hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: "")
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(profile: profile, apiKey: "hkt-key")
+        XCTAssertEqual(snapshot.providerKind, .hktGenAI)
+        XCTAssertEqual(snapshot.authentication, .hktAPIKey)
+    }
+
+    func testSnapshotDerivesGenericAuthenticationFromProfileWithoutOverrides() throws {
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(profile: try makeProfile(), apiKey: "generic-key")
+        XCTAssertEqual(snapshot.providerKind, .openAICompatible)
+        XCTAssertEqual(snapshot.authentication, .bearer)
+    }
+
+    func testReplacementHKTKeyIsDeletedWhenProfileSaveFailsWithoutPriorHKTKey() throws {
+        let secure = KeyedSecureValueStore()
+        secure.seed("generic-key", for: .openAICompatible)
+        let repository = OpenAICompatibleProviderRepository(profiles: InMemoryProfileStore(saveError: TestError.failed), secureStore: secure)
+        XCTAssertThrowsError(try repository.save(profile: .hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: ""), replacementAPIKey: "replacement"))
+        XCTAssertNil(secure.value(for: .hktGenAI))
+        XCTAssertEqual(secure.value(for: .openAICompatible), Data("generic-key".utf8))
+    }
+
+    func testReplacementHKTKeyRestoresPriorHKTKeyWhenProfileSaveFails() throws {
+        let secure = KeyedSecureValueStore()
+        secure.seed("old-hkt-key", for: .hktGenAI)
+        secure.seed("generic-key", for: .openAICompatible)
+        let repository = OpenAICompatibleProviderRepository(profiles: InMemoryProfileStore(saveError: TestError.failed), secureStore: secure)
+        XCTAssertThrowsError(try repository.save(profile: .hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: ""), replacementAPIKey: "replacement"))
+        XCTAssertEqual(secure.value(for: .hktGenAI), Data("old-hkt-key".utf8))
+        XCTAssertEqual(secure.value(for: .openAICompatible), Data("generic-key".utf8))
+    }
+
+    func testRemoveUsesActiveHKTKindEvenWhenItHasNoProfile() throws {
+        let store = OpenAICompatibleProviderProfileStore(defaults: makeDefaults())
+        try store.save(makeProfile())
+        try store.setActiveProviderKind(.hktGenAI)
+        let secure = KeyedSecureValueStore()
+        secure.seed("generic-key", for: .openAICompatible)
+        let repository = OpenAICompatibleProviderRepository(profiles: store, secureStore: secure)
+
+        try repository.removeAPIKey()
+
+        XCTAssertEqual(secure.value(for: .openAICompatible), Data("generic-key".utf8))
+        XCTAssertNil(secure.value(for: .hktGenAI))
+    }
+
+    func testCredentialRollbackFailureIsTypedAndRedacted() throws {
+        let secure = KeyedSecureValueStore(failDeletes: true)
+        let repository = OpenAICompatibleProviderRepository(profiles: InMemoryProfileStore(saveError: TestError.failed), secureStore: secure)
+        XCTAssertThrowsError(try repository.save(profile: .hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: ""), replacementAPIKey: "replacement")) {
+            XCTAssertEqual($0 as? ProviderRepositoryError, .credentialRollbackFailed)
+            XCTAssertEqual(($0 as? LocalizedError)?.errorDescription, "Provider credential update could not be rolled back.")
+        }
+    }
+
     private var temporaryDirectoryURL: URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -267,12 +431,20 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
 
     private func makeRepository(
         profileStore: InMemoryProfileStore = .init(),
-        secureStore: InMemorySecureValueStore = .init()
+        secureStore: any SecureValueStoring = InMemorySecureValueStore()
     ) -> OpenAICompatibleProviderRepository {
         OpenAICompatibleProviderRepository(
             profiles: profileStore,
             secureStore: secureStore
         )
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suite = "OpenAICompatibleProviderRepositoryTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        return defaults
     }
 
     private func makeProfile() throws -> OpenAICompatibleProviderProfile {
@@ -350,4 +522,32 @@ private final class InMemorySecureValueStore: SecureValueStoring, @unchecked Sen
 private enum TestError: Error {
     case failed
     case secretBearingFailure
+}
+
+private final class KeyedSecureValueStore: SecureValueStoring, @unchecked Sendable {
+    private var values: [String: Data] = [:]
+    private(set) var operations: [InMemorySecureValueStore.Operation] = []
+    private let failDeletes: Bool
+    init(failDeletes: Bool = false) { self.failDeletes = failDeletes }
+    func load(service: String, account: String) throws -> Data? {
+        operations.append(.load(service: service, account: account))
+        return values[service + "|" + account]
+    }
+    func save(_ data: Data, service: String, account: String) throws {
+        operations.append(.save(service: service, account: account))
+        values[service + "|" + account] = data
+    }
+    func delete(service: String, account: String) throws {
+        operations.append(.delete(service: service, account: account))
+        if failDeletes { throw TestError.failed }
+        values.removeValue(forKey: service + "|" + account)
+    }
+    func value(for kind: AIProviderKind) -> Data? {
+        let identity = OpenAICompatibleProviderCredential.identity(for: kind)
+        return values[identity.service + "|" + identity.account]
+    }
+    func seed(_ value: String, for kind: AIProviderKind) {
+        let identity = OpenAICompatibleProviderCredential.identity(for: kind)
+        values[identity.service + "|" + identity.account] = Data(value.utf8)
+    }
 }

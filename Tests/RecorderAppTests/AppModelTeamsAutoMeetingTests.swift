@@ -383,7 +383,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
     }
 
     func testAutomaticRecordingPersistsTeamsAutomaticSourceMetadata() async throws {
-        let fixture = makeRecordingFixture()
         let outputFolder = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(
@@ -391,7 +390,9 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             withIntermediateDirectories: true
         )
         defer { try? FileManager.default.removeItem(at: outputFolder) }
-        fixture.model.outputFolder = outputFolder
+        let fixture = makeRecordingFixture(
+            initialOutputFolder: outputFolder
+        )
 
         await startAutomaticRecording(fixture)
         fixture.model.startOrStop()
@@ -724,6 +725,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         await waitUntil {
             !fixture.engine.isRecording
                 && !fixture.model.isCaptureLifecycleWorking
+                && fixture.writer.closeCount == 1
         }
 
         XCTAssertNil(fixture.model.recordingOwnership)
@@ -1140,6 +1142,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
     }
 
     private func makeRecordingFixture(
+        initialOutputFolder: URL? = nil,
         storageProvider: AutoMeetingStorageProvider = .normal,
         storageMonitorTick: @escaping @Sendable () async -> Void = {
             try? await Task.sleep(for: .seconds(3_600))
@@ -1148,6 +1151,23 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             try? await Task.sleep(for: .seconds(3_600))
         }
     ) -> AutoMeetingRecordingFixture {
+        let fixtureOutputFolder: URL
+        if let initialOutputFolder {
+            fixtureOutputFolder = initialOutputFolder
+        } else {
+            fixtureOutputFolder = FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "AppModelTeamsAutoMeetingTests-\(UUID().uuidString)",
+                    isDirectory: true
+                )
+            try! FileManager.default.createDirectory(
+                at: fixtureOutputFolder,
+                withIntermediateDirectories: true
+            )
+            addTeardownBlock {
+                try? FileManager.default.removeItem(at: fixtureOutputFolder)
+            }
+        }
         let source = AutoMeetingRecordingCaptureSource()
         let writer = AutoMeetingRecordingWriter()
         let engine = RecordingEngine(
@@ -1180,6 +1200,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
+            initialOutputFolder: fixtureOutputFolder,
             teamsMuteSyncClient: client,
             permissionRequestHandler: { _, _ in
                 permissionRequestCount.value += 1

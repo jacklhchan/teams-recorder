@@ -212,6 +212,40 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertFalse(host.containsAccessibilityLabel("Edit details for \(originalName)"))
     }
 
+    func testTranscriptDetailActionProjectionUsesResolvedSessionForOpenDetail() {
+        let folder = URL(fileURLWithPath: "/tmp/transcript-detail-action-\(UUID().uuidString)")
+        let opened = RecordingSession(
+            id: folder,
+            folderURL: folder,
+            recordingURL: folder.appendingPathComponent("recording.m4a"),
+            createdAt: .now,
+            duration: 12,
+            fileSize: 0,
+            metadata: .init(title: "Original recording title", isFavorite: false)
+        )
+        let resolved = RecordingSession(
+            id: opened.id,
+            folderURL: opened.folderURL,
+            recordingURL: opened.recordingURL,
+            createdAt: opened.createdAt,
+            duration: opened.duration,
+            fileSize: opened.fileSize,
+            metadata: .init(title: "Generated meeting title", isFavorite: true)
+        )
+        let visibleSessions: [RecordingSession] = []
+        let allSessions = [resolved]
+        XCTAssertTrue(visibleSessions.isEmpty)
+
+        let current = TranscriptDetailActionProjection.current(
+            opened: opened,
+            allSessions: allSessions
+        )
+
+        XCTAssertEqual(current.id, opened.id)
+        XCTAssertEqual(current.displayName, "Generated meeting title")
+        XCTAssertTrue(current.isFavorite)
+    }
+
     func testSettingsRendersExistingCaptureTeamsVirtualMicAndProviderSections() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(

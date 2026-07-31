@@ -41,7 +41,7 @@ final class AppModelTranscriptionTests: XCTestCase {
                 baseURLText: "https://api.example.com/v1",
                 asrModel: "asr",
                 llmModel: "llm",
-                language: "",
+                language: "en",
                 prompt: ""
             ),
             apiKeyStatusError: TestError.failed
@@ -281,7 +281,6 @@ final class AppModelTranscriptionTests: XCTestCase {
                 searchLoader.load(session)
             }
         )
-        model.outputFolder = fixture.root
         model.sessions = [fixture.session]
         let staleText = "stale transcript search term"
         let newestText = "newest transcript search term"
@@ -304,6 +303,54 @@ final class AppModelTranscriptionTests: XCTestCase {
             newestDocumentWon,
             "A search rebuild queued before refresh must not overwrite "
                 + "a newer edited transcript."
+        )
+    }
+
+    func testWorkspaceSwitchSuppressesQueuedManualTranscriptSearchRebuild() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let otherWorkspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: otherWorkspace,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: otherWorkspace) }
+        let firstLoadStarted = expectation(
+            description: "manual transcript search rebuild started"
+        )
+        let searchLoader = BlockingSearchDocumentLoader(
+            firstLoadStarted: firstLoadStarted
+        )
+        defer { searchLoader.releaseFirstLoad() }
+        let model = makeModel(
+            fixture: fixture,
+            preparer: ControlledPreparer(
+                .immediate(.failure(TestError.failed))
+            ),
+            launcher: ControlledLauncher(),
+            recordingSearchDocumentLoader: { session in
+                searchLoader.load(session)
+            }
+        )
+        model.sessions = [fixture.session]
+
+        model.saveTranscript(
+            "old workspace searchable transcript",
+            for: fixture.session
+        )
+        await fulfillment(of: [firstLoadStarted], timeout: 1)
+        model.setOutputFolder(otherWorkspace)
+        searchLoader.releaseFirstLoad()
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertFalse(
+            model.sessions.contains(where: { $0.id == fixture.session.id })
+        )
+        XCTAssertTrue(
+            RecordingLibraryQuery(text: "old workspace searchable transcript")
+                .filter(model.sessions)
+                .isEmpty
         )
     }
 
@@ -394,7 +441,7 @@ final class AppModelTranscriptionTests: XCTestCase {
         defer { fixture.remove() }
         let started = expectation(description: "prepare started")
         let first = try makeSnapshot(asrModel: "first-model")
-        let repository = SnapshotProviderRepository(snapshot: first)
+        let repository = try SnapshotProviderRepository(snapshot: first)
         let preparer = ControlledPreparer(.suspended(started: started))
         let launcher = ControlledLauncher()
         let model = makeModel(
@@ -422,7 +469,7 @@ final class AppModelTranscriptionTests: XCTestCase {
     func testMissingProfileFailsBeforeAudioPreparation() throws {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
-        let repository = SnapshotProviderRepository(
+        let repository = try SnapshotProviderRepository(
             profile: try makeProfile(),
             snapshotError: ProviderRepositoryError.missingProfile
         )
@@ -661,8 +708,8 @@ final class AppModelTranscriptionTests: XCTestCase {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
         let secret = "exact-private-api-key"
-        let repository = SnapshotProviderRepository(
-            snapshot: .init(profile: try makeProfile(), apiKey: secret)
+        let repository = try SnapshotProviderRepository(
+            snapshot: try .validated(profile: makeProfile(), apiKey: secret)
         )
         let preparer = ControlledPreparer(.immediate(.success(.init(
             audioURL: fixture.temporaryAudioURL,
@@ -699,8 +746,8 @@ final class AppModelTranscriptionTests: XCTestCase {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
         let secret = "exact-live-private-api-key"
-        let repository = SnapshotProviderRepository(
-            snapshot: .init(profile: try makeProfile(), apiKey: secret)
+        let repository = try SnapshotProviderRepository(
+            snapshot: try .validated(profile: makeProfile(), apiKey: secret)
         )
         let preparer = ControlledPreparer(.immediate(.success(.init(
             audioURL: fixture.temporaryAudioURL,
@@ -759,6 +806,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            initialOutputFolder: fixture.root,
             recordingSessionLoader: recordingSessionLoader,
             recordingSearchDocumentLoader:
                 recordingSearchDocumentLoader,
@@ -770,6 +818,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             model.aiProviderSettingsModel.baseURLText = "https://api.example.com/v1"
             model.aiProviderSettingsModel.asrModel = "asr"
             model.aiProviderSettingsModel.llmModel = "llm"
+            model.aiProviderSettingsModel.selectedLanguage = .cantonese
             model.aiProviderSettingsModel.save()
         }
         return model
@@ -797,7 +846,7 @@ final class AppModelTranscriptionTests: XCTestCase {
     }
 
     private func makeSnapshot(asrModel: String) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: try makeProfile(asrModel: asrModel), apiKey: "saved")
+        try .validated(profile: makeProfile(asrModel: asrModel), apiKey: "saved")
     }
 
     private func makeProfile(asrModel: String = "asr") throws -> OpenAICompatibleProviderProfile {
@@ -805,7 +854,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             baseURLText: "https://api.example.com/v1",
             asrModel: asrModel,
             llmModel: "llm",
-            language: "",
+            language: "en",
             prompt: ""
         )
     }
@@ -1075,8 +1124,14 @@ private final class SnapshotProviderRepository: OpenAICompatibleProviderManaging
         snapshot: OpenAICompatibleProviderSnapshot? = nil,
         profile: OpenAICompatibleProviderProfile? = nil,
         snapshotError: Error? = nil
-    ) {
-        snapshotValue = snapshot ?? .init(profile: profile!, apiKey: nil)
+    ) throws {
+        if let snapshot {
+            snapshotValue = snapshot
+        } else if let profile {
+            snapshotValue = try .validated(profile: profile, apiKey: nil)
+        } else {
+            throw ProviderRepositoryError.missingProfile
+        }
         self.profile = profile ?? snapshot?.profile
         self.snapshotError = snapshotError
     }
@@ -1088,7 +1143,7 @@ private final class SnapshotProviderRepository: OpenAICompatibleProviderManaging
         return snapshotValue
     }
     func snapshot(overriding profile: OpenAICompatibleProviderProfile) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: profile, apiKey: snapshotValue.apiKey)
+        try .validated(profile: profile, apiKey: snapshotValue.apiKey)
     }
     func hasAPIKey() throws -> Bool { snapshotValue.apiKey != nil }
     func removeAPIKey() throws {}

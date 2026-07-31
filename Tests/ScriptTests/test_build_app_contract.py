@@ -509,3 +509,51 @@ esac
                 self.run_verify(app, codesign, file_command, entitlements).returncode,
                 0,
             )
+
+    def test_verifier_rejects_test_contract_and_runtime_content_anywhere_in_contents(self):
+        forbidden_paths = (
+            "Contents/Resources/meeting_intelligence_provider.py",
+            "Contents/Resources/Tests/ManualFixtures/fixture",
+            "Contents/Resources/contracts/meeting-intelligence.schema.json",
+            "Contents/Resources/contracts/fixtures/meeting-intelligence-v1.json",
+            "Contents/Resources/contracts/fixtures/recording-info-v2-meeting-intelligence.json",
+            "Contents/Frameworks/python3",
+            "Contents/Resources/runtime/helper.py",
+            "Contents/Resources/runtime/helper.pyc",
+            "Contents/Resources/runtime/__pycache__/helper",
+            "Contents/Helpers/ffmpeg",
+            "Contents/Helpers/ffprobe",
+            "Contents/Resources/MEETING_INTELLIGENCE_PROVIDER.PY",
+            "Contents/Frameworks/PYTHON3",
+            "Contents/Resources/runtime/HELPER.PY",
+            "Contents/Resources/runtime/HELPER.PYC",
+            "Contents/Resources/runtime/__PYCACHE__/helper",
+            "Contents/Helpers/FFMPEG",
+            "Contents/Helpers/FfPrObE",
+            "Contents/Resources/TRANSCRIBE-OPENAI-COMPATIBLE.SH",
+            "Contents/Resources/TRANSCRIBE-QWEN-ASR.SH",
+            "Contents/Resources/OPENAI_ASR_LONGFORM.PY",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codesign = self.make_codesign_shim(root)
+            file_command = self.make_file_shim(root)
+            entitlements = root / "entitlements.plist"
+            with entitlements.open("wb") as stream:
+                plistlib.dump({"com.apple.security.device.audio-input": True}, stream)
+
+            for index, relative_path in enumerate(forbidden_paths):
+                with self.subTest(relative_path=relative_path):
+                    app = self.make_app_fixture(root / f"forbidden-{index}")
+                    forbidden = app / relative_path
+                    forbidden.parent.mkdir(parents=True, exist_ok=True)
+                    forbidden.write_text("development-only", encoding="utf-8")
+                    self.assertNotEqual(
+                        self.run_verify(
+                            app,
+                            codesign,
+                            file_command,
+                            entitlements,
+                        ).returncode,
+                        0,
+                    )

@@ -2,7 +2,7 @@ import AVFoundation
 import Darwin
 import Foundation
 
-struct RecordingSession: Identifiable, Hashable {
+struct RecordingSession: Identifiable, Hashable, Sendable {
     let id: URL
     let folderURL: URL
     let recordingURL: URL

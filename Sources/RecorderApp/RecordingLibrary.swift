@@ -6,6 +6,22 @@ enum RecordingSource: String, Codable, Equatable, Hashable, Sendable {
     case imported
 }
 
+enum RecordingTitleOrigin: String, Codable, Equatable, Hashable, Sendable {
+    case unset
+    case meetingIntelligence
+    case manual
+}
+
+enum RecordingTitleEdit: Equatable, Sendable {
+    case unchanged
+    case manual(String?)
+    case applyMeetingIntelligence(String)
+}
+
+enum RecordingSessionMetadataStoreError: LocalizedError, Equatable, Sendable {
+    case unsupportedTitleOrigin(String)
+}
+
 enum JSONValue: Codable, Equatable, Hashable, Sendable {
     case null
     case bool(Bool)
@@ -55,11 +71,12 @@ enum JSONValue: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-struct RecordingSessionMetadata: Codable, Equatable, Hashable {
-    static let currentSchemaVersion = 1
+struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
+    static let currentSchemaVersion = 2
 
     var schemaVersion: Int
     var title: String?
+    var titleOrigin: RecordingTitleOrigin
     var tags: [String]
     var isFavorite: Bool
     var mediaKind: RecordingMediaKind
@@ -70,10 +87,12 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
     var meetingType: String?
     var participants: [String]
     var extensionFields: [String: JSONValue]
+    fileprivate var unsupportedTitleOrigin: String?
 
     init(
         schemaVersion: Int = currentSchemaVersion,
         title: String? = nil,
+        titleOrigin: RecordingTitleOrigin? = nil,
         tags: [String] = [],
         isFavorite: Bool = false,
         mediaKind: RecordingMediaKind = .audio,
@@ -83,10 +102,12 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
         source: RecordingSource = .manual,
         meetingType: String? = nil,
         participants: [String] = [],
-        extensionFields: [String: JSONValue] = [:]
+        extensionFields: [String: JSONValue] = [:],
+        unsupportedTitleOrigin: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        self.titleOrigin = titleOrigin ?? (self.title == nil ? .unset : .manual)
         self.tags = tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -105,11 +126,13 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
         self.extensionFields = extensionFields.filter {
             !Self.knownKeyNames.contains($0.key)
         }
+        self.unsupportedTitleOrigin = unsupportedTitleOrigin
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case schemaVersion
         case title
+        case titleOrigin
         case tags
         case isFavorite
         case mediaKind
@@ -136,6 +159,8 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
                 extensionFields[key.stringValue] = value
             }
         }
+        let rawTitleOrigin = try? container.decodeIfPresent(String.self, forKey: .titleOrigin)
+        let titleOrigin = rawTitleOrigin.flatMap(RecordingTitleOrigin.init(rawValue:))
         self.init(
             schemaVersion:
                 (try? container.decodeIfPresent(
@@ -143,6 +168,7 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
                     forKey: .schemaVersion
                 )) ?? Self.currentSchemaVersion,
             title: (try? container.decodeIfPresent(String.self, forKey: .title)) ?? nil,
+            titleOrigin: titleOrigin,
             tags: (try? container.decodeIfPresent([String].self, forKey: .tags)) ?? [],
             isFavorite: (try? container.decodeIfPresent(Bool.self, forKey: .isFavorite)) ?? false,
             mediaKind: (try? container.decodeIfPresent(RecordingMediaKind.self, forKey: .mediaKind)) ?? .audio,
@@ -152,7 +178,8 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
             source: (try? container.decodeIfPresent(RecordingSource.self, forKey: .source)) ?? .manual,
             meetingType: (try? container.decodeIfPresent(String.self, forKey: .meetingType)) ?? nil,
             participants: (try? container.decodeIfPresent([String].self, forKey: .participants)) ?? [],
-            extensionFields: extensionFields
+            extensionFields: extensionFields,
+            unsupportedTitleOrigin: titleOrigin == nil ? rawTitleOrigin : nil
         )
     }
 
@@ -160,6 +187,7 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encodeIfPresent(title, forKey: .title)
+        try container.encode(titleOrigin, forKey: .titleOrigin)
         try container.encode(tags, forKey: .tags)
         try container.encode(isFavorite, forKey: .isFavorite)
         try container.encode(mediaKind, forKey: .mediaKind)
@@ -185,6 +213,29 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable {
     private static let knownKeyNames = Set(
         CodingKeys.allCases.map(\.rawValue)
     )
+
+    mutating func applyTitleEdit(_ edit: RecordingTitleEdit) {
+        switch edit {
+        case .unchanged:
+            break
+        case .manual(let value):
+            title = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            titleOrigin = .manual
+        case .applyMeetingIntelligence(let value):
+            title = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            titleOrigin = .meetingIntelligence
+        }
+    }
+
+    /// Keeps specialised persistence adapters from silently normalising an
+    /// unsupported on-disk title origin during an unrelated metadata update.
+    func validateForPersistence() throws {
+        if let unsupportedTitleOrigin {
+            throw RecordingSessionMetadataStoreError.unsupportedTitleOrigin(unsupportedTitleOrigin)
+        }
+    }
 }
 
 private struct DynamicCodingKey: CodingKey {
@@ -213,6 +264,13 @@ enum RecordingSessionMetadataStore {
     }
 
     static func save(_ metadata: RecordingSessionMetadata, in folder: URL) throws {
+        if let unsupportedTitleOrigin = metadata.unsupportedTitleOrigin {
+            throw RecordingSessionMetadataStoreError.unsupportedTitleOrigin(
+                unsupportedTitleOrigin
+            )
+        }
+        var metadata = metadata
+        metadata.schemaVersion = max(metadata.schemaVersion, 2)
         let data = try JSONEncoder.pretty.encode(metadata)
         try data.write(to: fileURL(in: folder), options: .atomic)
     }

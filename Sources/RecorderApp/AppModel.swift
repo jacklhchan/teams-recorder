@@ -64,7 +64,7 @@ final class AppModel: ObservableObject {
     @Published var systemAudioPermission: CapturePermissionState = .notDetermined
     @Published var microphonePermission: CapturePermissionState = .notDetermined
     @Published private(set) var captureConnectionState: CaptureConnectionState = .connected
-    @Published var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
+    @Published private(set) var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published var statusMessage = "Ready"
     @Published var sessions: [RecordingSession] = []
     @Published var lastHealthReport: RecordingHealthReport?
@@ -93,6 +93,11 @@ final class AppModel: ObservableObject {
     private let recordingSessionCoordinator:
         RecordingSessionCoordinator
     private let transcriptionCoordinator: TranscriptionJobCoordinator
+    private let transcriptMutationGate: RecordingSessionMutationGate
+    /// AppModel owns the sole meeting-intelligence coordinator.  It projects
+    /// presentation and forwards commands; it deliberately owns no parallel
+    /// attempt/task/generation state.
+    private let meetingIntelligenceCoordinator: MeetingIntelligenceJobCoordinator
 
     var isCaptureLifecycleWorking: Bool {
         recordingSessionCoordinator.isWorking
@@ -170,9 +175,12 @@ final class AppModel: ObservableObject {
     private let teamsIntegrationIngress: TeamsIntegrationIngress
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
     private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
+    private let recordingSessionReloader: @Sendable (RecordingSession) -> RecordingSession
     private let recordingSearchDocumentLoader:
         @Sendable (RecordingSession) -> RecordingLibrarySearchDocument
     private let recordingSessionRecovery: @Sendable (URL) -> Void
+    private let recordingSessionTrashHandler:
+        @Sendable (URL) throws -> Bool
     private let permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)?
     private let volumeCapacityProvider: any VolumeCapacityProviding
     private let storagePolicy: RecordingStoragePolicy
@@ -231,6 +239,8 @@ final class AppModel: ObservableObject {
     private var recordingSearchDocumentRefreshGeneration: UInt64 = 0
     private var recordingSearchDocumentRefreshGenerations:
         [RecordingSession.ID: UInt64] = [:]
+    private var meetingIntelligenceSessionReloadGenerations:
+        [RecordingSession.ID: UInt64] = [:]
     private var recoveredLibraryFolders: Set<URL> = []
     private var storageMonitorTask: Task<Void, Never>?
     private var storageMonitorGeneration: UInt64 = 0
@@ -239,6 +249,7 @@ final class AppModel: ObservableObject {
     private var teamsScreenRefreshGeneration: UInt64 = 0
     private var teamsScreenCaptureIntentGeneration: UInt64 = 0
     private var teamsMeetingActive = false
+    private var workspacePublicationFence: WorkspacePublicationFence = .initial
 
     private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
     private static let teamsAutoMeetingEnabledKey = "teamsAutoMeetingEnabled"
@@ -251,6 +262,7 @@ final class AppModel: ObservableObject {
         inputDevices: @escaping () -> [AudioDevice] = AudioDeviceManager.inputDevices,
         defaultInputDeviceID: @escaping () -> AudioDeviceID? = AudioDeviceManager.defaultInputDeviceID,
         performStartupWork: Bool = true,
+        initialOutputFolder: URL? = nil,
         inputMuteControllerFactory: (
             (@escaping (Bool) -> Void) -> InputMuteControlling
         )? = nil,
@@ -260,6 +272,9 @@ final class AppModel: ObservableObject {
         },
         recordingSessionLoader: @escaping @Sendable (URL) -> [RecordingSession] = {
             RecordingSessionStore.load(from: $0)
+        },
+        recordingSessionReloader: @escaping @Sendable (RecordingSession) -> RecordingSession = {
+            RecordingSessionStore.session(for: $0.folderURL, recordingURL: $0.recordingURL)
         },
         recordingSearchDocumentLoader: @escaping @Sendable (
             RecordingSession
@@ -273,6 +288,11 @@ final class AppModel: ObservableObject {
         },
         recordingSessionRecovery: @escaping @Sendable (URL) -> Void = {
             IncompleteSessionRecovery().recover(in: $0)
+        },
+        recordingSessionTrashHandler: @escaping @Sendable (
+            URL
+        ) throws -> Bool = {
+            try RecordingSessionStore.moveToTrash(folder: $0)
         },
         permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)? = nil,
         volumeCapacityProvider: any VolumeCapacityProviding = SelectedVolumeCapacityProvider(),
@@ -295,6 +315,11 @@ final class AppModel: ObservableObject {
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
         transcriptionScriptURL: URL? = nil,
         transcriptionService: (any TranscriptionServicing)? = nil,
+        meetingIntelligenceCoordinatorFactory: ((
+            any OpenAICompatibleProviderManaging,
+            UUID,
+            RecordingSessionMutationGate
+        ) -> MeetingIntelligenceJobCoordinator)? = nil,
         playbackCoordinator: (any PlaybackCoordinating)? = nil,
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
         teamsIntegrationScheduler: @escaping (
@@ -303,6 +328,9 @@ final class AppModel: ObservableObject {
             Task { @MainActor in operation() }
         }
     ) {
+        if let initialOutputFolder {
+            outputFolder = initialOutputFolder
+        }
         let activeRecorder = recorder ?? RecordingEngine()
         let autoCoordinator = teamsAutoMeetingCoordinator
             ?? TeamsAutoMeetingCoordinator()
@@ -324,6 +352,8 @@ final class AppModel: ObservableObject {
             repository: activeProviderRepository,
             loadImmediately: false
         )
+        let transcriptMutationGate = RecordingSessionMutationGate()
+        self.transcriptMutationGate = transcriptMutationGate
         let activeTranscriptionService:
             any TranscriptionServicing
         if let transcriptionService {
@@ -335,14 +365,31 @@ final class AppModel: ObservableObject {
                     scriptURL: transcriptionScriptURL
                 )
         } else {
-            activeTranscriptionService =
-                NativeOpenAICompatibleTranscriptionService()
+            activeTranscriptionService = NativeOpenAICompatibleTranscriptionService(
+                publisher: TranscriptionArtifactPublisher(
+                    mutationGate: transcriptMutationGate
+                )
+            )
         }
         transcriptionCoordinator = TranscriptionJobCoordinator(
             providerRepository: activeProviderRepository,
             audioPreparer: transcriptionAudioPreparer,
-            service: activeTranscriptionService
+            service: activeTranscriptionService,
+            mutationGate: transcriptMutationGate
         )
+        if let meetingIntelligenceCoordinatorFactory {
+            meetingIntelligenceCoordinator = meetingIntelligenceCoordinatorFactory(
+                activeProviderRepository,
+                transcriptionCoordinator.publicationSourceID,
+                transcriptMutationGate
+            )
+        } else {
+            meetingIntelligenceCoordinator = Self.makeMeetingIntelligenceCoordinator(
+                repository: activeProviderRepository,
+                expectedPublicationSourceID: transcriptionCoordinator.publicationSourceID,
+                mutationGate: transcriptMutationGate
+            )
+        }
         self.appPaths = appPaths
         teamsMuteSyncEnabled = defaults.object(
             forKey: Self.teamsMuteSyncEnabledKey
@@ -353,9 +400,11 @@ final class AppModel: ObservableObject {
         teamsAutoMeetingState = autoCoordinator.state
         self.virtualMicStateProvider = virtualMicStateProvider
         self.recordingSessionLoader = recordingSessionLoader
+        self.recordingSessionReloader = recordingSessionReloader
         self.recordingSearchDocumentLoader =
             recordingSearchDocumentLoader
         self.recordingSessionRecovery = recordingSessionRecovery
+        self.recordingSessionTrashHandler = recordingSessionTrashHandler
         self.permissionRequestHandler = permissionRequestHandler
         self.volumeCapacityProvider = volumeCapacityProvider
         self.storagePolicy = storagePolicy
@@ -413,8 +462,25 @@ final class AppModel: ObservableObject {
             self?.statusMessage = message
         }
         transcriptionCoordinator.onSuccessfulPublication = {
+            [weak self] event in
+            guard let self,
+                  self.admitsTranscriptPublication(event) else { return }
+            self.rebuildSearchDocument(
+                for: event.session,
+                publicationFence: event.workspaceFence
+            ) { [weak self] in
+                guard let self,
+                      self.admitsTranscriptPublication(event) else { return }
+                self.meetingIntelligenceCoordinator
+                    .handleTranscriptPublished(event)
+            }
+        }
+        meetingIntelligenceCoordinator.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        meetingIntelligenceCoordinator.onSuccessfulPublication = {
             [weak self] session in
-            self?.rebuildSearchDocument(for: session)
+            self?.reloadMeetingIntelligenceSession(session)
         }
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
@@ -469,6 +535,72 @@ final class AppModel: ObservableObject {
         teamsMuteRelay.invalidate()
         teamsMuteSyncClient.stop()
         inputMuteController.uninstall()
+    }
+
+    private static func makeMeetingIntelligenceCoordinator(
+        repository: any OpenAICompatibleProviderManaging,
+        expectedPublicationSourceID: UUID,
+        mutationGate: RecordingSessionMutationGate
+    ) -> MeetingIntelligenceJobCoordinator {
+        let client = OpenAICompatibleMeetingIntelligenceClient()
+        let artifactStore = MeetingIntelligenceArtifactStore(
+            mutationGate: mutationGate
+        )
+        return MeetingIntelligenceJobCoordinator(
+            providerRepository: repository,
+            expectedPublicationSourceID: expectedPublicationSourceID,
+            availabilityChecker:
+                OpenAICompatibleMeetingIntelligenceAvailabilityChecker(
+                    client: OpenAICompatibleProviderClient()
+                ),
+            generator: MeetingIntelligencePipeline(client: client),
+            publisher: MeetingIntelligencePublisher(
+                mutationGate: mutationGate,
+                artifactStore: artifactStore
+            ),
+            artifactStore: artifactStore,
+            stateStore: MeetingIntelligenceStateStore(
+                mutationGate: mutationGate
+            ),
+            titleApplier: MeetingIntelligenceSuggestedTitleApplier(
+                mutationGate: mutationGate
+            )
+        )
+    }
+
+    func meetingIntelligencePresentation(
+        for session: RecordingSession
+    ) -> MeetingIntelligencePresentation {
+        meetingIntelligenceCoordinator.presentation(for: session)
+    }
+
+    func checkMeetingIntelligenceAvailability(for session: RecordingSession) {
+        meetingIntelligenceCoordinator.checkAvailability(for: session)
+    }
+
+    func generateMeetingIntelligence(for session: RecordingSession) {
+        meetingIntelligenceCoordinator.generate(for: session)
+    }
+
+    func regenerateMeetingIntelligence(for session: RecordingSession) {
+        meetingIntelligenceCoordinator.regenerate(for: session)
+    }
+
+    func retryMeetingIntelligenceGeneration(for session: RecordingSession) {
+        meetingIntelligenceCoordinator.retryGeneration(for: session)
+    }
+
+    func cancelMeetingIntelligence(for session: RecordingSession) {
+        meetingIntelligenceCoordinator.cancel(sessionID: session.id)
+    }
+
+    func applyMeetingIntelligenceSuggestedTitle(for session: RecordingSession) {
+        meetingIntelligenceCoordinator.applySuggestedTitle(for: session)
+    }
+
+    func shutdown() {
+        transcriptionCoordinator.shutdown()
+        meetingIntelligenceCoordinator.shutdown()
     }
 
     func refreshDevices() {
@@ -1161,7 +1293,12 @@ final class AppModel: ObservableObject {
 
     func setOutputFolder(_ folder: URL) {
         outputFolder = folder
+        workspacePublicationFence = workspacePublicationFence.advanced()
+        transcriptionCoordinator.advanceWorkspacePublicationFence(
+            to: workspacePublicationFence
+        )
         sessions = []
+        meetingIntelligenceCoordinator.resetForWorkspaceChange()
         transcriptionStatesBySessionID = [:]
         transcriptURLsBySessionID = [:]
         transcriptLogURLsBySessionID = [:]
@@ -1203,6 +1340,7 @@ final class AppModel: ObservableObject {
         recordingSearchDocumentRefreshGenerations.removeAll()
         recordingSessionRefreshGeneration &+= 1
         let generation = recordingSessionRefreshGeneration
+        meetingIntelligenceSessionReloadGenerations.removeAll()
         let folder = outputFolder
         let loader = recordingSessionLoader
         let recovery = recordingSessionRecovery
@@ -1231,11 +1369,22 @@ final class AppModel: ObservableObject {
                 self.transcriptionStatesBySessionID = self.projectTranscriptionStates(
                     transcriptionStates
                 )
+                self.meetingIntelligenceCoordinator.reload(sessions: loadedSessions)
             }
         }
     }
 
-    private func rebuildSearchDocument(for session: RecordingSession) {
+    private func rebuildSearchDocument(
+        for session: RecordingSession,
+        publicationFence: WorkspacePublicationFence? = nil,
+        completion: (@MainActor () -> Void)? = nil
+    ) {
+        guard admitsSearchDocumentRebuild(
+            for: session,
+            publicationFence: publicationFence
+        ) else {
+            return
+        }
         let sessionID = session.id
         recordingSearchDocumentRefreshGeneration &+= 1
         let nextGeneration =
@@ -1251,23 +1400,84 @@ final class AppModel: ObservableObject {
                       self.recordingSearchDocumentRefreshGenerations[
                         sessionID
                       ] == nextGeneration,
-                      let index = self.sessions.firstIndex(
-                        where: { $0.id == sessionID }
+                      self.admitsSearchDocumentRebuild(
+                        for: session,
+                        publicationFence: publicationFence
                       ) else {
                     return
                 }
-                let current = self.sessions[index]
-                guard current.metadata == session.metadata else {
-                    self.rebuildSearchDocument(for: current)
-                    return
+                if let index = self.sessions.firstIndex(where: { $0.id == sessionID }) {
+                    let current = self.sessions[index]
+                    guard current.metadata == session.metadata else {
+                        self.rebuildSearchDocument(
+                            for: current,
+                            publicationFence: publicationFence,
+                            completion: completion
+                        )
+                        return
+                    }
+                    self.sessions[index] = current.replacingSearchDocument(document)
+                } else {
+                    self.sessions.append(session.replacingSearchDocument(document))
                 }
-                self.sessions[index] =
-                    current.replacingSearchDocument(document)
                 self.recordingSearchDocumentRefreshGenerations[
                     sessionID
                 ] = nil
+                completion?()
             }
         }
+    }
+
+    private func reloadMeetingIntelligenceSession(_ session: RecordingSession) {
+        let workspaceGeneration = recordingSessionRefreshGeneration
+        let workspace = outputFolder.standardizedFileURL
+        guard isInCurrentWorkspace(session) else {
+            return
+        }
+        let sessionID = session.id
+        let sessionGeneration = (meetingIntelligenceSessionReloadGenerations[sessionID] ?? 0) &+ 1
+        meetingIntelligenceSessionReloadGenerations[sessionID] = sessionGeneration
+        let reloader = recordingSessionReloader
+        recordingSessionLoadingQueue.async { [weak self] in
+            let reloaded = reloader(session)
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.recordingSessionRefreshGeneration == workspaceGeneration,
+                      self.outputFolder.standardizedFileURL == workspace,
+                      self.meetingIntelligenceSessionReloadGenerations[sessionID] == sessionGeneration else {
+                    return
+                }
+                if let index = self.sessions.firstIndex(where: { $0.id == sessionID }) {
+                    self.sessions[index] = reloaded
+                } else {
+                    self.sessions.append(reloaded)
+                }
+                self.meetingIntelligenceCoordinator.reload(sessions: [reloaded])
+            }
+        }
+    }
+
+    private func isInCurrentWorkspace(_ session: RecordingSession) -> Bool {
+        let workspace = outputFolder.standardizedFileURL
+        let sessionFolder = session.folderURL.standardizedFileURL
+        return sessionFolder.path == workspace.path ||
+            sessionFolder.path.hasPrefix(workspace.path + "/")
+    }
+
+    private func admitsTranscriptPublication(
+        _ event: TranscriptPublished
+    ) -> Bool {
+        event.workspaceFence == workspacePublicationFence &&
+            isInCurrentWorkspace(event.session)
+    }
+
+    private func admitsSearchDocumentRebuild(
+        for session: RecordingSession,
+        publicationFence: WorkspacePublicationFence?
+    ) -> Bool {
+        guard let publicationFence else { return true }
+        return publicationFence == workspacePublicationFence &&
+            isInCurrentWorkspace(session)
     }
 
     private func projectTranscriptionStates(
@@ -1667,9 +1877,16 @@ final class AppModel: ObservableObject {
 
     func saveTranscript(_ text: String, for session: RecordingSession) {
         do {
-            try TranscriptDocumentStore.save(text, in: session.folderURL)
+            try transcriptMutationGate.withMutation(for: session.folderURL) {
+                try TranscriptDocumentStore.save(text, in: session.folderURL)
+            }
             transcriptURLsBySessionID[session.id] = TranscriptDocumentStore.editableURL(in: session.folderURL)
-            rebuildSearchDocument(for: session)
+            rebuildSearchDocument(
+                for: session,
+                publicationFence: workspacePublicationFence
+            ) { [weak self] in
+                self?.meetingIntelligenceCoordinator.transcriptDidSave(session)
+            }
             statusMessage = "Transcript saved"
         } catch {
             statusMessage = "Cannot save transcript: \(error.localizedDescription)"
@@ -1695,16 +1912,22 @@ final class AppModel: ObservableObject {
         statusMessage = "Transcript copied"
     }
 
-    func saveMetadata(title: String, tags: String, isFavorite: Bool, for session: RecordingSession) {
+    func saveMetadata(
+        titleEdit: RecordingTitleEdit,
+        tags: String,
+        isFavorite: Bool,
+        for session: RecordingSession
+    ) {
         do {
-            var metadata = RecordingSessionMetadataStore.load(in: session.folderURL)
-            let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            metadata.title = cleanedTitle.isEmpty ? nil : cleanedTitle
-            metadata.tags = tags.split(separator: ",").map(String.init)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            metadata.isFavorite = isFavorite
-            try RecordingSessionMetadataStore.save(metadata, in: session.folderURL)
+            try transcriptMutationGate.withMutation(for: session.folderURL) {
+                var metadata = RecordingSessionMetadataStore.load(in: session.folderURL)
+                metadata.applyTitleEdit(titleEdit)
+                metadata.tags = tags.split(separator: ",").map(String.init)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                metadata.isFavorite = isFavorite
+                try RecordingSessionMetadataStore.save(metadata, in: session.folderURL)
+            }
             refreshSessions()
             statusMessage = "Recording details saved"
         } catch {
@@ -1712,9 +1935,26 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Compatibility entry point for existing views.  Title identity controls
+    /// origin; a tags/favourite-only edit keeps its existing origin intact.
+    func saveMetadata(title: String, tags: String, isFavorite: Bool, for session: RecordingSession) {
+        let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedTitle = cleanedTitle.isEmpty ? nil : cleanedTitle
+        let titleEdit: RecordingTitleEdit = requestedTitle == session.metadata.title
+            ? .unchanged
+            : .manual(requestedTitle)
+        saveMetadata(
+            titleEdit: titleEdit,
+            tags: tags,
+            isFavorite: isFavorite,
+            for: session
+        )
+    }
+
     func moveSessionToTrash(_ session: RecordingSession) {
         do {
-            _ = try RecordingSessionStore.moveToTrash(folder: session.folderURL)
+            _ = try recordingSessionTrashHandler(session.folderURL)
+            meetingIntelligenceCoordinator.remove(sessionID: session.id)
             if playingSessionID == session.id { stopPlayback() }
             sessions.removeAll { $0.id == session.id }
             transcriptionStatesBySessionID.removeValue(forKey: session.id)
@@ -1740,14 +1980,16 @@ final class AppModel: ObservableObject {
                 result.recordingURL.lastPathComponent == "recording.m4a"
             var metadataSaveError: Error?
             do {
-                var metadata = RecordingSessionMetadataStore.load(
-                    in: result.folderURL
-                )
-                metadata.source = recordingSource
-                try RecordingSessionMetadataStore.save(
-                    metadata,
-                    in: result.folderURL
-                )
+                try transcriptMutationGate.withMutation(for: result.folderURL) {
+                    var metadata = RecordingSessionMetadataStore.load(
+                        in: result.folderURL
+                    )
+                    metadata.source = recordingSource
+                    try RecordingSessionMetadataStore.save(
+                        metadata,
+                        in: result.folderURL
+                    )
+                }
             } catch {
                 metadataSaveError = error
             }

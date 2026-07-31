@@ -48,6 +48,7 @@ Mentioning compatibility does not change or grant those licenses.
 class PackagingContractTests(unittest.TestCase):
     def test_readme_describes_current_provider_and_license(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        normalized_readme = " ".join(readme.split())
         required_phrases = (
             "OpenAI-Compatible Transcription",
             "API Base URL ending in `/v1`",
@@ -56,7 +57,7 @@ class PackagingContractTests(unittest.TestCase):
             "optional API key, language, and transcription prompt",
             "POST <API Base URL>/audio/transcriptions",
             "Model discovery is optional",
-            "when `/v1/models` is\n   unsupported",
+            "`/v1/models` is unsupported",
             "manually entered model identifiers remain available",
             "transcript.txt",
             "transcript.raw.txt",
@@ -71,9 +72,20 @@ class PackagingContractTests(unittest.TestCase):
             "`schemaVersion`",
             "Unknown metadata fields are preserved",
             "Native audio chunks use an isolated system temporary workspace",
-            "`.transcription-runs` is a legacy\nworkspace only",
+            "`.transcription-runs` is a legacy workspace only",
             "Successful native jobs keep only the four canonical artifacts",
             "provider API key and Teams pairing token are stored in macOS Keychain",
+            "HKT GenAI Platform",
+            "https://api.uat.bot-builder.pccw.com/v1/groups/{groupID}/openai",
+            "X-API-KEY",
+            "OpenAI-compatible API",
+            "Authorization: Bearer",
+            "exact `/models` match",
+            "zero automatic chat",
+            "Generate and Regenerate are explicit",
+            "meeting-intelligence.json",
+            "meeting-intelligence-state.json",
+            "manual titles are preserved",
             "oMLX settings are read only for a one-time migration",
             "oMLX is\nnot required, launched, installed, or managed by the recorder",
             "build/Local Meeting Recorder Staging.app",
@@ -84,7 +96,7 @@ class PackagingContractTests(unittest.TestCase):
         )
         for phrase in required_phrases:
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, readme)
+                self.assertIn(" ".join(phrase.split()), normalized_readme)
 
         stale_phrases = (
             "/Users/apple",
@@ -261,3 +273,16 @@ class PackagingContractTests(unittest.TestCase):
                             errors="ignore",
                         )
         self.assertNotIn("BlackHole", text)
+
+    def test_development_meeting_intelligence_harness_and_raw_fixtures_are_not_bundled(self):
+        build = (ROOT / "scripts/build-app.sh").read_text(encoding="utf-8")
+        forbidden = (
+            "Tests/ManualFixtures",
+            "meeting_intelligence_provider.py",
+            "contracts/fixtures",
+            "meeting-intelligence-v1.json",
+            "recording-info-v2-meeting-intelligence.json",
+        )
+        for value in forbidden:
+            with self.subTest(value=value):
+                self.assertNotIn(value, build)

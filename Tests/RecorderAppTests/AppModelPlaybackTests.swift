@@ -337,13 +337,13 @@ final class AppModelPlaybackTests: XCTestCase {
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
+            initialOutputFolder: root,
             permissionRequestHandler: { _, _ in },
             volumeCapacityProvider: TestCapacityProvider(),
             storageMonitorTick: { try? await Task.sleep(for: .seconds(3_600)) },
             testRecordingDelay: { await delay.wait() },
             playbackCoordinator: coordinator
         )
-        model.outputFolder = root
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
         XCTAssertEqual(model.captureReadiness, .ready)
@@ -392,13 +392,13 @@ final class AppModelPlaybackTests: XCTestCase {
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
+            initialOutputFolder: root,
             permissionRequestHandler: { _, _ in },
             volumeCapacityProvider: TestCapacityProvider(),
             storageMonitorTick: { try? await Task.sleep(for: .seconds(3_600)) },
             testRecordingDelay: { await delay.wait() },
             playbackCoordinator: FakePlaybackCoordinator()
         )
-        model?.outputFolder = root
         model?.systemAudioPermission = .granted
         model?.microphonePermission = .granted
 

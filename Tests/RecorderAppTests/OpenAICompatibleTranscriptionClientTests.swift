@@ -3,6 +3,31 @@ import XCTest
 @testable import RecorderApp
 
 final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
+    func testUploadUsesOnlySnapshotSelectedHKTHeader() async throws {
+        let transport = RecordingTranscriptionTransport(responses: [
+            .http(status: 200, body: #"{"text":"done"}"#)
+        ])
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(
+            profile: try .hktValidated(
+                groupID: "89", asrModel: "hkt-asr", llmModel: "hkt-llm",
+                language: "yue", prompt: "prompt"
+            ),
+            apiKey: "hkt-secret"
+        )
+
+        _ = try await makeClient(transport: transport).transcribe(
+            audioData: Data("audio".utf8), fileName: "meeting.m4a",
+            snapshot: snapshot, prompt: "prompt"
+        )
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.uat.bot-builder.pccw.com/v1/groups/89/openai/audio/transcriptions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-API-KEY"), "hkt-secret")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertTrue(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains("hkt-asr"))
+        XCTAssertFalse(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains("hkt-llm"))
+    }
+
     func testRetryPolicyRetriesOnlyTransientStatuses() {
         let policy = TranscriptionRetryPolicy()
 
@@ -169,6 +194,43 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
                 statusCode: 308
             )
         )
+    }
+
+    func testRedirectPolicyAcceptsNormalizedJSONAndRejectsGETOrContentTypeChangesWithoutAuthorization() throws {
+        var source = URLRequest(url: try XCTUnwrap(URL(string: "https://api.example/v1/chat/completions")))
+        source.httpMethod = "POST"
+        source.httpBody = Data("{}".utf8)
+        source.setValue("Application/JSON; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        source.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        var proposed = source
+        proposed.url = try XCTUnwrap(URL(string: "https://api.example/v1/chat/redirected"))
+        proposed.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        proposed.setValue("Bearer leaked", forHTTPHeaderField: "Authorization")
+        XCTAssertEqual(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 308)?.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        proposed.httpMethod = "GET"
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 307))
+        proposed.httpMethod = "POST"
+        proposed.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 307))
+
+        let multipart = try uploadRequest(url: "https://api.example/v1/audio/transcriptions")
+        var changedBoundary = multipart
+        changedBoundary.url = try XCTUnwrap(URL(string: "https://api.example/v1/audio/redirected"))
+        changedBoundary.setValue("multipart/form-data; boundary=changed", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: multipart, proposed: changedBoundary, statusCode: 307))
+        changedBoundary.setValue("multipart/form-data; boundary=test-BOUNDARY", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: multipart, proposed: changedBoundary, statusCode: 307))
+    }
+
+    func testRedirectPolicyRestoresAPIKeyOnlyAfterSameOriginValidation() throws {
+        var source = try uploadRequest(url: "https://api.example/v1/audio/transcriptions")
+        source.setValue("api-key", forHTTPHeaderField: "X-API-KEY")
+        var accepted = source
+        accepted.url = try XCTUnwrap(URL(string: "https://api.example/v1/audio/redirected"))
+        accepted.setValue("leaked", forHTTPHeaderField: "X-API-KEY")
+        XCTAssertEqual(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: accepted, statusCode: 307)?.value(forHTTPHeaderField: "X-API-KEY"), "api-key")
+        accepted.url = try XCTUnwrap(URL(string: "https://evil.example/redirected"))
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: accepted, statusCode: 307))
     }
 
     func testMultipartBuilderCapsAudioAndIncludesTypedFields() throws {
@@ -626,7 +688,7 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
     private func makeSnapshot(
         apiKey: String? = nil
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(
+        try .validated(
             profile: try OpenAICompatibleProviderProfile.validated(
                 baseURLText: "https://api.example/v1",
                 asrModel: "asr-model",

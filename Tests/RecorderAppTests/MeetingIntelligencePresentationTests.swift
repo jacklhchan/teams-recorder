@@ -37,4 +37,19 @@ final class MeetingIntelligencePresentationTests: XCTestCase {
         XCTAssertTrue(section.showsApplySuggestedTitle)
         XCTAssertTrue(section.showsManualTitleProtection)
     }
+
+    func testDraftTextSurvivesAnUnrelatedPresentationRerenderInSameOpenSheet() {
+        XCTAssertEqual(
+            TranscriptEditorDraft.loadedText(existing: "Edited draft", hasLoaded: true, load: { "Stored transcript" }),
+            "Edited draft"
+        )
+        XCTAssertEqual(
+            TranscriptEditorDraft.loadedText(existing: "", hasLoaded: false, load: { "Stored transcript" }),
+            "Stored transcript"
+        )
+        XCTAssertEqual(
+            TranscriptEditorDraft.loadedText(existing: "", hasLoaded: true, load: { "Stored transcript" }),
+            ""
+        )
+    }
 }

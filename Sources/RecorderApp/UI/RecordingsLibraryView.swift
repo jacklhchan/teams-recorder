@@ -326,13 +326,21 @@ private struct SessionListView: View {
     }
 }
 
+enum TranscriptEditorDraft {
+    /// The sheet owns its in-progress text. A model publication may rerender
+    /// the surrounding view but must not replace that text while still open.
+    static func loadedText(existing: String, hasLoaded: Bool, load: () -> String) -> String {
+        hasLoaded ? existing : load()
+    }
+}
+
 struct TranscriptEditorView: View {
     let session: RecordingSession
     let load: () -> String
     let save: (String) -> Void
     let openFolder: () -> Void
     /// Requests playback through the existing external presenter. This sheet
-    /// never creates an AVPlayerView or owns player lifetime.
+    /// never owns the playback view or player lifetime.
     let play: () -> Void
     let export: () -> Void
     let copy: () -> Void
@@ -341,6 +349,7 @@ struct TranscriptEditorView: View {
     let meetingIntelligenceActions: MeetingIntelligenceActions
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
+    @State private var hasLoadedDraft = false
 
     init(
         session: RecordingSession,
@@ -385,8 +394,27 @@ struct TranscriptEditorView: View {
             Divider()
             footer
         }
-        .frame(width: 860, height: 680)
-        .onAppear { text = load() }
+        .frame(
+            minWidth: 860,
+            idealWidth: 1_000,
+            maxWidth: .infinity,
+            minHeight: 680,
+            idealHeight: 720,
+            maxHeight: .infinity
+        )
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: "recorder.transcript.detail.root"
+            )
+        )
+        .onAppear {
+            text = TranscriptEditorDraft.loadedText(
+                existing: text,
+                hasLoaded: hasLoadedDraft,
+                load: load
+            )
+            hasLoadedDraft = true
+        }
     }
 
     private var header: some View {

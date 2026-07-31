@@ -5,6 +5,20 @@ import XCTest
 
 @MainActor
 final class MeetingIntelligenceSheetRenderTests: XCTestCase {
+    func testTranscriptDetailSourceDoesNotDeclareEmbeddedPlaybackViews() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/RecorderApp/UI/RecordingsLibraryView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(source.contains("AVPlayerView"))
+        XCTAssertFalse(source.contains("RecordingPlaybackView"))
+    }
+
     func test860By680SheetRendersMeetingIntelligenceAndNeverEmbedsPlaybackView() throws {
         let host = try SheetRenderHost(size: .init(width: 860, height: 680)) {
             TranscriptEditorView(
@@ -54,8 +68,22 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
 
         let reopened = try SheetRenderHost(size: .init(width: 1_280, height: 800), root: makeView())
         defer { reopened.close() }
+        XCTAssertGreaterThan(
+            try XCTUnwrap(reopened.frame(for: "recorder.transcript.detail.root")).width,
+            860,
+            "Wide host must expand the transcript detail beyond its 860-point minimum."
+        )
         XCTAssertTrue(reopened.contains(RecorderActionID.meetingIntelligenceCard))
         XCTAssertTrue(reopened.contains(RecorderActionID.saveTranscript))
+        for identifier in [
+            RecorderActionID.meetingIntelligenceCard,
+            RecorderActionID.saveTranscript
+        ] {
+            XCTAssertTrue(
+                reopened.windowContentRect.contains(try XCTUnwrap(reopened.frame(for: identifier))),
+                "\(identifier) must be reachable in the wide window."
+            )
+        }
     }
 
     private func session() -> RecordingSession {
@@ -98,6 +126,21 @@ private final class SheetRenderHost<Root: View> {
                 $0.accessibilityIdentifier() == identifier
             }
             || findAccessibility(in: hostingView.accessibilityChildren() ?? [], identifier: identifier) != nil
+    }
+
+    var windowContentRect: CGRect {
+        let rect = window.contentLayoutRect
+        return CGRect(origin: window.convertPoint(toScreen: rect.origin), size: rect.size)
+    }
+
+    func frame(for identifier: String) -> CGRect? {
+        if let view = allViews(startingAt: hostingView).first(where: {
+            $0.accessibilityIdentifier() == identifier
+        }) {
+            return view.accessibilityFrame()
+        }
+        return findAccessibility(in: hostingView.accessibilityChildren() ?? [], identifier: identifier)?
+            .accessibilityFrame()
     }
 
     func containsView(named className: String) -> Bool {

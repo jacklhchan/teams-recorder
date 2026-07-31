@@ -37,10 +37,16 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
             throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
         }
         do {
-            return try JSONDecoder.meetingIntelligence.decode(
+            let artifact = try JSONDecoder.meetingIntelligence.decode(
                 MeetingIntelligenceArtifact.self,
                 from: data
             )
+            guard MeetingIntelligenceArtifactValidator.isValid(artifact) else {
+                throw MeetingIntelligenceStoreError.malformed
+            }
+            return artifact
+        } catch let error as MeetingIntelligenceStoreError {
+            throw error
         } catch {
             throw MeetingIntelligenceStoreError.malformed
         }
@@ -49,6 +55,9 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
     func stage(_ artifact: MeetingIntelligenceArtifact, in folder: URL) throws -> URL {
         guard artifact.schemaVersion == MeetingIntelligenceArtifact.currentSchemaVersion else {
             throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(artifact.schemaVersion)
+        }
+        guard MeetingIntelligenceArtifactValidator.isValid(artifact) else {
+            throw MeetingIntelligenceStoreError.malformed
         }
         let data = try JSONEncoder.meetingIntelligence.encode(artifact)
         guard data.count <= Self.maximumBytes else {
@@ -74,12 +83,12 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
             guard let stagedSnapshot = try fileAccess.snapshot(
                 named: staged.lastPathComponent, in: normalizedFolder, maximumBytes: Self.maximumBytes
             ) else { throw MeetingIntelligenceStoreError.missing }
-            try validateCurrentSchema(stagedSnapshot.data, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
+            try validateArtifactData(stagedSnapshot.data)
             let destination = try fileAccess.snapshot(
                 named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes
             )
             if let destination {
-                try validateCurrentSchema(destination.data, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
+                try validateArtifactData(destination.data)
             }
             try fileAccess.promote(stagedSnapshot, to: Self.fileName, over: destination, in: normalizedFolder)
         }
@@ -222,6 +231,20 @@ private func validateCurrentSchema(_ data: Data, expected: Int) throws {
     let version = try schemaVersion(in: data)
     guard version == expected else {
         throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
+    }
+}
+
+private func validateArtifactData(_ data: Data) throws {
+    try validateCurrentSchema(data, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
+    do {
+        let artifact = try JSONDecoder.meetingIntelligence.decode(MeetingIntelligenceArtifact.self, from: data)
+        guard MeetingIntelligenceArtifactValidator.isValid(artifact) else {
+            throw MeetingIntelligenceStoreError.malformed
+        }
+    } catch let error as MeetingIntelligenceStoreError {
+        throw error
+    } catch {
+        throw MeetingIntelligenceStoreError.malformed
     }
 }
 

@@ -90,8 +90,8 @@ struct OpenAICompatibleMeetingIntelligenceClient: MeetingIntelligenceRequesting,
     static let maximumRequestBytes = 96 * 1_024
     static let maximumResponseBytes = 256 * 1_024
     static let maximumPartialSummaryBytes = 4 * 1_024
-    static let maximumFinalSummaryBytes = 48 * 1_024
-    static let maximumTitleGraphemes = 120
+    static let maximumFinalSummaryBytes = MeetingIntelligenceArtifactValidator.maximumSummaryBytes
+    static let maximumTitleGraphemes = MeetingIntelligenceArtifactValidator.maximumTitleGraphemes
     static let timeout: TimeInterval = 90
     static let maximumInputBytesBeforeEncoding = 88 * 1_024
     private let transport: any ProviderHTTPTransport
@@ -105,7 +105,7 @@ struct OpenAICompatibleMeetingIntelligenceClient: MeetingIntelligenceRequesting,
               let summary = object["summary"] as? String else {
             throw MeetingIntelligenceClientError.unsafeOutput
         }
-        return try sanitizedSummary(summary, limit: Self.maximumPartialSummaryBytes)
+        return try validatedSummary(summary, limit: Self.maximumPartialSummaryBytes)
     }
 
     func requestFinalResult(input: String, snapshot: OpenAICompatibleProviderSnapshot) async throws -> MeetingIntelligenceGeneratedContent {
@@ -115,7 +115,7 @@ struct OpenAICompatibleMeetingIntelligenceClient: MeetingIntelligenceRequesting,
               let summary = object["summary"] as? String else {
             throw MeetingIntelligenceClientError.unsafeOutput
         }
-        return .init(title: try sanitizedTitle(title), summary: try sanitizedSummary(summary, limit: Self.maximumFinalSummaryBytes))
+        return .init(title: try validatedTitle(title), summary: try validatedSummary(summary, limit: Self.maximumFinalSummaryBytes))
     }
 
     private func request(input: String, snapshot: OpenAICompatibleProviderSnapshot, final: Bool) async throws -> String {
@@ -166,43 +166,18 @@ struct OpenAICompatibleMeetingIntelligenceClient: MeetingIntelligenceRequesting,
               Set(object.keys) == keys else { return nil }
         return object
     }
-    private func sanitizedSummary(_ raw: String, limit: Int) throws -> String {
-        let normalized = raw.precomposedStringWithCanonicalMapping
-        guard !containsUnsafeScalar(normalized, allowingNewlineAndTab: true) else {
-            throw MeetingIntelligenceClientError.unsafeOutput
-        }
-        let value = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              value.lengthOfBytes(using: .utf8) <= limit,
-              !containsUnsafeScalar(value, allowingNewlineAndTab: true) else { throw MeetingIntelligenceClientError.unsafeOutput }
-        return value
-    }
-    private func sanitizedTitle(_ raw: String) throws -> String {
-        let normalized = raw.precomposedStringWithCanonicalMapping
-        guard !containsUnsafeScalar(normalized, allowingNewlineAndTab: false) else {
-            throw MeetingIntelligenceClientError.unsafeOutput
-        }
-        let value = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-        let forbiddenTitle = try! NSRegularExpression(pattern: "^(?:\\.|\\.\\.|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?|(meeting|test|manual)-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}(?:[0-9]{2})?)$")
-        let range = NSRange(value.startIndex..., in: value)
-        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              value.count <= Self.maximumTitleGraphemes,
-              !value.contains("/"), !value.contains("\\"),
-              forbiddenTitle.firstMatch(in: value, range: range) == nil,
-              !containsUnsafeScalar(value, allowingNewlineAndTab: false) else {
+    private func validatedSummary(_ raw: String, limit: Int) throws -> String {
+        guard let value = MeetingIntelligenceArtifactValidator.summary(raw, maximumBytes: limit) else {
             throw MeetingIntelligenceClientError.unsafeOutput
         }
         return value
     }
-    private func containsUnsafeScalar(_ value: String, allowingNewlineAndTab: Bool) -> Bool {
-        value.unicodeScalars.contains { scalar in
-            let value = scalar.value
-            if allowingNewlineAndTab && (value == 9 || value == 10) { return false }
-            return value < 32 || (127...159).contains(value) ||
-                scalar.properties.generalCategory == .format ||
-                [0x061C, 0x200B, 0x200E, 0x200F, 0xFEFF].contains(value) ||
-                (0x202A...0x202E).contains(value) || (0x2066...0x2069).contains(value)
+
+    private func validatedTitle(_ raw: String) throws -> String {
+        guard let value = MeetingIntelligenceArtifactValidator.title(raw) else {
+            throw MeetingIntelligenceClientError.unsafeOutput
         }
+        return value
     }
 
     private func retryAfter(_ response: HTTPURLResponse) -> TimeInterval? {

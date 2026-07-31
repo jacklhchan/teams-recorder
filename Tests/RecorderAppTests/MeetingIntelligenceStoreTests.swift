@@ -50,7 +50,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
     func testV1ArtifactIgnoresUnknownFields() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
         let data = Data(#"""
-        {"schemaVersion":1,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:abc","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","future":{"nested":[1,true]}}
+        {"schemaVersion":1,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","future":{"nested":[1,true]}}
         """#.utf8)
         try data.write(to: fixture.artifactURL)
 
@@ -331,7 +331,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
 
     func testExactReadBoundariesAcceptMaximumAndRejectMaximumPlusOne() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
-        let artifactPrefix = Data(#"{"schemaVersion":1,"summary":"","suggestedTitle":"","sourceTranscriptSHA256":"","sourceTranscriptByteCount":0,"model":"","generatedAt":"2026-01-01T00:00:00Z","intent":"generate"}"#.utf8)
+        let artifactPrefix = Data(#"{"schemaVersion":1,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":0,"model":"model","generatedAt":"2026-01-01T00:00:00Z","intent":"generate"}"#.utf8)
         try fixture.writePadded(artifactPrefix, to: fixture.artifactURL, count: MeetingIntelligenceArtifactStore.maximumBytes)
         XCTAssertNotNil(try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder))
         try fixture.writePadded(artifactPrefix, to: fixture.artifactURL, count: MeetingIntelligenceArtifactStore.maximumBytes + 1)
@@ -355,9 +355,87 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let oversized = fixture.artifact(summary: String(repeating: "x", count: MeetingIntelligenceArtifactStore.maximumBytes))
 
         XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).stage(oversized, in: fixture.folder)) {
-            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .tooLarge)
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .malformed)
         }
         XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), original)
+    }
+
+    func testArtifactStageAndLoadEnforceCurrentSchemaConstraints() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let base = fixture.artifact()
+        let invalid: [(String, MeetingIntelligenceArtifact)] = [
+            ("blank summary", fixture.artifact(summary: " \n\t ")),
+            ("large summary", fixture.artifact(summary: String(repeating: "a", count: MeetingIntelligenceArtifactValidator.maximumSummaryBytes + 1))),
+            ("summary controls", fixture.artifact(summary: "bad\u{202E}")),
+            ("date title", fixture.artifact(title: "2026-07-31")),
+            ("path title", fixture.artifact(title: "folder/name")),
+            ("title controls", fixture.artifact(title: "bad\u{200B}title")),
+            ("large title", fixture.artifact(title: String(repeating: "t", count: MeetingIntelligenceArtifactValidator.maximumTitleGraphemes + 1))),
+            ("bad hash", fixture.artifact(hash: "sha256:ABC")),
+            ("negative transcript bytes", fixture.artifact(byteCount: -1)),
+            ("too many transcript bytes", fixture.artifact(byteCount: MeetingIntelligenceArtifactValidator.maximumTranscriptBytes + 1)),
+            ("blank model", fixture.artifact(model: " ")),
+            ("large model", fixture.artifact(model: String(repeating: "m", count: MeetingIntelligenceArtifactValidator.maximumModelBytes + 1))),
+            ("model controls", fixture.artifact(model: "model\u{202E}"))
+        ]
+
+        XCTAssertTrue(MeetingIntelligenceArtifactValidator.isValid(base))
+        for (name, artifact) in invalid {
+            XCTAssertThrowsError(try store.stage(artifact, in: fixture.folder), name) {
+                XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .malformed)
+            }
+            let data = try JSONEncoder.meetingIntelligence.encode(artifact)
+            try data.write(to: fixture.artifactURL)
+            XCTAssertThrowsError(try store.load(in: fixture.folder), name) {
+                XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .malformed)
+            }
+            try FileManager.default.removeItem(at: fixture.artifactURL)
+        }
+
+        let nonFiniteDate = fixture.artifact(generatedAt: Date(timeIntervalSinceReferenceDate: .infinity))
+        XCTAssertThrowsError(try store.stage(nonFiniteDate, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .malformed)
+        }
+
+        for raw in [
+            #"{"schemaVersion":1,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"not-a-date","intent":"generate"}"#,
+            #"{"schemaVersion":1,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"unexpected"}"#
+        ] {
+            try Data(raw.utf8).write(to: fixture.artifactURL)
+            XCTAssertThrowsError(try store.load(in: fixture.folder)) {
+                XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .malformed)
+            }
+            try FileManager.default.removeItem(at: fixture.artifactURL)
+        }
+
+        let unsupported = MeetingIntelligenceArtifact(
+            schemaVersion: 2,
+            summary: base.summary,
+            suggestedTitle: base.suggestedTitle,
+            sourceTranscriptSHA256: base.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: base.sourceTranscriptByteCount,
+            model: base.model,
+            generatedAt: base.generatedAt,
+            intent: base.intent
+        )
+        XCTAssertThrowsError(try store.stage(unsupported, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
+        }
+    }
+
+    func testArtifactValidExactEncodingRetainsUnknownV1FieldsAndBoundaryValues() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let artifact = fixture.artifact(
+            summary: "line one\nline\ttwo",
+            title: String(repeating: "a", count: MeetingIntelligenceArtifactValidator.maximumTitleGraphemes),
+            byteCount: MeetingIntelligenceArtifactValidator.maximumTranscriptBytes,
+            model: String(repeating: "m", count: MeetingIntelligenceArtifactValidator.maximumModelBytes)
+        )
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let staged = try store.stage(artifact, in: fixture.folder)
+        try store.promoteStaged(staged, in: fixture.folder)
+        XCTAssertEqual(try store.load(in: fixture.folder), artifact)
     }
 
     func testActiveLoadCannotOverwriteConcurrentCompletedSaveUsingSharedGate() throws {
@@ -426,15 +504,22 @@ private final class MeetingIntelligenceStoreFixture {
         try? FileManager.default.removeItem(at: root)
     }
 
-    func artifact(summary: String = "Summary") -> MeetingIntelligenceArtifact {
+    func artifact(
+        summary: String = "Summary",
+        title: String = "Title",
+        hash: String = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        byteCount: Int = 3,
+        model: String = "model",
+        generatedAt: Date = Date(timeIntervalSince1970: 1_785_427_200)
+    ) -> MeetingIntelligenceArtifact {
         .init(
             schemaVersion: 1,
             summary: summary,
-            suggestedTitle: "Title",
-            sourceTranscriptSHA256: "sha256:abc",
-            sourceTranscriptByteCount: 3,
-            model: "model",
-            generatedAt: Date(timeIntervalSince1970: 1_785_427_200),
+            suggestedTitle: title,
+            sourceTranscriptSHA256: hash,
+            sourceTranscriptByteCount: byteCount,
+            model: model,
+            generatedAt: generatedAt,
             intent: .generate
         )
     }

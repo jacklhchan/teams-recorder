@@ -264,7 +264,7 @@ private struct SessionListView: View {
                 play: { play(session) },
                 export: { exportTranscript(session) },
                 copy: { copyTranscript(session) },
-                editDetails: { metadataSession = session },
+                editDetails: { metadataSession = $0 },
                 meetingIntelligencePresentation: meetingIntelligencePresentation(session),
                 meetingIntelligenceActions: .init(
                     generate: { generateMeetingIntelligence(session) },
@@ -335,6 +335,15 @@ enum TranscriptEditorDraft {
     }
 }
 
+enum TranscriptDetailActionProjection {
+    static func current(
+        opened: RecordingSession,
+        resolved: RecordingSession?
+    ) -> RecordingSession {
+        resolved ?? opened
+    }
+}
+
 struct TranscriptEditorView: View {
     let session: RecordingSession
     /// The list projection may be refreshed while this sheet is open (for
@@ -349,7 +358,7 @@ struct TranscriptEditorView: View {
     let play: () -> Void
     let export: () -> Void
     let copy: () -> Void
-    let editDetails: () -> Void
+    let editDetails: (RecordingSession) -> Void
     let meetingIntelligencePresentation: MeetingIntelligencePresentation
     let meetingIntelligenceActions: MeetingIntelligenceActions
     @Environment(\.dismiss) private var dismiss
@@ -365,7 +374,7 @@ struct TranscriptEditorView: View {
         play: @escaping () -> Void = {},
         export: @escaping () -> Void,
         copy: @escaping () -> Void,
-        editDetails: @escaping () -> Void = {},
+        editDetails: @escaping (RecordingSession) -> Void = { _ in },
         meetingIntelligencePresentation: MeetingIntelligencePresentation = .empty,
         meetingIntelligenceActions: MeetingIntelligenceActions = .init()
     ) {
@@ -443,7 +452,7 @@ struct TranscriptEditorView: View {
                     )
                 )
             Spacer()
-            Button(action: editDetails) {
+            Button { editDetails(displayedSession) } label: {
                 Image(systemName: displayedSession.isFavorite ? "star.fill" : "star")
             }
             .buttonStyle(.borderless)
@@ -456,7 +465,7 @@ struct TranscriptEditorView: View {
                     label: displayedSession.isFavorite ? "favorite" : "not-favorite"
                 )
             )
-            Button(action: editDetails) { Image(systemName: "pencil") }
+            Button { editDetails(displayedSession) } label: { Image(systemName: "pencil") }
                 .buttonStyle(.borderless)
                 .help("Edit recording details")
             Button("Open Folder", action: openFolder).buttonStyle(.bordered)
@@ -507,7 +516,10 @@ struct TranscriptEditorView: View {
     }
 
     private var displayedSession: RecordingSession {
-        resolvedSession ?? session
+        TranscriptDetailActionProjection.current(
+            opened: session,
+            resolved: resolvedSession
+        )
     }
 
     private var footer: some View {

@@ -93,6 +93,7 @@ var tests = new (string Name, Action Run)[]
     ,("Teams pairing tolerates an already-paired response", TeamsIntegrationTests.MuteCoordinatorKeepsTrustedStateWhenPairingIsAlreadyComplete)
     ,("live health is neutral before capture and healthy with signals", LiveAudioHealthAdvisorTests.ReportsNeutralBeforeCaptureAndHealthySignalsDuringCapture)
     ,("live health distinguishes silence, disconnect, and microphone mute", LiveAudioHealthAdvisorTests.WarnsOnSilentOrDisconnectedInputsButKeepsMutedMicNeutral)
+    ,("live health reports a recovered signal after historical interruptions", LiveAudioHealthAdvisorTests.ReportsRecoveryAfterHistoricalInterruptionsWhenSignalsAreLive)
     ,("Windows global hotkey routes messages and unregisters once", WindowsGlobalHotKeyRegistrarTests.RoutesCtrlAltMAndUnregistersExactlyOnce)
     ,("Windows global hotkey reports unavailable registrations", WindowsGlobalHotKeyRegistrarTests.FailsWithWin32ErrorWhenCtrlAltMIsUnavailable)
     ,("input mute only publishes effective transitions", InputMuteTests.IndependentMuteCausesOnlyPublishEffectiveTransitions)

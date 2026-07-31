@@ -74,6 +74,35 @@ internal static class LiveAudioHealthAdvisorTests
         Equal(LiveAudioHealthStatus.Warning, unavailable.Primary.Status);
     }
 
+    public static void ReportsRecoveryAfterHistoricalInterruptionsWhenSignalsAreLive()
+    {
+        var recovered = LiveAudioHealthAdvisor.Assess(
+            NativeCaptureStats.Empty(RecordingCaptureMode.Mixed) with
+            {
+                Packets = 12,
+                SilentPackets = 0,
+                PrimaryLevelPeak = 0.2f,
+                PrimaryLevelRms = 0.1f,
+                MicrophoneLevelPeak = 0.2f,
+                MicrophoneLevelRms = 0.1f,
+                Discontinuities = 1,
+                MicrophoneTimeline = NativeSourceTimelineStats.Empty with { SourceDisconnects = 1 },
+            },
+            isCaptureActive: true,
+            primaryTitle: "系統音訊",
+            primaryAvailable: true,
+            microphoneIncluded: true,
+            microphoneAvailable: true,
+            microphoneMuted: false);
+
+        Equal(LiveAudioHealthStatus.Recovered, recovered.Primary.Status);
+        Equal(LiveAudioHealthStatus.Recovered, recovered.Microphone.Status);
+        if (!recovered.Summary.Contains("目前正常", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Recovered health should explain that the live signal is currently normal.");
+        }
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull
     {
         if (!EqualityComparer<T>.Default.Equals(expected, actual))

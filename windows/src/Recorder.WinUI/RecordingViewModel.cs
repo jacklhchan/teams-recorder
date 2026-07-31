@@ -29,6 +29,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private const int WaveformBarCount = 48;
     private static readonly Brush HealthyHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.ForestGreen);
     private static readonly Brush WarningHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.DarkOrange);
+    private static readonly Brush RecoveredHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.Goldenrod);
     private static readonly Brush NeutralHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.Gray);
     private readonly DispatcherQueue dispatcherQueue;
     private readonly DispatcherQueueTimer telemetryTimer;
@@ -2544,6 +2545,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     {
         LiveAudioHealthStatus.Healthy => "\uE73E",
         LiveAudioHealthStatus.Warning => "\uE7BA",
+        LiveAudioHealthStatus.Recovered => "\uE73E",
         _ => "\uE946",
     };
 
@@ -2551,6 +2553,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     {
         LiveAudioHealthStatus.Healthy => HealthyHealthBrush,
         LiveAudioHealthStatus.Warning => WarningHealthBrush,
+        LiveAudioHealthStatus.Recovered => RecoveredHealthBrush,
         _ => NeutralHealthBrush,
     };
 

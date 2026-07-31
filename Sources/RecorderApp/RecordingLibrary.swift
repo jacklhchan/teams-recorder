@@ -228,6 +228,14 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
             titleOrigin = .meetingIntelligence
         }
     }
+
+    /// Keeps specialised persistence adapters from silently normalising an
+    /// unsupported on-disk title origin during an unrelated metadata update.
+    func validateForPersistence() throws {
+        if let unsupportedTitleOrigin {
+            throw RecordingSessionMetadataStoreError.unsupportedTitleOrigin(unsupportedTitleOrigin)
+        }
+    }
 }
 
 private struct DynamicCodingKey: CodingKey {

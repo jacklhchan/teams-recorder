@@ -236,6 +236,43 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         XCTAssertEqual(access.renameCalls, 0)
     }
 
+    func testPromotionRejectsFolderReplacementBeforeRename() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let staged = try store.stage(fixture.artifact(summary: "replacement"), in: fixture.folder)
+        let moved = fixture.root.appendingPathComponent("moved", isDirectory: true)
+        try FileManager.default.moveItem(at: fixture.folder, to: moved)
+        try FileManager.default.createDirectory(at: fixture.folder, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: moved.appendingPathComponent(staged.lastPathComponent),
+            to: fixture.folder.appendingPathComponent(staged.lastPathComponent)
+        )
+
+        XCTAssertThrowsError(try store.promoteStaged(staged, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.artifactURL.path))
+    }
+
+    func testPromotionRejectsSwapAfterDirectoryValidationBeforeRename() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let moved = fixture.root.appendingPathComponent("moved-after-validation", isDirectory: true)
+        let access = DarwinMeetingIntelligenceStoreFileAccess(beforeRename: {
+            try? FileManager.default.moveItem(at: fixture.folder, to: moved)
+            try? FileManager.default.createDirectory(at: fixture.folder, withIntermediateDirectories: true)
+        })
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate, fileAccess: access)
+        let staged = try store.stage(fixture.artifact(summary: "replacement"), in: fixture.folder)
+
+        XCTAssertThrowsError(try store.promoteStaged(staged, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.artifactURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: moved.appendingPathComponent(MeetingIntelligenceArtifactStore.fileName).path
+        ))
+    }
+
     func testInjectedRenameFailurePreservesArtifactAndStateBytes() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
         let artifactBytes = try fixture.writeExistingArtifact()

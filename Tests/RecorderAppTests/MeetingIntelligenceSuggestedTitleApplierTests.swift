@@ -50,6 +50,30 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
         XCTAssertEqual(store.saveCount, 0)
     }
 
+    func testDefaultMetadataAdapterRejectsSymlinkInsteadOfWritingOutsideSession() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let outside = folder.deletingLastPathComponent().appendingPathComponent("outside-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let original = Data(#"{"vendor":{"nested":[1,{"keep":true}]}}"#.utf8)
+        try original.write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: RecordingSessionMetadataStore.fileURL(in: folder),
+            withDestinationURL: outside
+        )
+        let revision = TranscriptDocumentRevision(sha256: "sha256:expected", byteCount: 8)
+        let session = RecordingSession(id: folder, folderURL: folder,
+                                       recordingURL: folder.appendingPathComponent("recording.m4a"),
+                                       createdAt: .distantPast, duration: 0, fileSize: 0, metadata: .init())
+        let applier = MeetingIntelligenceSuggestedTitleApplier(
+            mutationGate: .init(), transcriptReader: FixedReader(revision: revision)
+        )
+
+        let applied = try await applier.applySuggestedTitle(request(session: session, revision: revision))
+        XCTAssertFalse(applied)
+        XCTAssertEqual(try Data(contentsOf: outside), original)
+    }
+
     func testCapturedManualTitleCanBeExplicitlyReplaced() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -158,6 +182,7 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
         return folder
     }
 }
+
 
 private struct FixedReader: TranscriptDocumentReading {
     let revision: TranscriptDocumentRevision

@@ -6,12 +6,62 @@ protocol RecordingSessionMetadataStoring: Sendable {
 }
 
 struct RecordingSessionMetadataStoreAdapter: RecordingSessionMetadataStoring {
+    private static let maximumBytes = 256 * 1_024
+    private static let stagePrefix = ".meeting-intelligence-metadata-stage-"
+
     func load(in folder: URL) -> RecordingSessionMetadata {
-        RecordingSessionMetadataStore.load(in: folder)
+        guard let data = try? MeetingIntelligenceStoreFileIO.read(
+            named: RecordingSessionMetadataStore.fileName,
+            in: folder,
+            maximumBytes: Self.maximumBytes
+        ) else {
+            return RecordingSessionMetadata()
+        }
+        return (try? Self.decoder.decode(RecordingSessionMetadata.self, from: data))
+            ?? RecordingSessionMetadata()
     }
 
     func save(_ metadata: RecordingSessionMetadata, in folder: URL) throws {
-        try RecordingSessionMetadataStore.save(metadata, in: folder)
+        try metadata.validateForPersistence()
+        var metadata = metadata
+        metadata.schemaVersion = max(metadata.schemaVersion, RecordingSessionMetadata.currentSchemaVersion)
+        let data = try Self.encoder.encode(metadata)
+        guard data.count <= Self.maximumBytes else { throw MeetingIntelligenceStoreError.tooLarge }
+        let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+        let destination = try MeetingIntelligenceStoreFileIO.snapshot(
+            named: RecordingSessionMetadataStore.fileName,
+            in: normalizedFolder,
+            maximumBytes: Self.maximumBytes
+        )
+        let staged = try MeetingIntelligenceStoreFileIO.createSnapshot(
+            named: Self.stagePrefix + UUID().uuidString,
+            data: data,
+            in: normalizedFolder
+        )
+        do {
+            try MeetingIntelligenceStoreFileIO.promote(
+                staged,
+                to: RecordingSessionMetadataStore.fileName,
+                over: destination,
+                in: normalizedFolder
+            )
+        } catch {
+            try? MeetingIntelligenceStoreFileIO.remove(staged, in: normalizedFolder)
+            throw error
+        }
+    }
+
+    private static var encoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    private static var decoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
     }
 }
 

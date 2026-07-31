@@ -30,9 +30,14 @@ struct MeetingIntelligenceSuggestedTitleApplier: @unchecked Sendable {
     func applySuggestedTitle(_ request: MeetingIntelligenceSuggestedTitleRequest) async throws -> Bool {
         try await executor.run {
             let folder = try normalizedFolder(for: request.session)
+            let metadataSnapshot = try (metadataStore as? any RecordingSessionMetadataSecureStoring)?
+                .prepare(in: folder)
             return try mutationGate.withMutation(for: folder) {
                 try validate(request, in: folder)
-                var metadata = metadataStore.load(in: folder)
+                var metadata: RecordingSessionMetadata
+                if let secure = metadataStore as? any RecordingSessionMetadataSecureStoring,
+                   let metadataSnapshot { metadata = try secure.load(in: metadataSnapshot) }
+                else { metadata = metadataStore.load(in: folder) }
                 guard metadataMatchesCapturedValue(metadata, request: request) else {
                     return false
                 }
@@ -46,7 +51,9 @@ struct MeetingIntelligenceSuggestedTitleApplier: @unchecked Sendable {
                 defer { commit.finish() }
                 metadata.applyTitleEdit(.applyMeetingIntelligence(request.artifact.suggestedTitle))
                 try validateTranscript(request, in: folder)
-                try metadataStore.save(metadata, in: folder)
+                if let secure = metadataStore as? any RecordingSessionMetadataSecureStoring,
+                   let metadataSnapshot { try secure.save(metadata, in: metadataSnapshot) }
+                else { try metadataStore.save(metadata, in: folder) }
                 return true
             }
         }

@@ -69,8 +69,12 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
             mutationGate: .init(), transcriptReader: FixedReader(revision: revision)
         )
 
-        let applied = try await applier.applySuggestedTitle(request(session: session, revision: revision))
-        XCTAssertFalse(applied)
+        do {
+            _ = try await applier.applySuggestedTitle(request(session: session, revision: revision))
+            XCTFail("Expected unsafe metadata rejection")
+        } catch {
+            XCTAssertEqual(error as? MeetingIntelligenceStoreError, .unsafeFile)
+        }
         XCTAssertEqual(try Data(contentsOf: outside), original)
     }
 

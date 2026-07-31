@@ -347,11 +347,11 @@ enum MeetingIntelligenceStoreFileIO {
         return normalized
     }
 
-    static func read(named name: String, in folder: URL, maximumBytes: Int) throws -> Data? {
-        try snapshot(named: name, in: folder, maximumBytes: maximumBytes)?.data
+    static func read(named name: String, in folder: URL, maximumBytes: Int, expectedDirectory: MeetingIntelligenceStoreDirectoryIdentity? = nil) throws -> Data? {
+        try snapshot(named: name, in: folder, maximumBytes: maximumBytes, expectedDirectory: expectedDirectory)?.data
     }
 
-    static func snapshot(named name: String, in folder: URL, maximumBytes: Int) throws -> MeetingIntelligenceStoreFileSnapshot? {
+    static func snapshot(named name: String, in folder: URL, maximumBytes: Int, expectedDirectory: MeetingIntelligenceStoreDirectoryIdentity? = nil) throws -> MeetingIntelligenceStoreFileSnapshot? {
         let normalizedFolder = try normalizedFolder(folder)
         var pathEntry = stat()
         let entryURL = normalizedFolder.appendingPathComponent(name)
@@ -365,6 +365,9 @@ enum MeetingIntelligenceStoreFileIO {
         let directory = try openFolder(normalizedFolder)
         defer { Darwin.close(directory) }
         let directoryIdentity = try identity(ofDirectory: directory)
+        if let expectedDirectory, directoryIdentity != expectedDirectory {
+            throw MeetingIntelligenceStoreError.identityChanged
+        }
         var entry = stat()
         if fstatat(directory, name, &entry, AT_SYMLINK_NOFOLLOW) != 0 {
             if errno == ENOENT { return nil }
@@ -383,9 +386,18 @@ enum MeetingIntelligenceStoreFileIO {
         return .init(name: name, data: data, identity: identity, directoryIdentity: directoryIdentity)
     }
 
-    static func createSnapshot(named name: String, data: Data, in folder: URL) throws -> MeetingIntelligenceStoreFileSnapshot {
+    static func createSnapshot(
+        named name: String,
+        data: Data,
+        in folder: URL,
+        expectedDirectory: MeetingIntelligenceStoreDirectoryIdentity? = nil
+    ) throws -> MeetingIntelligenceStoreFileSnapshot {
         let directory = try openFolder(try normalizedFolder(folder))
         defer { Darwin.close(directory) }
+        let directoryIdentity = try identity(ofDirectory: directory)
+        if let expectedDirectory, directoryIdentity != expectedDirectory {
+            throw MeetingIntelligenceStoreError.identityChanged
+        }
         let descriptor = openat(
             directory,
             name,
@@ -399,7 +411,7 @@ enum MeetingIntelligenceStoreFileIO {
             name: name,
             data: data,
             identity: try identity(of: descriptor),
-            directoryIdentity: try identity(ofDirectory: directory)
+            directoryIdentity: directoryIdentity
         )
     }
 

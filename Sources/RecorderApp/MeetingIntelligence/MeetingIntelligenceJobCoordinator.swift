@@ -96,6 +96,11 @@ private actor MeetingIntelligenceIO {
         }
         await stateSaveScheduler.awaitAdmission()
         guard !Task.isCancelled, lease.isValid else { return }
+        // This reservation is the state-file linearization point. Lifecycle
+        // invalidation that wins before it produces no recovery state; once it
+        // exists, this exact save is the ordered winner.
+        guard let commit = lease.beginCommit() else { return }
+        defer { commit.finish() }
         latestWriteByFolder[folder] = incoming
         try states.save(state, in: folder)
     }

@@ -5,7 +5,18 @@ protocol RecordingSessionMetadataStoring: Sendable {
     func save(_ metadata: RecordingSessionMetadata, in folder: URL) throws
 }
 
-struct RecordingSessionMetadataStoreAdapter: RecordingSessionMetadataStoring {
+struct RecordingSessionMetadataSnapshot: Sendable {
+    let folder: URL
+    let directoryIdentity: MeetingIntelligenceStoreDirectoryIdentity
+}
+
+protocol RecordingSessionMetadataSecureStoring: RecordingSessionMetadataStoring {
+    func prepare(in folder: URL) throws -> RecordingSessionMetadataSnapshot
+    func load(in snapshot: RecordingSessionMetadataSnapshot) throws -> RecordingSessionMetadata
+    func save(_ metadata: RecordingSessionMetadata, in snapshot: RecordingSessionMetadataSnapshot) throws
+}
+
+struct RecordingSessionMetadataStoreAdapter: RecordingSessionMetadataSecureStoring {
     private static let maximumBytes = 256 * 1_024
     private static let stagePrefix = ".meeting-intelligence-metadata-stage-"
 
@@ -21,32 +32,52 @@ struct RecordingSessionMetadataStoreAdapter: RecordingSessionMetadataStoring {
             ?? RecordingSessionMetadata()
     }
 
+    func prepare(in folder: URL) throws -> RecordingSessionMetadataSnapshot {
+        let normalized = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+        return .init(folder: normalized, directoryIdentity: try MeetingIntelligenceStoreFileIO.folderIdentity(in: normalized))
+    }
+
+    func load(in snapshot: RecordingSessionMetadataSnapshot) throws -> RecordingSessionMetadata {
+        try MeetingIntelligenceStoreFileIO.verifyFolder(snapshot.folder, matches: snapshot.directoryIdentity)
+        guard let data = try MeetingIntelligenceStoreFileIO.read(named: RecordingSessionMetadataStore.fileName, in: snapshot.folder, maximumBytes: Self.maximumBytes, expectedDirectory: snapshot.directoryIdentity) else {
+            return .init()
+        }
+        return try Self.decoder.decode(RecordingSessionMetadata.self, from: data)
+    }
+
     func save(_ metadata: RecordingSessionMetadata, in folder: URL) throws {
+        let snapshot = try prepare(in: folder)
+        try save(metadata, in: snapshot)
+    }
+
+    func save(_ metadata: RecordingSessionMetadata, in snapshot: RecordingSessionMetadataSnapshot) throws {
         try metadata.validateForPersistence()
         var metadata = metadata
         metadata.schemaVersion = max(metadata.schemaVersion, RecordingSessionMetadata.currentSchemaVersion)
         let data = try Self.encoder.encode(metadata)
         guard data.count <= Self.maximumBytes else { throw MeetingIntelligenceStoreError.tooLarge }
-        let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+        try MeetingIntelligenceStoreFileIO.verifyFolder(snapshot.folder, matches: snapshot.directoryIdentity)
         let destination = try MeetingIntelligenceStoreFileIO.snapshot(
             named: RecordingSessionMetadataStore.fileName,
-            in: normalizedFolder,
-            maximumBytes: Self.maximumBytes
+            in: snapshot.folder,
+            maximumBytes: Self.maximumBytes,
+            expectedDirectory: snapshot.directoryIdentity
         )
         let staged = try MeetingIntelligenceStoreFileIO.createSnapshot(
             named: Self.stagePrefix + UUID().uuidString,
             data: data,
-            in: normalizedFolder
+            in: snapshot.folder,
+            expectedDirectory: snapshot.directoryIdentity
         )
         do {
             try MeetingIntelligenceStoreFileIO.promote(
                 staged,
                 to: RecordingSessionMetadataStore.fileName,
                 over: destination,
-                in: normalizedFolder
+                in: snapshot.folder
             )
         } catch {
-            try? MeetingIntelligenceStoreFileIO.remove(staged, in: normalizedFolder)
+            try? MeetingIntelligenceStoreFileIO.remove(staged, in: snapshot.folder)
             throw error
         }
     }
@@ -196,6 +227,8 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
     ) async throws -> MeetingIntelligencePublicationOutcome {
         let folder = try normalizedFolder(for: request.session)
         try validate(request, in: folder)
+        let metadataSnapshot = try (metadataStore as? any RecordingSessionMetadataSecureStoring)?
+            .prepare(in: folder)
 
         let artifact = MeetingIntelligenceArtifact(
             schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
@@ -224,7 +257,13 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
             try artifactStore.promoteStaged(staged, in: folder)
             promoted = true
 
-            var metadata = metadataStore.load(in: folder)
+            var metadata: RecordingSessionMetadata
+            if let secure = metadataStore as? any RecordingSessionMetadataSecureStoring,
+               let metadataSnapshot {
+                metadata = try secure.load(in: metadataSnapshot)
+            } else {
+                metadata = metadataStore.load(in: folder)
+            }
             // A transcript editor or retranscription may have settled while
             // metadata was loaded. Recheck immediately before any title write.
             try validateTranscript(request, in: folder)
@@ -242,7 +281,10 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
 
             metadata.applyTitleEdit(.applyMeetingIntelligence(request.content.title))
             do {
-                try metadataStore.save(metadata, in: folder)
+                if let secure = metadataStore as? any RecordingSessionMetadataSecureStoring,
+                   let metadataSnapshot {
+                    try secure.save(metadata, in: metadataSnapshot)
+                } else { try metadataStore.save(metadata, in: folder) }
                 return .init(
                     artifact: artifact,
                     titleWasApplied: true,

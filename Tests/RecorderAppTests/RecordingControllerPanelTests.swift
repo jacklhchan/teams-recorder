@@ -45,6 +45,7 @@ final class RecordingControllerPanelTests: XCTestCase {
             ),
             isRecordingPublisher: subject.eraseToAnyPublisher()
         )
+        defer { coordinator.shutdown() }
 
         subject.send(false)
         XCTAssertEqual(presenter.presentedModels.count, 0)
@@ -99,7 +100,10 @@ final class RecordingControllerPanelTests: XCTestCase {
         let recorder = RecordingEngine()
         let model = AppModel(
             recorder: recorder,
-            performStartupWork: false
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            virtualMicStateProvider: { .absent }
         )
         return (model, recorder)
     }

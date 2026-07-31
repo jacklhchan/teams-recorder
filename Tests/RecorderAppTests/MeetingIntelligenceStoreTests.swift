@@ -115,7 +115,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let store = MeetingIntelligenceStateStore(mutationGate: gate)
         let started = Date(timeIntervalSince1970: 1_785_427_200)
         try store.save(
-            .init(
+            MeetingIntelligenceState(
                 schemaVersion: 1,
                 phase: .generating,
                 message: "Generating",
@@ -223,6 +223,30 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: stateURL), stateBytes)
     }
 
+    func testFailedStatePromotionCleanupPreservesReplacedStage() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let replacement = Data("replacement-stage".utf8)
+        let access = ScriptedFileAccess(
+            renameError: .unsafeFile,
+            removeHook: { folder, name in
+                let url = folder.appendingPathComponent(name)
+                try FileManager.default.removeItem(at: url)
+                try replacement.write(to: url)
+            }
+        )
+        let store = MeetingIntelligenceStateStore(mutationGate: gate, fileAccess: access)
+
+        XCTAssertThrowsError(try store.save(fixture.state(), in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsafeFile)
+        }
+        let stage = try XCTUnwrap(
+            try FileManager.default.contentsOfDirectory(at: fixture.folder, includingPropertiesForKeys: nil)
+                .first { $0.lastPathComponent.hasPrefix(".meeting-intelligence-state-stage-") }
+        )
+        XCTAssertEqual(try Data(contentsOf: stage), replacement)
+        XCTAssertEqual(access.removeCalls, 0)
+    }
+
     func testStateRemoveRejectsIdentityChangeWithoutUnlinkingReplacement() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
         let stateURL = fixture.folder.appendingPathComponent(MeetingIntelligenceStateStore.fileName)
@@ -309,19 +333,11 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
 
     func testActiveLoadCannotOverwriteConcurrentCompletedSaveUsingSharedGate() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
-        let gate = RecordingSessionMutationGate()
-        let initialStore = MeetingIntelligenceStateStore(mutationGate: gate)
-        try initialStore.save(
-            .init(
-                schemaVersion: 1,
-                phase: .generating,
-                message: "Generating",
-                sourceTranscriptSHA256: nil,
-                startedAt: Date(timeIntervalSince1970: 1),
-                finishedAt: nil
-            ),
-            in: fixture.folder
+        let mutationAttempt = DispatchSemaphore(value: 0)
+        let gate = RecordingSessionMutationGate(
+            mutationAttemptObserver: { mutationAttempt.signal() }
         )
+        try fixture.generatingStateData().write(to: fixture.stateURL)
         let barrier = SnapshotBarrierFileAccess(blocking: MeetingIntelligenceStateStore.fileName)
         let store = MeetingIntelligenceStateStore(mutationGate: gate, fileAccess: barrier)
         let loadDone = DispatchSemaphore(value: 0)
@@ -333,14 +349,17 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
             defer { loadDone.signal() }
             do { _ = try store.load(in: fixture.folder) } catch { loadError = error }
         }
+        XCTAssertEqual(mutationAttempt.wait(timeout: .now() + 1), .success)
         XCTAssertEqual(barrier.snapshotTaken.wait(timeout: .now() + 1), .success)
 
         DispatchQueue.global().async {
             defer { saveDone.signal() }
             do { try store.save(fixture.state(), in: fixture.folder) } catch { saveError = error }
         }
-        XCTAssertEqual(barrier.createStarted.wait(timeout: .now() + 0.1), .timedOut)
+        XCTAssertEqual(mutationAttempt.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(barrier.snapshotCount, 1)
         barrier.releaseSnapshot.signal()
+        XCTAssertEqual(barrier.secondSnapshotTaken.wait(timeout: .now() + 1), .success)
         XCTAssertEqual(loadDone.wait(timeout: .now() + 1), .success)
         XCTAssertEqual(saveDone.wait(timeout: .now() + 1), .success)
         XCTAssertNil(loadError)
@@ -363,12 +382,14 @@ private final class MeetingIntelligenceStoreFixture {
     let root: URL
     let folder: URL
     let artifactURL: URL
+    let stateURL: URL
 
     init() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("meeting-intelligence-store-\(UUID().uuidString)", isDirectory: true)
         folder = root.appendingPathComponent("meeting", isDirectory: true)
         artifactURL = folder.appendingPathComponent(MeetingIntelligenceArtifactStore.fileName)
+        stateURL = folder.appendingPathComponent(MeetingIntelligenceStateStore.fileName)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     }
 
@@ -401,6 +422,19 @@ private final class MeetingIntelligenceStoreFixture {
 
     func stateData() -> Data {
         try! JSONEncoder.meetingIntelligence.encode(state())
+    }
+
+    func generatingStateData() -> Data {
+        try! JSONEncoder.meetingIntelligence.encode(
+            MeetingIntelligenceState(
+                schemaVersion: 1,
+                phase: .generating,
+                message: "Generating",
+                sourceTranscriptSHA256: nil,
+                startedAt: Date(timeIntervalSince1970: 1),
+                finishedAt: nil
+            )
+        )
     }
 
     func writePadded(_ prefix: Data, to url: URL, count: Int) throws {
@@ -456,7 +490,14 @@ private final class SnapshotBarrierFileAccess: MeetingIntelligenceStoreFileAcces
     private var shouldBlock = true
     let snapshotTaken = DispatchSemaphore(value: 0)
     let releaseSnapshot = DispatchSemaphore(value: 0)
-    let createStarted = DispatchSemaphore(value: 0)
+    let secondSnapshotTaken = DispatchSemaphore(value: 0)
+    private var snapshots = 0
+
+    var snapshotCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return snapshots
+    }
 
     init(blocking name: String) {
         blockingName = name
@@ -465,6 +506,8 @@ private final class SnapshotBarrierFileAccess: MeetingIntelligenceStoreFileAcces
     func snapshot(named name: String, in folder: URL, maximumBytes: Int) throws -> MeetingIntelligenceStoreFileSnapshot? {
         let snapshot = try base.snapshot(named: name, in: folder, maximumBytes: maximumBytes)
         lock.lock()
+        snapshots += 1
+        if snapshots == 2 { secondSnapshotTaken.signal() }
         let block = name == blockingName && shouldBlock
         if block { shouldBlock = false }
         lock.unlock()
@@ -476,7 +519,6 @@ private final class SnapshotBarrierFileAccess: MeetingIntelligenceStoreFileAcces
     }
 
     func create(named name: String, data: Data, in folder: URL) throws -> MeetingIntelligenceStoreFileSnapshot {
-        createStarted.signal()
         return try base.create(named: name, data: data, in: folder)
     }
 

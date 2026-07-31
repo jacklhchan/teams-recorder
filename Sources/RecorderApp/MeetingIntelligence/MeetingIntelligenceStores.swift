@@ -245,8 +245,7 @@ struct DarwinMeetingIntelligenceStoreFileAccess: MeetingIntelligenceStoreFileAcc
     }
 
     func remove(_ destination: MeetingIntelligenceStoreFileSnapshot, in folder: URL) throws {
-        try MeetingIntelligenceStoreFileIO.revalidate(destination, in: folder)
-        try MeetingIntelligenceStoreFileIO.removeIfPresent(named: destination.name, in: folder)
+        try MeetingIntelligenceStoreFileIO.remove(destination, in: folder)
     }
 }
 
@@ -316,17 +315,19 @@ private enum MeetingIntelligenceStoreFileIO {
         }
     }
 
-    static func removeIfPresent(named name: String, in folder: URL) throws {
+    static func remove(_ snapshot: MeetingIntelligenceStoreFileSnapshot, in folder: URL) throws {
         let directory = try openFolder(try normalizedFolder(folder))
         defer { Darwin.close(directory) }
-        let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW)
+        let descriptor = openat(directory, snapshot.name, O_RDONLY | O_NOFOLLOW)
         if descriptor < 0 {
-            if errno == ENOENT { return }
+            if errno == ENOENT { throw MeetingIntelligenceStoreError.identityChanged }
             throw MeetingIntelligenceStoreError.unsafeFile
         }
         defer { Darwin.close(descriptor) }
-        _ = try identity(of: descriptor)
-        guard unlinkat(directory, name, 0) == 0 else {
+        guard try identity(of: descriptor) == snapshot.identity else {
+            throw MeetingIntelligenceStoreError.identityChanged
+        }
+        guard unlinkat(directory, snapshot.name, 0) == 0 else {
             throw MeetingIntelligenceStoreError.unsafeFile
         }
     }

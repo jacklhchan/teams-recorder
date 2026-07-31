@@ -134,7 +134,7 @@ struct OpenAICompatibleMeetingIntelligenceClient: MeetingIntelligenceRequesting,
             throw MeetingIntelligenceClientError.unsafeOutput
         }
         let value = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-        let forbiddenTitle = try! NSRegularExpression(pattern: "^(?:\\.|\\.\\.|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?|(meeting|test|manual)-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4})$")
+        let forbiddenTitle = try! NSRegularExpression(pattern: "^(?:\\.|\\.\\.|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?|(meeting|test|manual)-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}(?:[0-9]{2})?)$")
         let range = NSRange(value.startIndex..., in: value)
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               value.count <= Self.maximumTitleGraphemes,

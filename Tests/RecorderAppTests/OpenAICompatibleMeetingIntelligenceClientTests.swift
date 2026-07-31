@@ -157,7 +157,7 @@ final class OpenAICompatibleMeetingIntelligenceClientTests: XCTestCase {
         XCTAssertEqual(result.title, "Café")
         XCTAssertEqual(result.summary, "line\n\ttext")
 
-        for title in [".", "..", "meeting-2026-07-31-1200", "test-2026-07-31-1200", "manual-2026-07-31-1200", "12:30", "x\u{200B}title", "x\u{FEFF}title", "x\u{200E}title", "x\u{200F}title", "x\u{061C}title"] {
+        for title in [".", "..", "meeting-2026-07-31-1200", "test-2026-07-31-1200", "manual-2026-07-31-1200", "meeting-2026-07-31-120000", "test-2026-07-31-120000", "manual-2026-07-31-120000", "12:30", "x\u{200B}title", "x\u{FEFF}title", "x\u{200E}title", "x\u{200F}title", "x\u{061C}title"] {
             let transport = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer(#"{"title":"\#(title)","summary":"ok"}"#))])
             await assertError(.unsafeOutput) { _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: transport).requestFinalResult(input: "x", snapshot: try self.snapshot()) }
         }
@@ -179,6 +179,18 @@ final class OpenAICompatibleMeetingIntelligenceClientTests: XCTestCase {
         }
         let transport = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer(#"{"title":"wrong"}"#))])
         await assertError(.unsafeOutput) { _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: transport).requestPartialSummary(input: "x", snapshot: try self.snapshot()) }
+    }
+
+    func testPreEncodingRequestBudgetAcceptsMaximumAndRejectsMaximumPlusOneWithoutTransport() async throws {
+        let maximum = 88 * 1_024
+        let accepted = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer(#"{"summary":"ok"}"#))])
+        _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: accepted).requestPartialSummary(input: String(repeating: "a", count: maximum), snapshot: try snapshot())
+        XCTAssertEqual(accepted.requests.count, 1)
+        let rejected = MeetingIntelligenceRecordingTransport(responses: [])
+        await assertError(.requestTooLarge) {
+            _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: rejected).requestPartialSummary(input: String(repeating: "a", count: maximum + 1), snapshot: try self.snapshot())
+        }
+        XCTAssertTrue(rejected.requests.isEmpty)
     }
 
     private func snapshot(apiKey: String? = nil) throws -> OpenAICompatibleProviderSnapshot {

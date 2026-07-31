@@ -101,6 +101,35 @@ internal static class TeamsTransportTests
         client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    public static void StateQueryFailureDoesNotBlockLaterMeetingPush()
+    {
+        var socket = new FakeSocket();
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"),
+            new FakeTokenStore { Token = "paired-token" },
+            () => socket,
+            TimeSpan.FromHours(1));
+        var states = new List<TeamsMeetingState>();
+        client.EventReceived += (_, @event) =>
+        {
+            if (@event is TeamsThirdPartyApiEvent.MeetingUpdate { Update.State: { } state })
+            {
+                lock (states) states.Add(state);
+            }
+        };
+
+        client.StartAsync().GetAwaiter().GetResult();
+        Wait(socket.Connected.Task, "The query-failure socket did not connect.");
+        Wait(socket.ReceiveEntered.Task, "The client must start receiving before state query is sent.");
+        WaitUntil(() => socket.Sent.Count == 1, "The state query was not sent.");
+        socket.Publish("""{"requestId":1,"errorMsg":"Device already paired"}""");
+        socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
+
+        WaitUntil(() => { lock (states) return states.Count == 1; }, "A state-query failure blocked the later Teams meeting push.");
+        Equal(true, states[0].IsInMeeting);
+        client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     public static void ClientFailsClosedWhenRemoteSocketClosesDuringMeeting()
     {
         var socket = new FakeSocket();

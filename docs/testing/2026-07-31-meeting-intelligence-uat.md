@@ -20,6 +20,7 @@ acceptance, or AirPods hardware acceptance.
 | `/models` GET count | |
 | `/audio/transcriptions` POST count | |
 | `/chat/completions` POST count | |
+| Artifact intent (`automatic`, `generate`, `regenerate`, or `retryGeneration`) | |
 | Result and observed title provenance | |
 | Screenshot paths (without credentials or transcript content) | |
 | Outstanding gates | Real provider / notarized artifact / Teams / AirPods |

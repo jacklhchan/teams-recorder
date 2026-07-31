@@ -269,8 +269,12 @@ attempt, and Cancel to stop an active availability or generation attempt.
 Successful output is stored as `meeting-intelligence.json`; bounded lifecycle
 presentation is stored separately as `meeting-intelligence-state.json`. These
 artifacts contain the summary, suggested title, transcript digest and byte
-count, model, timestamp, and intent. They never contain a credential, provider
-base URL, prompt, raw transcript, raw response, or local path.
+count, model, timestamp, and the exact initiating intent: `automatic`,
+`generate`, `regenerate`, or `retryGeneration`. They never contain a
+credential, provider base URL, prompt, raw transcript, raw response, or local
+path. There is no generic `manual` artifact intent. The schema advertises a
+512-character model identifier ceiling; the runtime's stricter 512 UTF-8 byte
+limit is authoritative.
 
 Generated titles are applied only when title ownership permits it. Existing
 manual titles are preserved, including a deliberate manual blank; a new result

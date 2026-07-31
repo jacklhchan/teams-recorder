@@ -84,6 +84,23 @@ class RecordingContractTests(unittest.TestCase):
             intelligence["intent"],
             "automatic",
         )
+        self.assertEqual(
+            set(intelligence_schema["properties"]["intent"]["enum"]),
+            {
+                "automatic",
+                "generate",
+                "regenerate",
+                "retryGeneration",
+            },
+        )
+        self.assertNotIn(
+            "manual",
+            intelligence_schema["properties"]["intent"]["enum"],
+        )
+        self.assertEqual(
+            intelligence_schema["properties"]["model"]["maxLength"],
+            512,
+        )
         self.assertTrue(
             intelligence["sourceTranscriptSHA256"].startswith("sha256:")
         )

@@ -39,6 +39,33 @@ test -f "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 test ! -e "$APP/Contents/Resources/release-manifest.json"
 test "$(<"$APP/Contents/Resources/.lmr-build-owner")" = "local.meeting.recorder.build-app.v1"
 
+FORBIDDEN_BUNDLE_CONTENT="$(
+  /usr/bin/find "$APP/Contents" -mindepth 1 \
+    \( \
+      -name 'Tests' -o \
+      -name 'ManualFixtures' -o \
+      -name 'contracts' -o \
+      -name '*.schema.json' -o \
+      -name 'recording-info-v*.json' -o \
+      -name 'meeting-intelligence-v*.json' -o \
+      -name 'meeting_intelligence_provider.py' -o \
+      -name '*.py' -o \
+      -name '*.pyc' -o \
+      -name '__pycache__' -o \
+      -iname 'python*' -o \
+      -name 'ffmpeg' -o \
+      -name 'ffprobe' -o \
+      -name 'transcribe-openai-compatible.sh' -o \
+      -name 'transcribe-qwen-asr.sh' -o \
+      -name 'openai_asr_longform.py' \
+    \) \
+    -print -quit
+)"
+if [[ -n "$FORBIDDEN_BUNDLE_CONTENT" ]]; then
+  echo "Forbidden test, contract, or runtime helper in app Contents." >&2
+  exit 70
+fi
+
 if [[ "$SIGN_MODE" == "ad-hoc" ]]; then
   "$CODESIGN_BIN" --verify --deep --strict "$APP" >&2
   SIGNING_METADATA="$("$CODESIGN_BIN" -d --verbose=4 "$APP" 2>&1 | tr -d '\r')"

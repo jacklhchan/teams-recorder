@@ -38,7 +38,8 @@
     },
     "model": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 512
     },
     "generatedAt": {
       "type": "string",
@@ -47,7 +48,9 @@
     "intent": {
       "enum": [
         "automatic",
-        "manual"
+        "generate",
+        "regenerate",
+        "retryGeneration"
       ]
     }
   },

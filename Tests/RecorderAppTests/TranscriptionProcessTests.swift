@@ -130,7 +130,7 @@ final class TranscriptionProcessTests: XCTestCase {
 
 private func makeSnapshot() throws -> OpenAICompatibleProviderSnapshot {
     try .validated(profile: try OpenAICompatibleProviderProfile.validated(
-        baseURLText: "https://api.example/v1", asrModel: "asr", llmModel: "llm", language: "", prompt: ""
+        baseURLText: "https://api.example/v1", asrModel: "asr", llmModel: "llm", language: "en", prompt: ""
     ), apiKey: nil)
 }
 

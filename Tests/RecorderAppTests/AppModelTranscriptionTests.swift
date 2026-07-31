@@ -41,7 +41,7 @@ final class AppModelTranscriptionTests: XCTestCase {
                 baseURLText: "https://api.example.com/v1",
                 asrModel: "asr",
                 llmModel: "llm",
-                language: "",
+                language: "en",
                 prompt: ""
             ),
             apiKeyStatusError: TestError.failed
@@ -805,7 +805,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             baseURLText: "https://api.example.com/v1",
             asrModel: asrModel,
             llmModel: "llm",
-            language: "",
+            language: "en",
             prompt: ""
         )
     }

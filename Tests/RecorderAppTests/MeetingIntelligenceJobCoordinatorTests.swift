@@ -32,6 +32,44 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         )
     }
 
+    func testCrossSourcePublicationIsRejectedBeforeAnyIOOrAvailability() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        var event = fixture.event(generation: 1)
+        event = .init(session: event.session, canonicalURL: event.canonicalURL, revision: event.revision,
+                      normalizedSessionFolder: event.normalizedSessionFolder,
+                      identity: .init(coordinatorInstanceID: UUID(), generation: 1, attemptID: UUID()))
+
+        fixture.coordinator.handleTranscriptPublished(event)
+        await Task.yield()
+
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.generator.requests, 0)
+    }
+
+    func testExactDigestArtifactSkipsAutomaticDiscoveryAndGeneration() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        fixture.artifactStore.loaded = fixture.artifact(revision: fixture.reader.snapshot.revision)
+
+        fixture.coordinator.handleTranscriptPublished(fixture.event(generation: 1))
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.generator.requests, 0)
+        XCTAssertEqual(fixture.publisher.requests, 0)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .ready)
+    }
+
+    func testCheckAvailabilityPerformsDiscoveryOnly() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+
+        fixture.coordinator.checkAvailability(for: fixture.session)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.availability.requests, 1)
+        XCTAssertEqual(fixture.generator.requests, 0)
+        XCTAssertEqual(fixture.publisher.requests, 0)
+    }
+
     func testManualGenerateBypassesDiscoveryButRejectsPlaceholder() async throws {
         let fixture = try CoordinatorFixture(availability: .unconfirmed(.discoveryUnsupported))
 
@@ -44,6 +82,7 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
 
         fixture.repository.snapshotValue = try fixture.snapshot(llmModel: "legacy-unconfigured-llm")
         fixture.coordinator.generate(for: fixture.session)
+        await fixture.waitForIdle()
         XCTAssertEqual(fixture.generator.requests, 1)
         XCTAssertEqual(
             fixture.coordinator.presentation(for: fixture.session).unavailableReason,
@@ -74,6 +113,7 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         )
 
         fixture.coordinator.transcriptDidSave(fixture.session)
+        await fixture.waitForIdle()
 
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .stale)
         XCTAssertEqual(fixture.availability.requests, 0)
@@ -107,7 +147,7 @@ private final class CoordinatorFixture {
                         createdAt: .distantPast, duration: 0, fileSize: 0, metadata: .init())
         repository = .init(snapshotValue: try Self.makeSnapshot(llmModel: "llm"))
         self.availability = .init(value: availability)
-        coordinator = .init(providerRepository: repository, transcriptReader: reader,
+        coordinator = .init(providerRepository: repository, expectedPublicationSourceID: coordinatorID, transcriptReader: reader,
                             availabilityChecker: self.availability, generator: generator,
                             publisher: publisher, artifactStore: artifactStore, stateStore: stateStore,
                             now: { .distantPast })

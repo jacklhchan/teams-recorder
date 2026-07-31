@@ -34,9 +34,42 @@ struct MeetingIntelligencePresentation: Equatable, Sendable {
 
 protocol MeetingIntelligenceSuggestedTitleApplying: Sendable {
     func applySuggestedTitle(
-        for session: RecordingSession,
-        artifact: MeetingIntelligenceArtifact
+        _ request: MeetingIntelligenceSuggestedTitleRequest
     ) async throws -> Bool
+}
+
+/// A concrete applier must validate `lease` and `sourceRevision` again inside
+/// the shared session mutation gate before changing metadata.
+struct MeetingIntelligenceSuggestedTitleRequest: Sendable {
+    let session: RecordingSession
+    let artifact: MeetingIntelligenceArtifact
+    let sourceRevision: TranscriptDocumentRevision
+    let lease: MeetingIntelligenceAttemptLease
+}
+
+private actor MeetingIntelligenceIO {
+    private let repository: any OpenAICompatibleProviderManaging
+    private let reader: any TranscriptDocumentReading
+    private let artifacts: any MeetingIntelligenceArtifactStoring
+    private let states: any MeetingIntelligenceStateStoring
+    private var latestGenerationByFolder: [URL: UInt64] = [:]
+    private var disabledFolders = Set<URL>()
+
+    init(repository: any OpenAICompatibleProviderManaging, reader: any TranscriptDocumentReading,
+         artifacts: any MeetingIntelligenceArtifactStoring, states: any MeetingIntelligenceStateStoring) {
+        self.repository = repository; self.reader = reader; self.artifacts = artifacts; self.states = states
+    }
+    func snapshot() throws -> OpenAICompatibleProviderSnapshot { try repository.snapshot() }
+    func transcript(in folder: URL) throws -> TranscriptDocumentSnapshot { try reader.readCanonical(in: folder, allowLegacy: false) }
+    func artifact(in folder: URL) throws -> MeetingIntelligenceArtifact? { try artifacts.load(in: folder) }
+    func state(in folder: URL) throws -> MeetingIntelligenceState? { try states.load(in: folder) }
+    func save(_ state: MeetingIntelligenceState, in folder: URL, generation: UInt64) throws {
+        guard !disabledFolders.contains(folder) else { return }
+        latestGenerationByFolder[folder] = max(latestGenerationByFolder[folder] ?? 0, generation)
+        guard latestGenerationByFolder[folder] == generation else { return }
+        try states.save(state, in: folder)
+    }
+    func disable(folder: URL) { disabledFolders.insert(folder) }
 }
 
 @MainActor
@@ -45,8 +78,8 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     var onSuccessfulPublication: ((RecordingSession) -> Void)?
 
-    private let providerRepository: any OpenAICompatibleProviderManaging
-    private let transcriptReader: any TranscriptDocumentReading
+    private let expectedPublicationSourceID: UUID
+    private let io: MeetingIntelligenceIO
     private let availabilityChecker: any MeetingIntelligenceAvailabilityChecking
     private let generator: any MeetingIntelligenceGenerating
     private let publisher: any MeetingIntelligencePublishing
@@ -67,6 +100,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     init(
         providerRepository: any OpenAICompatibleProviderManaging,
+        expectedPublicationSourceID: UUID,
         transcriptReader: any TranscriptDocumentReading = SecureTranscriptDocumentReader(),
         availabilityChecker: any MeetingIntelligenceAvailabilityChecking,
         generator: any MeetingIntelligenceGenerating,
@@ -76,8 +110,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         titleApplier: (any MeetingIntelligenceSuggestedTitleApplying)? = nil,
         now: @escaping DateNow = { Date() }
     ) {
-        self.providerRepository = providerRepository
-        self.transcriptReader = transcriptReader
+        self.expectedPublicationSourceID = expectedPublicationSourceID
+        io = .init(repository: providerRepository, reader: transcriptReader,
+                   artifacts: artifactStore, states: stateStore)
         self.availabilityChecker = availabilityChecker
         self.generator = generator
         self.publisher = publisher
@@ -98,29 +133,30 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     func handleTranscriptPublished(_ event: TranscriptPublished) {
         guard !isShutDown, !removedSessionIDs.contains(event.session.id),
-              validate(event) else { return }
+              event.identity.coordinatorInstanceID == expectedPublicationSourceID else { return }
         let sessionID = event.session.id
         guard accepts(event.identity, after: latestPublicationsBySessionID[sessionID]) else { return }
         latestPublicationsBySessionID[sessionID] = event.identity
         sessionsByID[sessionID] = event.session
-        startAutomatic(session: event.session, source: event.revision)
+        let ticket = replaceWork(for: event.session)
+        tasksBySessionID[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.clearTaskIfOwned(ticket, for: event.session) }
+            await self.startAutomatic(event: event, ticket: ticket)
+        }
     }
 
     func checkAvailability(for session: RecordingSession) {
         guard !isShutDown else { return }
         sessionsByID[session.id] = session
-        guard let snapshot = validSnapshot(for: session, intent: .generate) else { return }
         let ticket = replaceWork(for: session)
-        setPresentation(.init(
-            phase: .checkingAvailability, summary: presentation(for: session).summary,
-            suggestedTitle: presentation(for: session).suggestedTitle,
-            statusMessage: "Checking model availability…", model: snapshot.profile.llmModel,
-            titleIsProtected: titleIsProtected(session), unavailableReason: nil
-        ), for: session)
-        persist(.checkingAvailability, message: "Checking availability.", revision: nil, for: session)
         tasksBySessionID[session.id] = Task { @MainActor [weak self] in
-            let result = await self?.availabilityChecker.availability(for: snapshot)
-            guard let self, self.owns(ticket, for: session), let result else { return }
+            guard let self else { return }
+            defer { self.clearTaskIfOwned(ticket, for: session) }
+            guard let snapshot = await self.snapshotIfUsable(for: session, ticket: ticket) else { return }
+            self.setChecking(session, snapshot: snapshot, revision: nil)
+            let result = await self.availabilityChecker.availability(for: snapshot)
+            guard self.owns(ticket, for: session) else { return }
             self.setAvailability(result, session: session, snapshot: snapshot)
             self.clearTaskIfOwned(ticket, for: session)
         }
@@ -146,22 +182,34 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         guard !isShutDown else { return }
         sessionsByID[session.id] = session
         invalidateWork(for: session.id)
-        guard let current = try? transcriptReader.readCanonical(in: session.folderURL, allowLegacy: false) else {
-            setFailed("Transcript needs attention.", for: session)
-            return
-        }
-        let artifact = try? artifactStore.load(in: session.folderURL)
-        if let artifact, artifact.sourceTranscriptSHA256 == current.revision.sha256,
-           artifact.sourceTranscriptByteCount == current.revision.byteCount {
-            setPresentation(from: artifact, phase: .ready, message: "Ready.", session: session)
-        } else if let artifact {
-            setPresentation(from: artifact, phase: .stale, message: "Transcript changed. Regenerate to update.", session: session)
-        } else {
-            setPresentation(.empty, for: session)
+        let ticket = replaceWork(for: session)
+        tasksBySessionID[session.id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.clearTaskIfOwned(ticket, for: session) }
+            do {
+                async let transcript = self.io.transcript(in: session.folderURL)
+                async let artifact = self.io.artifact(in: session.folderURL)
+                let (current, existing) = try await (transcript, artifact)
+                guard self.owns(ticket, for: session) else { return }
+                if let existing, existing.sourceTranscriptSHA256 == current.revision.sha256,
+                   existing.sourceTranscriptByteCount == current.revision.byteCount {
+                    self.setPresentation(from: existing, phase: .ready, message: "Ready.", session: session)
+                } else if let existing {
+                    self.setPresentation(from: existing, phase: .stale, message: "Transcript changed. Regenerate to update.", session: session)
+                } else { self.setPresentation(.empty, for: session) }
+                self.clearTaskIfOwned(ticket, for: session)
+            } catch {
+                guard self.owns(ticket, for: session) else { return }
+                self.setFailed("Transcript needs attention.", for: session)
+                self.clearTaskIfOwned(ticket, for: session)
+            }
         }
     }
 
     func remove(sessionID: RecordingSession.ID) {
+        if let session = sessionsByID[sessionID] {
+            Task { await io.disable(folder: session.folderURL) }
+        }
         removedSessionIDs.insert(sessionID)
         invalidateWork(for: sessionID)
         presentationsBySessionID.removeValue(forKey: sessionID)
@@ -181,12 +229,20 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     func applySuggestedTitle(for session: RecordingSession) {
-        guard !isShutDown, let applier = titleApplier,
-              let artifact = try? artifactStore.load(in: session.folderURL) else { return }
+        guard !isShutDown, let applier = titleApplier else { return }
         let ticket = replaceWork(for: session)
         tasksBySessionID[session.id] = Task { @MainActor [weak self] in
-            let applied = (try? await applier.applySuggestedTitle(for: session, artifact: artifact)) ?? false
-            guard let self, self.owns(ticket, for: session) else { return }
+            guard let self else { return }
+            defer { self.clearTaskIfOwned(ticket, for: session) }
+            guard let artifact = try? await self.io.artifact(in: session.folderURL),
+                  let current = try? await self.io.transcript(in: session.folderURL),
+                  artifact.sourceTranscriptSHA256 == current.revision.sha256,
+                  artifact.sourceTranscriptByteCount == current.revision.byteCount,
+                  self.owns(ticket, for: session) else { return }
+            let applied = (try? await applier.applySuggestedTitle(.init(session: session, artifact: artifact,
+                                                                         sourceRevision: current.revision,
+                                                                         lease: ticket.lease))) ?? false
+            guard self.owns(ticket, for: session) else { return }
             if applied {
                 self.onSuccessfulPublication?(session)
             }
@@ -197,69 +253,74 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     func shutdown() {
         guard !isShutDown else { return }
         isShutDown = true
-        for id in tasksBySessionID.keys { invalidateWork(for: id) }
+        for id in Array(tasksBySessionID.keys) {
+            if let session = sessionsByID[id] {
+                Task { await io.disable(folder: session.folderURL) }
+            }
+            invalidateWork(for: id)
+        }
         tasksBySessionID.removeAll()
         attemptsBySessionID.removeAll()
         leasesBySessionID.removeAll()
     }
 
-    private func startAutomatic(session: RecordingSession, source: TranscriptDocumentRevision) {
-        let snapshot: OpenAICompatibleProviderSnapshot
-        do { snapshot = try providerRepository.snapshot() }
-        catch { setFailed("Configure an AI provider before generating.", for: session); return }
-        guard isUsableModel(snapshot.profile.llmModel) else {
-            setUnavailable(.placeholderModel, session: session, snapshot: snapshot)
+    private func startAutomatic(event: TranscriptPublished, ticket: Ticket) async {
+        let session = event.session
+        guard owns(ticket, for: session),
+              let transcript = try? await io.transcript(in: session.folderURL),
+              transcript.url == event.canonicalURL, transcript.revision == event.revision,
+              normalizedFolder(for: session) == event.normalizedSessionFolder else { return }
+        // A persisted result for the exact canonical bytes is already the
+        // desired automatic outcome; do not spend a fresh /models or chat call.
+        if let artifact = try? await io.artifact(in: session.folderURL),
+           artifact.sourceTranscriptSHA256 == transcript.revision.sha256,
+           artifact.sourceTranscriptByteCount == transcript.revision.byteCount {
+            guard owns(ticket, for: session) else { return }
+            setPresentation(from: artifact, phase: .ready, message: "Ready.", session: session)
+            clearTaskIfOwned(ticket, for: session)
             return
         }
-        let ticket = replaceWork(for: session)
-        setPresentation(.init(phase: .checkingAvailability, summary: nil, suggestedTitle: nil,
-                              statusMessage: "Checking model availability…", model: snapshot.profile.llmModel,
-                              titleIsProtected: titleIsProtected(session), unavailableReason: nil), for: session)
-        persist(.checkingAvailability, message: "Checking availability.", revision: source, for: session)
-        tasksBySessionID[session.id] = Task { @MainActor [weak self] in
-            let availability = await self?.availabilityChecker.availability(for: snapshot)
-            guard let self, self.owns(ticket, for: session), let availability else { return }
-            guard case .confirmed = availability else {
-                self.setAvailability(availability, session: session, snapshot: snapshot)
-                self.clearTaskIfOwned(ticket, for: session)
-                return
-            }
-            await self.generateOwned(session: session, source: source, snapshot: snapshot,
-                                     intent: .automatic, ticket: ticket)
+        guard let snapshot = await snapshotIfUsable(for: session, ticket: ticket) else { return }
+        setChecking(session, snapshot: snapshot, revision: transcript.revision)
+        let availability = await availabilityChecker.availability(for: snapshot)
+        guard owns(ticket, for: session) else { return }
+        guard case .confirmed = availability else {
+            setAvailability(availability, session: session, snapshot: snapshot)
+            clearTaskIfOwned(ticket, for: session)
+            return
         }
+        await generateOwned(session: session, transcript: transcript, snapshot: snapshot,
+                            intent: .automatic, ticket: ticket)
     }
 
     private func startManual(session: RecordingSession, intent: MeetingIntelligenceIntent) {
         guard !isShutDown else { return }
         sessionsByID[session.id] = session
-        guard let snapshot = validSnapshot(for: session, intent: intent),
-              let source = try? transcriptReader.readCanonical(in: session.folderURL, allowLegacy: false) else {
-            return
-        }
         let ticket = replaceWork(for: session)
         tasksBySessionID[session.id] = Task { @MainActor [weak self] in
-            await self?.generateOwned(session: session, source: source.revision, snapshot: snapshot,
-                                      intent: intent, ticket: ticket)
+            guard let self else { return }
+            defer { self.clearTaskIfOwned(ticket, for: session) }
+            guard let snapshot = await self.snapshotIfUsable(for: session, ticket: ticket),
+                  let transcript = try? await self.io.transcript(in: session.folderURL),
+                  self.owns(ticket, for: session) else { return }
+            await self.generateOwned(session: session, transcript: transcript, snapshot: snapshot,
+                                     intent: intent, ticket: ticket)
         }
     }
 
     private func generateOwned(
         session: RecordingSession,
-        source: TranscriptDocumentRevision,
+        transcript: TranscriptDocumentSnapshot,
         snapshot: OpenAICompatibleProviderSnapshot,
         intent: MeetingIntelligenceIntent,
         ticket: Ticket
     ) async {
-        guard owns(ticket, for: session),
-              let transcript = try? transcriptReader.readCanonical(in: session.folderURL, allowLegacy: false),
-              transcript.revision == source else {
-            return
-        }
+        guard owns(ticket, for: session) else { return }
         setPresentation(.init(phase: .generating(.init(stage: .generatingFinal, current: 0, total: 0)),
                               summary: presentation(for: session).summary, suggestedTitle: presentation(for: session).suggestedTitle,
                               statusMessage: "Generating meeting intelligence…", model: snapshot.profile.llmModel,
                               titleIsProtected: titleIsProtected(session), unavailableReason: nil), for: session)
-        persist(.generating, message: "Generating meeting intelligence.", revision: source, for: session)
+        persist(.generating, message: "Generating meeting intelligence.", revision: transcript.revision, for: session)
         do {
             let content = try await generator.generate(transcript: transcript, snapshot: snapshot) { [weak self] progress in
                 Task { @MainActor [weak self] in
@@ -271,7 +332,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                 }
             }
             guard owns(ticket, for: session), !Task.isCancelled else { return }
-            let outcome = try await publisher.publish(.init(session: session, sourceRevision: source,
+            let outcome = try await publisher.publish(.init(session: session, sourceRevision: transcript.revision,
                                                              capturedTitle: session.metadata.title,
                                                              capturedTitleOrigin: session.metadata.titleOrigin,
                                                              content: content, snapshot: snapshot, intent: intent,
@@ -279,22 +340,24 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             guard owns(ticket, for: session), !Task.isCancelled else { return }
             setPresentation(from: outcome.artifact, phase: .ready,
                             message: outcome.titleWarning ?? "Ready.", session: session)
-            persist(.completed, message: outcome.titleWarning ?? "Ready.", revision: source, for: session)
+            persist(.completed, message: outcome.titleWarning ?? "Ready.", revision: transcript.revision, for: session)
             onSuccessfulPublication?(session)
             clearTaskIfOwned(ticket, for: session)
         } catch is CancellationError {
             finishCancellationIfOwned(ticket, session: session)
         } catch {
             guard owns(ticket, for: session), !Task.isCancelled else { return }
-            setFailed(sanitized(error.localizedDescription), for: session)
-            persist(.failed, message: sanitized(error.localizedDescription), revision: source, for: session)
+            let message = failureMessage(for: error)
+            setFailed(message, for: session)
+            persist(.failed, message: message, revision: transcript.revision, for: session)
             clearTaskIfOwned(ticket, for: session)
         }
     }
 
-    private func validSnapshot(for session: RecordingSession, intent _: MeetingIntelligenceIntent) -> OpenAICompatibleProviderSnapshot? {
+    private func snapshotIfUsable(for session: RecordingSession, ticket: Ticket) async -> OpenAICompatibleProviderSnapshot? {
         do {
-            let snapshot = try providerRepository.snapshot()
+            let snapshot = try await io.snapshot()
+            guard owns(ticket, for: session) else { return nil }
             guard isUsableModel(snapshot.profile.llmModel) else {
                 setUnavailable(.placeholderModel, session: session, snapshot: snapshot)
                 return nil
@@ -304,6 +367,15 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             setFailed("Configure an AI provider before generating.", for: session)
             return nil
         }
+    }
+
+    private func setChecking(_ session: RecordingSession, snapshot: OpenAICompatibleProviderSnapshot,
+                             revision: TranscriptDocumentRevision?) {
+        setPresentation(.init(phase: .checkingAvailability, summary: presentation(for: session).summary,
+                              suggestedTitle: presentation(for: session).suggestedTitle,
+                              statusMessage: "Checking model availability…", model: snapshot.profile.llmModel,
+                              titleIsProtected: titleIsProtected(session), unavailableReason: nil), for: session)
+        persist(.checkingAvailability, message: "Checking availability.", revision: revision, for: session)
     }
 
     private func setAvailability(_ availability: MeetingIntelligenceAvailability, session: RecordingSession, snapshot: OpenAICompatibleProviderSnapshot) {
@@ -325,17 +397,30 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     private func loadPresentation(for session: RecordingSession) {
-        do {
-            let artifact = try artifactStore.load(in: session.folderURL)
-            let state = try stateStore.load(in: session.folderURL)
-            if let artifact, let transcript = try? transcriptReader.readCanonical(in: session.folderURL, allowLegacy: false) {
-                let phase: MeetingIntelligencePresentation.Phase = artifact.sourceTranscriptSHA256 == transcript.revision.sha256 && artifact.sourceTranscriptByteCount == transcript.revision.byteCount ? .ready : .stale
-                setPresentation(from: artifact, phase: phase, message: phase == .ready ? "Ready." : "Transcript changed. Regenerate to update.", session: session)
-            } else if let state, state.phase == .interrupted {
-                setPresentation(.init(phase: .interrupted, summary: nil, suggestedTitle: nil, statusMessage: state.message,
-                                      model: nil, titleIsProtected: titleIsProtected(session), unavailableReason: nil), for: session)
+        let ticket = replaceWork(for: session)
+        tasksBySessionID[session.id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.clearTaskIfOwned(ticket, for: session) }
+            do {
+                async let artifact = self.io.artifact(in: session.folderURL)
+                async let state = self.io.state(in: session.folderURL)
+                let (existing, recovered) = try await (artifact, state)
+                guard self.owns(ticket, for: session) else { return }
+                if let existing {
+                    let source = try await self.io.transcript(in: session.folderURL)
+                    guard self.owns(ticket, for: session) else { return }
+                    let phase: MeetingIntelligencePresentation.Phase = existing.sourceTranscriptSHA256 == source.revision.sha256 && existing.sourceTranscriptByteCount == source.revision.byteCount ? .ready : .stale
+                    self.setPresentation(from: existing, phase: phase, message: phase == .ready ? "Ready." : "Transcript changed. Regenerate to update.", session: session)
+                } else if recovered?.phase == .interrupted {
+                    self.setPresentation(.init(phase: .interrupted, summary: nil, suggestedTitle: nil,
+                                               statusMessage: "Meeting intelligence interrupted. You can generate again.",
+                                               model: nil, titleIsProtected: self.titleIsProtected(session), unavailableReason: nil), for: session)
+                }
+            } catch {
+                guard self.owns(ticket, for: session) else { return }
+                self.setFailed("Meeting intelligence needs attention.", for: session)
             }
-        } catch { setFailed("Meeting intelligence needs attention.", for: session) }
+        }
     }
 
     private func setPresentation(from artifact: MeetingIntelligenceArtifact, phase: MeetingIntelligencePresentation.Phase, message: String, session: RecordingSession) {
@@ -358,7 +443,8 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         let state = MeetingIntelligenceState(schemaVersion: MeetingIntelligenceState.currentSchemaVersion, phase: phase,
                                              message: sanitized(message), sourceTranscriptSHA256: revision?.sha256,
                                              startedAt: now(), finishedAt: [.completed, .failed, .cancelled, .interrupted].contains(phase) ? now() : nil)
-        try? stateStore.save(state, in: session.folderURL)
+        guard let generation = generationsBySessionID[session.id], !isShutDown else { return }
+        Task { _ = try? await io.save(state, in: session.folderURL, generation: generation) }
     }
 
     private struct Ticket: Equatable {
@@ -407,19 +493,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         clearTaskIfOwned(ticket, for: session)
     }
 
-    private func validate(_ event: TranscriptPublished) -> Bool {
-        let folder = event.session.folderURL.resolvingSymlinksInPath().standardizedFileURL
-        guard folder == event.normalizedSessionFolder,
-              event.session.id.standardizedFileURL == folder,
-              let snapshot = try? transcriptReader.readCanonical(in: folder, allowLegacy: false),
-              snapshot.url == event.canonicalURL,
-              snapshot.revision == event.revision else { return false }
-        return true
-    }
-
     private func accepts(_ incoming: TranscriptPublicationIdentity, after current: TranscriptPublicationIdentity?) -> Bool {
         guard let current else { return true }
-        guard current.coordinatorInstanceID == incoming.coordinatorInstanceID else { return true }
+        guard current.coordinatorInstanceID == incoming.coordinatorInstanceID else { return false }
         // A TranscriptionJobCoordinator generation identifies one completed
         // publication attempt.  UUIDs are not ordered, so accepting another
         // UUID at the same generation would let a forged/late callback start
@@ -430,4 +506,19 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private func titleIsProtected(_ session: RecordingSession) -> Bool { session.metadata.titleOrigin == .manual }
     private func isUsableModel(_ model: String) -> Bool { let v = model.trimmingCharacters(in: .whitespacesAndNewlines); return !v.isEmpty && v != "legacy-unconfigured-llm" }
     private func sanitized(_ message: String) -> String { String(message.unicodeScalars.filter { $0.properties.generalCategory != .control || $0 == "\n" || $0 == "\t" }.map(String.init).joined().prefix(1_024)) }
+    private func normalizedFolder(for session: RecordingSession) -> URL? {
+        let folder = session.folderURL.resolvingSymlinksInPath().standardizedFileURL
+        return session.id.standardizedFileURL == folder ? folder : nil
+    }
+    private func failureMessage(for error: Error) -> String {
+        switch error {
+        case is CancellationError: return "Meeting intelligence cancelled."
+        case MeetingIntelligencePipelineError.cancelled: return "Meeting intelligence cancelled."
+        case MeetingIntelligencePipelineError.deadlineExceeded: return "Meeting intelligence timed out. You can retry generation."
+        case MeetingIntelligencePipelineError.sourceTooLarge: return "The transcript is too large to summarize."
+        case MeetingIntelligencePublicationError.transcriptChanged: return "Transcript changed. Regenerate to update."
+        case MeetingIntelligencePublicationError.leaseInvalid: return "Meeting intelligence cancelled."
+        default: return "Meeting intelligence could not be completed. You can retry generation."
+        }
+    }
 }

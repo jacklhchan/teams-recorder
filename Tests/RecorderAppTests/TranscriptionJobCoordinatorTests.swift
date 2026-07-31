@@ -108,6 +108,10 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(events[0].session.id, fixture.session.id)
         XCTAssertEqual(events[0].revision, revision)
         XCTAssertEqual(events[0].identity.generation, 1)
+        XCTAssertEqual(
+            coordinator.publicationSourceID,
+            UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        )
     }
 
     func testCommittedRevisionMismatchEmitsNoEvent() async throws {

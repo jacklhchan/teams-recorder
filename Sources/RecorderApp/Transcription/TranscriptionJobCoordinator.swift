@@ -18,6 +18,10 @@ final class TranscriptionJobCoordinator: ObservableObject {
     var onStatusMessage: ((String) -> Void)?
     var onSuccessfulPublication: ((TranscriptPublished) -> Void)?
 
+    /// The only publication stream which a meeting-intelligence coordinator
+    /// may consume.  This is intentionally read-only outside this type.
+    var publicationSourceID: UUID { coordinatorInstanceID }
+
     private let providerRepository:
         any OpenAICompatibleProviderManaging
     private let audioPreparer: any TranscriptionAudioPreparing

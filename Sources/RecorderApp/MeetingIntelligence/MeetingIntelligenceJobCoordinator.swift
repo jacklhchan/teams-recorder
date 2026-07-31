@@ -61,18 +61,10 @@ private actor MeetingIntelligenceIO {
     private let stateSaveScheduler: any MeetingIntelligenceStateSaveScheduling
     private var latestWriteByFolder: [URL: WriteIdentity] = [:]
 
-    private struct WriteIdentity: Comparable {
+    private struct WriteIdentity {
         let generation: UInt64
         let attempt: UUID
         let sequence: UInt64
-
-        static func < (lhs: Self, rhs: Self) -> Bool {
-            if lhs.generation != rhs.generation { return lhs.generation < rhs.generation }
-            // An attempt is never permitted to replace another attempt at the
-            // same generation. UUID ordering would make that nondeterministic.
-            guard lhs.attempt == rhs.attempt else { return false }
-            return lhs.sequence < rhs.sequence
-        }
     }
 
     init(repository: any OpenAICompatibleProviderManaging, reader: any TranscriptDocumentReading,
@@ -123,8 +115,6 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private let io: MeetingIntelligenceIO
     private let availabilityChecker: any MeetingIntelligenceAvailabilityChecking
     private let generator: any MeetingIntelligenceGenerating
-    private let artifactStore: any MeetingIntelligenceArtifactStoring
-    private let stateStore: any MeetingIntelligenceStateStoring
     private let titleApplier: MeetingIntelligenceSuggestedTitleApplier?
     private let now: DateNow
 
@@ -160,8 +150,6 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                    stateSaveScheduler: stateSaveScheduler)
         self.availabilityChecker = availabilityChecker
         self.generator = generator
-        self.artifactStore = artifactStore
-        self.stateStore = stateStore
         self.titleApplier = titleApplier
         self.now = now
     }
@@ -338,7 +326,10 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         reloadTokensBySessionID.removeAll()
         for id in Array(tasksBySessionID.keys) { invalidateWork(for: id) }
         tasksBySessionID.removeAll()
-        generationsBySessionID.removeAll()
+        // Keep the counters across a workspace cutover. A user can later
+        // switch back to the same folder, whose IO actor has already observed
+        // a higher generation; resetting to one would permanently reject all
+        // subsequent state writes for that folder.
         attemptsBySessionID.removeAll()
         leasesBySessionID.removeAll()
         nextWriteSequenceBySessionID.removeAll()

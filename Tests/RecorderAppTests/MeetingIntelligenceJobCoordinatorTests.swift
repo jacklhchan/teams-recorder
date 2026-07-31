@@ -390,6 +390,26 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.publisher.requests, 1)
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .ready)
     }
+
+    func testWorkspaceResetReturningToSameFolderKeepsStateWriteGenerationMonotonic() async throws {
+        let states = RecordingStateStore()
+        let fixture = try CoordinatorFixture(availability: .confirmed, stateStoreOverride: states)
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fixture.waitForIdle()
+        fixture.coordinator.regenerate(for: fixture.session)
+        await fixture.waitForIdle()
+        XCTAssertEqual(states.saved.count, 4)
+
+        fixture.coordinator.resetForWorkspaceChange()
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+        fixture.coordinator.generate(for: fixture.session)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(states.saved.count, 6)
+        XCTAssertEqual(states.saved.last?.phase, .completed)
+    }
 }
 
 @MainActor

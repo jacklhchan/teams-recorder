@@ -135,7 +135,8 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
             XCTAssertTrue(error is CancellationError)
         }
         ControlledURLProtocol.finishLatestResponse()
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        let didStopLoading = await ControlledURLProtocol.waitForStopLoadingCount(1)
+        XCTAssertTrue(didStopLoading)
         XCTAssertEqual(ControlledURLProtocol.stopLoadingCount, 1)
         XCTAssertTrue(transport.hasReleasedTaskAndSessionForTesting)
     }
@@ -548,6 +549,14 @@ private final class ControlledURLProtocol: URLProtocol, @unchecked Sendable {
         while !lock.withLock({ started }) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
+    }
+
+    static func waitForStopLoadingCount(_ expected: Int) async -> Bool {
+        for _ in 0..<100 {
+            if lock.withLock({ stopped >= expected }) { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return lock.withLock { stopped >= expected }
     }
 
     static func finishLatestResponse() {

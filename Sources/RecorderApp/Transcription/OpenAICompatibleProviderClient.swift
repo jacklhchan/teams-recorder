@@ -215,8 +215,8 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         lock.lock()
         let task = self.task
         lock.unlock()
-        task?.cancel()
         finish(.failure(CancellationError()))
+        task?.cancel()
     }
 
     private func finish(_ result: Result<(Data, HTTPURLResponse), Error>) {

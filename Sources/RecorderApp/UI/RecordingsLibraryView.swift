@@ -270,15 +270,17 @@ private struct SessionListView: View {
                 export: { exportTranscript(session) },
                 copy: { copyTranscript(session) },
                 editDetails: { metadataSession = $0 },
-                meetingIntelligencePresentation: meetingIntelligencePresentation(session),
-                meetingIntelligenceActions: .init(
-                    generate: { generateMeetingIntelligence(session) },
-                    regenerate: { regenerateMeetingIntelligence(session) },
-                    checkAgain: { checkMeetingIntelligenceAvailability(session) },
-                    retryGeneration: { retryMeetingIntelligenceGeneration(session) },
-                    cancel: { cancelMeetingIntelligence(session) },
-                    applySuggestedTitle: { applyMeetingIntelligenceSuggestedTitle(session) }
-                )
+                meetingIntelligencePresentation: meetingIntelligencePresentation,
+                meetingIntelligenceActions: { currentSession in
+                    .init(
+                        generate: { generateMeetingIntelligence(currentSession) },
+                        regenerate: { regenerateMeetingIntelligence(currentSession) },
+                        checkAgain: { checkMeetingIntelligenceAvailability(currentSession) },
+                        retryGeneration: { retryMeetingIntelligenceGeneration(currentSession) },
+                        cancel: { cancelMeetingIntelligence(currentSession) },
+                        applySuggestedTitle: { applyMeetingIntelligenceSuggestedTitle(currentSession) }
+                    )
+                }
             )
         }
         .sheet(item: $metadataSession) { session in
@@ -374,8 +376,8 @@ struct TranscriptEditorView: View {
     let export: () -> Void
     let copy: () -> Void
     let editDetails: (RecordingSession) -> Void
-    let meetingIntelligencePresentation: MeetingIntelligencePresentation
-    let meetingIntelligenceActions: MeetingIntelligenceActions
+    private let meetingIntelligencePresentationForSession: (RecordingSession) -> MeetingIntelligencePresentation
+    private let meetingIntelligenceActionsForSession: (RecordingSession) -> MeetingIntelligenceActions
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @State private var hasLoadedDraft = false
@@ -402,8 +404,34 @@ struct TranscriptEditorView: View {
         self.export = export
         self.copy = copy
         self.editDetails = editDetails
-        self.meetingIntelligencePresentation = meetingIntelligencePresentation
-        self.meetingIntelligenceActions = meetingIntelligenceActions
+        meetingIntelligencePresentationForSession = { _ in meetingIntelligencePresentation }
+        meetingIntelligenceActionsForSession = { _ in meetingIntelligenceActions }
+    }
+
+    init(
+        session: RecordingSession,
+        resolvedSession: RecordingSession? = nil,
+        load: @escaping () -> String,
+        save: @escaping (String) -> Void,
+        openFolder: @escaping () -> Void = {},
+        play: @escaping () -> Void = {},
+        export: @escaping () -> Void,
+        copy: @escaping () -> Void,
+        editDetails: @escaping (RecordingSession) -> Void = { _ in },
+        meetingIntelligencePresentation: @escaping (RecordingSession) -> MeetingIntelligencePresentation,
+        meetingIntelligenceActions: @escaping (RecordingSession) -> MeetingIntelligenceActions
+    ) {
+        self.session = session
+        self.resolvedSession = resolvedSession
+        self.load = load
+        self.save = save
+        self.openFolder = openFolder
+        self.play = play
+        self.export = export
+        self.copy = copy
+        self.editDetails = editDetails
+        meetingIntelligencePresentationForSession = meetingIntelligencePresentation
+        meetingIntelligenceActionsForSession = meetingIntelligenceActions
     }
 
     var body: some View {
@@ -414,8 +442,8 @@ struct TranscriptEditorView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     playbackControls
                     MeetingIntelligenceSectionView(
-                        presentation: meetingIntelligencePresentation,
-                        actions: meetingIntelligenceActions
+                        presentation: meetingIntelligencePresentationForSession(displayedSession),
+                        actions: meetingIntelligenceActionsForSession(displayedSession)
                     )
                     transcriptEditor
                     details

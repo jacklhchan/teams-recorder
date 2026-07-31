@@ -119,10 +119,57 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
         XCTAssertEqual(host.editorText, "Stored transcript")
     }
 
+    func testOpenUnsetSessionRefreshesMeetingIntelligencePresentationAndRegenerateUsesCanonicalSession() throws {
+        let opened = session(title: nil, titleOrigin: .unset)
+        let state = TranscriptDetailLifecycleState(session: opened)
+        let host = try TranscriptDetailLifecycleHost(state: state)
+        defer { host.close() }
+
+        state.session = session(
+            basedOn: opened,
+            title: "MI title A",
+            titleOrigin: .meetingIntelligence
+        )
+        state.meetingIntelligencePresentation = .init(
+            phase: .ready,
+            summary: "Canonical summary",
+            suggestedTitle: "MI title A",
+            statusMessage: "Ready.",
+            model: "test-model",
+            titleIsProtected: false,
+            unavailableReason: nil
+        )
+        host.render()
+
+        XCTAssertEqual(host.accessibilityLabel(for: RecorderActionID.transcriptDetailTitle), "MI title A")
+        XCTAssertEqual(state.presentationLookupSession?.metadata.title, "MI title A")
+        XCTAssertEqual(state.presentationLookupSession?.metadata.titleOrigin, .meetingIntelligence)
+        XCTAssertEqual(state.actionsLookupSession?.metadata.title, "MI title A")
+        XCTAssertEqual(state.actionsLookupSession?.metadata.titleOrigin, .meetingIntelligence)
+
+        let actions = try XCTUnwrap(state.projectedActions)
+        actions.generate()
+        actions.regenerate()
+        actions.checkAgain()
+        actions.retryGeneration()
+        actions.cancel()
+        actions.applySuggestedTitle()
+        XCTAssertEqual(
+            state.invokedActions,
+            ["generate", "regenerate", "checkAgain", "retryGeneration", "cancel", "applySuggestedTitle"]
+        )
+        XCTAssertTrue(state.invokedSessions.allSatisfy { invoked in
+            invoked.id == opened.id
+                && invoked.metadata.title == "MI title A"
+                && invoked.metadata.titleOrigin == .meetingIntelligence
+        })
+    }
+
     private func session(
         basedOn existing: RecordingSession? = nil,
-        title: String = "Transcript detail",
-        favorite: Bool = false
+        title: String? = "Transcript detail",
+        favorite: Bool = false,
+        titleOrigin: RecordingTitleOrigin? = nil
     ) -> RecordingSession {
         let folder = existing?.folderURL ?? URL(fileURLWithPath: "/tmp/meeting-intelligence-sheet-\(UUID().uuidString)")
         return RecordingSession(
@@ -132,18 +179,26 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
             createdAt: existing?.createdAt ?? .now,
             duration: existing?.duration ?? 12,
             fileSize: existing?.fileSize ?? 1,
-            metadata: .init(title: title, isFavorite: favorite)
+            metadata: .init(title: title, titleOrigin: titleOrigin, isFavorite: favorite)
         )
     }
 }
 
 @MainActor
 private final class TranscriptDetailLifecycleState: ObservableObject {
+    let openedSession: RecordingSession
     @Published var session: RecordingSession
     @Published var isDetailOpen = true
+    @Published var meetingIntelligencePresentation = MeetingIntelligencePresentation.empty
     @Published private var unrelatedRevision = 0
+    private(set) var presentationLookupSession: RecordingSession?
+    private(set) var actionsLookupSession: RecordingSession?
+    private(set) var projectedActions: MeetingIntelligenceActions?
+    private(set) var invokedActions: [String] = []
+    private(set) var invokedSessions: [RecordingSession] = []
 
     init(session: RecordingSession) {
+        openedSession = session
         self.session = session
     }
 
@@ -158,6 +213,29 @@ private final class TranscriptDetailLifecycleState: ObservableObject {
     func reopenDetail() {
         isDetailOpen = true
     }
+
+    func meetingIntelligencePresentation(for session: RecordingSession) -> MeetingIntelligencePresentation {
+        presentationLookupSession = session
+        return meetingIntelligencePresentation
+    }
+
+    func meetingIntelligenceActions(for session: RecordingSession) -> MeetingIntelligenceActions {
+        actionsLookupSession = session
+        let record: (String) -> Void = { [weak self] action in
+            self?.invokedActions.append(action)
+            self?.invokedSessions.append(session)
+        }
+        let actions = MeetingIntelligenceActions(
+            generate: { record("generate") },
+            regenerate: { record("regenerate") },
+            checkAgain: { record("checkAgain") },
+            retryGeneration: { record("retryGeneration") },
+            cancel: { record("cancel") },
+            applySuggestedTitle: { record("applySuggestedTitle") }
+        )
+        projectedActions = actions
+        return actions
+    }
 }
 
 @MainActor
@@ -167,12 +245,14 @@ private struct TranscriptDetailLifecycleRoot: View {
     var body: some View {
         if state.isDetailOpen {
             TranscriptEditorView(
-                session: state.session,
+                session: state.openedSession,
                 resolvedSession: state.session,
                 load: { "Stored transcript" },
                 save: { _ in },
                 export: {},
-                copy: {}
+                copy: {},
+                meetingIntelligencePresentation: state.meetingIntelligencePresentation,
+                meetingIntelligenceActions: state.meetingIntelligenceActions
             )
         }
     }

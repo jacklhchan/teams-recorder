@@ -45,7 +45,9 @@ or cross-tenant support. Teams UI mute/unmute actions did not deliver reliable
 mute-state updates in that validation. Teams Mute Sync therefore remains an
 unverified Preview and must not be presented as working, reliable, or capable of
 controlling Teams mute. The integration relies on supported pushed events and
-does not retain `query-state` polling as a workaround. Video capture and a
+uses one best-effort `query-state` request after its receive loop is active, so
+an authenticated connection can obtain its current meeting state even when Teams
+does not emit a new transition push. Video capture and a
 virtual microphone driver are not available. Aggregate
 health is available, but source-specific health statistics are not yet exposed.
 

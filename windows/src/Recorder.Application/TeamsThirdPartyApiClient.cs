@@ -135,8 +135,11 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
     private CancellationTokenSource? lifetime;
     private Task? runTask;
     private ITeamsWebSocketConnection? connection;
+    private StateQueryRequest? pendingStateQuery;
     private long generation;
     private int requestId;
+
+    private sealed record StateQueryRequest(long Generation, ITeamsWebSocketConnection Connection, int RequestId);
 
     public TeamsThirdPartyApiClient(
         TeamsThirdPartyApiIdentity identity,
@@ -182,14 +185,38 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
 
     public Task RequestPairingAsync(CancellationToken cancellationToken = default) => SendCommandAsync(TeamsThirdPartyApiAction.Pair, cancellationToken);
 
-    private async Task SendCommandAsync(TeamsThirdPartyApiAction action, CancellationToken cancellationToken)
+    private async Task<int> SendCommandAsync(TeamsThirdPartyApiAction action, CancellationToken cancellationToken)
     {
         ITeamsWebSocketConnection? active;
         lock (gate) active = connection;
         if (active is null || active.State != WebSocketState.Open) throw new InvalidOperationException("Teams Third-party API is not connected.");
-        var json = TeamsThirdPartyApi.CreateCommand(action, Interlocked.Increment(ref requestId));
+        var nextRequestId = Interlocked.Increment(ref requestId);
+        await SendCommandAsync(action, nextRequestId, active, cancellationToken).ConfigureAwait(false);
+        return nextRequestId;
+    }
+
+    private async Task SendCommandAsync(
+        TeamsThirdPartyApiAction action,
+        int commandRequestId,
+        ITeamsWebSocketConnection expectedConnection,
+        CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!ReferenceEquals(connection, expectedConnection) || expectedConnection.State != WebSocketState.Open)
+                throw new InvalidOperationException("Teams Third-party API is not connected.");
+        }
+        var json = TeamsThirdPartyApi.CreateCommand(action, commandRequestId);
         await sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { await active.SendAsync(Encoding.UTF8.GetBytes(json), cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            lock (gate)
+            {
+                if (!ReferenceEquals(connection, expectedConnection) || expectedConnection.State != WebSocketState.Open)
+                    throw new InvalidOperationException("Teams Third-party API is not connected.");
+            }
+            await expectedConnection.SendAsync(Encoding.UTF8.GetBytes(json), cancellationToken).ConfigureAwait(false);
+        }
         finally { sendGate.Release(); }
     }
 
@@ -205,19 +232,18 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
                 await current.ConnectAsync(TeamsThirdPartyApi.CreateEndpoint(identity, token), cancellationToken).ConfigureAwait(false);
                 if (!TrySetConnection(runGeneration, current)) { await current.DisposeAsync().ConfigureAwait(false); return; }
                 PublishConnection(runGeneration, null);
-                // The Teams Third-party API was only verified to send meeting presence as a
-                // push event. Do not poll query-state: some Teams builds reject it and the
-                // proven Meet Now flow is to wait for the next authenticated push.
-                var credentialWasRefreshed = await ReceiveLoopAsync(
+                // Teams can acknowledge an authenticated device without including meetingState.
+                // Start receiving first, then issue one best-effort current-state query. This is
+                // the same order used by the macOS client: a query failure cannot suppress later
+                // push updates or take a paired connection offline.
+                var receive = ReceiveLoopAsync(
                     runGeneration,
                     current,
                     !string.IsNullOrWhiteSpace(token),
-                    cancellationToken).ConfigureAwait(false);
-                // tokenRefresh is a normal, authenticated credential rotation.  Reporting it
-                // as a connection failure makes the coordinator discard its trusted meeting
-                // state and disable automatic recording just before this loop reconnects with
-                // the replacement token.
-                if (!credentialWasRefreshed && !cancellationToken.IsCancellationRequested && IsCurrent(runGeneration, current))
+                    cancellationToken);
+                await TryQueryStateAfterReceiveStartsAsync(runGeneration, current, cancellationToken).ConfigureAwait(false);
+                await receive.ConfigureAwait(false);
+                if (!cancellationToken.IsCancellationRequested && IsCurrent(runGeneration, current))
                     PublishConnection(runGeneration, "Teams API connection unavailable");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
@@ -243,6 +269,8 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
         CancellationToken cancellationToken)
     {
         var buffer = new byte[8192];
+        var hasPairingCredential = isPairingAuthenticated;
+        var automaticPairingRequested = false;
         using var payload = new MemoryStream();
         while (!cancellationToken.IsCancellationRequested && IsCurrent(runGeneration, current))
         {
@@ -261,13 +289,21 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
             var json = Encoding.UTF8.GetString(payload.GetBuffer(), 0, (int)payload.Length);
             payload.SetLength(0);
             var @event = TeamsThirdPartyApi.Decode(json);
+            if (IsStateQueryReply(runGeneration, current, @event))
+            {
+                // A state-query acknowledgement/error is informational. In particular, it is
+                // not a user-requested pairing outcome and must not change pairing trust.
+                continue;
+            }
             if (@event is TeamsThirdPartyApiEvent.TokenRefresh(var token))
             {
                 await tokens.WriteAsync(token, cancellationToken).ConfigureAwait(false);
-                // A credential refresh is transport-private; do not pass its plaintext to UI subscribers.
-                // Reconnect so the next socket proves it was opened with the newly issued token.
-                // State received on this unauthenticated pairing socket must not drive recording.
-                return true;
+                // Teams issues the credential on this active localhost connection.  Retain the
+                // socket and refresh its state instead of reconnecting into a race that can
+                // suppress the automatic-recording countdown.
+                hasPairingCredential = true;
+                await TryQueryStateAfterReceiveStartsAsync(runGeneration, current, cancellationToken).ConfigureAwait(false);
+                continue;
             }
             if (@event is TeamsThirdPartyApiEvent.Error(_, var message) && IsInvalidPairingToken(message))
             {
@@ -276,14 +312,89 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
                 await tokens.ClearAsync(cancellationToken).ConfigureAwait(false);
                 return false;
             }
+            if (@event is TeamsThirdPartyApiEvent.MeetingUpdate { Update.CanPair: true } &&
+                !hasPairingCredential && !automaticPairingRequested)
+            {
+                // Teams shows its user-approval prompt only after a local client sends a
+                // command while a meeting is joined. Request it once; Teams still requires the
+                // user to approve that prompt before the device can interact with the meeting.
+                automaticPairingRequested = true;
+                var pairingRequestId = Interlocked.Increment(ref requestId);
+                await SendCommandAsync(TeamsThirdPartyApiAction.Pair, pairingRequestId, current, cancellationToken).ConfigureAwait(false);
+            }
             if (IsCurrent(runGeneration, current))
             {
                 if (@event is TeamsThirdPartyApiEvent.MeetingUpdate update)
-                    @event = update with { IsPairingAuthenticated = isPairingAuthenticated };
+                    @event = update with { IsPairingAuthenticated = hasPairingCredential };
                 EventReceived?.Invoke(this, @event);
             }
         }
         return false;
+    }
+
+    private async Task TryQueryStateAfterReceiveStartsAsync(
+        long runGeneration,
+        ITeamsWebSocketConnection current,
+        CancellationToken cancellationToken)
+    {
+        var queryRequestId = Interlocked.Increment(ref requestId);
+        if (!TryRegisterStateQuery(runGeneration, current, queryRequestId)) return;
+        try
+        {
+            await SendCommandAsync(TeamsThirdPartyApiAction.QueryState, queryRequestId, current, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            ClearStateQuery(runGeneration, current, queryRequestId);
+        }
+        catch
+        {
+            // A Teams build may reject query-state. It must never stop reception of subsequent
+            // meeting pushes, which are still authoritative when they arrive.
+            ClearStateQuery(runGeneration, current, queryRequestId);
+        }
+    }
+
+    private bool TryRegisterStateQuery(long expectedGeneration, ITeamsWebSocketConnection expectedConnection, int queryRequestId)
+    {
+        lock (gate)
+        {
+            if (generation != expectedGeneration || !ReferenceEquals(connection, expectedConnection) || lifetime is null)
+                return false;
+            pendingStateQuery = new StateQueryRequest(expectedGeneration, expectedConnection, queryRequestId);
+            return true;
+        }
+    }
+
+    private bool IsStateQueryReply(long expectedGeneration, ITeamsWebSocketConnection expectedConnection, TeamsThirdPartyApiEvent @event)
+    {
+        var responseId = @event switch
+        {
+            TeamsThirdPartyApiEvent.Response(var requestId, _) => requestId,
+            TeamsThirdPartyApiEvent.Error(var requestId, _) => requestId,
+            _ => null,
+        };
+        if (!responseId.HasValue) return false;
+        lock (gate)
+        {
+            if (pendingStateQuery is not { } query ||
+                query.Generation != expectedGeneration ||
+                !ReferenceEquals(query.Connection, expectedConnection) ||
+                query.RequestId != responseId.Value)
+                return false;
+            pendingStateQuery = null;
+            return true;
+        }
+    }
+
+    private void ClearStateQuery(long expectedGeneration, ITeamsWebSocketConnection expectedConnection, int queryRequestId)
+    {
+        lock (gate)
+        {
+            if (pendingStateQuery is { } query && query.Generation == expectedGeneration &&
+                ReferenceEquals(query.Connection, expectedConnection) && query.RequestId == queryRequestId)
+                pendingStateQuery = null;
+        }
     }
 
     private bool TrySetConnection(long expectedGeneration, ITeamsWebSocketConnection value) { lock (gate) { if (generation != expectedGeneration || lifetime is null) return false; connection = value; return true; } }
@@ -291,7 +402,15 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
         receivedBytes < 0 || accumulatedBytes > MaxInboundMessageBytes || receivedBytes > MaxInboundMessageBytes - accumulatedBytes;
     private static bool IsInvalidPairingToken(string message) =>
         message.Contains("invalid token", StringComparison.OrdinalIgnoreCase);
-    private void ClearConnection(long expectedGeneration, ITeamsWebSocketConnection? value) { lock (gate) { if (generation == expectedGeneration && ReferenceEquals(connection, value)) connection = null; } }
+    private void ClearConnection(long expectedGeneration, ITeamsWebSocketConnection? value)
+    {
+        lock (gate)
+        {
+            if (pendingStateQuery is { } query && query.Generation == expectedGeneration && ReferenceEquals(query.Connection, value))
+                pendingStateQuery = null;
+            if (generation == expectedGeneration && ReferenceEquals(connection, value)) connection = null;
+        }
+    }
     private bool IsCurrent(long expectedGeneration, ITeamsWebSocketConnection value) { lock (gate) return generation == expectedGeneration && ReferenceEquals(connection, value) && lifetime is not null; }
     private void PublishConnection(long expectedGeneration, string? error) { if (IsCurrentGeneration(expectedGeneration)) ConnectionChanged?.Invoke(this, error); }
     private bool IsCurrentGeneration(long expectedGeneration) { lock (gate) return generation == expectedGeneration && lifetime is not null; }

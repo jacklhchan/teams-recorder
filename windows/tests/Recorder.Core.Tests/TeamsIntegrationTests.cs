@@ -9,6 +9,8 @@ internal static class TeamsIntegrationTests
         if (!endpoint.Query.Contains("token=token%2B%2F%3D", StringComparison.Ordinal)) throw new InvalidOperationException("Pairing token was not safely encoded.");
         var command = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.Pair, 7);
         if (command != "{\"action\":\"pair\",\"parameters\":{},\"requestId\":7}") throw new InvalidOperationException($"Unexpected Teams command: {command}");
+        var stateQuery = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.QueryState, 8);
+        if (stateQuery != "{\"action\":\"query-state\",\"parameters\":{},\"requestId\":8}") throw new InvalidOperationException($"Unexpected Teams state query: {stateQuery}");
         if (command.Contains("mute", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Teams integration must not issue a Teams mute command.");
     }
@@ -61,6 +63,22 @@ internal static class TeamsIntegrationTests
         Equal(TeamsMuteSyncStatus.WaitingForPairingApproval, coordinator.Snapshot.Status);
         Equal(false, coordinator.Snapshot.IsPairingAuthenticated);
         if (coordinator.Snapshot.LastMeetingState is not null) throw new InvalidOperationException("Unauthenticated meeting state must not be retained.");
+    }
+
+    public static void MuteCoordinatorKeepsIssuedCredentialWhenTeamsOffersPairing()
+    {
+        var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
+        using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
+        coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
+
+        // The current macOS implementation keeps a Teams-issued credential authoritative even
+        // when Teams also advertises canPair. This preserves existing auto-recording users.
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, true), true, true), true));
+
+        Equal(TeamsMuteSyncStatus.InMeeting, coordinator.Snapshot.Status);
+        Equal(true, coordinator.Snapshot.IsPairingAuthenticated);
+        Equal(true, coordinator.Snapshot.IsPairingKnown);
+        if (coordinator.Snapshot.LastMeetingState is null) throw new InvalidOperationException("An issued credential must retain the meeting state.");
     }
 
     public static void MuteCoordinatorFailsClosedOnApiError()

@@ -102,16 +102,21 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
             if (!enabled) return;
             switch (@event)
             {
-                case TeamsThirdPartyApiEvent.MeetingUpdate(var update, var isPairingAuthenticated):
-                    if (!isPairingAuthenticated)
+                case TeamsThirdPartyApiEvent.MeetingUpdate(var update, var hasStoredPairingCredential):
+                    // A Teams-issued credential remains authoritative for this local
+                    // connection. canPair announces that Teams can offer pairing; it does not
+                    // revoke an existing credential. Treating it as revocation prevented
+                    // existing users from entering the automatic-recording countdown.
+                    if (!hasStoredPairingCredential)
                     {
                         FailClosedForLostTrustLocked();
                         SetSnapshotLocked(new TeamsMuteSyncSnapshot(
-                            update.CanPair ? TeamsMuteSyncStatus.WaitingForPairingApproval : TeamsMuteSyncStatus.WaitingForMeeting,
+                            TeamsMuteSyncStatus.WaitingForPairingApproval,
                             null,
-                            null,
+                            update.CanPair ? "Teams is waiting for pairing approval." : null,
                             false,
-                            microphoneRoutingEngaged));
+                            microphoneRoutingEngaged,
+                            false));
                     }
                     else if (update.State is { } state)
                     {

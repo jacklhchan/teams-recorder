@@ -10,7 +10,7 @@
 - WinUI 可開始、停止及執行 10 秒測試錄音，並顯示彙總 peak、packet、silent-packet 與 discontinuity 資訊。
 - WinUI 啟動時會先嘗試復原中斷工作階段，再掃描受管的非 reparse-point 直接子資料夾，並以 Windows `MediaPlayer` 播放所選 M4A。
 
-這是系統輸出錄製，並非 Teams-only 或任意單一程序錄製。雖然 repository 有 process-loopback 探針與原生能力，MVP UI 沒有提供程序選取，也不得宣稱 Teams 程序隔離。Windows 的 Teams Third-party App API Preview 已在單一實測環境完成配對、收到可信 meeting presence，並以自動流程完成一個 M4A；這不構成一般可用、跨 tenant/client 或 Teams-only 錄製的宣稱。該驗證中，Teams UI 的 mute/unmute 未可靠推送後續 mute-state，故 Teams Mute Sync 仍屬未驗證 Preview，不得宣稱可用、可靠同步或可控制 Teams 靜音；不得以 `query-state` polling 補救缺失的事件更新。
+這是系統輸出錄製，並非 Teams-only 或任意單一程序錄製。雖然 repository 有 process-loopback 探針與原生能力，MVP UI 沒有提供程序選取，也不得宣稱 Teams 程序隔離。Windows 的 Teams Third-party App API Preview 已在單一實測環境完成配對、收到可信 meeting presence，並以自動流程完成一個 M4A；這不構成一般可用、跨 tenant/client 或 Teams-only 錄製的宣稱。該驗證中，Teams UI 的 mute/unmute 未可靠推送後續 mute-state，故 Teams Mute Sync 仍屬未驗證 Preview，不得宣稱可用、可靠同步或可控制 Teams 靜音；Windows 會在接收迴圈啟動後發出一次 `query-state` 取得目前會議狀態，但不會把它當作靜音同步的替代品。
 
 ## 工作階段、容量與復原
 
@@ -41,7 +41,7 @@ WinUI 已接入此流程：手動錄製與 10 秒測試分別配置 `manual-*`�
 | --- | --- | --- |
 | Audio-first 錄製 | WASAPI system loopback、可選 capture endpoint 混音、AAC M4A finalization、最多四聲道輸入的 stereo downmix core，以及 WinUI 開始／停止／10 秒測試均已實作。實機 M4A 結果見下節。 | 不代表每一種實體麥克風或音訊驅動程式皆已驗證；尤其不可把 downmix core 視為目前開發機已成功完成麥克風混音。 |
 | Session library 與復原 | 受管資料夾掃描、metadata、容量 gate、backup 的 `ftyp` 驗證與無覆寫 promotion／啟動復原均已接入，並有測試覆蓋。 | 不代表已在所有中斷情境或使用者檔案系統上完成端對端發行驗證。 |
-| Teams 靜音整合預覽 | 已有本機 Teams Third-party App API WebSocket client、DPAPI token store、pairing、push-only event 處理與 fail-closed 行為；單一環境已完成配對及 meeting presence 實測。初始「未靜音」快照不會自動開啟本機錄音麥克風。 | Teams UI mute/unmute 未可靠推送後續狀態；不得宣稱 Teams API 已普遍可用、mute sync／控制可用或可靠，亦不得以 `query-state` polling 替代。 |
+| Teams 靜音整合預覽 | 已有本機 Teams Third-party App API WebSocket client、DPAPI token store、pairing、接收迴圈啟動後的一次 `query-state` 與 fail-closed 行為；單一環境已完成配對及 meeting presence 實測。初始「未靜音」快照不會自動開啟本機錄音麥克風。 | Teams UI mute/unmute 未可靠推送後續狀態；不得宣稱 Teams API 已普遍可用、mute sync／控制可用或可靠。單次狀態查詢不取代後續 mute 推送。 |
 | 全域熱鍵與本機 mute | `Ctrl+Alt+M` 的 Windows `RegisterHotKey` registrar、獨立 local/input mute 合併，以及對錄音輸入的明確 mute 狀態已有實作與測試。 | 不代表硬體 mute 手勢、Teams mute 或虛擬麥克風輸出已完成整合或驗證。 |
 | 視訊／WGC | 僅有非錄製的 Windows Graphics Capture 可行性 probe。此開發主機的 probe 失敗，因此沒有 Windows 視窗／Teams 視訊錄製功能。 | 不得把 probe 或其原始碼視為可用的 WGC、A/V mux 或 QPC 對齊證據；其他主機仍須獨立 probe。 |
 | 虛擬麥克風 | app 只會辨識一個已設定 endpoint ID、且名稱符合預期的受信任 virtual-microphone endpoint。 | Windows audio driver 的簽署、安裝、endpoint 供應與實機音訊路由皆是外部必要前置條件；本專案不提供或驗證該 driver。 |
@@ -72,7 +72,7 @@ windows\src\Recorder.WinUI\bin\x64\Release\net10.0-windows10.0.22621.0\win-x64\R
 - 原生 4-channel-to-stereo downmix core 與其測試已加入；但它只會在 capture client 成功初始化後處理 PCM，無法繞過上述 Intel 4-channel endpoint 在 WASAPI／Media Foundation RAW 初始化階段的 `E_INVALIDARG`。因此，本機**沒有** optional-mic-mix 成功證據。
 - 已在桌面版 Teams 的「Make a test call」啟動 Echo Test Call，並同時以 Release `BridgeProbe mixed` 錄製 45 秒。bridge 回報 2,263 個 render packets、1,086,720 個輸出 frame、0 個 silent packet、peak `0.761594` 與 12 個 discontinuity；產物為 367,453 bytes，Windows Shell 辨識為 22 秒、126 kbps 的 MPEG-4 Audio。這是 Teams Test Call 期間的 system-loopback 與 M4A finalization 實測證據；它不代表 Teams-only process isolation、Teams API、meeting 偵測或自動錄音。
 - 2026-07-30：在桌面版 Teams 的僅自己 Meet now 完成 Third-party App API pairing；已配對連線收到 meeting-presence 快照，使用者明確啟用後自動開始並完成一個可播放的 `meeting-*` M4A 工作階段。這是單一環境證據，並非一般 Teams 支援。
-- 同一次驗證中，Teams UI 的 mute/unmute 均未可靠推送後續 mute-state；已移除未證實的 `query-state` polling。Recorder 只使用已配對連線的推送事件，且不會依單一「未靜音」快照自動開啟本機錄音麥克風。
+- 同一次驗證中，Teams UI 的 mute/unmute 均未可靠推送後續 mute-state；Recorder 在接收迴圈已啟動後只發出一次 `query-state` 取得目前會議狀態，並保留已配對連線的後續推送。單一「未靜音」快照不會自動開啟本機錄音麥克風。
 
 ## 發行前仍必須完成的實機 gate
 

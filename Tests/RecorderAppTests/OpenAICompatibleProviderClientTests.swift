@@ -155,25 +155,35 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         }
     }
 
-    func testRedirectDelegateAcceptsSameOriginJSONAndMultipart307And308WithExactCredentials() throws {
-        for (contentType, status) in [("application/json", 307), ("multipart/form-data; boundary=CaseSensitive", 308)] {
+    func testRedirectDelegateAcceptsExactlyOneGenericOrHKTCredential() throws {
+        for (contentType, status, header, value, other) in [("application/json", 307, "Authorization", "Bearer secret", "X-API-KEY"), ("multipart/form-data; boundary=CaseSensitive", 308, "X-API-KEY", "api-key", "Authorization")] {
             var source = URLRequest(url: try XCTUnwrap(URL(string: "https://provider.test/v1/original")))
             source.httpMethod = "POST"
             source.httpBody = Data("exact body".utf8)
             source.setValue(contentType, forHTTPHeaderField: "Content-Type")
-            source.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
-            source.setValue("api-key", forHTTPHeaderField: "X-API-KEY")
+            source.setValue(value, forHTTPHeaderField: header)
             var destination = source
             destination.url = try XCTUnwrap(URL(string: "https://provider.test/v1/redirected"))
-            destination.setValue("leaked", forHTTPHeaderField: "Authorization")
-            destination.setValue("leaked", forHTTPHeaderField: "X-API-KEY")
+            destination.setValue("leaked", forHTTPHeaderField: header)
+            destination.setValue("leaked", forHTTPHeaderField: other)
             let redirected = try XCTUnwrap(ProviderRedirectDelegate(source: source).redirectedRequest(proposed: destination, statusCode: status))
             XCTAssertEqual(redirected.httpMethod, "POST")
             XCTAssertEqual(redirected.httpBody, Data("exact body".utf8))
             XCTAssertEqual(redirected.value(forHTTPHeaderField: "Content-Type"), contentType)
-            XCTAssertEqual(redirected.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
-            XCTAssertEqual(redirected.value(forHTTPHeaderField: "X-API-KEY"), "api-key")
+            XCTAssertEqual(redirected.value(forHTTPHeaderField: header), value)
+            XCTAssertNil(redirected.value(forHTTPHeaderField: other))
         }
+    }
+
+    func testRedirectDelegateRejectsAmbiguousDualCredentialSource() throws {
+        var source = URLRequest(url: try XCTUnwrap(URL(string: "https://provider.test/v1/original")))
+        source.httpMethod = "POST"; source.httpBody = Data("body".utf8)
+        source.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        source.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        source.setValue("api-key", forHTTPHeaderField: "X-API-KEY")
+        var proposed = source
+        proposed.url = try XCTUnwrap(URL(string: "https://provider.test/v1/redirected"))
+        XCTAssertNil(ProviderRedirectDelegate(source: source).redirectedRequest(proposed: proposed, statusCode: 307))
     }
 
     func testRedirectDelegateRejectsMutationsWithoutReturningCredentials() throws {

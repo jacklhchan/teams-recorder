@@ -14,17 +14,19 @@ enum ProviderRedirectPolicy {
         for header in credentialHeaders {
             proposed.setValue(nil, forHTTPHeaderField: header)
         }
+        let sourceCredentials = credentialHeaders.compactMap { header in
+            source.value(forHTTPHeaderField: header).map { (header, $0) }
+        }
         guard statusCode == 307 || statusCode == 308,
+              sourceCredentials.count <= 1,
               source.httpMethod == "POST", proposed.httpMethod == "POST",
               let sourceBody = source.httpBody, proposed.httpBody == sourceBody,
               let sourceType = normalizedContentType(source),
               sourceType == normalizedContentType(proposed), isSupportedContentType(sourceType),
               let sourceURL = source.url, let destinationURL = proposed.url,
               allows(from: sourceURL, to: destinationURL) else { return nil }
-        for header in credentialHeaders {
-            if let value = source.value(forHTTPHeaderField: header) {
-                proposed.setValue(value, forHTTPHeaderField: header)
-            }
+        if let credential = sourceCredentials.first {
+            proposed.setValue(credential.1, forHTTPHeaderField: credential.0)
         }
         return proposed
     }

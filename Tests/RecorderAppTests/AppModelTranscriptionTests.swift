@@ -818,6 +818,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             model.aiProviderSettingsModel.baseURLText = "https://api.example.com/v1"
             model.aiProviderSettingsModel.asrModel = "asr"
             model.aiProviderSettingsModel.llmModel = "llm"
+            model.aiProviderSettingsModel.selectedLanguage = .cantonese
             model.aiProviderSettingsModel.save()
         }
         return model

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -86,7 +87,16 @@ final class TranscriptionProcessTests: XCTestCase {
             .init(audioURL: fixture.audioURL, sessionFolder: fixture.root, snapshot: try makeSnapshot()),
             onProgress: { _ in }
         )
-        XCTAssertEqual(result.committedTranscriptRevision.byteCount, Data("legacy transcript".utf8).count)
+        let bytes = Data("legacy transcript".utf8)
+        XCTAssertEqual(
+            result.committedTranscriptRevision,
+            .init(
+                sha256: "sha256:" + SHA256.hash(data: bytes)
+                    .map { String(format: "%02x", $0) }
+                    .joined(),
+                byteCount: bytes.count
+            )
+        )
     }
 }
 

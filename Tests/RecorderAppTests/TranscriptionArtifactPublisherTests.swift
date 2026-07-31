@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -64,9 +65,15 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
         )
         XCTAssertFalse(manifest.contains("apiKey"))
         XCTAssertFalse(manifest.contains("baseURL"))
+        let bytes = Data("final-4".utf8)
         XCTAssertEqual(
-            artifacts?.committedTranscriptRevision.byteCount,
-            Data("final-4".utf8).count
+            artifacts?.committedTranscriptRevision,
+            .init(
+                sha256: "sha256:" + SHA256.hash(data: bytes)
+                    .map { String(format: "%02x", $0) }
+                    .joined(),
+                byteCount: bytes.count
+            )
         )
     }
 

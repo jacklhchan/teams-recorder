@@ -83,6 +83,85 @@ final class SecureTranscriptDocumentReaderTests: XCTestCase {
             )
         ) { XCTAssertEqual($0 as? SecureTranscriptReadError, .invalidUTF8) }
     }
+
+    func testReadsNoMoreThanSingleOverflowByteWhenFileGrowsAfterInitialStatus() throws {
+        let fixture = try TranscriptReaderFixture()
+        defer { fixture.remove() }
+        let access = ControlledTranscriptFileAccess(
+            statuses: [
+                .regular(byteCount: Int64(SecureTranscriptDocumentReader.maximumBytes)),
+                .regular(byteCount: Int64(SecureTranscriptDocumentReader.maximumBytes + 1))
+            ],
+            chunks: Array(
+                repeating: Data(repeating: 65, count: 64 * 1_024),
+                count: SecureTranscriptDocumentReader.maximumBytes / (64 * 1_024)
+            ) + [Data([66])]
+        )
+
+        XCTAssertThrowsError(
+            try SecureTranscriptDocumentReader(fileAccess: access).readCanonical(
+                in: fixture.folder,
+                allowLegacy: false
+            )
+        ) { XCTAssertEqual($0 as? SecureTranscriptReadError, .tooLarge) }
+        XCTAssertEqual(
+            access.readLimits.last,
+            1
+        )
+        XCTAssertTrue(access.readLimits.allSatisfy { $0 <= 64 * 1_024 })
+    }
+
+    func testRejectsDeterministicIdentityChangeAfterRead() throws {
+        let fixture = try TranscriptReaderFixture()
+        defer { fixture.remove() }
+        let bytes = Data("stable bytes".utf8)
+        let access = ControlledTranscriptFileAccess(
+            statuses: [
+                .regular(inode: 101, byteCount: Int64(bytes.count)),
+                .regular(inode: 202, byteCount: Int64(bytes.count))
+            ],
+            chunks: [bytes, Data()]
+        )
+
+        XCTAssertThrowsError(
+            try SecureTranscriptDocumentReader(fileAccess: access).readCanonical(
+                in: fixture.folder,
+                allowLegacy: false
+            )
+        ) { XCTAssertEqual($0 as? SecureTranscriptReadError, .identityChanged) }
+    }
+}
+
+private final class ControlledTranscriptFileAccess:
+    TranscriptFileAccessing,
+    @unchecked Sendable
+{
+    private var statuses: [TranscriptFileStatus]
+    private var chunks: [Data]
+    private(set) var readLimits: [Int] = []
+
+    init(statuses: [TranscriptFileStatus], chunks: [Data]) {
+        self.statuses = statuses
+        self.chunks = chunks
+    }
+
+    func openFolder(at path: String) -> Int32 { 10 }
+
+    func openFile(named name: String, in folderDescriptor: Int32) -> Int32 {
+        11
+    }
+
+    func status(of descriptor: Int32) -> TranscriptFileStatus? {
+        guard !statuses.isEmpty else { return nil }
+        return statuses.removeFirst()
+    }
+
+    func read(from descriptor: Int32, maximumByteCount: Int) -> Data {
+        readLimits.append(maximumByteCount)
+        return chunks.removeFirst()
+    }
+
+    func close(_ descriptor: Int32) {}
 }
 
 private struct TranscriptReaderFixture {

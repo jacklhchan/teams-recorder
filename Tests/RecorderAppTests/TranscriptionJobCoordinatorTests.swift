@@ -142,10 +142,14 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
             manifestURL: nil, logURL: fixture.logURL,
             committedTranscriptRevision: try fixture.revision()
         ))
+        let oldAttempt = UUID()
+        let newAttempt = UUID()
+        var attemptIDs = [oldAttempt, newAttempt]
         let coordinator = TranscriptionJobCoordinator(
             providerRepository: CoordinatorRepository(snapshot: try fixture.snapshot()),
             audioPreparer: CoordinatorPreparer(result: .success(.init(audioURL: fixture.audioURL, cleanupURL: nil))),
-            service: service
+            service: service,
+            attemptIDFactory: { attemptIDs.removeFirst() }
         )
         var events: [TranscriptPublished] = []
         coordinator.onSuccessfulPublication = { events.append($0) }
@@ -161,6 +165,8 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(events.count, 1)
         XCTAssertEqual(events[0].identity.generation, 3)
+        XCTAssertEqual(events[0].identity.attemptID, newAttempt)
+        XCTAssertNotEqual(events[0].identity.attemptID, oldAttempt)
     }
 
     func testProviderSecretIsRedactedFromFailureAndPersistedState() async throws {

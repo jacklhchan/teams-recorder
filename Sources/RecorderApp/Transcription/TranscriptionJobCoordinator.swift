@@ -25,6 +25,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
     private let mutationGate: RecordingSessionMutationGate
     private let transcriptReader: any TranscriptDocumentReading
     private let coordinatorInstanceID: UUID
+    private let attemptIDFactory: () -> UUID
     private var task: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var activeAttempt: UUID?
@@ -38,7 +39,8 @@ final class TranscriptionJobCoordinator: ObservableObject {
         mutationGate: RecordingSessionMutationGate = .init(),
         transcriptReader: any TranscriptDocumentReading =
             SecureTranscriptDocumentReader(),
-        coordinatorInstanceID: UUID = UUID()
+        coordinatorInstanceID: UUID = UUID(),
+        attemptIDFactory: @escaping () -> UUID = UUID.init
     ) {
         self.providerRepository = providerRepository
         self.audioPreparer = audioPreparer
@@ -46,6 +48,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
         self.mutationGate = mutationGate
         self.transcriptReader = transcriptReader
         self.coordinatorInstanceID = coordinatorInstanceID
+        self.attemptIDFactory = attemptIDFactory
     }
 
     deinit {
@@ -74,7 +77,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
         }
 
         generation &+= 1
-        let attempt = UUID()
+        let attempt = attemptIDFactory()
         let attemptGeneration = generation
         activeAttempt = attempt
         activeSession = session

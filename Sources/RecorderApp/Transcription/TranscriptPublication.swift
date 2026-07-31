@@ -2,53 +2,211 @@ import CryptoKit
 import Darwin
 import Foundation
 
-struct TranscriptDocumentRevision: Equatable, Sendable { let sha256: String; let byteCount: Int }
-struct TranscriptDocumentSnapshot: Equatable, Sendable { let url: URL; let data: Data; let revision: TranscriptDocumentRevision }
-struct TranscriptPublicationIdentity: Equatable, Sendable { let coordinatorInstanceID: UUID; let generation: UInt64; let attemptID: UUID }
-struct TranscriptPublished: Sendable { let session: RecordingSession; let canonicalURL: URL; let revision: TranscriptDocumentRevision; let normalizedSessionFolder: URL; let identity: TranscriptPublicationIdentity }
-protocol TranscriptDocumentReading: Sendable { func readCanonical(in sessionFolder: URL, allowLegacy: Bool) throws -> TranscriptDocumentSnapshot }
-enum SecureTranscriptReadError: LocalizedError, Equatable, Sendable { case missing, empty, tooLarge, invalidUTF8, unsafeFile, identityChanged }
+struct TranscriptDocumentRevision: Equatable, Sendable {
+    let sha256: String
+    let byteCount: Int
+}
+
+struct TranscriptDocumentSnapshot: Equatable, Sendable {
+    let url: URL
+    let data: Data
+    let revision: TranscriptDocumentRevision
+}
+
+struct TranscriptPublicationIdentity: Equatable, Sendable {
+    let coordinatorInstanceID: UUID
+    let generation: UInt64
+    let attemptID: UUID
+}
+
+struct TranscriptPublished: Sendable {
+    let session: RecordingSession
+    let canonicalURL: URL
+    let revision: TranscriptDocumentRevision
+    let normalizedSessionFolder: URL
+    let identity: TranscriptPublicationIdentity
+}
+
+protocol TranscriptDocumentReading: Sendable {
+    func readCanonical(
+        in sessionFolder: URL,
+        allowLegacy: Bool
+    ) throws -> TranscriptDocumentSnapshot
+}
+
+enum SecureTranscriptReadError: LocalizedError, Equatable, Sendable {
+    case missing
+    case empty
+    case tooLarge
+    case invalidUTF8
+    case unsafeFile
+    case identityChanged
+}
+
+struct TranscriptFileStatus: Equatable, Sendable {
+    let device: Int64
+    let inode: Int64
+    let byteCount: Int64
+    let linkCount: Int64
+    let isRegularFile: Bool
+
+    static func regular(
+        device: Int64 = 1,
+        inode: Int64 = 1,
+        byteCount: Int64,
+        linkCount: Int64 = 1
+    ) -> TranscriptFileStatus {
+        .init(
+            device: device,
+            inode: inode,
+            byteCount: byteCount,
+            linkCount: linkCount,
+            isRegularFile: true
+        )
+    }
+}
+
+protocol TranscriptFileAccessing: Sendable {
+    func openFolder(at path: String) -> Int32
+    func openFile(named name: String, in folderDescriptor: Int32) -> Int32
+    func status(of descriptor: Int32) -> TranscriptFileStatus?
+    func read(from descriptor: Int32, maximumByteCount: Int) throws -> Data
+    func close(_ descriptor: Int32)
+}
+
+struct DarwinTranscriptFileAccess: TranscriptFileAccessing {
+    func openFolder(at path: String) -> Int32 {
+        open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    }
+
+    func openFile(named name: String, in folderDescriptor: Int32) -> Int32 {
+        openat(folderDescriptor, name, O_RDONLY | O_NOFOLLOW)
+    }
+
+    func status(of descriptor: Int32) -> TranscriptFileStatus? {
+        var value = stat()
+        guard fstat(descriptor, &value) == 0 else { return nil }
+        return .init(
+            device: Int64(value.st_dev),
+            inode: Int64(value.st_ino),
+            byteCount: Int64(value.st_size),
+            linkCount: Int64(value.st_nlink),
+            isRegularFile: (value.st_mode & S_IFMT) == S_IFREG
+        )
+    }
+
+    func read(from descriptor: Int32, maximumByteCount: Int) throws -> Data {
+        var buffer = [UInt8](repeating: 0, count: maximumByteCount)
+        let count = Darwin.read(descriptor, &buffer, maximumByteCount)
+        guard count >= 0 else { throw SecureTranscriptReadError.unsafeFile }
+        return Data(buffer.prefix(count))
+    }
+
+    func close(_ descriptor: Int32) {
+        Darwin.close(descriptor)
+    }
+}
 
 struct SecureTranscriptDocumentReader: TranscriptDocumentReading {
     static let maximumBytes = 4 * 1_024 * 1_024
-    func readCanonical(in sessionFolder: URL, allowLegacy: Bool) throws -> TranscriptDocumentSnapshot {
+
+    private let fileAccess: any TranscriptFileAccessing
+
+    init(fileAccess: any TranscriptFileAccessing = DarwinTranscriptFileAccess()) {
+        self.fileAccess = fileAccess
+    }
+
+    func readCanonical(
+        in sessionFolder: URL,
+        allowLegacy: Bool
+    ) throws -> TranscriptDocumentSnapshot {
         let folder = sessionFolder.standardizedFileURL
-        guard folder == sessionFolder.resolvingSymlinksInPath().standardizedFileURL else { throw SecureTranscriptReadError.unsafeFile }
-        let folderFD = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-        guard folderFD >= 0 else { throw SecureTranscriptReadError.missing }
-        defer { close(folderFD) }
+        guard folder == sessionFolder.resolvingSymlinksInPath().standardizedFileURL else {
+            throw SecureTranscriptReadError.unsafeFile
+        }
+        let folderDescriptor = fileAccess.openFolder(at: folder.path)
+        guard folderDescriptor >= 0 else {
+            throw SecureTranscriptReadError.missing
+        }
+        defer { fileAccess.close(folderDescriptor) }
+
         let names = [TranscriptDocumentStore.editableFileName]
             + (allowLegacy ? TranscriptDocumentStore.legacyTranscriptFileNames : [])
-        var selectedName: String?
-        var fd: Int32 = -1
-        for name in names {
-            let candidate = openat(folderFD, name, O_RDONLY | O_NOFOLLOW)
-            if candidate >= 0 {
-                selectedName = name
-                fd = candidate
-                break
+        let opened = try openWhitelistedFile(
+            named: names,
+            in: folderDescriptor
+        )
+        defer { fileAccess.close(opened.descriptor) }
+
+        let before = try validatedStatus(of: opened.descriptor)
+        guard before.byteCount > 0 else {
+            throw SecureTranscriptReadError.empty
+        }
+        guard before.byteCount <= Int64(Self.maximumBytes) else {
+            throw SecureTranscriptReadError.tooLarge
+        }
+
+        var data = Data()
+        let maximumReadBytes = Self.maximumBytes + 1
+        while data.count < maximumReadBytes {
+            let remaining = maximumReadBytes - data.count
+            let chunk = try fileAccess.read(
+                from: opened.descriptor,
+                maximumByteCount: min(64 * 1_024, remaining)
+            )
+            if chunk.isEmpty { break }
+            data.append(chunk)
+            guard data.count <= Self.maximumBytes else {
+                throw SecureTranscriptReadError.tooLarge
             }
+        }
+
+        let after = try validatedStatus(of: opened.descriptor)
+        guard before == after else {
+            throw SecureTranscriptReadError.identityChanged
+        }
+        guard !data.isEmpty else {
+            throw SecureTranscriptReadError.empty
+        }
+        guard String(data: data, encoding: .utf8) != nil else {
+            throw SecureTranscriptReadError.invalidUTF8
+        }
+        let digest = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return .init(
+            url: folder.appendingPathComponent(opened.name),
+            data: data,
+            revision: .init(
+                sha256: "sha256:\(digest)",
+                byteCount: data.count
+            )
+        )
+    }
+
+    private func openWhitelistedFile(
+        named names: [String],
+        in folderDescriptor: Int32
+    ) throws -> (name: String, descriptor: Int32) {
+        for name in names {
+            let descriptor = fileAccess.openFile(
+                named: name,
+                in: folderDescriptor
+            )
+            if descriptor >= 0 { return (name, descriptor) }
             if errno != ENOENT { throw SecureTranscriptReadError.unsafeFile }
         }
-        guard let selectedName, fd >= 0 else { throw SecureTranscriptReadError.missing }
-        defer { close(fd) }
-        var before = stat()
-        guard fstat(fd, &before) == 0, (before.st_mode & S_IFMT) == S_IFREG, before.st_nlink == 1 else { throw SecureTranscriptReadError.unsafeFile }
-        guard before.st_size > 0 else { throw SecureTranscriptReadError.empty }
-        guard before.st_size <= off_t(Self.maximumBytes) else { throw SecureTranscriptReadError.tooLarge }
-        var data = Data(); var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while data.count <= Self.maximumBytes {
-            let count = Darwin.read(fd, &buffer, buffer.count)
-            guard count >= 0 else { throw SecureTranscriptReadError.unsafeFile }
-            if count == 0 { break }; data.append(buffer, count: count)
+        throw SecureTranscriptReadError.missing
+    }
+
+    private func validatedStatus(
+        of descriptor: Int32
+    ) throws -> TranscriptFileStatus {
+        guard let status = fileAccess.status(of: descriptor),
+              status.isRegularFile,
+              status.linkCount == 1 else {
+            throw SecureTranscriptReadError.unsafeFile
         }
-        var after = stat()
-        guard fstat(fd, &after) == 0,
-              before.st_dev == after.st_dev, before.st_ino == after.st_ino,
-              before.st_size == after.st_size, before.st_nlink == after.st_nlink else { throw SecureTranscriptReadError.identityChanged }
-        guard data.count <= Self.maximumBytes else { throw SecureTranscriptReadError.tooLarge }
-        guard String(data: data, encoding: .utf8) != nil else { throw SecureTranscriptReadError.invalidUTF8 }
-        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        return .init(url: folder.appendingPathComponent(selectedName), data: data, revision: .init(sha256: "sha256:\(hash)", byteCount: data.count))
+        return status
     }
 }

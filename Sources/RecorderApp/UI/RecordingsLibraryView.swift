@@ -257,6 +257,7 @@ private struct SessionListView: View {
         .sheet(item: $transcriptSession) { session in
             TranscriptEditorView(
                 session: session,
+                resolvedSession: sessions.first(where: { $0.id == session.id }),
                 load: { transcriptText(session) },
                 save: { saveTranscript($0, session) },
                 openFolder: { open(session) },
@@ -336,6 +337,10 @@ enum TranscriptEditorDraft {
 
 struct TranscriptEditorView: View {
     let session: RecordingSession
+    /// The list projection may be refreshed while this sheet is open (for
+    /// example after applying a generated title). Keep the stable session ID
+    /// and the editor draft, but render the current metadata projection.
+    let resolvedSession: RecordingSession?
     let load: () -> String
     let save: (String) -> Void
     let openFolder: () -> Void
@@ -353,6 +358,7 @@ struct TranscriptEditorView: View {
 
     init(
         session: RecordingSession,
+        resolvedSession: RecordingSession? = nil,
         load: @escaping () -> String,
         save: @escaping (String) -> Void,
         openFolder: @escaping () -> Void = {},
@@ -364,6 +370,7 @@ struct TranscriptEditorView: View {
         meetingIntelligenceActions: MeetingIntelligenceActions = .init()
     ) {
         self.session = session
+        self.resolvedSession = resolvedSession
         self.load = load
         self.save = save
         self.openFolder = openFolder
@@ -424,15 +431,31 @@ struct TranscriptEditorView: View {
             }
             .buttonStyle(.borderless)
             .help("Back")
-            Text(session.displayName)
+            Text(displayedSession.displayName)
                 .font(.headline)
                 .lineLimit(1)
+                .accessibilityIdentifier(RecorderActionID.transcriptDetailTitle)
+                .accessibilityLabel(displayedSession.displayName)
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: RecorderActionID.transcriptDetailTitle,
+                        label: displayedSession.displayName
+                    )
+                )
             Spacer()
             Button(action: editDetails) {
-                Image(systemName: session.isFavorite ? "star.fill" : "star")
+                Image(systemName: displayedSession.isFavorite ? "star.fill" : "star")
             }
             .buttonStyle(.borderless)
             .help("Edit recording details")
+            .accessibilityIdentifier(RecorderActionID.transcriptDetailFavorite)
+            .accessibilityValue(displayedSession.isFavorite ? "favorite" : "not-favorite")
+            .background(
+                RecorderDestinationAccessibilityMarker(
+                    identifier: RecorderActionID.transcriptDetailFavorite,
+                    label: displayedSession.isFavorite ? "favorite" : "not-favorite"
+                )
+            )
             Button(action: editDetails) { Image(systemName: "pencil") }
                 .buttonStyle(.borderless)
                 .help("Edit recording details")
@@ -474,13 +497,17 @@ struct TranscriptEditorView: View {
 
     private var details: some View {
         HStack {
-            Label(session.durationText, systemImage: "clock")
+            Label(displayedSession.durationText, systemImage: "clock")
             Spacer()
-            Label(session.fileSizeText, systemImage: "internaldrive")
+            Label(displayedSession.fileSizeText, systemImage: "internaldrive")
         }
         .font(.caption)
         .foregroundStyle(.secondary)
         .padding(.vertical, 4)
+    }
+
+    private var displayedSession: RecordingSession {
+        resolvedSession ?? session
     }
 
     private var footer: some View {

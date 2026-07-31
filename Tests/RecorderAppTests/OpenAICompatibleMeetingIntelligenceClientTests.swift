@@ -21,7 +21,7 @@ final class OpenAICompatibleMeetingIntelligenceClientTests: XCTestCase {
         let transport = MeetingIntelligenceRecordingTransport(responses: [
             .response(status: 200, body: outer(#"{"title":"HKT meeting","summary":"Done."}"#))
         ])
-        let snapshot = OpenAICompatibleProviderSnapshot(
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(
             profile: try .hktValidated(groupID: "77", asrModel: "asr", llmModel: "hkt-llm", language: "en", prompt: "prompt"),
             apiKey: "hkt-secret"
         )
@@ -229,7 +229,7 @@ final class OpenAICompatibleMeetingIntelligenceClientTests: XCTestCase {
     }
 
     private func snapshot(apiKey: String? = nil) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: try .validated(baseURLText: "https://api.example/v1", asrModel: "asr-only", llmModel: "llm-only", language: "en", prompt: "ASR prompt"), apiKey: apiKey)
+        try .validated(profile: try .validated(baseURLText: "https://api.example/v1", asrModel: "asr-only", llmModel: "llm-only", language: "en", prompt: "ASR prompt"), apiKey: apiKey)
     }
 
     private func body(_ request: URLRequest) throws -> [String: Any] {

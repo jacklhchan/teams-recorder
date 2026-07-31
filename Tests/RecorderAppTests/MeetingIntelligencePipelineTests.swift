@@ -344,7 +344,7 @@ final class MeetingIntelligencePipelineTests: XCTestCase {
     }
 
     private func providerSnapshot() throws -> OpenAICompatibleProviderSnapshot {
-        .init(
+        try .validated(
             profile: try .validated(
                 baseURLText: "https://api.example",
                 asrModel: "asr",

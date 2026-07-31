@@ -51,3 +51,16 @@ enum ProviderRequestAuthentication {
         )
     }
 }
+
+enum ProviderAPIKeyValidation {
+    static func validated(_ value: String?) throws -> String? {
+        guard let value else { return nil }
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !value.unicodeScalars.contains(where: { scalar in
+                  scalar.value < 32 || (127...159).contains(scalar.value)
+              }) else {
+            throw ProviderRepositoryError.invalidAPIKeyEncoding
+        }
+        return value
+    }
+}

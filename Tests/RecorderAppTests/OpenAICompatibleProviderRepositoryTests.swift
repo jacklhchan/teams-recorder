@@ -13,7 +13,7 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
 
         XCTAssertEqual(
             try repository.snapshot(),
-            OpenAICompatibleProviderSnapshot(
+            try OpenAICompatibleProviderSnapshot.validated(
                 profile: try XCTUnwrap(profileStore.profile),
                 apiKey: "secret-key"
             )
@@ -30,6 +30,52 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
         )
 
         XCTAssertEqual(secure.stored, Data("existing-key".utf8))
+    }
+
+    func testRejectsEmptyWhitespaceAndControlKeysForGenericAndHKTWithoutWrites() throws {
+        let profiles: [OpenAICompatibleProviderProfile] = [
+            try makeProfile(),
+            try .hktValidated(
+                groupID: "42", asrModel: "hkt-asr", llmModel: "hkt-llm",
+                language: "yue", prompt: ""
+            )
+        ]
+        for profile in profiles {
+            for key in ["", " \t ", "bad\nkey", "bad\rkey", "bad\u{7F}key"] {
+                let secure = InMemorySecureValueStore()
+                let store = InMemoryProfileStore()
+                let repository = makeRepository(profileStore: store, secureStore: secure)
+
+                XCTAssertThrowsError(
+                    try repository.save(profile: profile, replacementAPIKey: key)
+                ) { error in
+                    XCTAssertEqual(error as? ProviderRepositoryError, .invalidAPIKeyEncoding)
+                    XCTAssertFalse(error.localizedDescription.contains(key))
+                }
+                XCTAssertNil(store.profile)
+                XCTAssertTrue(secure.operations.isEmpty)
+            }
+        }
+    }
+
+    func testRejectsWhitespaceAndControlKeysWhenLoadingGenericAndHKT() throws {
+        for profile in [
+            try makeProfile(),
+            try .hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: "")
+        ] {
+            for key in [" \n", "bad\rkey", "bad\u{7F}key"] {
+                let secure = KeyedSecureValueStore()
+                secure.seed(key, for: profile.providerKind)
+                let repository = makeRepository(
+                    profileStore: InMemoryProfileStore(profile: profile),
+                    secureStore: secure
+                )
+                XCTAssertThrowsError(try repository.snapshot()) { error in
+                    XCTAssertEqual(error as? ProviderRepositoryError, .invalidAPIKeyEncoding)
+                    XCTAssertFalse(error.localizedDescription.contains(key))
+                }
+            }
+        }
     }
 
     func testExplicitRemoveDeletesKey() throws {
@@ -291,13 +337,13 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
 
     func testSnapshotDerivesHKTAuthenticationFromProfileWithoutOverrides() throws {
         let profile = try OpenAICompatibleProviderProfile.hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: "")
-        let snapshot = OpenAICompatibleProviderSnapshot(profile: profile, apiKey: "hkt-key")
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(profile: profile, apiKey: "hkt-key")
         XCTAssertEqual(snapshot.providerKind, .hktGenAI)
         XCTAssertEqual(snapshot.authentication, .hktAPIKey)
     }
 
     func testSnapshotDerivesGenericAuthenticationFromProfileWithoutOverrides() throws {
-        let snapshot = OpenAICompatibleProviderSnapshot(profile: try makeProfile(), apiKey: "generic-key")
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(profile: try makeProfile(), apiKey: "generic-key")
         XCTAssertEqual(snapshot.providerKind, .openAICompatible)
         XCTAssertEqual(snapshot.authentication, .bearer)
     }

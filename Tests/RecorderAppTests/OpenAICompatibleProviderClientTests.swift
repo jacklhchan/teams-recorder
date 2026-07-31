@@ -258,7 +258,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         let transport = RecordingProviderTransport(
             response: .success(.init(status: 200, body: #"{"data":[{"id":"hkt-asr"},{"id":"hkt-llm"}]}"#))
         )
-        let snapshot = try OpenAICompatibleProviderSnapshot(
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(
             profile: .hktValidated(
                 groupID: "12345",
                 asrModel: "hkt-asr",
@@ -279,6 +279,27 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         )
         XCTAssertEqual(transport.lastRequest?.value(forHTTPHeaderField: "X-API-KEY"), "hkt-secret")
         XCTAssertNil(transport.lastRequest?.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testMalformedHKTProfileCannotProduceSnapshotOrReachTransport() throws {
+        let malformed = try JSONDecoder().decode(
+            OpenAICompatibleProviderProfile.self,
+            from: Data(#"{"schemaVersion":1,"providerKind":"hktGenAI","baseURL":"https://evil.example/v1","groupID":"42","asrModel":"asr","llmModel":"llm","language":"yue","prompt":""}"#.utf8)
+        )
+        let transport = RecordingProviderTransport(
+            response: .success(.init(status: 200, body: #"{"data":[]}"#))
+        )
+
+        XCTAssertThrowsError(
+            try OpenAICompatibleProviderSnapshot.validated(
+                profile: malformed,
+                apiKey: "hkt-secret"
+            )
+        ) { error in
+            XCTAssertEqual(error as? ProviderProfileValidationError, .invalidProviderConfiguration)
+            XCTAssertFalse(error.localizedDescription.contains("hkt-secret"))
+        }
+        XCTAssertNil(transport.lastRequest)
     }
 
     func testUnsupportedModelDiscoveryStillReportsReachable() async throws {
@@ -383,7 +404,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
     private func snapshot(
         apiKey: String? = nil
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: try makeProfile(), apiKey: apiKey)
+        try .validated(profile: try makeProfile(), apiKey: apiKey)
     }
 
     private func controlledSessionConfiguration() -> URLSessionConfiguration {

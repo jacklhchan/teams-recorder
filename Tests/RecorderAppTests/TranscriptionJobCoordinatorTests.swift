@@ -323,7 +323,7 @@ private struct CoordinatorFixture {
     func snapshot(
         apiKey: String? = nil
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(
+        try .validated(
             profile: try OpenAICompatibleProviderProfile.validated(
                 baseURLText: "https://api.example/v1",
                 asrModel: "asr",
@@ -373,7 +373,7 @@ private final class CoordinatorRepository:
     func snapshot(
         overriding profile: OpenAICompatibleProviderProfile
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: profile, apiKey: value.apiKey)
+        try .validated(profile: profile, apiKey: value.apiKey)
     }
 
     func hasAPIKey() throws -> Bool {

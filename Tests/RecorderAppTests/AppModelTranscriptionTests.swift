@@ -394,7 +394,7 @@ final class AppModelTranscriptionTests: XCTestCase {
         defer { fixture.remove() }
         let started = expectation(description: "prepare started")
         let first = try makeSnapshot(asrModel: "first-model")
-        let repository = SnapshotProviderRepository(snapshot: first)
+        let repository = try SnapshotProviderRepository(snapshot: first)
         let preparer = ControlledPreparer(.suspended(started: started))
         let launcher = ControlledLauncher()
         let model = makeModel(
@@ -422,7 +422,7 @@ final class AppModelTranscriptionTests: XCTestCase {
     func testMissingProfileFailsBeforeAudioPreparation() throws {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
-        let repository = SnapshotProviderRepository(
+        let repository = try SnapshotProviderRepository(
             profile: try makeProfile(),
             snapshotError: ProviderRepositoryError.missingProfile
         )
@@ -661,8 +661,8 @@ final class AppModelTranscriptionTests: XCTestCase {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
         let secret = "exact-private-api-key"
-        let repository = SnapshotProviderRepository(
-            snapshot: .init(profile: try makeProfile(), apiKey: secret)
+        let repository = try SnapshotProviderRepository(
+            snapshot: try .validated(profile: makeProfile(), apiKey: secret)
         )
         let preparer = ControlledPreparer(.immediate(.success(.init(
             audioURL: fixture.temporaryAudioURL,
@@ -699,8 +699,8 @@ final class AppModelTranscriptionTests: XCTestCase {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
         let secret = "exact-live-private-api-key"
-        let repository = SnapshotProviderRepository(
-            snapshot: .init(profile: try makeProfile(), apiKey: secret)
+        let repository = try SnapshotProviderRepository(
+            snapshot: try .validated(profile: makeProfile(), apiKey: secret)
         )
         let preparer = ControlledPreparer(.immediate(.success(.init(
             audioURL: fixture.temporaryAudioURL,
@@ -797,7 +797,7 @@ final class AppModelTranscriptionTests: XCTestCase {
     }
 
     private func makeSnapshot(asrModel: String) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: try makeProfile(asrModel: asrModel), apiKey: "saved")
+        try .validated(profile: makeProfile(asrModel: asrModel), apiKey: "saved")
     }
 
     private func makeProfile(asrModel: String = "asr") throws -> OpenAICompatibleProviderProfile {
@@ -1075,8 +1075,14 @@ private final class SnapshotProviderRepository: OpenAICompatibleProviderManaging
         snapshot: OpenAICompatibleProviderSnapshot? = nil,
         profile: OpenAICompatibleProviderProfile? = nil,
         snapshotError: Error? = nil
-    ) {
-        snapshotValue = snapshot ?? .init(profile: profile!, apiKey: nil)
+    ) throws {
+        if let snapshot {
+            snapshotValue = snapshot
+        } else if let profile {
+            snapshotValue = try .validated(profile: profile, apiKey: nil)
+        } else {
+            throw ProviderRepositoryError.missingProfile
+        }
         self.profile = profile ?? snapshot?.profile
         self.snapshotError = snapshotError
     }
@@ -1088,7 +1094,7 @@ private final class SnapshotProviderRepository: OpenAICompatibleProviderManaging
         return snapshotValue
     }
     func snapshot(overriding profile: OpenAICompatibleProviderProfile) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: profile, apiKey: snapshotValue.apiKey)
+        try .validated(profile: profile, apiKey: snapshotValue.apiKey)
     }
     func hasAPIKey() throws -> Bool { snapshotValue.apiKey != nil }
     func removeAPIKey() throws {}

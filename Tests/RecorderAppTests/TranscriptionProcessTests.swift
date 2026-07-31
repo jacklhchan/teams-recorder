@@ -98,12 +98,58 @@ final class TranscriptionProcessTests: XCTestCase {
             )
         )
     }
+
+    func testLegacyServiceRejectsHKTBeforeLaunchingAnyProcess() async throws {
+        let launcher = CountingLauncher()
+        let service = LegacyProcessTranscriptionService(
+            launcher: launcher,
+            scriptURL: URL(fileURLWithPath: "/unused/transcribe.py")
+        )
+        let profile = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: ""
+        )
+        let request = TranscriptionServiceRequest(
+            audioURL: URL(fileURLWithPath: "/unused/audio.m4a"),
+            sessionFolder: URL(fileURLWithPath: "/unused/session"),
+            snapshot: try .validated(profile: profile, apiKey: "hkt-secret")
+        )
+
+        do {
+            _ = try await service.transcribe(request, onProgress: { _ in })
+            XCTFail("Expected HKT legacy rejection")
+        } catch {
+            XCTAssertEqual(
+                error as? LegacyProcessTranscriptionServiceError,
+                .unsupportedProviderPreset
+            )
+            XCTAssertFalse(error.localizedDescription.contains("hkt-secret"))
+        }
+        XCTAssertEqual(launcher.launchCount, 0)
+    }
 }
 
 private func makeSnapshot() throws -> OpenAICompatibleProviderSnapshot {
-    .init(profile: try OpenAICompatibleProviderProfile.validated(
+    try .validated(profile: try OpenAICompatibleProviderProfile.validated(
         baseURLText: "https://api.example/v1", asrModel: "asr", llmModel: "llm", language: "", prompt: ""
     ), apiKey: nil)
+}
+
+private final class CountingLauncher: TranscriptionProcessLaunching, @unchecked Sendable {
+    private(set) var launchCount = 0
+
+    func makeProcess(
+        request _: TranscriptionProcessRequest,
+        onOutput _: @escaping @Sendable (String) -> Void
+    ) throws -> any TranscriptionProcessing {
+        launchCount += 1
+        return NeverStartedProcess()
+    }
+}
+
+private final class NeverStartedProcess: TranscriptionProcessing, @unchecked Sendable {
+    func run() throws { XCTFail("Legacy process must not launch") }
+    func waitForExit() async -> TranscriptionProcessResult { fatalError("Unexpected wait") }
+    func terminate() {}
 }
 
 private struct StdinFixture {

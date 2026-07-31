@@ -89,6 +89,7 @@ enum LegacyProcessTranscriptionServiceError:
     case completedWithoutTranscript
     case invalidArtifactPath
     case processFailed(Int32)
+    case unsupportedProviderPreset
 
     var errorDescription: String? {
         switch self {
@@ -99,6 +100,8 @@ enum LegacyProcessTranscriptionServiceError:
         case .processFailed(let status):
             "Transcription failed with exit code \(status). "
                 + "Open the ASR log for details."
+        case .unsupportedProviderPreset:
+            "The selected provider preset is not supported by legacy transcription."
         }
     }
 }
@@ -130,6 +133,9 @@ final class LegacyProcessTranscriptionService:
             TranscriptionServiceProgress
         ) -> Void
     ) async throws -> TranscriptionServiceResult {
+        guard request.snapshot.providerKind == .openAICompatible else {
+            throw LegacyProcessTranscriptionServiceError.unsupportedProviderPreset
+        }
         let configurationInput = try JSONEncoder().encode(
             OpenAICompatibleTranscriptionLaunchPayload(
                 snapshot: request.snapshot

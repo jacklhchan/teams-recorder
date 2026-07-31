@@ -56,7 +56,7 @@ struct OpenAICompatibleProviderSnapshot: Equatable, Sendable {
     let profile: OpenAICompatibleProviderProfile
     let apiKey: String?
 
-    init(profile: OpenAICompatibleProviderProfile, apiKey: String?) {
+    private init(validatedProfile profile: OpenAICompatibleProviderProfile, apiKey: String?) {
         self.providerKind = profile.providerKind
         self.authentication = .forProviderKind(profile.providerKind)
         self.profile = profile
@@ -68,8 +68,8 @@ struct OpenAICompatibleProviderSnapshot: Equatable, Sendable {
         apiKey: String?
     ) throws -> Self {
         Self(
-            profile: try OpenAICompatibleProviderProfile.validatedPersisted(profile),
-            apiKey: apiKey
+            validatedProfile: try OpenAICompatibleProviderProfile.validatedPersisted(profile),
+            apiKey: try ProviderAPIKeyValidation.validated(apiKey)
         )
     }
 
@@ -195,7 +195,10 @@ final class OpenAICompatibleProviderRepository: OpenAICompatibleProviderManaging
     ) throws {
         try lock.withLock {
             let profile = try OpenAICompatibleProviderProfile.validatedPersisted(profile)
-            if let replacementAPIKey, !replacementAPIKey.isEmpty {
+            if let replacementAPIKey {
+                let replacementAPIKey = try ProviderAPIKeyValidation.validated(
+                    replacementAPIKey
+                )!
                 let identity = OpenAICompatibleProviderCredential.identity(for: profile.providerKind)
                 let previousKey = try secureStore.load(
                     service: identity.service,
@@ -303,7 +306,9 @@ final class OpenAICompatibleProviderRepository: OpenAICompatibleProviderManaging
             }
             var newlySavedLegacyKey: Data?
             if existingKey == nil, let legacyKey = legacy.apiKey {
-                let data = Data(legacyKey.utf8)
+                let data = Data(
+                    try ProviderAPIKeyValidation.validated(legacyKey)!.utf8
+                )
                 try secureStore.save(
                     data,
                     service: OpenAICompatibleProviderCredential.service,
@@ -380,9 +385,9 @@ final class OpenAICompatibleProviderRepository: OpenAICompatibleProviderManaging
         ) else {
             return nil
         }
-        guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+        guard let value = String(data: data, encoding: .utf8) else {
             throw ProviderRepositoryError.invalidAPIKeyEncoding
         }
-        return value
+        return try ProviderAPIKeyValidation.validated(value)
     }
 }

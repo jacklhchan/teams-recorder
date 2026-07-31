@@ -7,7 +7,7 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         let transport = RecordingTranscriptionTransport(responses: [
             .http(status: 200, body: #"{"text":"done"}"#)
         ])
-        let snapshot = OpenAICompatibleProviderSnapshot(
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(
             profile: try .hktValidated(
                 groupID: "89", asrModel: "hkt-asr", llmModel: "hkt-llm",
                 language: "yue", prompt: "prompt"
@@ -688,7 +688,7 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
     private func makeSnapshot(
         apiKey: String? = nil
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(
+        try .validated(
             profile: try OpenAICompatibleProviderProfile.validated(
                 baseURLText: "https://api.example/v1",
                 asrModel: "asr-model",

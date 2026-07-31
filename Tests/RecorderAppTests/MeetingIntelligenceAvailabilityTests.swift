@@ -21,7 +21,7 @@ final class MeetingIntelligenceAvailabilityTests: XCTestCase {
     }
 
     func testExactLLMMatchForHKTUsesCapturedHKTSnapshot() async throws {
-        let snapshot = OpenAICompatibleProviderSnapshot(
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(
             profile: try .hktValidated(
                 groupID: "456", asrModel: "hkt-asr", llmModel: "hkt-llm",
                 language: "yue", prompt: "prompt"

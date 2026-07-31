@@ -257,12 +257,9 @@ private struct SessionListView: View {
             }
         }
         .sheet(item: $transcriptSession) { session in
-            TranscriptEditorView(
-                session: session,
-                resolvedSession: TranscriptDetailActionProjection.current(
-                    opened: session,
-                    allSessions: allSessions
-                ),
+            TranscriptDetailSheetView(
+                openedSession: session,
+                allSessions: allSessions,
                 load: { transcriptText(session) },
                 save: { saveTranscript($0, session) },
                 openFolder: { open(session) },
@@ -271,16 +268,12 @@ private struct SessionListView: View {
                 copy: { copyTranscript(session) },
                 editDetails: { metadataSession = $0 },
                 meetingIntelligencePresentation: meetingIntelligencePresentation,
-                meetingIntelligenceActions: { currentSession in
-                    .init(
-                        generate: { generateMeetingIntelligence(currentSession) },
-                        regenerate: { regenerateMeetingIntelligence(currentSession) },
-                        checkAgain: { checkMeetingIntelligenceAvailability(currentSession) },
-                        retryGeneration: { retryMeetingIntelligenceGeneration(currentSession) },
-                        cancel: { cancelMeetingIntelligence(currentSession) },
-                        applySuggestedTitle: { applyMeetingIntelligenceSuggestedTitle(currentSession) }
-                    )
-                }
+                checkMeetingIntelligenceAvailability: checkMeetingIntelligenceAvailability,
+                generateMeetingIntelligence: generateMeetingIntelligence,
+                regenerateMeetingIntelligence: regenerateMeetingIntelligence,
+                retryMeetingIntelligenceGeneration: retryMeetingIntelligenceGeneration,
+                cancelMeetingIntelligence: cancelMeetingIntelligence,
+                applyMeetingIntelligenceSuggestedTitle: applyMeetingIntelligenceSuggestedTitle
             )
         }
         .sheet(item: $metadataSession) { session in
@@ -334,6 +327,58 @@ private struct SessionListView: View {
     }
 }
 
+/// Stateless content for the transcript sheet. The sheet item remains the
+/// stable opened session, while every render resolves presentation and command
+/// routing from the latest library projection for that recording ID.
+struct TranscriptDetailSheetView: View {
+    let openedSession: RecordingSession
+    let allSessions: [RecordingSession]
+    let load: () -> String
+    let save: (String) -> Void
+    let openFolder: () -> Void
+    let play: () -> Void
+    let export: () -> Void
+    let copy: () -> Void
+    let editDetails: (RecordingSession) -> Void
+    let meetingIntelligencePresentation: (RecordingSession) -> MeetingIntelligencePresentation
+    let checkMeetingIntelligenceAvailability: (RecordingSession) -> Void
+    let generateMeetingIntelligence: (RecordingSession) -> Void
+    let regenerateMeetingIntelligence: (RecordingSession) -> Void
+    let retryMeetingIntelligenceGeneration: (RecordingSession) -> Void
+    let cancelMeetingIntelligence: (RecordingSession) -> Void
+    let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
+
+    var body: some View {
+        let currentSession = TranscriptDetailActionProjection.current(
+            opened: openedSession,
+            allSessions: allSessions
+        )
+        let actions = TranscriptDetailActionProjection.meetingIntelligenceActions(
+            for: currentSession,
+            checkAgain: checkMeetingIntelligenceAvailability,
+            generate: generateMeetingIntelligence,
+            regenerate: regenerateMeetingIntelligence,
+            retryGeneration: retryMeetingIntelligenceGeneration,
+            cancel: cancelMeetingIntelligence,
+            applySuggestedTitle: applyMeetingIntelligenceSuggestedTitle
+        )
+
+        return TranscriptEditorView(
+            session: openedSession,
+            resolvedSession: currentSession,
+            load: load,
+            save: save,
+            openFolder: openFolder,
+            play: play,
+            export: export,
+            copy: copy,
+            editDetails: editDetails,
+            meetingIntelligencePresentation: meetingIntelligencePresentation,
+            meetingIntelligenceActions: { _ in actions }
+        )
+    }
+}
+
 enum TranscriptEditorDraft {
     /// The sheet owns its in-progress text. A model publication may rerender
     /// the surrounding view but must not replace that text while still open.
@@ -358,6 +403,25 @@ enum TranscriptDetailActionProjection {
         resolved: RecordingSession?
     ) -> RecordingSession {
         resolved ?? opened
+    }
+
+    static func meetingIntelligenceActions(
+        for session: RecordingSession,
+        checkAgain: @escaping (RecordingSession) -> Void,
+        generate: @escaping (RecordingSession) -> Void,
+        regenerate: @escaping (RecordingSession) -> Void,
+        retryGeneration: @escaping (RecordingSession) -> Void,
+        cancel: @escaping (RecordingSession) -> Void,
+        applySuggestedTitle: @escaping (RecordingSession) -> Void
+    ) -> MeetingIntelligenceActions {
+        .init(
+            generate: { generate(session) },
+            regenerate: { regenerate(session) },
+            checkAgain: { checkAgain(session) },
+            retryGeneration: { retryGeneration(session) },
+            cancel: { cancel(session) },
+            applySuggestedTitle: { applySuggestedTitle(session) }
+        )
     }
 }
 

@@ -119,20 +119,46 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
         XCTAssertEqual(host.editorText, "Stored transcript")
     }
 
-    func testOpenUnsetSessionRefreshesMeetingIntelligencePresentationAndRegenerateUsesCanonicalSession() throws {
-        let opened = session(title: nil, titleOrigin: .unset)
+    func testOpenUnsetSessionRefreshesThroughGeneratedTitlesAndProtectsManualOwnership() async throws {
+        let publication = try PublicationFixture(
+            metadata: .init(title: nil, titleOrigin: .unset)
+        )
+        defer { publication.remove() }
+        let opened = session(
+            basedOn: publication.session,
+            title: nil,
+            titleOrigin: .unset
+        )
         let state = TranscriptDetailLifecycleState(session: opened)
         let host = try TranscriptDetailLifecycleHost(state: state)
         defer { host.close() }
 
+        XCTAssertNil(state.openedSession.metadata.title)
+        XCTAssertEqual(state.openedSession.metadata.titleOrigin, .unset)
+
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceGenerate))
+        try host.click(RecorderActionID.meetingIntelligenceGenerate)
+        let generateSession = try XCTUnwrap(state.invokedSessions.first)
+        XCTAssertEqual(generateSession.id, opened.id)
+        XCTAssertNil(generateSession.metadata.title)
+        XCTAssertEqual(generateSession.metadata.titleOrigin, .unset)
+
+        let firstOutcome = try await publication.publisher.publish(
+            publication.request.replacing(
+                capturedTitle: generateSession.metadata.title,
+                capturedTitleOrigin: generateSession.metadata.titleOrigin,
+                content: .init(title: "MI title A", summary: "Summary A")
+            )
+        )
+        XCTAssertTrue(firstOutcome.titleWasApplied)
         state.session = session(
             basedOn: opened,
-            title: "MI title A",
-            titleOrigin: .meetingIntelligence
+            title: publication.metadata.title,
+            titleOrigin: publication.metadata.titleOrigin
         )
         state.meetingIntelligencePresentation = .init(
             phase: .ready,
-            summary: "Canonical summary",
+            summary: "Summary A",
             suggestedTitle: "MI title A",
             statusMessage: "Ready.",
             model: "test-model",
@@ -144,25 +170,152 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
         XCTAssertEqual(host.accessibilityLabel(for: RecorderActionID.transcriptDetailTitle), "MI title A")
         XCTAssertEqual(state.presentationLookupSession?.metadata.title, "MI title A")
         XCTAssertEqual(state.presentationLookupSession?.metadata.titleOrigin, .meetingIntelligence)
-        XCTAssertEqual(state.actionsLookupSession?.metadata.title, "MI title A")
-        XCTAssertEqual(state.actionsLookupSession?.metadata.titleOrigin, .meetingIntelligence)
 
-        let actions = try XCTUnwrap(state.projectedActions)
-        actions.generate()
-        actions.regenerate()
-        actions.checkAgain()
-        actions.retryGeneration()
-        actions.cancel()
-        actions.applySuggestedTitle()
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceRegenerate))
+        try host.click(RecorderActionID.meetingIntelligenceRegenerate)
+        let regenerateSession = try XCTUnwrap(state.invokedSessions.last)
+        XCTAssertEqual(regenerateSession.metadata.title, "MI title A")
+        XCTAssertEqual(regenerateSession.metadata.titleOrigin, .meetingIntelligence)
+        let secondOutcome = try await publication.publisher.publish(
+            publication.request.replacing(
+                capturedTitle: regenerateSession.metadata.title,
+                capturedTitleOrigin: regenerateSession.metadata.titleOrigin,
+                content: .init(title: "MI title B", summary: "Summary B")
+            )
+        )
+        XCTAssertTrue(secondOutcome.titleWasApplied)
+        state.session = session(
+            basedOn: opened,
+            title: publication.metadata.title,
+            titleOrigin: publication.metadata.titleOrigin
+        )
+        state.meetingIntelligencePresentation = .init(
+            phase: .ready,
+            summary: "Summary B",
+            suggestedTitle: "MI title B",
+            statusMessage: "Ready.",
+            model: "test-model",
+            titleIsProtected: false,
+            unavailableReason: nil
+        )
+        host.render()
+
+        XCTAssertEqual(host.accessibilityLabel(for: RecorderActionID.transcriptDetailTitle), "MI title B")
+        XCTAssertEqual(publication.metadata.title, "MI title B")
+        XCTAssertEqual(publication.metadata.titleOrigin, .meetingIntelligence)
+        XCTAssertEqual(state.presentationLookupSession?.metadata.title, "MI title B")
+        XCTAssertEqual(state.presentationLookupSession?.metadata.titleOrigin, .meetingIntelligence)
+
+        state.meetingIntelligencePresentation = .init(
+            phase: .ready,
+            summary: "Summary B",
+            suggestedTitle: "MI title B",
+            statusMessage: "Check availability again.",
+            model: "test-model",
+            titleIsProtected: false,
+            unavailableReason: .connectionFailed
+        )
+        host.render()
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceCheckAgain))
+        try host.click(RecorderActionID.meetingIntelligenceCheckAgain)
+
+        state.meetingIntelligencePresentation = .init(
+            phase: .failed,
+            summary: "Summary B",
+            suggestedTitle: "MI title B",
+            statusMessage: "Generation failed.",
+            model: "test-model",
+            titleIsProtected: false,
+            unavailableReason: nil
+        )
+        host.render()
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceRetryGeneration))
+        try host.click(RecorderActionID.meetingIntelligenceRetryGeneration)
+
+        state.meetingIntelligencePresentation = .init(
+            phase: .generating(.init(stage: .generatingFinal, current: 1, total: 1)),
+            summary: "Summary B",
+            suggestedTitle: "MI title B",
+            statusMessage: "Generating…",
+            model: "test-model",
+            titleIsProtected: false,
+            unavailableReason: nil
+        )
+        host.render()
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceCancel))
+        try host.click(RecorderActionID.meetingIntelligenceCancel)
+
+        state.session = session(
+            basedOn: opened,
+            title: "Manual title",
+            titleOrigin: .manual
+        )
+        state.meetingIntelligencePresentation = .init(
+            phase: .ready,
+            summary: "Summary B",
+            suggestedTitle: "MI title B",
+            statusMessage: "Ready.",
+            model: "test-model",
+            titleIsProtected: true,
+            unavailableReason: nil
+        )
+        host.render()
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceManualTitleProtection))
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceApplyTitle))
+        try host.click(RecorderActionID.meetingIntelligenceApplyTitle)
+
         XCTAssertEqual(
             state.invokedActions,
             ["generate", "regenerate", "checkAgain", "retryGeneration", "cancel", "applySuggestedTitle"]
         )
-        XCTAssertTrue(state.invokedSessions.allSatisfy { invoked in
+        XCTAssertEqual(state.invokedSessions.count, 6)
+        XCTAssertEqual(state.invokedSessions[0].metadata.titleOrigin, .unset)
+        XCTAssertEqual(state.invokedSessions[1].metadata.title, "MI title A")
+        XCTAssertEqual(state.invokedSessions[1].metadata.titleOrigin, .meetingIntelligence)
+        XCTAssertTrue(state.invokedSessions.dropFirst(2).prefix(3).allSatisfy { invoked in
             invoked.id == opened.id
-                && invoked.metadata.title == "MI title A"
+                && invoked.metadata.title == "MI title B"
                 && invoked.metadata.titleOrigin == .meetingIntelligence
         })
+        XCTAssertEqual(state.invokedSessions[5].metadata.title, "Manual title")
+        XCTAssertEqual(state.invokedSessions[5].metadata.titleOrigin, .manual)
+
+        for protectedMetadata in [
+            RecordingSessionMetadata(title: "Manual title", titleOrigin: .manual),
+            RecordingSessionMetadata(title: nil, titleOrigin: .manual)
+        ] {
+            let protectedPublication = try PublicationFixture(metadata: protectedMetadata)
+            defer { protectedPublication.remove() }
+            let outcome = try await protectedPublication.publisher.publish(
+                protectedPublication.request.replacing(
+                    capturedTitle: protectedMetadata.title,
+                    capturedTitleOrigin: protectedMetadata.titleOrigin,
+                    content: .init(title: "MI title B", summary: "Summary B")
+                )
+            )
+
+            XCTAssertFalse(outcome.titleWasApplied)
+            XCTAssertEqual(outcome.artifact.suggestedTitle, "MI title B")
+            XCTAssertEqual(protectedPublication.metadata, protectedMetadata)
+
+            state.session = session(
+                basedOn: opened,
+                title: protectedMetadata.title,
+                titleOrigin: protectedMetadata.titleOrigin
+            )
+            state.meetingIntelligencePresentation = .init(
+                phase: .ready,
+                summary: "Summary B",
+                suggestedTitle: "MI title B",
+                statusMessage: "Ready.",
+                model: "test-model",
+                titleIsProtected: protectedMetadata.titleOrigin == .manual,
+                unavailableReason: nil
+            )
+            host.render()
+            XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceManualTitleProtection))
+            XCTAssertEqual(state.presentationLookupSession?.metadata, protectedMetadata)
+        }
     }
 
     private func session(
@@ -193,7 +346,6 @@ private final class TranscriptDetailLifecycleState: ObservableObject {
     @Published private var unrelatedRevision = 0
     private(set) var presentationLookupSession: RecordingSession?
     private(set) var actionsLookupSession: RecordingSession?
-    private(set) var projectedActions: MeetingIntelligenceActions?
     private(set) var invokedActions: [String] = []
     private(set) var invokedSessions: [RecordingSession] = []
 
@@ -219,23 +371,12 @@ private final class TranscriptDetailLifecycleState: ObservableObject {
         return meetingIntelligencePresentation
     }
 
-    func meetingIntelligenceActions(for session: RecordingSession) -> MeetingIntelligenceActions {
+    func record(_ action: String, session: RecordingSession) {
         actionsLookupSession = session
-        let record: (String) -> Void = { [weak self] action in
-            self?.invokedActions.append(action)
-            self?.invokedSessions.append(session)
-        }
-        let actions = MeetingIntelligenceActions(
-            generate: { record("generate") },
-            regenerate: { record("regenerate") },
-            checkAgain: { record("checkAgain") },
-            retryGeneration: { record("retryGeneration") },
-            cancel: { record("cancel") },
-            applySuggestedTitle: { record("applySuggestedTitle") }
-        )
-        projectedActions = actions
-        return actions
+        invokedActions.append(action)
+        invokedSessions.append(session)
     }
+
 }
 
 @MainActor
@@ -244,15 +385,23 @@ private struct TranscriptDetailLifecycleRoot: View {
 
     var body: some View {
         if state.isDetailOpen {
-            TranscriptEditorView(
-                session: state.openedSession,
-                resolvedSession: state.session,
+            TranscriptDetailSheetView(
+                openedSession: state.openedSession,
+                allSessions: [state.session],
                 load: { "Stored transcript" },
                 save: { _ in },
+                openFolder: {},
+                play: {},
                 export: {},
                 copy: {},
+                editDetails: { _ in },
                 meetingIntelligencePresentation: state.meetingIntelligencePresentation,
-                meetingIntelligenceActions: state.meetingIntelligenceActions
+                checkMeetingIntelligenceAvailability: { state.record("checkAgain", session: $0) },
+                generateMeetingIntelligence: { state.record("generate", session: $0) },
+                regenerateMeetingIntelligence: { state.record("regenerate", session: $0) },
+                retryMeetingIntelligenceGeneration: { state.record("retryGeneration", session: $0) },
+                cancelMeetingIntelligence: { state.record("cancel", session: $0) },
+                applyMeetingIntelligenceSuggestedTitle: { state.record("applySuggestedTitle", session: $0) }
             )
         }
     }
@@ -292,6 +441,38 @@ private final class TranscriptDetailLifecycleHost {
                 accessibilityElement(for: identifier),
                 key: "accessibilityLabel"
             )
+    }
+
+    func contains(_ identifier: String) -> Bool {
+        view(for: identifier) != nil || accessibilityElement(for: identifier) != nil
+    }
+
+    func click(_ identifier: String) throws {
+        let marker = try XCTUnwrap(
+            view(for: identifier),
+            "Missing rendered action marker: \(identifier)"
+        )
+        let location = marker.convert(
+            NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
+            to: nil
+        )
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(
+                NSEvent.mouseEvent(
+                    with: type,
+                    location: location,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: type == .leftMouseDown ? 1 : 0
+                )
+            )
+            window.sendEvent(event)
+        }
+        render()
     }
 
     func render() {

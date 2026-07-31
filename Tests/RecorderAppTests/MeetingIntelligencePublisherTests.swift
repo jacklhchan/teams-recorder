@@ -256,7 +256,7 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
 
 private enum TestError: Error { case saveFailed }
 
-private extension MeetingIntelligencePublicationRequest {
+extension MeetingIntelligencePublicationRequest {
     func replacing(
         capturedTitle: String?,
         capturedTitleOrigin: RecordingTitleOrigin,
@@ -300,7 +300,7 @@ private final class SecureMetadataPublicationFixture: @unchecked Sendable {
     func remove() { try? FileManager.default.removeItem(at: root) }
 }
 
-private final class PublicationFixture: @unchecked Sendable {
+final class PublicationFixture: @unchecked Sendable {
     let root: URL
     let folder: URL
     let session: RecordingSession
@@ -360,7 +360,7 @@ private final class PublicationFixture: @unchecked Sendable {
     func remove() { try? FileManager.default.removeItem(at: root) }
 }
 
-private final class PublisherTranscriptReader: TranscriptDocumentReading, @unchecked Sendable {
+final class PublisherTranscriptReader: TranscriptDocumentReading, @unchecked Sendable {
     let url: URL
     let data: Data
     var revision: TranscriptDocumentRevision
@@ -376,7 +376,7 @@ private final class PublisherTranscriptReader: TranscriptDocumentReading, @unche
     }
 }
 
-private final class PublisherArtifactStore: MeetingIntelligenceArtifactStoring, @unchecked Sendable {
+final class PublisherArtifactStore: MeetingIntelligenceArtifactStoring, @unchecked Sendable {
     private(set) var stagedArtifact: MeetingIntelligenceArtifact?
     private(set) var visibleArtifact: MeetingIntelligenceArtifact?
     private(set) var promotions = 0
@@ -406,7 +406,7 @@ private final class PublisherArtifactStore: MeetingIntelligenceArtifactStoring, 
     }
 }
 
-private final class PublisherMetadataStore: RecordingSessionMetadataStoring, @unchecked Sendable {
+final class PublisherMetadataStore: RecordingSessionMetadataStoring, @unchecked Sendable {
     var metadata: RecordingSessionMetadata
     var saveError: Error?
     var beforeLoad: (() -> Void)?

@@ -71,7 +71,8 @@ final class AIProviderSettingsModel: ObservableObject {
 
         static func blank(for kind: AIProviderKind) -> Self {
             switch kind {
-            case .openAICompatible: Self()
+            case .openAICompatible:
+                Self(language: MeetingLanguage.cantonese.rawValue)
             case .hktGenAI:
                 Self(
                     asrModel: "private-ai/whisper-large-v3-cantonese-v2",

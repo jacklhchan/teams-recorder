@@ -176,6 +176,23 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.language, "zh")
     }
 
+    func testFreshGenericDraftSavesCantoneseWithoutPickerInteraction() {
+        let repository = RecordingProviderRepository()
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient()
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+
+        model.save()
+
+        XCTAssertEqual(repository.saveCount, 1)
+        XCTAssertEqual(repository.profiles[.openAICompatible]?.language, "yue")
+        XCTAssertFalse(model.statusIsError)
+    }
+
     func testBlankKeyOnSavePreservesStoredKey() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
         let model = AIProviderSettingsModel(

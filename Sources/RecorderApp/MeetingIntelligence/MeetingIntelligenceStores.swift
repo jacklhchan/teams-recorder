@@ -10,13 +10,22 @@ enum MeetingIntelligenceStoreError: LocalizedError, Equatable, Sendable {
     case missing
 }
 
+private enum MeetingIntelligenceStoreMutationGate {
+    static let shared = RecordingSessionMutationGate()
+}
+
 struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sendable {
     static let fileName = "meeting-intelligence.json"
     static let maximumBytes = 256 * 1_024
     private let mutationGate: RecordingSessionMutationGate
+    private let fileAccess: any MeetingIntelligenceStoreFileAccess
 
-    init(mutationGate: RecordingSessionMutationGate = .init()) {
+    init(
+        mutationGate: RecordingSessionMutationGate = MeetingIntelligenceStoreMutationGate.shared,
+        fileAccess: any MeetingIntelligenceStoreFileAccess = DarwinMeetingIntelligenceStoreFileAccess()
+    ) {
         self.mutationGate = mutationGate
+        self.fileAccess = fileAccess
     }
 
     func load(in folder: URL) throws -> MeetingIntelligenceArtifact? {
@@ -50,7 +59,7 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
             throw MeetingIntelligenceStoreError.tooLarge
         }
         let name = ".meeting-intelligence-stage-\(UUID().uuidString)"
-        try MeetingIntelligenceStoreFileIO.create(
+        _ = try fileAccess.create(
             named: name,
             data: data,
             in: folder
@@ -66,14 +75,17 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
                   staged.lastPathComponent.hasPrefix(".meeting-intelligence-stage-") else {
                 throw MeetingIntelligenceStoreError.unsafeFile
             }
-            let stagedData = try MeetingIntelligenceStoreFileIO.requiredData(
+            guard let stagedSnapshot = try fileAccess.snapshot(
                 named: staged.lastPathComponent, in: normalizedFolder, maximumBytes: Self.maximumBytes
+            ) else { throw MeetingIntelligenceStoreError.missing }
+            try validateCurrentSchema(stagedSnapshot.data, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
+            let destination = try fileAccess.snapshot(
+                named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes
             )
-            try validateCurrentSchema(stagedData, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
-            if let destination = try MeetingIntelligenceStoreFileIO.read(named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes) {
-                try validateCurrentSchema(destination, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
+            if let destination {
+                try validateCurrentSchema(destination.data, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
             }
-            try MeetingIntelligenceStoreFileIO.rename(named: staged.lastPathComponent, to: Self.fileName, in: normalizedFolder)
+            try fileAccess.promote(stagedSnapshot, to: Self.fileName, over: destination, in: normalizedFolder)
         }
     }
 }
@@ -82,9 +94,14 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
     static let fileName = "meeting-intelligence-state.json"
     static let maximumBytes = 32 * 1_024
     private let mutationGate: RecordingSessionMutationGate
+    private let fileAccess: any MeetingIntelligenceStoreFileAccess
 
-    init(mutationGate: RecordingSessionMutationGate = .init()) {
+    init(
+        mutationGate: RecordingSessionMutationGate = MeetingIntelligenceStoreMutationGate.shared,
+        fileAccess: any MeetingIntelligenceStoreFileAccess = DarwinMeetingIntelligenceStoreFileAccess()
+    ) {
         self.mutationGate = mutationGate
+        self.fileAccess = fileAccess
     }
 
     func load(in folder: URL) throws -> MeetingIntelligenceState? {
@@ -140,19 +157,31 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
             throw MeetingIntelligenceStoreError.tooLarge
         }
         try mutationGate.withMutation(for: folder) {
-            if let destination = try MeetingIntelligenceStoreFileIO.read(named: Self.fileName, in: folder, maximumBytes: Self.maximumBytes) {
-                try validateCurrentSchema(destination, expected: MeetingIntelligenceState.currentSchemaVersion)
+            let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+            let destination = try fileAccess.snapshot(named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes)
+            if let destination {
+                try validateCurrentSchema(destination.data, expected: MeetingIntelligenceState.currentSchemaVersion)
             }
-            try MeetingIntelligenceStoreFileIO.replaceAtomically(named: Self.fileName, data: data, in: folder)
+            let stage = try fileAccess.create(
+                named: ".meeting-intelligence-state-stage-\(UUID().uuidString)", data: data, in: normalizedFolder
+            )
+            do {
+                try fileAccess.promote(stage, to: Self.fileName, over: destination, in: normalizedFolder)
+            } catch {
+                try? MeetingIntelligenceStoreFileIO.removeIfPresent(named: stage.name, in: normalizedFolder)
+                throw error
+            }
         }
     }
 
     func remove(in folder: URL) throws {
         try mutationGate.withMutation(for: folder) {
-            if let destination = try MeetingIntelligenceStoreFileIO.read(named: Self.fileName, in: folder, maximumBytes: Self.maximumBytes) {
-                try validateCurrentSchema(destination, expected: MeetingIntelligenceState.currentSchemaVersion)
-            }
-            try MeetingIntelligenceStoreFileIO.removeIfPresent(named: Self.fileName, in: folder)
+            let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+            guard let destination = try fileAccess.snapshot(
+                named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes
+            ) else { return }
+            try validateCurrentSchema(destination.data, expected: MeetingIntelligenceState.currentSchemaVersion)
+            try fileAccess.remove(destination, in: normalizedFolder)
         }
     }
 
@@ -180,13 +209,51 @@ private func validateCurrentSchema(_ data: Data, expected: Int) throws {
     }
 }
 
-private enum MeetingIntelligenceStoreFileIO {
-    private struct Identity: Equatable {
-        let device: Int64
-        let inode: Int64
-        let byteCount: Int64
+struct MeetingIntelligenceStoreFileIdentity: Equatable, Sendable {
+    let device: Int64
+    let inode: Int64
+    let byteCount: Int64
+}
+
+struct MeetingIntelligenceStoreFileSnapshot: Equatable, Sendable {
+    let name: String
+    let data: Data
+    let identity: MeetingIntelligenceStoreFileIdentity
+}
+
+protocol MeetingIntelligenceStoreFileAccess: Sendable {
+    func snapshot(named name: String, in folder: URL, maximumBytes: Int) throws -> MeetingIntelligenceStoreFileSnapshot?
+    func create(named name: String, data: Data, in folder: URL) throws -> MeetingIntelligenceStoreFileSnapshot
+    func promote(_ staged: MeetingIntelligenceStoreFileSnapshot, to destinationName: String, over destination: MeetingIntelligenceStoreFileSnapshot?, in folder: URL) throws
+    func remove(_ destination: MeetingIntelligenceStoreFileSnapshot, in folder: URL) throws
+}
+
+struct DarwinMeetingIntelligenceStoreFileAccess: MeetingIntelligenceStoreFileAccess, Sendable {
+    func snapshot(named name: String, in folder: URL, maximumBytes: Int) throws -> MeetingIntelligenceStoreFileSnapshot? {
+        try MeetingIntelligenceStoreFileIO.snapshot(named: name, in: folder, maximumBytes: maximumBytes)
     }
 
+    func create(named name: String, data: Data, in folder: URL) throws -> MeetingIntelligenceStoreFileSnapshot {
+        try MeetingIntelligenceStoreFileIO.createSnapshot(named: name, data: data, in: folder)
+    }
+
+    func promote(_ staged: MeetingIntelligenceStoreFileSnapshot, to destinationName: String, over destination: MeetingIntelligenceStoreFileSnapshot?, in folder: URL) throws {
+        try MeetingIntelligenceStoreFileIO.revalidate(staged, in: folder)
+        if let destination {
+            try MeetingIntelligenceStoreFileIO.revalidate(destination, in: folder)
+        } else if try MeetingIntelligenceStoreFileIO.exists(named: destinationName, in: folder) {
+            throw MeetingIntelligenceStoreError.identityChanged
+        }
+        try MeetingIntelligenceStoreFileIO.rename(named: staged.name, to: destinationName, in: folder)
+    }
+
+    func remove(_ destination: MeetingIntelligenceStoreFileSnapshot, in folder: URL) throws {
+        try MeetingIntelligenceStoreFileIO.revalidate(destination, in: folder)
+        try MeetingIntelligenceStoreFileIO.removeIfPresent(named: destination.name, in: folder)
+    }
+}
+
+private enum MeetingIntelligenceStoreFileIO {
     static func normalizedFolder(_ folder: URL) throws -> URL {
         let normalized = folder.standardizedFileURL
         guard normalized == folder.resolvingSymlinksInPath().standardizedFileURL else {
@@ -196,6 +263,10 @@ private enum MeetingIntelligenceStoreFileIO {
     }
 
     static func read(named name: String, in folder: URL, maximumBytes: Int) throws -> Data? {
+        try snapshot(named: name, in: folder, maximumBytes: maximumBytes)?.data
+    }
+
+    static func snapshot(named name: String, in folder: URL, maximumBytes: Int) throws -> MeetingIntelligenceStoreFileSnapshot? {
         let normalizedFolder = try normalizedFolder(folder)
         let directory = try openFolder(normalizedFolder)
         defer { Darwin.close(directory) }
@@ -205,7 +276,8 @@ private enum MeetingIntelligenceStoreFileIO {
             throw MeetingIntelligenceStoreError.unsafeFile
         }
         defer { Darwin.close(descriptor) }
-        return try readValidated(descriptor, maximumBytes: maximumBytes)
+        let (data, identity) = try readValidatedWithIdentity(descriptor, maximumBytes: maximumBytes)
+        return .init(name: name, data: data, identity: identity)
     }
 
     static func requiredData(named name: String, in folder: URL, maximumBytes: Int) throws -> Data {
@@ -216,6 +288,10 @@ private enum MeetingIntelligenceStoreFileIO {
     }
 
     static func create(named name: String, data: Data, in folder: URL) throws {
+        _ = try createSnapshot(named: name, data: data, in: folder)
+    }
+
+    static func createSnapshot(named name: String, data: Data, in folder: URL) throws -> MeetingIntelligenceStoreFileSnapshot {
         let directory = try openFolder(try normalizedFolder(folder))
         defer { Darwin.close(directory) }
         let descriptor = openat(
@@ -227,6 +303,7 @@ private enum MeetingIntelligenceStoreFileIO {
         guard descriptor >= 0 else { throw MeetingIntelligenceStoreError.unsafeFile }
         defer { Darwin.close(descriptor) }
         try writeAll(data, to: descriptor)
+        return .init(name: name, data: data, identity: try identity(of: descriptor))
     }
 
     static func replaceAtomically(named name: String, data: Data, in folder: URL) throws {
@@ -252,6 +329,22 @@ private enum MeetingIntelligenceStoreFileIO {
         }
         defer { Darwin.close(descriptor) }
         _ = try identity(of: descriptor)
+    }
+
+    static func revalidate(_ snapshot: MeetingIntelligenceStoreFileSnapshot, in folder: URL) throws {
+        guard let current = try self.snapshot(named: snapshot.name, in: folder, maximumBytes: Int(snapshot.identity.byteCount)),
+              current.identity == snapshot.identity else {
+            throw MeetingIntelligenceStoreError.identityChanged
+        }
+    }
+
+    static func exists(named name: String, in folder: URL) throws -> Bool {
+        let directory = try openFolder(try normalizedFolder(folder))
+        defer { Darwin.close(directory) }
+        var attributes = stat()
+        if fstatat(directory, name, &attributes, AT_SYMLINK_NOFOLLOW) == 0 { return true }
+        if errno == ENOENT { return false }
+        throw MeetingIntelligenceStoreError.unsafeFile
     }
 
     static func rename(named source: String, to destination: String, in folder: URL) throws {
@@ -284,6 +377,10 @@ private enum MeetingIntelligenceStoreFileIO {
     }
 
     private static func readValidated(_ descriptor: Int32, maximumBytes: Int) throws -> Data {
+        try readValidatedWithIdentity(descriptor, maximumBytes: maximumBytes).0
+    }
+
+    private static func readValidatedWithIdentity(_ descriptor: Int32, maximumBytes: Int) throws -> (Data, MeetingIntelligenceStoreFileIdentity) {
         let before = try identity(of: descriptor)
         guard before.byteCount <= Int64(maximumBytes) else {
             throw MeetingIntelligenceStoreError.tooLarge
@@ -304,17 +401,17 @@ private enum MeetingIntelligenceStoreFileIO {
         guard try identity(of: descriptor) == before else {
             throw MeetingIntelligenceStoreError.identityChanged
         }
-        return data
+        return (data, before)
     }
 
-    private static func identity(of descriptor: Int32) throws -> Identity {
+    private static func identity(of descriptor: Int32) throws -> MeetingIntelligenceStoreFileIdentity {
         var attributes = stat()
         guard fstat(descriptor, &attributes) == 0,
               (attributes.st_mode & S_IFMT) == S_IFREG,
               attributes.st_nlink == 1 else {
             throw MeetingIntelligenceStoreError.unsafeFile
         }
-        return Identity(
+        return MeetingIntelligenceStoreFileIdentity(
             device: Int64(attributes.st_dev),
             inode: Int64(attributes.st_ino),
             byteCount: Int64(attributes.st_size)

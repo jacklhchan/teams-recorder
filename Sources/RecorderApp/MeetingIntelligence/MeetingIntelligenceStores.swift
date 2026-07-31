@@ -10,18 +10,21 @@ enum MeetingIntelligenceStoreError: LocalizedError, Equatable, Sendable {
     case missing
 }
 
-struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sendable {
+struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactSecureStoring, Sendable {
     static let fileName = "meeting-intelligence.json"
     static let maximumBytes = 256 * 1_024
     private let mutationGate: RecordingSessionMutationGate
     private let fileAccess: any MeetingIntelligenceStoreFileAccess
+    private let beforeStageCreate: (@Sendable () -> Void)?
 
     init(
         mutationGate: RecordingSessionMutationGate,
-        fileAccess: any MeetingIntelligenceStoreFileAccess = DarwinMeetingIntelligenceStoreFileAccess()
+        fileAccess: any MeetingIntelligenceStoreFileAccess = DarwinMeetingIntelligenceStoreFileAccess(),
+        beforeStageCreate: (@Sendable () -> Void)? = nil
     ) {
         self.mutationGate = mutationGate
         self.fileAccess = fileAccess
+        self.beforeStageCreate = beforeStageCreate
     }
 
     func load(in folder: URL) throws -> MeetingIntelligenceArtifact? {
@@ -53,6 +56,22 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
     }
 
     func stage(_ artifact: MeetingIntelligenceArtifact, in folder: URL) throws -> URL {
+        try stage(artifact, in: folder, expectedDirectory: nil)
+    }
+
+    func stage(
+        _ artifact: MeetingIntelligenceArtifact,
+        in folder: URL,
+        expectedDirectory: MeetingIntelligenceStoreDirectoryIdentity
+    ) throws -> URL {
+        try stage(artifact, in: folder, expectedDirectory: Optional(expectedDirectory))
+    }
+
+    private func stage(
+        _ artifact: MeetingIntelligenceArtifact,
+        in folder: URL,
+        expectedDirectory: MeetingIntelligenceStoreDirectoryIdentity?
+    ) throws -> URL {
         guard artifact.schemaVersion == MeetingIntelligenceArtifact.currentSchemaVersion else {
             throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(artifact.schemaVersion)
         }
@@ -64,12 +83,18 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
             throw MeetingIntelligenceStoreError.tooLarge
         }
         let folderIdentity = try MeetingIntelligenceStoreFileIO.folderIdentity(in: folder)
+        if let expectedDirectory, folderIdentity != expectedDirectory {
+            throw MeetingIntelligenceStoreError.identityChanged
+        }
         let name = ".meeting-intelligence-stage-\(folderIdentity.device)-\(folderIdentity.inode)-\(UUID().uuidString)"
-        _ = try fileAccess.create(
-            named: name,
-            data: data,
-            in: folder
-        )
+        beforeStageCreate?()
+        if let expectedDirectory {
+            _ = try MeetingIntelligenceStoreFileIO.createSnapshot(
+                named: name, data: data, in: folder, expectedDirectory: expectedDirectory
+            )
+        } else {
+            _ = try fileAccess.create(named: name, data: data, in: folder)
+        }
         return folder.standardizedFileURL.appendingPathComponent(name)
     }
 

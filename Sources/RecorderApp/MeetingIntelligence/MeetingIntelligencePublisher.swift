@@ -19,6 +19,13 @@ protocol RecordingSessionMetadataSecureStoring: RecordingSessionMetadataStoring 
 struct RecordingSessionMetadataStoreAdapter: RecordingSessionMetadataSecureStoring {
     private static let maximumBytes = 256 * 1_024
     private static let stagePrefix = ".meeting-intelligence-metadata-stage-"
+    private let beforeCreate: (@Sendable () -> Void)?
+    private let beforeRename: (@Sendable () -> Void)?
+
+    init(beforeCreate: (@Sendable () -> Void)? = nil, beforeRename: (@Sendable () -> Void)? = nil) {
+        self.beforeCreate = beforeCreate
+        self.beforeRename = beforeRename
+    }
 
     func load(in folder: URL) -> RecordingSessionMetadata {
         guard let data = try? MeetingIntelligenceStoreFileIO.read(
@@ -63,6 +70,7 @@ struct RecordingSessionMetadataStoreAdapter: RecordingSessionMetadataSecureStori
             maximumBytes: Self.maximumBytes,
             expectedDirectory: snapshot.directoryIdentity
         )
+        beforeCreate?()
         let staged = try MeetingIntelligenceStoreFileIO.createSnapshot(
             named: Self.stagePrefix + UUID().uuidString,
             data: data,
@@ -74,7 +82,8 @@ struct RecordingSessionMetadataStoreAdapter: RecordingSessionMetadataSecureStori
                 staged,
                 to: RecordingSessionMetadataStore.fileName,
                 over: destination,
-                in: snapshot.folder
+                in: snapshot.folder,
+                beforeRename: beforeRename
             )
         } catch {
             try? MeetingIntelligenceStoreFileIO.remove(staged, in: snapshot.folder)
@@ -229,6 +238,15 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
         try validate(request, in: folder)
         let metadataSnapshot = try (metadataStore as? any RecordingSessionMetadataSecureStoring)?
             .prepare(in: folder)
+        // The metadata capability also binds this publication to the directory
+        // that was prepared.  Do not let a replaced folder receive a newly
+        // staged artifact while the later metadata update is rejected.
+        if let metadataSnapshot {
+            try MeetingIntelligenceStoreFileIO.verifyFolder(
+                folder,
+                matches: metadataSnapshot.directoryIdentity
+            )
+        }
 
         let artifact = MeetingIntelligenceArtifact(
             schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
@@ -240,7 +258,17 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
             generatedAt: request.generatedAt,
             intent: request.intent
         )
-        let staged = try artifactStore.stage(artifact, in: folder)
+        let staged: URL
+        if let secure = artifactStore as? any MeetingIntelligenceArtifactSecureStoring,
+           let metadataSnapshot {
+            staged = try secure.stage(
+                artifact,
+                in: folder,
+                expectedDirectory: metadataSnapshot.directoryIdentity
+            )
+        } else {
+            staged = try artifactStore.stage(artifact, in: folder)
+        }
         var promoted = false
         defer {
             if !promoted {
@@ -250,6 +278,12 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
 
         return try mutationGate.withMutation(for: folder) {
             try validate(request, in: folder)
+            if let metadataSnapshot {
+                try MeetingIntelligenceStoreFileIO.verifyFolder(
+                    folder,
+                    matches: metadataSnapshot.directoryIdentity
+                )
+            }
             guard let commit = request.lease.beginCommit() else {
                 throw MeetingIntelligencePublicationError.leaseInvalid
             }

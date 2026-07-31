@@ -113,6 +113,17 @@ protocol MeetingIntelligenceArtifactStoring: Sendable {
     func removeStaged(_ stagedURL: URL, in folder: URL) throws
 }
 
+/// Capability-aware artifact staging. The default on-disk store accepts the
+/// directory identity captured with metadata so a replacement folder cannot
+/// receive even a temporary publication candidate.
+protocol MeetingIntelligenceArtifactSecureStoring: MeetingIntelligenceArtifactStoring {
+    func stage(
+        _ artifact: MeetingIntelligenceArtifact,
+        in folder: URL,
+        expectedDirectory: MeetingIntelligenceStoreDirectoryIdentity
+    ) throws -> URL
+}
+
 protocol MeetingIntelligenceStateStoring: Sendable {
     func load(in folder: URL) throws -> MeetingIntelligenceState?
     func save(_ state: MeetingIntelligenceState, in folder: URL) throws

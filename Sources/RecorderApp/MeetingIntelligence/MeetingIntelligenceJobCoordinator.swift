@@ -46,6 +46,11 @@ struct MeetingIntelligenceSuggestedTitleRequest: Sendable {
 /// deterministic point at which remove/shutdown can invalidate a queued write.
 protocol MeetingIntelligenceStateSaveScheduling: Sendable {
     func awaitAdmission() async
+    func awaitCommitAdmission() async
+}
+
+extension MeetingIntelligenceStateSaveScheduling {
+    func awaitCommitAdmission() async {}
 }
 
 private struct ImmediateMeetingIntelligenceStateSaveScheduler: MeetingIntelligenceStateSaveScheduling {
@@ -95,6 +100,8 @@ private actor MeetingIntelligenceIO {
             else { return }
         }
         await stateSaveScheduler.awaitAdmission()
+        guard !Task.isCancelled, lease.isValid else { return }
+        await stateSaveScheduler.awaitCommitAdmission()
         guard !Task.isCancelled, lease.isValid else { return }
         // This reservation is the state-file linearization point. Lifecycle
         // invalidation that wins before it produces no recovery state; once it

@@ -15,6 +15,52 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertTrue(reservation.isCurrent)
         reservation.finish()
     }
+
+    func testDefaultArtifactStageRejectsReplacementAfterMetadataCapabilityWithoutWritingReplacementFolder() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let folder = root.appendingPathComponent("session", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transcript = folder.appendingPathComponent("transcript.txt")
+        let transcriptData = Data("Transcript text".utf8)
+        try transcriptData.write(to: transcript)
+        let metadataURL = RecordingSessionMetadataStore.fileURL(in: folder)
+        try Data(#"{"vendor":"original"}"#.utf8).write(to: metadataURL)
+        let replacement = Data(#"{"vendor":"replacement"}"#.utf8)
+        let swap = PublisherFolderSwap(folder: folder, replacementMetadata: replacement)
+        let revision = TranscriptDocumentRevision(
+            sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            byteCount: transcriptData.count
+        )
+        let reader = PublisherTranscriptReader(url: transcript, data: transcriptData, revision: revision)
+        let artifactStore = MeetingIntelligenceArtifactStore(
+            mutationGate: .init(),
+            beforeStageCreate: { swap.replace() }
+        )
+        let publisher = MeetingIntelligencePublisher(
+            mutationGate: .init(), transcriptReader: reader, artifactStore: artifactStore
+        )
+        let session = RecordingSession(id: folder, folderURL: folder,
+                                       recordingURL: folder.appendingPathComponent("recording.m4a"),
+                                       createdAt: .distantPast, duration: 0, fileSize: 0, metadata: .init())
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(
+            profile: .validated(baseURLText: "http://127.0.0.1:8080", asrModel: "asr", llmModel: "llm", language: "en", prompt: ""),
+            apiKey: nil
+        )
+        let request = MeetingIntelligencePublicationRequest(
+            session: session, sourceRevision: revision, capturedTitle: nil, capturedTitleOrigin: .unset,
+            content: .init(title: "Project decision", summary: "Decision summary"), snapshot: snapshot,
+            intent: .generate, generatedAt: .distantPast, lease: .init()
+        )
+
+        await assertStoreError(.identityChanged) { _ = try await publisher.publish(request) }
+        XCTAssertEqual(try Data(contentsOf: metadataURL), replacement)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: folder.appendingPathComponent(MeetingIntelligenceArtifactStore.fileName).path
+        ))
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+            .contains { $0.lastPathComponent.hasPrefix(".meeting-intelligence-stage-") })
+    }
     func testUnsetTitlePublishesArtifactAndAppliesGeneratedTitle() async throws {
         let fixture = try PublicationFixture(metadata: .init(title: nil, titleOrigin: .unset))
         defer { fixture.remove() }
@@ -181,6 +227,18 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
             XCTAssertEqual(error as? MeetingIntelligencePublicationError, expected)
         }
     }
+
+    private func assertStoreError(
+        _ expected: MeetingIntelligenceStoreError,
+        operation: () async throws -> Void
+    ) async {
+        do {
+            try await operation()
+            XCTFail("Expected store failure")
+        } catch {
+            XCTAssertEqual(error as? MeetingIntelligenceStoreError, expected)
+        }
+    }
 }
 
 private enum TestError: Error { case saveFailed }
@@ -305,5 +363,32 @@ private final class PublisherMetadataStore: RecordingSessionMetadataStoring, @un
     func save(_ metadata: RecordingSessionMetadata, in _: URL) throws {
         if let saveError { throw saveError }
         self.metadata = metadata
+    }
+}
+
+private final class PublisherFolderSwap: @unchecked Sendable {
+    let folder: URL
+    let replacementMetadata: Data
+    private let lock = NSLock()
+    private var didSwap = false
+
+    init(folder: URL, replacementMetadata: Data) {
+        self.folder = folder
+        self.replacementMetadata = replacementMetadata
+    }
+
+    func replace() {
+        lock.withLock {
+            guard !didSwap else { return }
+            didSwap = true
+            let moved = folder.deletingLastPathComponent().appendingPathComponent("moved-\(UUID().uuidString)", isDirectory: true)
+            do {
+                try FileManager.default.moveItem(at: folder, to: moved)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try replacementMetadata.write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+            } catch {
+                XCTFail("Could not replace test session folder: \(error)")
+            }
+        }
     }
 }

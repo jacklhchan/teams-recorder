@@ -371,6 +371,63 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertTrue(states.saved.isEmpty)
     }
 
+    func testRemoveAndWorkspaceResetInvalidateStateWritesWaitingForCommitAdmission() async throws {
+        for action in ["remove", "workspace reset"] {
+            let entered = expectation(description: "\(action) state commit admission")
+            let released = expectation(description: "\(action) admission released")
+            let gate = GenerationGate()
+            let scheduler = CommitBlockingStateSaveScheduler(entered: entered, released: released, gate: gate)
+            let states = RecordingStateStore()
+            let fixture = try CoordinatorFixture(availability: .confirmed, stateStoreOverride: states,
+                                                 stateSaveSchedulerOverride: scheduler)
+
+            fixture.coordinator.generate(for: fixture.session)
+            await fulfillment(of: [entered], timeout: 1)
+            if action == "remove" {
+                fixture.coordinator.remove(sessionID: fixture.session.id)
+            } else {
+                fixture.coordinator.resetForWorkspaceChange()
+            }
+            await gate.release()
+            await fulfillment(of: [released], timeout: 1)
+            XCTAssertTrue(states.saved.isEmpty, "\(action) must suppress the invalidated state save")
+        }
+    }
+
+    func testCancellationBeforeCommitAdmissionSuppressesGeneratingStateButPersistsNewerCancellation() async throws {
+        let entered = expectation(description: "state commit admission")
+        let released = expectation(description: "state admission released")
+        let gate = GenerationGate()
+        let scheduler = CommitBlockingStateSaveScheduler(entered: entered, released: released, gate: gate)
+        let states = RecordingStateStore()
+        let fixture = try CoordinatorFixture(availability: .confirmed, stateStoreOverride: states,
+                                             stateSaveSchedulerOverride: scheduler)
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [entered], timeout: 1)
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        await gate.release()
+        await fulfillment(of: [released], timeout: 1)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(states.saved.map(\.phase), [.cancelled])
+    }
+
+    func testPostReservationInvalidationCommitsCurrentStateBeforeNewerCancellation() async throws {
+        let entered = expectation(description: "state save entered after reservation")
+        let release = DispatchSemaphore(value: 0)
+        let states = BlockingStateStore(entered: entered, release: release)
+        let fixture = try CoordinatorFixture(availability: .confirmed, stateStoreOverride: states)
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [entered], timeout: 1)
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        release.signal()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(states.saved.map(\.phase), [.generating, .cancelled])
+    }
+
     func testWorkspaceResetSuppressesOldLateJobAndAcceptsNewWork() async throws {
         let entered = expectation(description: "old generator entered")
         let finished = expectation(description: "old generator finished")
@@ -624,6 +681,34 @@ private final class BlockingStateSaveScheduler: MeetingIntelligenceStateSaveSche
         self.entered = entered; self.released = released; self.gate = gate
     }
     func awaitAdmission() async { entered.fulfill(); await gate.wait(); released.fulfill() }
+}
+
+private final class CommitBlockingStateSaveScheduler: MeetingIntelligenceStateSaveScheduling, @unchecked Sendable {
+    let entered: XCTestExpectation
+    let released: XCTestExpectation
+    let gate: GenerationGate
+    private let lock = NSLock()
+    private var shouldBlock = true
+
+    init(entered: XCTestExpectation, released: XCTestExpectation, gate: GenerationGate) {
+        self.entered = entered
+        self.released = released
+        self.gate = gate
+    }
+
+    func awaitAdmission() async {}
+
+    func awaitCommitAdmission() async {
+        let block = lock.withLock { () -> Bool in
+            guard shouldBlock else { return false }
+            shouldBlock = false
+            return true
+        }
+        guard block else { return }
+        entered.fulfill()
+        await gate.wait()
+        released.fulfill()
+    }
 }
 
 private final class BlockSecondStateSaveScheduler: MeetingIntelligenceStateSaveScheduling, @unchecked Sendable {

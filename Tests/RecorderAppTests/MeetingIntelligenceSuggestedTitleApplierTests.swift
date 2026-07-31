@@ -24,7 +24,8 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(object["title"] as? String, "Customer planning review")
         XCTAssertEqual(object["titleOrigin"] as? String, "meetingIntelligence")
-        XCTAssertNotNil(object["vendor"])
+        let vendor = try XCTUnwrap(object["vendor"] as? [String: Any])
+        XCTAssertEqual(vendor["keep"] as? [NSNumber], [1, 2])
     }
 
     func testInvalidLeaseRefusesMetadataWrite() async throws {
@@ -171,6 +172,70 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
         XCTAssertEqual(store.saveCount, 0)
     }
 
+    func testPreparedMetadataCapabilityRejectsFolderReplacementBeforeLoad() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let original = Data(#"{"vendor":{"nested":[1,{"keep":true}]}}"#.utf8)
+        try original.write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+        let adapter = RecordingSessionMetadataStoreAdapter()
+        let capability = try adapter.prepare(in: folder)
+        let swap = FolderSwap(folder: folder, replacementMetadata: Data(#"{"vendor":"replacement"}"#.utf8))
+        swap.replace()
+
+        XCTAssertThrowsError(try adapter.load(in: capability)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
+        }
+        XCTAssertEqual(try Data(contentsOf: RecordingSessionMetadataStore.fileURL(in: folder)), swap.replacementMetadata)
+    }
+
+    func testMetadataCapabilityBeforeCreateSwapRejectsWithoutReplacementWrite() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Data(#"{"vendor":"original"}"#.utf8).write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+        let swap = FolderSwap(folder: folder, replacementMetadata: Data(#"{"vendor":"replacement"}"#.utf8))
+        let adapter = RecordingSessionMetadataStoreAdapter(beforeCreate: { swap.replace() })
+        let capability = try adapter.prepare(in: folder)
+
+        XCTAssertThrowsError(try adapter.save(.init(title: "Generated", titleOrigin: .meetingIntelligence), in: capability)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
+        }
+        XCTAssertEqual(try Data(contentsOf: RecordingSessionMetadataStore.fileURL(in: folder)), swap.replacementMetadata)
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+            .contains { $0.lastPathComponent.hasPrefix(".meeting-intelligence-metadata-stage-") })
+    }
+
+    func testMetadataCapabilityBeforeRenameSwapRejectsWithoutReplacementWrite() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Data(#"{"vendor":"original"}"#.utf8).write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+        let swap = FolderSwap(folder: folder, replacementMetadata: Data(#"{"vendor":"replacement"}"#.utf8))
+        let adapter = RecordingSessionMetadataStoreAdapter(beforeRename: { swap.replace() })
+        let capability = try adapter.prepare(in: folder)
+
+        XCTAssertThrowsError(try adapter.save(.init(title: "Generated", titleOrigin: .meetingIntelligence), in: capability)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
+        }
+        XCTAssertEqual(try Data(contentsOf: RecordingSessionMetadataStore.fileURL(in: folder)), swap.replacementMetadata)
+    }
+
+    func testMetadataCapabilityRoundTripsExactNestedUnknownObjectAndArray() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let original = Data(#"{"schemaVersion":2,"vendor":{"items":[1,{"inner":["one",false,{"deep":"value"}]}],"flag":true},"other":[{"name":"preserve"},3]}"#.utf8)
+        try original.write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+        let adapter = RecordingSessionMetadataStoreAdapter()
+        let capability = try adapter.prepare(in: folder)
+        var metadata = try adapter.load(in: capability)
+        metadata.applyTitleEdit(.applyMeetingIntelligence("Generated"))
+        try adapter.save(metadata, in: capability)
+
+        let before = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        let afterData = try Data(contentsOf: RecordingSessionMetadataStore.fileURL(in: folder))
+        let after = try XCTUnwrap(JSONSerialization.jsonObject(with: afterData) as? [String: Any])
+        XCTAssertEqual(after["vendor"] as? NSDictionary, before["vendor"] as? NSDictionary)
+        XCTAssertEqual(after["other"] as? NSArray, before["other"] as? NSArray)
+    }
+
     private func request(session: RecordingSession, revision: TranscriptDocumentRevision,
                          lease: MeetingIntelligenceAttemptLease = .init()) -> MeetingIntelligenceSuggestedTitleRequest {
         .init(session: session,
@@ -225,5 +290,32 @@ private final class MutableReader: TranscriptDocumentReading, @unchecked Sendabl
     func readCanonical(in folder: URL, allowLegacy _: Bool) throws -> TranscriptDocumentSnapshot {
         let revision = self.revision
         return .init(url: folder.appendingPathComponent("transcript.txt"), data: Data("contents".utf8), revision: revision)
+    }
+}
+
+private final class FolderSwap: @unchecked Sendable {
+    let folder: URL
+    let replacementMetadata: Data
+    private let lock = NSLock()
+    private var didSwap = false
+
+    init(folder: URL, replacementMetadata: Data) {
+        self.folder = folder
+        self.replacementMetadata = replacementMetadata
+    }
+
+    func replace() {
+        lock.withLock {
+            guard !didSwap else { return }
+            didSwap = true
+            let moved = folder.deletingLastPathComponent().appendingPathComponent("moved-\(UUID().uuidString)", isDirectory: true)
+            do {
+                try FileManager.default.moveItem(at: folder, to: moved)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try replacementMetadata.write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+            } catch {
+                XCTFail("Could not replace test session folder: \(error)")
+            }
+        }
     }
 }

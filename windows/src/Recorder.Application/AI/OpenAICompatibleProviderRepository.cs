@@ -37,8 +37,17 @@ public sealed class OpenAICompatibleProviderRepository(
     {
         var profile = await LoadProfileAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new ProviderRepositoryException("Configure an AI provider before starting transcription.");
-        return new(profile, await apiKeys.ReadAsync(cancellationToken).ConfigureAwait(false));
+        return await SnapshotAsync(profile, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Uses a validated, unsaved draft profile with the current secure key for a connection test.</summary>
+    public async Task<OpenAICompatibleProviderSnapshot> SnapshotAsync(
+        OpenAICompatibleProviderProfile profile,
+        CancellationToken cancellationToken = default) =>
+        new(OpenAICompatibleProviderProfile.ValidateStored(profile), await apiKeys.ReadAsync(cancellationToken).ConfigureAwait(false));
+
+    public async Task<bool> HasApiKeyAsync(CancellationToken cancellationToken = default) =>
+        !string.IsNullOrWhiteSpace(await apiKeys.ReadAsync(cancellationToken).ConfigureAwait(false));
 
     public Task ClearApiKeyAsync(CancellationToken cancellationToken = default) => apiKeys.ClearAsync(cancellationToken);
     private static OpenAICompatibleProviderProfile? Validate(OpenAICompatibleProviderProfile? profile) =>

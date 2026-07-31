@@ -43,6 +43,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     // owns no persisted API key: the repository keeps it separately in per-user DPAPI.
     private OpenAICompatibleProviderRepository? openAiProviderRepository;
     private OpenAICompatibleAsrHttpTransport? openAiAsrTransport;
+    private OpenAICompatibleProviderConnectionClient? openAiProviderConnectionClient;
     private RecordingSessionAsrJobCoordinator? transcriptionCoordinator;
     private OpenAiCompatibleMeetingSummaryClient? meetingSummaryClient;
     private MeetingSummaryCoordinator? meetingSummaryCoordinator;
@@ -101,6 +102,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private string openAiLanguage = "zh";
     private string openAiPrompt = "";
     private bool isOpenAiProviderInitialized;
+    private bool hasOpenAiApiKey;
+    private bool isTestingOpenAiProvider;
     private string openAiProviderIntegrationStatus = "正在準備本機 OpenAI 相容 API 設定。";
     // Endpoint IDs stay in memory only. They are used solely to compare the
     // active Windows Teams audio session with the current loopback choice.
@@ -150,6 +153,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         CancelTeamsAutomaticRecordingStartCommand = new AsyncRelayCommand(CancelTeamsAutomaticRecordingStartAsync, () => CanCancelTeamsAutomaticRecordingStart);
         StopRecordingFromOverlayCommand = new AsyncRelayCommand(StopRecordingFromOverlayAsync, () => CanStopRecordingFromOverlay);
         ToggleLocalMicrophoneMuteCommand = new AsyncRelayCommand(ToggleLocalMicrophoneMuteAsync, () => !isShuttingDown);
+        TestOpenAiProviderConnectionCommand = new AsyncRelayCommand(TestOpenAiProviderConnectionAsync, () => CanTestOpenAiProvider);
         teamsInputMute.Changed += OnInputMuteChanged;
         CaptureSources.Add(CaptureSourceChoice.SystemAudio);
         CaptureSources.Add(CaptureSourceChoice.SelectedApplication);
@@ -174,6 +178,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public ObservableCollection<ProcessSelectionChoice> ProcessCatalog { get; } = [];
 
     public ObservableCollection<LibraryRecording> LibraryItems { get; } = [];
+
+    /// <summary>Model IDs discovered by the explicitly requested provider connection test.</summary>
+    public ObservableCollection<string> OpenAiDiscoveredModels { get; } = [];
 
     /// <summary>Recent post-normalization Teams/system output peaks, oldest first.</summary>
     public ObservableCollection<WaveformBar> OutputWaveformBars { get; } = [];
@@ -232,6 +239,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public AsyncRelayCommand StopRecordingFromOverlayCommand { get; }
 
     public AsyncRelayCommand ToggleLocalMicrophoneMuteCommand { get; }
+
+    public AsyncRelayCommand TestOpenAiProviderConnectionCommand { get; }
 
     public bool IsRecordingMicrophoneMuted => teamsInputMute.IsMuted;
 
@@ -615,6 +624,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public bool CanSaveOpenAiProvider => IsOpenAiProviderAvailable && !IsBusy;
 
+    /// <summary>Tests only the configured provider endpoint; it never starts an upload.</summary>
+    public bool CanTestOpenAiProvider => IsOpenAiProviderAvailable && !IsBusy && !IsTestingOpenAiProvider;
+
+    public bool CanRemoveOpenAiApiKey => IsOpenAiProviderAvailable && !IsBusy && hasOpenAiApiKey;
+
+    /// <summary>The key itself is never returned to the view, only whether DPAPI has one.</summary>
+    public string OpenAiApiKeyFieldLabel => hasOpenAiApiKey ? "API Key（已儲存）" : "API Key（選填）";
+
+    public bool IsTestingOpenAiProvider
+    {
+        get => isTestingOpenAiProvider;
+        private set => SetProperty(ref isTestingOpenAiProvider, value);
+    }
+
     public bool CanStartOpenAiTranscription =>
         IsOpenAiProviderAvailable && !IsBusy && SelectedLibraryItem is { IsManaged: true, IsPlayable: true };
 
@@ -785,6 +808,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             new JsonOpenAICompatibleProviderProfileStore(),
             new WindowsDpapiOpenAICompatibleApiKeyStore());
         openAiAsrTransport = new OpenAICompatibleAsrHttpTransport();
+        openAiProviderConnectionClient = new OpenAICompatibleProviderConnectionClient();
         transcriptionCoordinator = RecordingSessionAsrJobCoordinator.CreateOpenAiCompatible(
             openAiProviderRepository,
             new OpenAICompatibleAsrClient(openAiAsrTransport));
@@ -794,6 +818,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         try
         {
             var profile = await openAiProviderRepository.LoadProfileAsync();
+            hasOpenAiApiKey = await openAiProviderRepository.HasApiKeyAsync();
             if (profile is not null)
             {
                 OpenAiApiBaseUrl = profile.BaseUrl;
@@ -812,12 +837,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         {
             // A corrupted old profile must not block local recording. Keep the editor
             // available so the user can replace it; do not display a possibly sensitive URL.
+            hasOpenAiApiKey = false;
             OpenAiProviderIntegrationStatus = "無法讀取先前的 AI 設定；請重新輸入並儲存。";
         }
         finally
         {
             isOpenAiProviderInitialized = true;
             OnPropertyChanged(nameof(IsOpenAiProviderAvailable));
+            OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
             UpdateCommandStates();
         }
     }
@@ -838,6 +865,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OpenAiLlmModel = profile.LlmModel;
         OpenAiLanguage = profile.Language;
         OpenAiPrompt = profile.Prompt;
+        hasOpenAiApiKey = await providers.HasApiKeyAsync();
+        OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
         OpenAiProviderIntegrationStatus = string.IsNullOrWhiteSpace(replacementApiKey)
             ? "已儲存 AI 供應商設定；既有 API 金鑰保持不變。"
             : "已儲存 AI 供應商設定與目前 Windows 使用者的加密 API 金鑰。";
@@ -848,7 +877,50 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         var providers = openAiProviderRepository
             ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
         await providers.ClearApiKeyAsync();
+        hasOpenAiApiKey = false;
+        OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
         OpenAiProviderIntegrationStatus = "已移除目前 Windows 使用者的本機 API 金鑰；供應商設定仍保留。";
+    });
+
+    /// <summary>
+    /// Mirrors macOS' lightweight <c>GET /models</c> test. Draft values are used
+    /// directly, so users can verify a provider before saving a profile.
+    /// </summary>
+    public Task TestOpenAiProviderConnectionAsync() => RunOperationAsync(async () =>
+    {
+        var providers = openAiProviderRepository
+            ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
+        var connection = openAiProviderConnectionClient
+            ?? throw new InvalidOperationException("AI 供應商連線檢查尚未準備完成。");
+        var profile = OpenAICompatibleProviderProfile.Validated(
+            OpenAiApiBaseUrl, OpenAiAsrModel, OpenAiLlmModel, OpenAiLanguage, OpenAiPrompt);
+
+        IsTestingOpenAiProvider = true;
+        try
+        {
+            var snapshot = await providers.SnapshotAsync(profile);
+            var report = await connection.TestConnectionAsync(snapshot.Profile, snapshot.ApiKey);
+            OpenAiDiscoveredModels.Clear();
+            foreach (var model in report.Models)
+            {
+                OpenAiDiscoveredModels.Add(model);
+            }
+
+            OpenAiProviderIntegrationStatus = report.SupportsModelDiscovery
+                ? report.Models.Count == 0
+                    ? "已連線；此供應商沒有回傳可選模型，可手動輸入模型名稱。"
+                    : $"已連線；已找到 {report.Models.Count} 個模型，可從 ASR 或 LLM 清單選擇。"
+                : "已連線；此供應商未提供模型清單，請手動輸入模型名稱。";
+        }
+        catch
+        {
+            OpenAiProviderIntegrationStatus = "無法連線至 AI 供應商。請檢查 Base URL、API Key 與網路後再試。";
+            throw;
+        }
+        finally
+        {
+            IsTestingOpenAiProvider = false;
+        }
     });
 
     /// <summary>Starts a user-confirmed ASR job for one completed, managed M4A session.</summary>
@@ -1134,6 +1206,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         meetingSummaryClient = null;
         openAiAsrTransport?.Dispose();
         openAiAsrTransport = null;
+        openAiProviderConnectionClient?.Dispose();
+        openAiProviderConnectionClient = null;
         openAiProviderRepository = null;
         isOpenAiProviderInitialized = false;
         SetRecorderAvailable(false);
@@ -2575,6 +2649,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         CancelTeamsAutomaticRecordingStartCommand.RaiseCanExecuteChanged();
         StopRecordingFromOverlayCommand.RaiseCanExecuteChanged();
         ToggleLocalMicrophoneMuteCommand.RaiseCanExecuteChanged();
+        TestOpenAiProviderConnectionCommand.RaiseCanExecuteChanged();
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
         OnPropertyChanged(nameof(CanSaveDiagnostics));
         OnPropertyChanged(nameof(CanOpenDiagnosticsFolder));
@@ -2587,6 +2662,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OnPropertyChanged(nameof(GlobalMuteHotKeyStatus));
         OnPropertyChanged(nameof(IsOpenAiProviderAvailable));
         OnPropertyChanged(nameof(CanSaveOpenAiProvider));
+        OnPropertyChanged(nameof(CanTestOpenAiProvider));
+        OnPropertyChanged(nameof(CanRemoveOpenAiApiKey));
+        OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
         OnPropertyChanged(nameof(CanStartOpenAiTranscription));
         OnPropertyChanged(nameof(CanGenerateOpenAiSummary));
     }

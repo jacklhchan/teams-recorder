@@ -248,25 +248,25 @@
             </Grid>
 
             <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
-                <StackPanel Spacing="10">
-                    <TextBlock Text="AI 逐字稿與摘要（OpenAI 相容 API）" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="明確同意後才會傳送資料"
-                             Message="ASR 只會在您選取一段已完成的錄音並按下「開始 ASR」後，才上傳該音訊。LLM 摘要只會在您另行按下「產生摘要」後，才上傳逐字稿文字；不會再次上傳音訊。" />
-                    <TextBlock Text="API 金鑰以目前 Windows 使用者的 DPAPI 加密儲存，並會以遮罩顯示；絕不寫入診斷報告、應用程式日誌或錄音工作階段。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                    <Grid ColumnSpacing="12" RowSpacing="8">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                        <TextBox Grid.Column="0" Header="API Base URL" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiApiBaseUrl, Mode=TwoWay}" />
-                        <PasswordBox x:Name="OpenAiApiKeyPasswordBox" Grid.Column="1" Header="API Key（已遮罩）" IsEnabled="{Binding IsOpenAiProviderAvailable}" PasswordChar="●" PlaceholderText="以目前 Windows 使用者的 DPAPI 加密儲存" />
-                        <TextBox Grid.Column="0" Header="ASR Model" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiAsrModel, Mode=TwoWay}" />
-                        <TextBox Grid.Column="1" Header="LLM Model" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiLlmModel, Mode=TwoWay}" />
-                        <TextBox Grid.Column="0" Header="語言（選填）" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiLanguage, Mode=TwoWay}" />
-                        <TextBox Grid.Column="1" Header="ASR 提示詞（選填）" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiPrompt, Mode=TwoWay}" />
-                    </Grid>
+                <StackPanel MaxWidth="680" Spacing="12" HorizontalAlignment="Left">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="AI Provider" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="OpenAI 相容 API" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                    <TextBox Header="API Base URL" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiApiBaseUrl, Mode=TwoWay}" />
+                    <PasswordBox x:Name="OpenAiApiKeyPasswordBox" Header="{Binding OpenAiApiKeyFieldLabel}" IsEnabled="{Binding IsOpenAiProviderAvailable}" PasswordChar="●" PlaceholderText="留空會保留已儲存的 API Key" />
+                    <ComboBox Header="ASR Model" IsEditable="True" IsEnabled="{Binding IsOpenAiProviderAvailable}" ItemsSource="{Binding OpenAiDiscoveredModels}" Text="{Binding OpenAiAsrModel, Mode=TwoWay}" />
+                    <ComboBox Header="LLM Model" IsEditable="True" IsEnabled="{Binding IsOpenAiProviderAvailable}" ItemsSource="{Binding OpenAiDiscoveredModels}" Text="{Binding OpenAiLlmModel, Mode=TwoWay}" />
+                    <TextBox Header="Language（選填）" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="例如：zh 或 en" Text="{Binding OpenAiLanguage, Mode=TwoWay}" />
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Prompt（選填）" />
+                        <TextBox AcceptsReturn="True" Height="76" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="提供專有名詞或轉錄偏好" Text="{Binding OpenAiPrompt, Mode=TwoWay}" TextWrapping="Wrap" />
+                    </StackPanel>
                     <StackPanel Orientation="Horizontal" Spacing="10">
-                        <Button IsEnabled="{Binding CanSaveOpenAiProvider}" Click="OnSaveOpenAiProviderSettingsClick" Content="儲存供應商設定" />
-                        <Button IsEnabled="{Binding CanSaveOpenAiProvider}" Click="OnClearOpenAiApiKeyClick" Content="移除 API Key" />
-                        <Button IsEnabled="{Binding CanStartOpenAiTranscription}" Click="OnStartOpenAiTranscriptionClick" Content="開始 ASR（上傳音訊）" />
-                        <Button IsEnabled="{Binding CanGenerateOpenAiSummary}" Click="OnGenerateOpenAiSummaryClick" Content="產生摘要（上傳逐字稿）" />
+                        <Button IsEnabled="{Binding CanSaveOpenAiProvider}" Click="OnSaveOpenAiProviderSettingsClick" Content="儲存" />
+                        <Button Command="{Binding TestOpenAiProviderConnectionCommand}" Content="測試連線" />
+                        <Button IsEnabled="{Binding CanRemoveOpenAiApiKey}" Click="OnClearOpenAiApiKeyClick" Content="移除 Key" />
+                        <ProgressRing Width="20" Height="20" IsActive="{Binding IsTestingOpenAiProvider}" />
                     </StackPanel>
                     <TextBlock Text="{Binding OpenAiProviderIntegrationStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                 </StackPanel>
@@ -288,6 +288,11 @@
                         </ListView.ItemTemplate>
                     </ListView>
                     <TextBlock Text="{Binding SelectedLibraryDetails}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button IsEnabled="{Binding CanStartOpenAiTranscription}" Click="OnStartOpenAiTranscriptionClick" Content="轉錄選取錄音" />
+                        <Button IsEnabled="{Binding CanGenerateOpenAiSummary}" Click="OnGenerateOpenAiSummaryClick" Content="產生選取摘要" />
+                    </StackPanel>
+                    <TextBlock Text="轉錄只會在您確認後上傳所選 M4A；摘要只會在您再次確認後傳送該錄音的逐字稿文字。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <Grid ColumnSpacing="12" RowSpacing="8">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <TextBox Grid.Column="0" Header="名稱" IsEnabled="{Binding CanManageLibrary}" PlaceholderText="為這個工作階段命名" Text="{Binding LibraryTitle, Mode=TwoWay}" />
@@ -307,7 +312,7 @@
                     <Slider Maximum="1" Minimum="0" Value="{Binding PlaybackProgress}" IsEnabled="{Binding CanSeek}" />
                 </StackPanel>
             </Border>
-            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此 MVP 專注音訊工作階段與本機播放。Teams 整合仍屬 Preview：靜音狀態更新需要在實際 Teams 租戶／用戶端重複驗證；不包含視訊、虛擬麥克風或逐字稿。" TextWrapping="Wrap" />
+            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此 MVP 專注音訊工作階段、本機播放及使用者確認後的 AI 後處理。Teams 整合仍屬 Preview：靜音狀態更新需要在實際 Teams 租戶／用戶端重複驗證；不包含視訊或虛擬麥克風。" TextWrapping="Wrap" />
         </StackPanel>
         </ScrollViewer>
     </Grid>

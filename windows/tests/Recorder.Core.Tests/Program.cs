@@ -116,6 +116,8 @@ var tests = new (string Name, Action Run)[]
     ,("OpenAI-compatible provider defaults and normalizes its profile", OpenAICompatibleProviderTests.DefaultsMatchOpenAiAndNormalizeVersionedBaseUrl)
     ,("OpenAI-compatible provider rejects unsafe URLs and future schemas", OpenAICompatibleProviderTests.ProfileRejectsInsecureOrSensitiveUrlsAndFutureSchema)
     ,("OpenAI-compatible provider keeps API key out of profile JSON", OpenAICompatibleProviderTests.RepositoryKeepsKeyOutOfProfileJsonAndSnapshotsItSeparately)
+    ,("OpenAI-compatible provider discovers models with a request-scoped key", OpenAICompatibleProviderConnectionTests.DiscoversModelsAndKeepsAuthenticationRequestScoped)
+    ,("OpenAI-compatible provider allows manual models and rejects unsafe failures", OpenAICompatibleProviderConnectionTests.AcceptsManualModelProvidersAndRejectsUnsafeFailures)
     ,("transcription artifacts publish atomically with bounded prior copies", TranscriptionArtifactTests.PublishesAtomicallyWithBoundedPreviousArtifacts)
     ,("transcription startup recovery marks in-progress work interrupted", TranscriptionArtifactTests.StartupRecoveryMarksOnlyInProgressStateInterrupted)
     ,("transcription publisher rejects foreign artifact folders", TranscriptionArtifactTests.RefusesForeignOrReparseArtifactLocation)

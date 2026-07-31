@@ -46,8 +46,7 @@ from the packaged app.
    request.
 6. Explicitly Generate with discovery unsupported.
 7. Verify contextual title and complete summary quality against the transcript.
-8. Manually rename and manually clear titles, then Regenerate and confirm
-   protection.
+8. Run the title-ownership and open-detail-sheet coverage below.
 9. Edit the transcript during generation and confirm stale-result rejection.
 10. Cancel during availability, request, reduction, decode, and response
     processing where practical.
@@ -66,3 +65,52 @@ from the packaged app.
 
 Record whether each step passed, failed, or remains blocked. Do not infer
 provider request counts from UI alone when provider telemetry is unavailable.
+
+## Title ownership with the detail sheet kept open
+
+Use an advertised LLM model and provider telemetry. Open the transcript detail
+sheet while the meeting title is unset, and keep that same sheet open for the
+entire sequence:
+
+1. Allow the first automatic generation to set automatic title **A**.
+2. Wait for the canonical recording-session metadata/library refresh while the
+   sheet remains open; do not close and reopen it to obtain the refreshed state.
+3. Select **Regenerate** and verify automatic title **B** replaces **A** in the
+   still-open sheet and remains meeting-intelligence-owned.
+4. Repeat the sequence after manually entering a title, and separately after
+   manually clearing the title. In both cases, preserve the manual title or
+   manual blank respectively; regeneration must not claim either as an
+   automatic meeting-intelligence title.
+
+Record the actual telemetry deltas for each run. For a single-chunk automatic
+generation, `/models` GET must increase by exactly **1** and
+`/chat/completions` POST by exactly **1**. For the subsequent regeneration
+while the same sheet stays open, `/chat/completions` POST must increase by
+exactly **1**, while `/models` GET and `/audio/transcriptions` POST each
+increase by exactly **0**. Capture the provider telemetry rows and the visible
+title/provenance state; do not infer these deltas from UI indications alone.
+
+## `/models` GET redirect rejection
+
+With a controlled provider, test source `/models` GET endpoints responding
+with each of **307** and **308**, once to a controlled same-origin destination
+and once to a controlled cross-origin destination. In every case, the source
+must receive exactly one request; the destination must receive **0** requests
+and **0** credentials; and **Test Connection** must fail with redirect
+rejected. Retain sanitized source/destination telemetry as evidence.
+
+This deliberate source-GET redirect rejection is different from the supported
+upload-preserving POST 307/308 behavior. Do not treat the latter as evidence
+that `/models` GET redirects are allowed.
+
+## Exact 4 MiB long-transcript request accounting
+
+Use provider telemetry and construct an exactly **4 MiB UTF-8** transcript as
+**64 × 64 KiB** newline-friendly blocks. Start with a manually selected
+**Regenerate** action so model discovery is not part of this measurement. The
+actual deltas must be exactly: `/chat/completions` POST **+71** (= 64 partial
+plus 6 reduction plus 1 final), `/models` GET **+0**, and
+`/audio/transcriptions` POST **+0**. Record the telemetry counts themselves,
+not a UI-derived estimate, and do not include transcript content in the
+evidence. Keep real-provider, notarized-artifact, Teams, and AirPods as
+outstanding gates, and include no secrets in any evidence.

@@ -249,6 +249,28 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
+    func testMinimumSettingsKeepsReadyTeamsStatusInsideWindow() throws {
+        let fixture = makeReadyTeamsFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.settings)
+
+        let frame = try XCTUnwrap(
+            host.frame(
+                forAccessibilityIdentifier: "teams-mute-sync-status"
+            ),
+            "Missing Teams mute-sync status"
+        )
+        XCTAssertTrue(
+            host.windowContentRect.contains(frame),
+            "Ready Teams status must remain inside the 860×680 window: \(frame)"
+        )
+    }
+
     func testSourceControlGatesRemainDisabledDuringLifecycleWork() throws {
         let fixture = makeLifecycleWorkingFixture()
         defer { fixture.source.resumeRefresh() }
@@ -352,6 +374,27 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             selectedBundleIdentifier: "com.example.capture"
         )
         return .init(model: model, defaults: defaults, source: source)
+    }
+
+    private func makeReadyTeamsFixture() -> StartupDisabledFixture {
+        let suiteName =
+            "RecorderWorkspaceRenderTests.ready-teams.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let client = RenderTeamsMuteSyncClient()
+        let model = AppModel(
+            defaults: defaults,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            teamsMuteSyncClient: client,
+            teamsIntegrationScheduler: { operation in operation() }
+        )
+        model.systemAudioPermission = .notDetermined
+        model.microphonePermission = .granted
+        model.installTeamsMuteSync()
+        client.emit(.status(.ready))
+        return .init(model: model, defaults: defaults)
     }
 
     private func waitUntil(
@@ -618,6 +661,26 @@ final class WorkspaceHost {
 
 private enum WorkspaceHostError: Error {
     case missingAccessibilityElement(String)
+}
+
+private final class RenderTeamsMuteSyncClient: TeamsMuteSyncing {
+    private var onEvent: ((TeamsMuteSyncEvent) -> Void)?
+
+    func start(onEvent: @escaping (TeamsMuteSyncEvent) -> Void) {
+        self.onEvent = onEvent
+    }
+
+    func stop() {
+        onEvent = nil
+    }
+
+    func reconnect() {}
+
+    func requestPairing() {}
+
+    func emit(_ event: TeamsMuteSyncEvent) {
+        onEvent?(event)
+    }
 }
 
 @MainActor

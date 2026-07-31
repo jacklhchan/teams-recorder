@@ -291,7 +291,7 @@ private struct TeamsAutoMeetingDetailView: View {
                     )
                 )
         }
-        .frame(minWidth: 380, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -340,7 +340,7 @@ private struct TeamsMuteSyncDetailView: View {
                 .toggleStyle(.switch)
                 .help("Follow Microsoft Teams microphone mute state")
         }
-        .frame(minWidth: 380, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var detail: String {
@@ -367,6 +367,12 @@ private struct TeamsMuteSyncStateView: View {
             Label(title, systemImage: iconName)
                 .foregroundStyle(statusColor)
                 .lineLimit(1)
+                .accessibilityIdentifier("teams-mute-sync-status")
+                .background(
+                    RecorderSettingsAccessibilityMarker(
+                        identifier: "teams-mute-sync-status"
+                    )
+                )
             if status == .waitingForPairingApproval {
                 Button(action: requestPairing) { Image(systemName: "link.badge.plus") }
                     .buttonStyle(.bordered)

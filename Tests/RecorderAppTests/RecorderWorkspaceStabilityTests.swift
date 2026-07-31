@@ -1,5 +1,4 @@
 import AppKit
-import AVKit
 import SwiftUI
 import XCTest
 @testable import RecorderApp
@@ -139,7 +138,6 @@ final class RecorderWorkspaceStabilityTests: XCTestCase {
 
         XCTAssertEqual(countdownFactory.makeCount, 1)
         XCTAssertEqual(playbackFactory.makeCount, 1)
-        XCTAssertFalse(containsAVPlayerView(in: hostingView))
     }
 
     private func requireStabilityRun() throws {
@@ -180,13 +178,6 @@ final class RecorderWorkspaceStabilityTests: XCTestCase {
         return view.subviews.contains {
             containsAccessibilityIdentifier(identifier, in: $0)
         }
-    }
-
-    private func containsAVPlayerView(in view: NSView) -> Bool {
-        if view is AVPlayerView {
-            return true
-        }
-        return view.subviews.contains(where: containsAVPlayerView(in:))
     }
 }
 

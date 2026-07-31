@@ -92,7 +92,34 @@ The matching Release `Recorder.NativeBridge.dll` is copied next to it. Do not
 ship the Debug native DLL: it depends on the non-redistributable debug C++
 runtime.
 
-## Why the app is not installed yet
+## Per-user Setup.exe for another Windows computer
+
+After the Release native bridge has been verified, create a self-contained x64
+installer that does not require the target computer to have .NET installed:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Build-Setup.ps1
+```
+
+The resulting installer is:
+
+```text
+windows\out\installer\TeamsRecorderSetup-1.0.0-win-x64.exe
+```
+
+It installs per-user under `%LocalAppData%\Programs\Teams Recorder`, creates a
+Start Menu shortcut, and can optionally create a desktop shortcut. Uninstalling
+the app deliberately preserves `%LocalAppData%\Teams Recorder\Sessions`,
+including M4A sessions and recovery evidence. The installer also deploys the
+required Microsoft VC++ runtime DLLs app-local, so it does not need to make a
+machine-wide runtime installation on the target computer.
+
+This repository does not yet have a code-signing certificate. The generated
+Setup.exe is suitable for controlled internal testing, but Windows may identify
+it as an unknown publisher. Do not distribute it broadly until the installer
+and executable have been code-signed through the normal release process.
+
+## Why the app is not installed by a normal build
 
 Building an `.exe` does not register or install an app in Windows. The project
 defaults to an unpackaged, self-contained developer build so the Release EXE

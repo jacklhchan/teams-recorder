@@ -1,3 +1,4 @@
+using Recorder.Core;
 using TeamsRecorder.Windows.Application;
 
 internal static class AudioMvpTests
@@ -58,6 +59,56 @@ internal static class AudioMvpTests
         Equal(1, bridge.StopCalls);
     }
 
+    public static void RecoverableFaultRetainsEvidenceAndAllowsRestart()
+    {
+        using var root = new TemporaryRoot();
+        var bridge = new MixedBridge { WriteOutputOnStart = true };
+        using var lifecycle = new RecordingLifecycleService(bridge, root.Path);
+        var first = lifecycle.StartMixedAsync(
+            RecordingSessionKind.Manual,
+            renderEndpointId: null,
+            microphoneEndpointId: null).GetAwaiter().GetResult();
+        var oldGeneration = first.Snapshot.Generation;
+
+        bridge.SourceFaulted = true;
+        var faulted = lifecycle.RefreshAsync().GetAwaiter().GetResult();
+        Equal(RecordingCoordinatorState.Faulted, faulted.State);
+        Equal(true, faulted.HasRecoverableFault);
+
+        var recovery = lifecycle.FinalizeForRecoveryAsync().GetAwaiter().GetResult();
+        if (recovery.Published || !File.Exists(first.Session.BackupAudioPath) ||
+            File.Exists(first.Session.FinalAudioPath))
+        {
+            throw new InvalidOperationException(
+                "A recoverable capture fault was incorrectly published as a clean recording.");
+        }
+        if (recovery.Error?.Message.Contains("device invalidated", StringComparison.Ordinal) != true)
+        {
+            throw new InvalidOperationException("Fault recovery discarded the native diagnostic.");
+        }
+        if (lifecycle.Snapshot.State != RecordingCoordinatorState.Stopped ||
+            !lifecycle.Snapshot.HasRecoverableFault ||
+            lifecycle.Snapshot.Generation <= oldGeneration)
+        {
+            throw new InvalidOperationException(
+                "Fault recovery did not produce a restartable generation while retaining its fault marker.");
+        }
+
+        var recoveredGeneration = lifecycle.Snapshot.Generation;
+        bridge.SourceFaulted = false;
+        var restarted = lifecycle.StartMixedAsync(
+            RecordingSessionKind.Manual,
+            renderEndpointId: null,
+            microphoneEndpointId: null).GetAwaiter().GetResult();
+        Equal(RecordingCoordinatorState.Recording, restarted.Snapshot.State);
+        Equal(false, restarted.Snapshot.HasRecoverableFault);
+        if (restarted.Snapshot.Generation <= recoveredGeneration)
+        {
+            throw new InvalidOperationException("A restarted recording reused a recovered generation.");
+        }
+        lifecycle.StopAsync().GetAwaiter().GetResult();
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private static void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new InvalidOperationException($"Expected {typeof(T).Name}."); }
 
@@ -68,13 +119,49 @@ internal static class AudioMvpTests
         public int MixedStartCalls { get; private set; }
         public int RegularStartCalls { get; private set; }
         public int StopCalls { get; private set; }
+        public bool SourceFaulted { get; set; }
+        public bool WriteOutputOnStart { get; init; }
         private NativeRecorderState state = NativeRecorderState.Ready;
         public NativeOperationResult Start(NativeRecordingRequest request) { RegularStartCalls++; state = NativeRecorderState.Recording; return NativeOperationResult.Success(); }
-        public NativeOperationResult StartMixed(NativeMixedRecordingRequest request) { request.Validate(); LastMixedRequest = request; MixedStartCalls++; if (MixedStartResult.IsSuccess) state = NativeRecorderState.Recording; return MixedStartResult; }
+        public NativeOperationResult StartMixed(NativeMixedRecordingRequest request)
+        {
+            request.Validate();
+            LastMixedRequest = request;
+            MixedStartCalls++;
+            if (MixedStartResult.IsSuccess)
+            {
+                if (WriteOutputOnStart) File.WriteAllBytes(request.OutputPath, [1, 2, 3, 4]);
+                state = NativeRecorderState.Recording;
+            }
+            return MixedStartResult;
+        }
         public NativeOperationResult Stop() { StopCalls++; state = NativeRecorderState.Stopped; return NativeOperationResult.Success(); }
-        public NativeRecorderSnapshot GetSnapshot() => new(NativeRecorderResult.Ok, state, NativeCaptureStats.Empty(RecordingCaptureMode.Mixed), null);
+        public NativeRecorderSnapshot GetSnapshot() => SourceFaulted
+            ? new(
+                NativeRecorderResult.CaptureError,
+                NativeRecorderState.Faulted,
+                NativeCaptureStats.Empty(RecordingCaptureMode.Mixed),
+                "device invalidated")
+            : new(
+                NativeRecorderResult.Ok,
+                state,
+                NativeCaptureStats.Empty(RecordingCaptureMode.Mixed),
+                null);
         public NativeEndpointEnumerationResult EnumerateEndpoints() => new(NativeOperationResult.Success(), Array.Empty<NativeCaptureEndpoint>());
         public void Dispose() { }
+    }
+
+    private sealed class TemporaryRoot : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            "recorder-audio-mvp-tests",
+            Guid.NewGuid().ToString("N"));
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Path)) Directory.Delete(Path, recursive: true);
+        }
     }
 
     private sealed class TestDelay : IRecordingDelay

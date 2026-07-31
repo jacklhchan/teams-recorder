@@ -26,6 +26,7 @@ var tests = new (string Name, Action Run)[]
     ,("mixed recording request validates its audio-only contract", AudioMvpTests.MixedRequestValidatesAudioOnlyContract)
     ,("mixed recording coordinator starts, stops, and retries", AudioMvpTests.MixedCoordinatorStartsStopsAndRetries)
     ,("mixed test recording stops after its scheduled delay", AudioMvpTests.MixedTestRecordingStopsAfterScheduledDelay)
+    ,("recoverable mixed fault retains evidence and permits restart", AudioMvpTests.RecoverableFaultRetainsEvidenceAndAllowsRestart)
     ,("session capacity respects block and warning boundaries", SessionStorageTests.CapacityBoundariesAreExact)
     ,("session allocation and publishing do not overwrite media", SessionStorageTests.AllocationAndPublishDoNotOverwrite)
     ,("session library ignores unsafe and incomplete entries", SessionStorageTests.LibraryIgnoresUnsafeIncompleteAndMalformedEntries)

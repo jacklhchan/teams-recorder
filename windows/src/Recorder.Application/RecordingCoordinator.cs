@@ -18,7 +18,8 @@ public sealed record RecordingCoordinatorSnapshot(
     NativeCaptureStats Stats,
     string? Error,
     bool IsTestRecording,
-    bool NeedsNativeCleanup)
+    bool NeedsNativeCleanup,
+    bool HasRecoverableFault = false)
 {
     public static RecordingCoordinatorSnapshot Initial { get; } = new(
         Generation: 0,
@@ -27,7 +28,8 @@ public sealed record RecordingCoordinatorSnapshot(
         Stats: NativeCaptureStats.Empty(RecordingCaptureMode.SystemLoopback),
         Error: null,
         IsTestRecording: false,
-        NeedsNativeCleanup: false);
+        NeedsNativeCleanup: false,
+        HasRecoverableFault: false);
 }
 
 public interface IRecordingDelay
@@ -117,7 +119,8 @@ public sealed class RecordingCoordinator
                 Stats: NativeCaptureStats.Empty(request.Mode),
                 Error: null,
                 IsTestRecording: false,
-                NeedsNativeCleanup: false);
+                NeedsNativeCleanup: false,
+                HasRecoverableFault: false);
             snapshot = starting;
             stopTask = null;
             refreshTask = null;
@@ -205,9 +208,10 @@ public sealed class RecordingCoordinator
             stopping = snapshot with
             {
                 State = RecordingCoordinatorState.Stopping,
-                Error = null,
                 IsTestRecording = false,
                 NeedsNativeCleanup = false,
+                HasRecoverableFault = snapshot.State == RecordingCoordinatorState.Faulted ||
+                    snapshot.HasRecoverableFault,
             };
             snapshot = stopping;
             operation = Enqueue(() => StopCore(stopping.Generation));
@@ -311,17 +315,19 @@ public sealed class RecordingCoordinator
                 {
                     State = RecordingCoordinatorState.Stopped,
                     Stats = stats,
-                    Error = null,
+                    Error = snapshot.HasRecoverableFault ? snapshot.Error : null,
                     IsTestRecording = false,
                     NeedsNativeCleanup = false,
+                    HasRecoverableFault = snapshot.HasRecoverableFault,
                 }
                 : snapshot with
                 {
                     State = RecordingCoordinatorState.Faulted,
                     Stats = stats,
-                    Error = UserMessage(result, "Audio capture could not stop cleanly."),
+                    Error = snapshot.Error ?? UserMessage(result, "Audio capture could not stop cleanly."),
                     IsTestRecording = false,
                     NeedsNativeCleanup = false,
+                    HasRecoverableFault = true,
                 };
             snapshot = completed;
             stopTask = null;
@@ -356,6 +362,7 @@ public sealed class RecordingCoordinator
                     Error = nativeSnapshot?.Error ?? "Audio capture status is unavailable.",
                     IsTestRecording = false,
                     NeedsNativeCleanup = true,
+                    HasRecoverableFault = true,
                 };
             }
             else if (nativeSnapshot.State == NativeRecorderState.Recording)
@@ -375,6 +382,7 @@ public sealed class RecordingCoordinator
                     Error = nativeSnapshot.Error ?? "Audio capture ended unexpectedly.",
                     IsTestRecording = false,
                     NeedsNativeCleanup = nativeSnapshot.State == NativeRecorderState.Faulted,
+                    HasRecoverableFault = true,
                 };
             }
 
@@ -388,6 +396,42 @@ public sealed class RecordingCoordinator
             Publish(refreshed);
         }
         return refreshed;
+    }
+
+    /// <summary>
+    /// Releases a terminal capture fault after the application layer has
+    /// retained its evidence. The original diagnostic remains observable, but
+    /// the generation is invalidated and the next start is permitted.
+    /// </summary>
+    public RecordingCoordinatorSnapshot CompleteFaultRecovery()
+    {
+        RecordingCoordinatorSnapshot completed;
+        lock (stateGate)
+        {
+            if (snapshot.NeedsNativeCleanup ||
+                (snapshot.State != RecordingCoordinatorState.Faulted &&
+                 (snapshot.State != RecordingCoordinatorState.Stopped ||
+                  !snapshot.HasRecoverableFault)))
+            {
+                return snapshot;
+            }
+
+            CancelTestLocked();
+            completed = snapshot with
+            {
+                Generation = checked(snapshot.Generation + 1),
+                State = RecordingCoordinatorState.Stopped,
+                IsTestRecording = false,
+                NeedsNativeCleanup = false,
+                HasRecoverableFault = true,
+            };
+            snapshot = completed;
+            stopTask = null;
+            refreshTask = null;
+        }
+
+        Publish(completed);
+        return completed;
     }
 
     private NativeEndpointEnumerationResult RefreshEndpointsCore()

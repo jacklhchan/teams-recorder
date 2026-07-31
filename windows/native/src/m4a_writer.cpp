@@ -59,7 +59,9 @@ public:
 
 private:
     static constexpr std::uint64_t kBlockDurationNumerator =
-        10'000'000U * 1024U;
+        10'000'000ULL * 1024ULL;
+    static_assert(kBlockDurationNumerator == 10'240'000'000ULL,
+                  "AAC timestamp numerator must not overflow 32 bits");
     static constexpr std::uint64_t kSampleRate = 48'000U;
 };
 namespace {

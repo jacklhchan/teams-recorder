@@ -228,6 +228,51 @@ void ExpectDecodableAacStream(const std::filesystem::path& final_path) {
     Expect(decoded_sample, "SourceReader did not decode an AAC sample");
 }
 
+std::uint64_t ReadPresentationDuration100ns(const std::filesystem::path& final_path) {
+    ComPtr<IMFSourceReader> reader;
+    HRESULT result = MFCreateSourceReaderFromURL(final_path.c_str(), nullptr, &reader);
+    Expect(SUCCEEDED(result) && reader != nullptr,
+           "could not open finalized M4A to inspect duration");
+
+    PROPVARIANT duration{};
+    PropVariantInit(&duration);
+    result = reader->GetPresentationAttribute(
+        static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE),
+        MF_PD_DURATION,
+        &duration);
+    const bool valid = SUCCEEDED(result) && duration.vt == VT_UI8;
+    const std::uint64_t value = valid ? duration.uhVal.QuadPart : 0;
+    PropVariantClear(&duration);
+    Expect(valid, "M4A presentation duration is unavailable");
+    return value;
+}
+
+void OneSecondInputRetainsOneSecondTimeline(const std::filesystem::path& directory) {
+    const auto final_path = directory / "one-second-duration.m4a";
+    Error error = Error::Ok;
+    std::string detail;
+    auto writer = Writer::Create(final_path, 128'000U, &error, &detail);
+    Expect(writer != nullptr && error == Error::Ok,
+           "duration writer creation failed");
+
+    std::vector<float> frames(960U * 2U, 0.0F);
+    for (std::uint32_t block = 0; block < 50U; ++block) {
+        frames[static_cast<std::size_t>(block % 960U) * 2U] = 0.25F;
+        Expect(writer->WriteFrames(
+                   frames.data(), 960U,
+                   static_cast<std::uint64_t>(block) * 200'000ULL,
+                   &detail) == Error::Ok,
+               "duration writer could not write one-second PCM input");
+    }
+    Expect(writer->Finalize(&detail) == Error::Ok,
+           "duration writer could not finalize");
+    writer.reset();
+
+    const std::uint64_t duration = ReadPresentationDuration100ns(final_path);
+    Expect(duration >= 9'500'000ULL && duration <= 10'500'000ULL,
+           "AAC timestamps compressed a one-second input timeline");
+}
+
 void FinalizedFileIsPlayableContainer(const std::filesystem::path& directory,
                                       std::uint32_t frames_per_write) {
     const auto final_path = directory / ("finalized-" + std::to_string(frames_per_write) + ".m4a");
@@ -479,6 +524,8 @@ int main(int argc, char** argv) {
                     FinalizeWithStages(directory, options);
                 } else if (options.test == "stress") {
                     StressWritesFinalizeCleanly(directory, options);
+                } else if (options.test == "duration") {
+                    OneSecondInputRetainsOneSecondTimeline(directory);
                 } else if (options.test == "split") {
                     SplitWritesFinalizeAndDecode(directory, options.frames);
                 } else if (options.test == "abort") {

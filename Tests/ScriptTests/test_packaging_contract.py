@@ -48,6 +48,7 @@ Mentioning compatibility does not change or grant those licenses.
 class PackagingContractTests(unittest.TestCase):
     def test_readme_describes_current_provider_and_license(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        normalized_readme = " ".join(readme.split())
         required_phrases = (
             "OpenAI-Compatible Transcription",
             "API Base URL ending in `/v1`",
@@ -55,8 +56,8 @@ class PackagingContractTests(unittest.TestCase):
             "LLM Model identifier",
             "optional API key, language, and transcription prompt",
             "POST <API Base URL>/audio/transcriptions",
-            "Model discovery\nis optional",
-            "`/v1/models` is\n   unsupported",
+            "Model discovery is optional",
+            "`/v1/models` is unsupported",
             "manually entered model identifiers remain available",
             "transcript.txt",
             "transcript.raw.txt",
@@ -71,7 +72,7 @@ class PackagingContractTests(unittest.TestCase):
             "`schemaVersion`",
             "Unknown metadata fields are preserved",
             "Native audio chunks use an isolated system temporary workspace",
-            "`.transcription-runs` is a legacy\nworkspace only",
+            "`.transcription-runs` is a legacy workspace only",
             "Successful native jobs keep only the four canonical artifacts",
             "provider API key and Teams pairing token are stored in macOS Keychain",
             "HKT GenAI Platform",
@@ -81,7 +82,7 @@ class PackagingContractTests(unittest.TestCase):
             "Authorization: Bearer",
             "exact `/models` match",
             "zero automatic chat",
-            "Generate and Regenerate are\nexplicit",
+            "Generate and Regenerate are explicit",
             "meeting-intelligence.json",
             "meeting-intelligence-state.json",
             "manual titles are preserved",
@@ -95,7 +96,7 @@ class PackagingContractTests(unittest.TestCase):
         )
         for phrase in required_phrases:
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, readme)
+                self.assertIn(" ".join(phrase.split()), normalized_readme)
 
         stale_phrases = (
             "/Users/apple",

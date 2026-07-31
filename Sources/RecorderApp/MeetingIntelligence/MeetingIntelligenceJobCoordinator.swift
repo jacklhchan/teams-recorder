@@ -390,9 +390,16 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         tasksBySessionID[session.id] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: session) }
-            guard let snapshot = await self.snapshotIfUsable(for: session, ticket: ticket),
-                  let transcript = try? await self.io.transcript(in: session.folderURL),
-                  self.owns(ticket, for: session) else { return }
+            guard let snapshot = await self.snapshotIfUsable(for: session, ticket: ticket) else { return }
+            let transcript: TranscriptDocumentSnapshot
+            do {
+                transcript = try await self.io.transcript(in: session.folderURL)
+            } catch {
+                guard self.owns(ticket, for: session), !Task.isCancelled else { return }
+                self.setFailed("Transcript needs attention.", for: session)
+                return
+            }
+            guard self.owns(ticket, for: session) else { return }
             await self.generateOwned(session: session, transcript: transcript, snapshot: snapshot,
                                      intent: intent, ticket: ticket)
         }
@@ -432,9 +439,12 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             guard owns(ticket, for: session), !Task.isCancelled else { return }
             setPresentation(from: outcome.artifact, phase: .ready,
                             message: outcome.titleWarning ?? "Ready.", session: session)
+            // Publication is the semantic success boundary. State persistence
+            // is recovery-only and may be delayed/cancelled without changing
+            // the one successful library/search refresh callback.
+            onSuccessfulPublication?(session)
             await persist(.completed, message: outcome.titleWarning ?? "Ready.", revision: transcript.revision,
                           ticket: ticket, for: session)
-            onSuccessfulPublication?(session)
             clearTaskIfOwned(ticket, for: session)
         } catch is CancellationError {
             await finishCancellationIfOwned(ticket, session: session)
@@ -457,6 +467,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             }
             return snapshot
         } catch {
+            guard owns(ticket, for: session), !Task.isCancelled else { return nil }
             setFailed("Configure an AI provider before generating.", for: session)
             return nil
         }

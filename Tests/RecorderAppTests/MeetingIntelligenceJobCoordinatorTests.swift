@@ -410,6 +410,84 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(states.saved.count, 6)
         XCTAssertEqual(states.saved.last?.phase, .completed)
     }
+
+    func testManualTranscriptLoadFailureShowsNeedsAttentionRatherThanStuckGenerating() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        fixture.reader.readError = SecureTranscriptReadError.missing
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .failed)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).statusMessage, "Transcript needs attention.")
+        XCTAssertEqual(fixture.generator.requests, 0)
+    }
+
+    func testOldSnapshotFailureAfterCancellationCannotOverwriteTerminalPresentation() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let entered = expectation(description: "snapshot entered")
+        let finished = expectation(description: "snapshot finished")
+        let release = DispatchSemaphore(value: 0)
+        fixture.repository.snapshotEntered = entered
+        fixture.repository.snapshotFinished = finished
+        fixture.repository.snapshotRelease = release
+        fixture.repository.snapshotError = ProviderProfileValidationError.invalidBaseURL
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [entered], timeout: 1)
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        await fixture.waitForIdle()
+        release.signal()
+        await fulfillment(of: [finished], timeout: 1)
+
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .cancelled)
+    }
+
+    func testCallbackEmitsBeforeCompletedStateAdmissionAndSurvivesCancellation() async throws {
+        let fixture = try callbackBlockedFixture()
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [fixture.scheduler.completedAdmission], timeout: 1)
+        XCTAssertEqual(fixture.callbackCount.value, 1)
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: fixture.session.id)
+        await fixture.scheduler.release()
+        XCTAssertEqual(fixture.callbackCount.value, 1)
+    }
+
+    func testCallbackEmitsBeforeCompletedStateAdmissionAndSurvivesRemoval() async throws {
+        let fixture = try callbackBlockedFixture()
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [fixture.scheduler.completedAdmission], timeout: 1)
+        XCTAssertEqual(fixture.callbackCount.value, 1)
+        fixture.coordinator.remove(sessionID: fixture.session.id)
+        await fixture.scheduler.release()
+        XCTAssertEqual(fixture.callbackCount.value, 1)
+    }
+
+    func testCallbackEmitsBeforeCompletedStateAdmissionAndSurvivesShutdown() async throws {
+        let fixture = try callbackBlockedFixture()
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [fixture.scheduler.completedAdmission], timeout: 1)
+        XCTAssertEqual(fixture.callbackCount.value, 1)
+        fixture.coordinator.shutdown()
+        await fixture.scheduler.release()
+        XCTAssertEqual(fixture.callbackCount.value, 1)
+    }
+
+    private func callbackBlockedFixture() throws -> CallbackBlockedFixture {
+        let scheduler = BlockSecondStateSaveScheduler()
+        let fixture = try CoordinatorFixture(availability: .confirmed, stateSaveSchedulerOverride: scheduler)
+        let callbackCount = CallbackCount()
+        fixture.coordinator.onSuccessfulPublication = { _ in callbackCount.increment() }
+        return .init(coordinator: fixture.coordinator, session: fixture.session, scheduler: scheduler, callbackCount: callbackCount)
+    }
+}
+
+private struct CallbackBlockedFixture {
+    let coordinator: MeetingIntelligenceJobCoordinator
+    let session: RecordingSession
+    let scheduler: BlockSecondStateSaveScheduler
+    let callbackCount: CallbackCount
 }
 
 @MainActor
@@ -548,18 +626,53 @@ private final class BlockingStateSaveScheduler: MeetingIntelligenceStateSaveSche
     func awaitAdmission() async { entered.fulfill(); await gate.wait(); released.fulfill() }
 }
 
+private final class BlockSecondStateSaveScheduler: MeetingIntelligenceStateSaveScheduling, @unchecked Sendable {
+    let completedAdmission = XCTestExpectation(description: "completed state admission")
+    private let gate = GenerationGate()
+    private let lock = NSLock()
+    private var count = 0
+    func awaitAdmission() async {
+        let call = lock.withLock { count += 1; return count }
+        guard call == 2 else { return }
+        completedAdmission.fulfill()
+        await gate.wait()
+    }
+    func release() async { await gate.release() }
+}
+
+private final class CallbackCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+
 private final class CoordinatorTranscriptReader: TranscriptDocumentReading, @unchecked Sendable {
     var snapshot: TranscriptDocumentSnapshot
+    var readError: Error?
     init(snapshot: TranscriptDocumentSnapshot) { self.snapshot = snapshot }
-    func readCanonical(in _: URL, allowLegacy _: Bool) throws -> TranscriptDocumentSnapshot { snapshot }
+    func readCanonical(in _: URL, allowLegacy _: Bool) throws -> TranscriptDocumentSnapshot {
+        if let readError { throw readError }
+        return snapshot
+    }
 }
 
 private final class CoordinatorRepository: OpenAICompatibleProviderManaging, @unchecked Sendable {
     var snapshotValue: OpenAICompatibleProviderSnapshot
+    var snapshotError: Error?
+    var snapshotEntered: XCTestExpectation?
+    var snapshotFinished: XCTestExpectation?
+    var snapshotRelease: DispatchSemaphore?
     init(snapshotValue: OpenAICompatibleProviderSnapshot) { self.snapshotValue = snapshotValue }
     func loadProfile() throws -> OpenAICompatibleProviderProfile? { snapshotValue.profile }
     func save(profile _: OpenAICompatibleProviderProfile, replacementAPIKey _: String?) throws {}
-    func snapshot() throws -> OpenAICompatibleProviderSnapshot { snapshotValue }
+    func snapshot() throws -> OpenAICompatibleProviderSnapshot {
+        snapshotEntered?.fulfill()
+        snapshotRelease?.wait()
+        snapshotFinished?.fulfill()
+        if let snapshotError { throw snapshotError }
+        return snapshotValue
+    }
     func snapshot(overriding profile: OpenAICompatibleProviderProfile) throws -> OpenAICompatibleProviderSnapshot { try .validated(profile: profile, apiKey: snapshotValue.apiKey) }
     func hasAPIKey() throws -> Bool { snapshotValue.apiKey != nil }
     func removeAPIKey() throws {}

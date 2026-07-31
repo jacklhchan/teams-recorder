@@ -18,6 +18,35 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(in: fixture.folder), artifact)
     }
 
+    func testRemoveStagedUsesIdentityCheckedCleanup() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let staged = try store.stage(fixture.artifact(), in: fixture.folder)
+
+        try store.removeStaged(staged, in: fixture.folder)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.path))
+        XCTAssertNil(try store.load(in: fixture.folder))
+    }
+
+    func testRemoveStagedRejectsReplacementInsteadOfDeletingIt() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let replacement = Data("replacement".utf8)
+        let access = ScriptedFileAccess(removeHook: { folder, name in
+            let url = folder.appendingPathComponent(name)
+            try FileManager.default.removeItem(at: url)
+            try replacement.write(to: url)
+        })
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate, fileAccess: access)
+        let staged = try store.stage(fixture.artifact(), in: fixture.folder)
+
+        XCTAssertThrowsError(try store.removeStaged(staged, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
+        }
+        XCTAssertEqual(try Data(contentsOf: staged), replacement)
+        XCTAssertEqual(access.removeCalls, 0)
+    }
+
     func testV1ArtifactIgnoresUnknownFields() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
         let data = Data(#"""

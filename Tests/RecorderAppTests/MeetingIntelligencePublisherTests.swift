@@ -15,6 +15,8 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertEqual(fixture.metadata.title, "Project decision")
         XCTAssertEqual(fixture.metadata.titleOrigin, .meetingIntelligence)
         XCTAssertEqual(fixture.artifactStore.promotions, 1)
+        XCTAssertEqual(fixture.artifactStore.cleanups, 0)
+        XCTAssertEqual(fixture.artifactStore.visibleArtifact?.summary, "Decision summary")
     }
 
     func testGeneratedTitleReplacesOnlyCapturedGeneratedTitle() async throws {
@@ -64,6 +66,33 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
             _ = try await changedDigest.publisher.publish(changedDigest.request)
         }
         XCTAssertEqual(changedDigest.artifactStore.promotions, 0)
+    }
+
+    func testPostStageRejectionAndPromotionFailureRemoveCandidate() async throws {
+        let rejected = try PublicationFixture(metadata: .init())
+        defer { rejected.remove() }
+        rejected.artifactStore.onStage = { rejected.request.lease.invalidate() }
+
+        await assertPublicationError(.leaseInvalid) {
+            _ = try await rejected.publisher.publish(rejected.request)
+        }
+        XCTAssertEqual(rejected.artifactStore.promotions, 0)
+        XCTAssertEqual(rejected.artifactStore.cleanups, 1)
+        XCTAssertNil(rejected.artifactStore.stagedArtifact)
+        XCTAssertNil(rejected.artifactStore.visibleArtifact)
+
+        let promotionFailure = try PublicationFixture(metadata: .init())
+        defer { promotionFailure.remove() }
+        promotionFailure.artifactStore.promoteError = TestError.saveFailed
+
+        do {
+            _ = try await promotionFailure.publisher.publish(promotionFailure.request)
+            XCTFail("Expected promotion failure")
+        } catch {}
+        XCTAssertEqual(promotionFailure.artifactStore.promotions, 0)
+        XCTAssertEqual(promotionFailure.artifactStore.cleanups, 1)
+        XCTAssertNil(promotionFailure.artifactStore.stagedArtifact)
+        XCTAssertNil(promotionFailure.artifactStore.visibleArtifact)
     }
 
     func testManualRenameAtMetadataBarrierCannotBeOverwritten() async throws {
@@ -128,16 +157,6 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertEqual(outcome.titleWarning, MeetingIntelligencePublicationOutcome.metadataWarning)
         XCTAssertEqual(fixture.artifactStore.promotions, 1)
         XCTAssertEqual(fixture.metadata.title, nil)
-    }
-
-    func testCompletedPublicationProducesOneSemanticOutcome() async throws {
-        let fixture = try PublicationFixture(metadata: .init())
-        defer { fixture.remove() }
-
-        let outcomes = [try await fixture.publisher.publish(fixture.request)]
-
-        XCTAssertEqual(outcomes.count, 1)
-        XCTAssertEqual(fixture.artifactStore.promotions, 1)
     }
 
     private func assertPublicationError(
@@ -232,19 +251,32 @@ private final class PublisherTranscriptReader: TranscriptDocumentReading, @unche
 }
 
 private final class PublisherArtifactStore: MeetingIntelligenceArtifactStoring, @unchecked Sendable {
-    private var staged: MeetingIntelligenceArtifact?
+    private(set) var stagedArtifact: MeetingIntelligenceArtifact?
+    private(set) var visibleArtifact: MeetingIntelligenceArtifact?
     private(set) var promotions = 0
+    private(set) var cleanups = 0
+    var onStage: (() -> Void)?
     var onPromote: (() -> Void)?
+    var promoteError: Error?
 
     func load(in _: URL) throws -> MeetingIntelligenceArtifact? { nil }
     func stage(_ artifact: MeetingIntelligenceArtifact, in folder: URL) throws -> URL {
-        staged = artifact
+        stagedArtifact = artifact
+        onStage?()
+        onStage = nil
         return folder.appendingPathComponent(".meeting-intelligence-stage-test")
     }
     func promoteStaged(_: URL, in _: URL) throws {
+        if let promoteError { throw promoteError }
         promotions += 1
+        visibleArtifact = stagedArtifact
+        stagedArtifact = nil
         onPromote?()
         onPromote = nil
+    }
+    func removeStaged(_: URL, in _: URL) throws {
+        cleanups += 1
+        stagedArtifact = nil
     }
 }
 

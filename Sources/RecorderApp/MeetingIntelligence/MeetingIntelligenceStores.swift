@@ -84,6 +84,25 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
             try fileAccess.promote(stagedSnapshot, to: Self.fileName, over: destination, in: normalizedFolder)
         }
     }
+
+    func removeStaged(_ stagedURL: URL, in folder: URL) throws {
+        try mutationGate.withMutation(for: folder) {
+            let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+            let staged = stagedURL.standardizedFileURL
+            guard staged.deletingLastPathComponent() == normalizedFolder,
+                  staged.lastPathComponent.hasPrefix(".meeting-intelligence-stage-") else {
+                throw MeetingIntelligenceStoreError.unsafeFile
+            }
+            guard let snapshot = try fileAccess.snapshot(
+                named: staged.lastPathComponent,
+                in: normalizedFolder,
+                maximumBytes: Self.maximumBytes
+            ) else {
+                return
+            }
+            try fileAccess.remove(snapshot, in: normalizedFolder)
+        }
+    }
 }
 
 struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable {

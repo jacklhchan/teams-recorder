@@ -109,10 +109,17 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
             intent: request.intent
         )
         let staged = try artifactStore.stage(artifact, in: folder)
+        var promoted = false
+        defer {
+            if !promoted {
+                try? artifactStore.removeStaged(staged, in: folder)
+            }
+        }
 
         return try mutationGate.withMutation(for: folder) {
             try validate(request, in: folder)
             try artifactStore.promoteStaged(staged, in: folder)
+            promoted = true
             try validate(request, in: folder)
 
             var metadata = metadataStore.load(in: folder)

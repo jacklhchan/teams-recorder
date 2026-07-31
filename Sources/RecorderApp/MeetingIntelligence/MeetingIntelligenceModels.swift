@@ -44,6 +44,7 @@ protocol MeetingIntelligenceArtifactStoring: Sendable {
     func load(in folder: URL) throws -> MeetingIntelligenceArtifact?
     func stage(_ artifact: MeetingIntelligenceArtifact, in folder: URL) throws -> URL
     func promoteStaged(_ stagedURL: URL, in folder: URL) throws
+    func removeStaged(_ stagedURL: URL, in folder: URL) throws
 }
 
 protocol MeetingIntelligenceStateStoring: Sendable {

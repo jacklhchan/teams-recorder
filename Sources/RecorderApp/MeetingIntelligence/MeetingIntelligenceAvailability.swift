@@ -38,6 +38,9 @@ struct OpenAICompatibleMeetingIntelligenceAvailabilityChecker:
         guard !model.isEmpty, model != "legacy-unconfigured-llm" else {
             return .unconfirmed(.placeholderModel)
         }
+        guard !Task.isCancelled else {
+            return .unconfirmed(.connectionFailed)
+        }
 
         do {
             let report = try await client.testConnection(

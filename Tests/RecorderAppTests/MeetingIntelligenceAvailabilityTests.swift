@@ -15,7 +15,9 @@ final class MeetingIntelligenceAvailabilityTests: XCTestCase {
 
         XCTAssertEqual(result, .confirmed)
         let requestedModels = await client.requestedProfiles.map(\.llmModel)
+        let requestedAPIKeys = await client.requestedAPIKeys
         XCTAssertEqual(requestedModels, ["llm-model"])
+        XCTAssertEqual(requestedAPIKeys, ["test-key"])
     }
 
     func testExactLLMMatchConfirmsWhenASRAndLLMModelsAreTheSame() async throws {
@@ -61,6 +63,7 @@ final class MeetingIntelligenceAvailabilityTests: XCTestCase {
 
     func testPlaceholderModelsReturnUnconfirmedWithoutAConnection() async throws {
         let emptySnapshot = try providerSnapshot(llmModel: "")
+        let whitespaceSnapshot = try providerSnapshot(llmModel: " \n\t ")
         let legacySnapshot = try providerSnapshot(llmModel: "legacy-unconfigured-llm")
         let client = StubProviderConnectionClient(result: .success(
             .init(supportsModelDiscovery: true, models: ["llm-model"])
@@ -68,9 +71,11 @@ final class MeetingIntelligenceAvailabilityTests: XCTestCase {
         let checker = OpenAICompatibleMeetingIntelligenceAvailabilityChecker(client: client)
 
         let emptyResult = await checker.availability(for: emptySnapshot)
+        let whitespaceResult = await checker.availability(for: whitespaceSnapshot)
         let legacyResult = await checker.availability(for: legacySnapshot)
         let requestedCount = await client.requestedProfiles.count
         XCTAssertEqual(emptyResult, .unconfirmed(.placeholderModel))
+        XCTAssertEqual(whitespaceResult, .unconfirmed(.placeholderModel))
         XCTAssertEqual(legacyResult, .unconfirmed(.placeholderModel))
         XCTAssertEqual(requestedCount, 0)
     }
@@ -152,11 +157,33 @@ final class MeetingIntelligenceAvailabilityTests: XCTestCase {
         XCTAssertEqual(result, .unconfirmed(.connectionFailed))
         XCTAssertEqual(requestCount, 1)
     }
+
+    func testPreEntryCancellationSkipsProviderConnection() async throws {
+        let snapshot = try providerSnapshot(llmModel: "llm-model")
+        let client = StubProviderConnectionClient(result: .success(
+            .init(supportsModelDiscovery: true, models: ["llm-model"])
+        ))
+        let checker = OpenAICompatibleMeetingIntelligenceAvailabilityChecker(client: client)
+        let enterAvailability = AsyncBarrier()
+        let task = Task {
+            await enterAvailability.wait()
+            return await checker.availability(for: snapshot)
+        }
+
+        task.cancel()
+        await enterAvailability.open()
+
+        let result = await task.value
+        let requestCount = await client.requestedProfiles.count
+        XCTAssertEqual(result, .unconfirmed(.connectionFailed))
+        XCTAssertEqual(requestCount, 0)
+    }
 }
 
 private actor StubProviderConnectionClient: ProviderConnectionTesting {
     private let result: Result<ProviderConnectionReport, Error>
     private(set) var requestedProfiles: [OpenAICompatibleProviderProfile] = []
+    private(set) var requestedAPIKeys: [String?] = []
 
     init(result: Result<ProviderConnectionReport, Error>) {
         self.result = result
@@ -167,6 +194,7 @@ private actor StubProviderConnectionClient: ProviderConnectionTesting {
         apiKey: String?
     ) async throws -> ProviderConnectionReport {
         requestedProfiles.append(profile)
+        requestedAPIKeys.append(apiKey)
         return try result.get()
     }
 }
@@ -219,13 +247,18 @@ private func providerSnapshot(
     asrModel: String = "asr-model",
     llmModel: String = "llm-model"
 ) throws -> OpenAICompatibleProviderSnapshot {
+    let escapedLLMModel = llmModel
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+        .replacingOccurrences(of: "\n", with: "\\n")
+        .replacingOccurrences(of: "\t", with: "\\t")
     let json = """
     {
       "profile": {
         "schemaVersion": 1,
         "baseURL": "https://provider.example/v1",
         "asrModel": "\(asrModel)",
-        "llmModel": "\(llmModel)",
+        "llmModel": "\(escapedLLMModel)",
         "language": "en",
         "prompt": "Summarize this meeting."
       },

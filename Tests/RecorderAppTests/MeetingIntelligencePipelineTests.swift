@@ -63,13 +63,13 @@ final class MeetingIntelligencePipelineTests: XCTestCase {
         )
 
         let partials = await client.partialInputs
-        XCTAssertEqual(partials.map(\.utf8.count), [64 * 1_024, 64 * 1_024 + 1])
+        XCTAssertEqual(partials.map(\.utf8.count), [64 * 1_024, 1, 64 * 1_024])
         XCTAssertEqual(Data(partials.joined().utf8), source)
     }
 
     func testSourceOverflowFailsBeforeAnyRequest() async throws {
         let client = ScriptedMeetingIntelligenceClient()
-        await assertPipelineFails {
+        await assertPipelineFails(.sourceTooLarge) {
             _ = try await MeetingIntelligencePipeline(client: client).generate(
                 transcript: self.transcript(bytes: Data(repeating: 0x61, count: 4 * 1_024 * 1_024 + 1)),
                 snapshot: try self.providerSnapshot(),
@@ -84,7 +84,7 @@ final class MeetingIntelligencePipelineTests: XCTestCase {
         let client = ScriptedMeetingIntelligenceClient()
         await client.setPartial { _ in String(repeating: "x", count: 4 * 1_024 + 1) }
 
-        await assertPipelineFails {
+        await assertPipelineFails(.partialTooLarge) {
             _ = try await MeetingIntelligencePipeline(client: client).generate(
                 transcript: self.transcript(bytes: Data(repeating: 0x61, count: 65 * 1_024)),
                 snapshot: try self.providerSnapshot(),
@@ -119,7 +119,7 @@ final class MeetingIntelligencePipelineTests: XCTestCase {
         let clock = DeadlinePipelineClock()
         let client = ScriptedMeetingIntelligenceClient()
 
-        await assertPipelineFails {
+        await assertPipelineFails(.deadlineExceeded) {
             _ = try await MeetingIntelligencePipeline(client: client, now: { clock.now() }).generate(
                 transcript: self.transcript(bytes: Data("transcript".utf8)),
                 snapshot: try self.providerSnapshot(),
@@ -186,6 +186,155 @@ final class MeetingIntelligencePipelineTests: XCTestCase {
         XCTAssertEqual(finalRequestCount, 1)
     }
 
+    func testEscapeHeavyInputIsShrunkByExactEncodedRequestSizerBeforeClientCall() async throws {
+        let client = ScriptedMeetingIntelligenceClient()
+        await client.setPartial { _ in "p" }
+        let source = Data(String(repeating: "\\", count: 64 * 1_024 + 1).utf8)
+
+        _ = try await MeetingIntelligencePipeline(client: client).generate(
+            transcript: transcript(bytes: source),
+            snapshot: try providerSnapshot(),
+            onProgress: { _ in }
+        )
+
+        let inputs = await client.partialInputs
+        XCTAssertTrue(inputs.allSatisfy {
+            MeetingIntelligenceRequestEncoder.body(
+                input: $0,
+                snapshot: try! self.providerSnapshot(),
+                final: false
+            ).count <= OpenAICompatibleMeetingIntelligenceClient.maximumRequestBytes
+        })
+        XCTAssertEqual(Data(inputs.prefix(2).joined().utf8), source)
+    }
+
+    func testEscapedMultibyteInputShrinksAtScalarBoundariesWithoutDataLoss() async throws {
+        let client = ScriptedMeetingIntelligenceClient()
+        await client.setPartial { _ in "p" }
+        let source = Data(String(repeating: "\\é", count: 28 * 1_024).utf8)
+
+        _ = try await MeetingIntelligencePipeline(client: client).generate(
+            transcript: transcript(bytes: source),
+            snapshot: try providerSnapshot(),
+            onProgress: { _ in }
+        )
+
+        let inputs = await client.partialInputs
+        XCTAssertEqual(Data(inputs.prefix(2).joined().utf8), source)
+        XCTAssertTrue(inputs.prefix(2).allSatisfy {
+            $0.utf8.count <= OpenAICompatibleMeetingIntelligenceClient.maximumInputBytesBeforeEncoding &&
+                MeetingIntelligenceRequestEncoder.body(
+                    input: $0,
+                    snapshot: try! self.providerSnapshot(),
+                    final: false
+                ).count <= OpenAICompatibleMeetingIntelligenceClient.maximumRequestBytes
+        })
+    }
+
+    func testFourMiBWithEarlyNewlinesUsesExactlySixtyFourChunksAndSeventyOneRequests() async throws {
+        let client = ScriptedMeetingIntelligenceClient()
+        await client.setPartial { _ in "p" }
+        let block = Data(("\n" + String(repeating: "a", count: 64 * 1_024 - 1)).utf8)
+        var source = Data()
+        for _ in 0 ..< 64 { source.append(block) }
+
+        _ = try await MeetingIntelligencePipeline(client: client).generate(
+            transcript: transcript(bytes: source),
+            snapshot: try providerSnapshot(),
+            onProgress: { _ in }
+        )
+
+        let inputs = await client.partialInputs
+        let total = await client.requestCount
+        XCTAssertEqual(inputs.prefix(64).map(\.utf8.count), Array(repeating: 64 * 1_024, count: 64))
+        XCTAssertEqual(Data(inputs.prefix(64).joined().utf8), source)
+        XCTAssertEqual(total, 71)
+    }
+
+    func testSizingCanMakeMoreThanSixtyFourChunksFailBeforeAnyClientRequest() async throws {
+        let client = ScriptedMeetingIntelligenceClient()
+        let source = Data(String(repeating: "\\", count: 4 * 1_024 * 1_024).utf8)
+
+        await assertPipelineFails(.tooManyChunks) {
+            _ = try await MeetingIntelligencePipeline(client: client).generate(
+                transcript: self.transcript(bytes: source),
+                snapshot: try self.providerSnapshot(),
+                onProgress: { _ in }
+            )
+        }
+        let requestCount = await client.requestCount
+        XCTAssertEqual(requestCount, 0)
+    }
+
+    func testDelimiterAfterNonzeroOffsetPreservesEveryByte() async throws {
+        let client = ScriptedMeetingIntelligenceClient()
+        await client.setPartial { _ in "p" }
+        let source = Data((String(repeating: "a", count: 64 * 1_024) + "b\n\n" + String(repeating: "c", count: 64 * 1_024)).utf8)
+
+        _ = try await MeetingIntelligencePipeline(client: client).generate(
+            transcript: transcript(bytes: source),
+            snapshot: try providerSnapshot(),
+            onProgress: { _ in }
+        )
+
+        let partials = await client.partialInputs
+        XCTAssertEqual(partials.prefix(2), [String(repeating: "a", count: 64 * 1_024), "b\n\n"])
+        XCTAssertEqual(Data(partials.prefix(3).joined().utf8), source)
+    }
+
+    func testProgressCancellationPreventsRequestAndLaterProgress() async throws {
+        let client = ScriptedMeetingIntelligenceClient()
+        let progress = ProgressCancellationRecorder()
+
+        await assertPipelineFails(.cancelled) {
+            _ = try await MeetingIntelligencePipeline(client: client).generate(
+                transcript: self.transcript(bytes: Data(repeating: 0x61, count: 65 * 1_024)),
+                snapshot: try self.providerSnapshot(),
+                onProgress: { event in
+                    progress.record(event)
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            )
+        }
+        let requestCount = await client.requestCount
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(progress.events.count, 1)
+    }
+
+    func testNeverFinalSizerPermitsSeventyOneRequestsButRejectsTheSeventySecond() async throws {
+        let client = ScriptedMeetingIntelligenceClient()
+        await client.setPartial { _ in "p" }
+        let sizer = NeverFinalRequestSizer()
+
+        await assertPipelineFails(.tooManyRequests) {
+            _ = try await MeetingIntelligencePipeline(client: client, sizer: sizer).generate(
+                transcript: self.transcript(bytes: Data(repeating: 0x61, count: 4 * 1_024 * 1_024)),
+                snapshot: try self.providerSnapshot(),
+                onProgress: { _ in }
+            )
+        }
+        let requestCount = await client.requestCount
+        XCTAssertEqual(requestCount, 71)
+    }
+
+    func testNeverFinalSizerReachesMaximumReductionDepthBeforePublication() async throws {
+        let client = ScriptedMeetingIntelligenceClient()
+        await client.setPartial { _ in "p" }
+
+        await assertPipelineFails(.maximumDepthReached) {
+            _ = try await MeetingIntelligencePipeline(
+                client: client,
+                sizer: NeverFinalRequestSizer()
+            ).generate(
+                transcript: self.transcript(bytes: Data(repeating: 0x61, count: 65 * 1_024)),
+                snapshot: try self.providerSnapshot(),
+                onProgress: { _ in }
+            )
+        }
+        let requestCount = await client.requestCount
+        XCTAssertEqual(requestCount, 6)
+    }
+
     private func transcript(bytes: Data) -> TranscriptDocumentSnapshot {
         .init(
             url: URL(fileURLWithPath: "/tmp/transcript.txt"),
@@ -208,13 +357,16 @@ final class MeetingIntelligencePipelineTests: XCTestCase {
     }
 
     private func assertPipelineFails(
+        _ expected: MeetingIntelligencePipelineError,
         _ body: @escaping () async throws -> Void
     ) async {
         do {
             try await body()
             XCTFail("Expected bounded pipeline failure")
+        } catch let error as MeetingIntelligencePipelineError {
+            XCTAssertEqual(error, expected)
         } catch {
-            // The public contract is no generated content and no final publication.
+            XCTFail("Unexpected pipeline error: \(error)")
         }
     }
 
@@ -269,6 +421,23 @@ private final class DeadlinePipelineClock: @unchecked Sendable {
             reads += 1
             return reads <= 2 ? start : start.advanced(by: .seconds(1_800))
         }
+    }
+}
+
+private final class ProgressCancellationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [MeetingIntelligenceProgress] = []
+
+    var events: [MeetingIntelligenceProgress] { lock.withLock { values } }
+
+    func record(_ event: MeetingIntelligenceProgress) {
+        lock.withLock { values.append(event) }
+    }
+}
+
+private struct NeverFinalRequestSizer: MeetingIntelligenceRequestSizing {
+    func fits(input _: String, snapshot _: OpenAICompatibleProviderSnapshot, final: Bool) -> Bool {
+        !final
     }
 }
 

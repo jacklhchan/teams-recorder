@@ -181,16 +181,32 @@ final class OpenAICompatibleMeetingIntelligenceClientTests: XCTestCase {
         await assertError(.unsafeOutput) { _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: transport).requestPartialSummary(input: "x", snapshot: try self.snapshot()) }
     }
 
-    func testPreEncodingRequestBudgetAcceptsMaximumAndRejectsMaximumPlusOneWithoutTransport() async throws {
-        let maximum = 88 * 1_024
+    func testExactEncodedRequestBudgetRejectsEscapedInputWithoutTransport() async throws {
+        let acceptedInput = String(repeating: "\\", count: 40 * 1_024)
         let accepted = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer(#"{"summary":"ok"}"#))])
-        _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: accepted).requestPartialSummary(input: String(repeating: "a", count: maximum), snapshot: try snapshot())
+        _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: accepted).requestPartialSummary(input: acceptedInput, snapshot: try snapshot())
         XCTAssertEqual(accepted.requests.count, 1)
+        let request = try XCTUnwrap(accepted.requests.first)
+        XCTAssertLessThanOrEqual(
+            try XCTUnwrap(request.httpBody).count,
+            OpenAICompatibleMeetingIntelligenceClient.maximumRequestBytes
+        )
+
+        let rejectedInput = String(repeating: "\\", count: 60 * 1_024)
         let rejected = MeetingIntelligenceRecordingTransport(responses: [])
         await assertError(.requestTooLarge) {
-            _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: rejected).requestPartialSummary(input: String(repeating: "a", count: maximum + 1), snapshot: try self.snapshot())
+            _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: rejected).requestPartialSummary(input: rejectedInput, snapshot: try self.snapshot())
         }
         XCTAssertTrue(rejected.requests.isEmpty)
+
+        let rawOverLimit = MeetingIntelligenceRecordingTransport(responses: [])
+        await assertError(.requestTooLarge) {
+            _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: rawOverLimit).requestPartialSummary(
+                input: String(repeating: "a", count: OpenAICompatibleMeetingIntelligenceClient.maximumInputBytesBeforeEncoding + 1),
+                snapshot: try self.snapshot()
+            )
+        }
+        XCTAssertTrue(rawOverLimit.requests.isEmpty)
     }
 
     private func snapshot(apiKey: String? = nil) throws -> OpenAICompatibleProviderSnapshot {

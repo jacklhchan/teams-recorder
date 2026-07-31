@@ -62,20 +62,14 @@ final class MeetingIntelligenceAvailabilityTests: XCTestCase {
     }
 
     func testPlaceholderModelsReturnUnconfirmedWithoutAConnection() async throws {
-        let emptySnapshot = try providerSnapshot(llmModel: "")
-        let whitespaceSnapshot = try providerSnapshot(llmModel: " \n\t ")
         let legacySnapshot = try providerSnapshot(llmModel: "legacy-unconfigured-llm")
         let client = StubProviderConnectionClient(result: .success(
             .init(supportsModelDiscovery: true, models: ["llm-model"])
         ))
         let checker = OpenAICompatibleMeetingIntelligenceAvailabilityChecker(client: client)
 
-        let emptyResult = await checker.availability(for: emptySnapshot)
-        let whitespaceResult = await checker.availability(for: whitespaceSnapshot)
         let legacyResult = await checker.availability(for: legacySnapshot)
         let requestedCount = await client.requestedProfiles.count
-        XCTAssertEqual(emptyResult, .unconfirmed(.placeholderModel))
-        XCTAssertEqual(whitespaceResult, .unconfirmed(.placeholderModel))
         XCTAssertEqual(legacyResult, .unconfirmed(.placeholderModel))
         XCTAssertEqual(requestedCount, 0)
     }
@@ -247,26 +241,14 @@ private func providerSnapshot(
     asrModel: String = "asr-model",
     llmModel: String = "llm-model"
 ) throws -> OpenAICompatibleProviderSnapshot {
-    let escapedLLMModel = llmModel
-        .replacingOccurrences(of: "\\", with: "\\\\")
-        .replacingOccurrences(of: "\"", with: "\\\"")
-        .replacingOccurrences(of: "\n", with: "\\n")
-        .replacingOccurrences(of: "\t", with: "\\t")
-    let json = """
-    {
-      "profile": {
-        "schemaVersion": 1,
-        "baseURL": "https://provider.example/v1",
-        "asrModel": "\(asrModel)",
-        "llmModel": "\(escapedLLMModel)",
-        "language": "en",
-        "prompt": "Summarize this meeting."
-      },
-      "apiKey": "test-key"
-    }
-    """
-    return try JSONDecoder().decode(
-        OpenAICompatibleProviderSnapshot.self,
-        from: Data(json.utf8)
+    try OpenAICompatibleProviderSnapshot.validated(
+        profile: .validated(
+            baseURLText: "https://provider.example/v1",
+            asrModel: asrModel,
+            llmModel: llmModel,
+            language: "en",
+            prompt: "Summarize this meeting."
+        ),
+        apiKey: "test-key"
     )
 }

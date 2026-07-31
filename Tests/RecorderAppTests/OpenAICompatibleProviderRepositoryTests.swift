@@ -286,25 +286,17 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(secure.operations.last, .delete(service: OpenAICompatibleProviderCredential.hktService, account: OpenAICompatibleProviderCredential.hktAccount))
     }
 
-    func testSnapshotDecodingRejectsMismatchedHKTBearerAuthentication() throws {
+    func testSnapshotDerivesHKTAuthenticationFromProfileWithoutOverrides() throws {
         let profile = try OpenAICompatibleProviderProfile.hktValidated(groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: "")
-        let data = try JSONEncoder().encode(OpenAICompatibleProviderSnapshot(profile: profile, apiKey: "hkt-key"))
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        object["authentication"] = ["bearer": [:]]
-        let tampered = try JSONSerialization.data(withJSONObject: object)
-        XCTAssertThrowsError(try JSONDecoder().decode(OpenAICompatibleProviderSnapshot.self, from: tampered)) {
-            XCTAssertEqual($0 as? ProviderSnapshotValidationError, .authenticationMismatch)
-        }
+        let snapshot = OpenAICompatibleProviderSnapshot(profile: profile, apiKey: "hkt-key")
+        XCTAssertEqual(snapshot.providerKind, .hktGenAI)
+        XCTAssertEqual(snapshot.authentication, .hktAPIKey)
     }
 
-    func testSnapshotDecodingRejectsMismatchedGenericHKTKind() throws {
-        let data = try JSONEncoder().encode(OpenAICompatibleProviderSnapshot(profile: makeProfile(), apiKey: "generic-key"))
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        object["providerKind"] = "hktGenAI"
-        let tampered = try JSONSerialization.data(withJSONObject: object)
-        XCTAssertThrowsError(try JSONDecoder().decode(OpenAICompatibleProviderSnapshot.self, from: tampered)) {
-            XCTAssertEqual($0 as? ProviderSnapshotValidationError, .providerKindMismatch)
-        }
+    func testSnapshotDerivesGenericAuthenticationFromProfileWithoutOverrides() throws {
+        let snapshot = OpenAICompatibleProviderSnapshot(profile: try makeProfile(), apiKey: "generic-key")
+        XCTAssertEqual(snapshot.providerKind, .openAICompatible)
+        XCTAssertEqual(snapshot.authentication, .bearer)
     }
 
     func testReplacementHKTKeyIsDeletedWhenProfileSaveFailsWithoutPriorHKTKey() throws {

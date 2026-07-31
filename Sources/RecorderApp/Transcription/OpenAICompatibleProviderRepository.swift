@@ -17,15 +17,12 @@ protocol OpenAICompatibleProviderManaging: AnyObject {
     ) throws -> LegacyProviderMigrationOutcome
 }
 
-struct OpenAICompatibleProviderSnapshot: Codable, Equatable, Sendable {
+/// Runtime-only immutable credential snapshot. It must never be serialized.
+struct OpenAICompatibleProviderSnapshot: Equatable, Sendable {
     let providerKind: AIProviderKind
     let authentication: ProviderAuthentication
     let profile: OpenAICompatibleProviderProfile
     let apiKey: String?
-
-    private enum CodingKeys: String, CodingKey {
-        case providerKind, authentication, profile, apiKey
-    }
 
     init(profile: OpenAICompatibleProviderProfile, apiKey: String?) {
         self.providerKind = profile.providerKind
@@ -44,37 +41,6 @@ struct OpenAICompatibleProviderSnapshot: Codable, Equatable, Sendable {
         )
     }
 
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let profile = try OpenAICompatibleProviderProfile.validatedPersisted(
-            container.decode(OpenAICompatibleProviderProfile.self, forKey: .profile)
-        )
-        let decodedKind = try container.decode(AIProviderKind.self, forKey: .providerKind)
-        guard decodedKind == profile.providerKind else {
-            throw ProviderSnapshotValidationError.providerKindMismatch
-        }
-        let decodedAuthentication = try container.decode(ProviderAuthentication.self, forKey: .authentication)
-        let authentication = ProviderAuthentication.forProviderKind(profile.providerKind)
-        guard decodedAuthentication == authentication else {
-            throw ProviderSnapshotValidationError.authenticationMismatch
-        }
-        providerKind = profile.providerKind
-        self.authentication = authentication
-        self.profile = profile
-        apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey)
-    }
-}
-
-enum ProviderSnapshotValidationError: LocalizedError, Equatable {
-    case providerKindMismatch
-    case authenticationMismatch
-
-    var errorDescription: String? {
-        switch self {
-        case .providerKindMismatch: "The provider snapshot kind does not match its profile."
-        case .authenticationMismatch: "The provider snapshot authentication does not match its profile."
-        }
-    }
 }
 
 enum OpenAICompatibleProviderCredential {

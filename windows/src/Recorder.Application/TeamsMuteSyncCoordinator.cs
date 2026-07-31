@@ -131,6 +131,29 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             microphoneRoutingEngaged));
                     }
                     break;
+                case TeamsThirdPartyApiEvent.Error(_, var message) when IsAlreadyPairedResponse(message):
+                    // A pairing retry may race with an existing Teams credential.  This is not
+                    // a loss of trust: keep any authenticated meeting snapshot and otherwise
+                    // wait for the authenticated connection to supply its first meeting update.
+                    if (snapshot.IsPairingAuthenticated)
+                    {
+                        SetSnapshotLocked(snapshot with
+                        {
+                            Status = snapshot.LastMeetingState?.IsInMeeting == true
+                                ? TeamsMuteSyncStatus.InMeeting
+                                : TeamsMuteSyncStatus.Ready,
+                            Detail = null,
+                        });
+                    }
+                    else
+                    {
+                        SetSnapshotLocked(snapshot with
+                        {
+                            Status = TeamsMuteSyncStatus.WaitingForMeeting,
+                            Detail = null,
+                        });
+                    }
+                    break;
                 case TeamsThirdPartyApiEvent.Error(_, var message):
                     FailClosedForLostTrustLocked();
                     SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.Failed, null, message, false, microphoneRoutingEngaged));
@@ -181,6 +204,9 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         if (microphoneRoutingEngaged) microphone.SetMuted(true);
         if (wasTrustedMeeting) MeetingPresenceChanged?.Invoke(this, false);
     }
+
+    private static bool IsAlreadyPairedResponse(string message) =>
+        message.Contains("already paired", StringComparison.OrdinalIgnoreCase);
 
     private void SetSnapshotLocked(TeamsMuteSyncSnapshot value)
     {

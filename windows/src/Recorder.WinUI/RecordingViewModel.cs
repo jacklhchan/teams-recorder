@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
 using Recorder.Core;
 using TeamsRecorder.Windows.Application;
 using TeamsRecorder.Windows.Application.AI;
@@ -26,6 +27,9 @@ namespace TeamsRecorder.Windows.WinUI;
 public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverlayStateSource
 {
     private const int WaveformBarCount = 48;
+    private static readonly Brush HealthyHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.ForestGreen);
+    private static readonly Brush WarningHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.DarkOrange);
+    private static readonly Brush NeutralHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.Gray);
     private readonly DispatcherQueue dispatcherQueue;
     private readonly DispatcherQueueTimer telemetryTimer;
     private readonly DispatcherQueueTimer playbackTimer;
@@ -147,7 +151,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         CancelRecycleLibraryCommand = new AsyncRelayCommand(CancelRecycleLibraryAsync, () => IsRecycleConfirmationVisible);
         EnableTeamsMuteSyncCommand = new AsyncRelayCommand(EnableTeamsMuteSyncAsync, () => CanManageTeamsMuteSync && !IsTeamsMuteSyncEnabled);
         DisableTeamsMuteSyncCommand = new AsyncRelayCommand(DisableTeamsMuteSyncAsync, () => CanManageTeamsMuteSync && IsTeamsMuteSyncEnabled);
-        RequestTeamsPairingCommand = new AsyncRelayCommand(RequestTeamsPairingAsync, () => CanManageTeamsMuteSync && IsTeamsMuteSyncEnabled);
+        RequestTeamsPairingCommand = new AsyncRelayCommand(RequestTeamsPairingAsync, () => CanRequestTeamsPairing);
         EnableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(EnableTeamsAutomaticRecordingAsync, () => CanEnableTeamsAutomaticRecording);
         DisableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(DisableTeamsAutomaticRecordingAsync, () => CanDisableTeamsAutomaticRecording);
         CancelTeamsAutomaticRecordingStartCommand = new AsyncRelayCommand(CancelTeamsAutomaticRecordingStartAsync, () => CanCancelTeamsAutomaticRecordingStart);
@@ -268,6 +272,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public bool CanManageTeamsMuteSync => !isShuttingDown && !isTeamsMuteSyncOperationInProgress;
 
+    /// <summary>A paired connection does not need another pairing request.</summary>
+    public bool CanRequestTeamsPairing =>
+        CanManageTeamsMuteSync &&
+        IsTeamsMuteSyncEnabled &&
+        !teamsMuteSnapshot.IsPairingAuthenticated;
+
     /// <summary>
     /// Automatic recording is deliberately a separate opt-in.  A Teams connection alone is
     /// insufficient: this remains false until a paired API supplies an authoritative meeting state.
@@ -280,11 +290,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         teamsMuteSnapshot.Status is TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting &&
         teamsMuteSnapshot.LastMeetingState is not null;
 
+    /// <summary>
+    /// Automation may be enabled for a paired connection before it reports a meeting.
+    /// Starting capture still requires <see cref="HasTrustedTeamsMeetingState"/>.
+    /// </summary>
+    private bool HasPairedTeamsConnection =>
+        IsTeamsMuteSyncEnabled &&
+        teamsMuteSnapshot.IsPairingAuthenticated &&
+        teamsMuteSnapshot.Status is TeamsMuteSyncStatus.WaitingForMeeting or TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting;
+
     public bool CanEnableTeamsAutomaticRecording =>
         !isShuttingDown &&
         !isTeamsAutomaticRecordingOperationInProgress &&
         !IsTeamsAutomaticRecordingEnabled &&
-        HasTrustedTeamsMeetingState;
+        HasPairedTeamsConnection;
 
     public bool CanDisableTeamsAutomaticRecording =>
         !isShuttingDown &&
@@ -355,8 +374,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             : "Teams 推送了後續未靜音狀態：本次 M4A 錄音內選取的麥克風來源可用；不會改變 Teams 本身。";
 
     public string TeamsAutomaticRecordingStatusText => !IsTeamsAutomaticRecordingEnabled
-        ? HasTrustedTeamsMeetingState
-            ? "未啟用自動錄音：必須由使用者明確啟用，才會依可信的 Teams 會議狀態開始或停止錄音。"
+        ? HasPairedTeamsConnection
+            ? "未啟用自動錄音：Teams 已配對。啟用後會等待可信的 Teams 會議狀態，才開始或停止錄音。"
             : "自動錄音尚未可用：請先啟用 Teams 同步、完成配對，並等待可信的會議狀態。"
         : teamsAutomaticSnapshot.State switch
         {
@@ -382,6 +401,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 OnPropertyChanged(nameof(SelectedRenderDescription));
                 OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
                 OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
+                NotifyLiveAudioHealthChanged();
                 UpdateCommandStates();
                 PersistAppSettingsInBackground();
             }
@@ -398,6 +418,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 OnPropertyChanged(nameof(SelectedMicrophoneDescription));
                 OnPropertyChanged(nameof(MicrophoneHealthText));
                 OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
+                NotifyLiveAudioHealthChanged();
                 UpdateCommandStates();
                 PersistAppSettingsInBackground();
             }
@@ -418,6 +439,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 OnPropertyChanged(nameof(SelectedApplicationPanelVisibility));
                 OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
                 OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
+                NotifyLiveAudioHealthChanged();
                 UpdateCommandStates();
                 PersistAppSettingsInBackground();
             }
@@ -718,6 +740,33 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         ? "未啟用"
         : $"{InputLevelPercent:0.0}%";
 
+    private LiveAudioHealthAssessment LiveAudioHealth => LiveAudioHealthAdvisor.Assess(
+        snapshot.Stats,
+        isCaptureActive: snapshot.State == RecordingCoordinatorState.Recording,
+        primaryTitle: PrimaryCaptureLabel,
+        primaryAvailable: IsPrimaryCaptureAvailable,
+        microphoneIncluded: SelectedMicrophoneEndpoint?.EndpointId is not null,
+        microphoneAvailable: SelectedMicrophoneEndpoint is not { IsAvailable: false },
+        microphoneMuted: IsRecordingMicrophoneMuted);
+
+    public string PrimaryHealthTitle => LiveAudioHealth.Primary.Title;
+
+    public string PrimaryHealthDetail => LiveAudioHealth.Primary.Detail;
+
+    public string PrimaryHealthGlyph => HealthGlyph(LiveAudioHealth.Primary.Status);
+
+    public Brush PrimaryHealthBrush => HealthBrush(LiveAudioHealth.Primary.Status);
+
+    public string MicrophoneHealthTitle => LiveAudioHealth.Microphone.Title;
+
+    public string MicrophoneHealthDetail => LiveAudioHealth.Microphone.Detail;
+
+    public string MicrophoneHealthGlyph => HealthGlyph(LiveAudioHealth.Microphone.Status);
+
+    public Brush MicrophoneHealthBrush => HealthBrush(LiveAudioHealth.Microphone.Status);
+
+    public string AudioHealthSummaryText => LiveAudioHealth.Summary;
+
     public string AggregateHealthText =>
         $"彙總：{snapshot.Stats.Packets:N0} 音訊封包、{snapshot.Stats.Discontinuities:N0} 次中斷；" +
         (snapshot.Stats.Packets == 0
@@ -729,6 +778,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private string PrimaryCaptureLabel => SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
         ? $"指定應用程式：{SelectedProcess?.DisplayName ?? "已選程序"}"
         : "系統音訊";
+
+    private bool IsPrimaryCaptureAvailable => SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+        ? SelectedProcess is { IsAvailable: true }
+        : SelectedRenderEndpoint is not { IsAvailable: false };
 
     public string RenderHealthText => snapshot.Stats.SourceSampleRate == 0
         ? $"{PrimaryCaptureLabel}：等待第一個音訊封包。"
@@ -1275,7 +1328,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private async Task RequestTeamsPairingAsync()
     {
         var sync = teamsMuteSync;
-        if (sync is null || !IsTeamsMuteSyncEnabled)
+        if (sync is null || !CanRequestTeamsPairing)
         {
             return;
         }
@@ -1313,14 +1366,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         {
             await automatic.SetEnabledAsync(true);
             var meeting = teamsMuteSnapshot.LastMeetingState;
-            if (meeting is null || !HasTrustedTeamsMeetingState)
+            if (meeting is { } trustedMeeting && HasTrustedTeamsMeetingState)
             {
-                await automatic.SetEnabledAsync(false);
-                ErrorText = "Teams 會議狀態在啟用自動錄音前失去信任；未開始錄音。";
-                return;
+                await automatic.SetMeetingPresenceAsync(trustedMeeting.IsInMeeting);
             }
-
-            await automatic.SetMeetingPresenceAsync(meeting.IsInMeeting);
             teamsAutomaticSnapshot = automatic.Snapshot;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
@@ -1463,7 +1512,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
             UpdateCommandStates();
 
-            if (!HasTrustedTeamsMeetingState && teamsAutomaticRecorder?.Snapshot.IsEnabled == true)
+            if (!HasPairedTeamsConnection && teamsAutomaticRecorder?.Snapshot.IsEnabled == true)
             {
                 _ = DisableTeamsAutomaticRecordingAfterTrustLossAsync();
             }
@@ -1629,6 +1678,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             OnPropertyChanged(nameof(IsRecordingMicrophoneMuted));
             OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
             OnPropertyChanged(nameof(MicrophoneHealthText));
+            NotifyLiveAudioHealthChanged();
             OnPropertyChanged(nameof(TeamsMuteRoutingText));
         }
 
@@ -2467,12 +2517,40 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OnPropertyChanged(nameof(OutputLevelText));
         OnPropertyChanged(nameof(InputLevelPercent));
         OnPropertyChanged(nameof(InputLevelText));
+        NotifyLiveAudioHealthChanged();
         OnPropertyChanged(nameof(AggregateHealthText));
         OnPropertyChanged(nameof(RenderHealthText));
         OnPropertyChanged(nameof(MicrophoneHealthText));
         OnPropertyChanged(nameof(ResultText));
         UpdateCommandStates();
     }
+
+    private void NotifyLiveAudioHealthChanged()
+    {
+        OnPropertyChanged(nameof(PrimaryHealthTitle));
+        OnPropertyChanged(nameof(PrimaryHealthDetail));
+        OnPropertyChanged(nameof(PrimaryHealthGlyph));
+        OnPropertyChanged(nameof(PrimaryHealthBrush));
+        OnPropertyChanged(nameof(MicrophoneHealthTitle));
+        OnPropertyChanged(nameof(MicrophoneHealthDetail));
+        OnPropertyChanged(nameof(MicrophoneHealthGlyph));
+        OnPropertyChanged(nameof(MicrophoneHealthBrush));
+        OnPropertyChanged(nameof(AudioHealthSummaryText));
+    }
+
+    private static string HealthGlyph(LiveAudioHealthStatus status) => status switch
+    {
+        LiveAudioHealthStatus.Healthy => "\uE73E",
+        LiveAudioHealthStatus.Warning => "\uE7BA",
+        _ => "\uE946",
+    };
+
+    private static Brush HealthBrush(LiveAudioHealthStatus status) => status switch
+    {
+        LiveAudioHealthStatus.Healthy => HealthyHealthBrush,
+        LiveAudioHealthStatus.Warning => WarningHealthBrush,
+        _ => NeutralHealthBrush,
+    };
 
     private static void AppendWaveform(ObservableCollection<WaveformBar> bars, float peak)
     {
@@ -2657,6 +2735,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OnPropertyChanged(nameof(CanManageLibrary));
         OnPropertyChanged(nameof(CanConfirmRecycle));
         OnPropertyChanged(nameof(CanManageTeamsMuteSync));
+        OnPropertyChanged(nameof(CanRequestTeamsPairing));
         OnPropertyChanged(nameof(IsRecordingMicrophoneMuted));
         OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
         OnPropertyChanged(nameof(GlobalMuteHotKeyStatus));

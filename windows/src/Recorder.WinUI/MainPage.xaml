@@ -186,11 +186,28 @@
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                 <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                     <StackPanel Spacing="12">
-                        <TextBlock Text="即時健康狀態" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="即時音訊健康檢查" Style="{StaticResource SubtitleTextBlockStyle}" />
                         <TextBlock Text="{Binding StatusText}" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                        <TextBlock Text="{Binding AggregateHealthText}" TextWrapping="Wrap" />
-                        <TextBlock Text="{Binding RenderHealthText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                        <TextBlock Text="{Binding MicrophoneHealthText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
+                            <Grid ColumnSpacing="20">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon FontSize="20" Glyph="{Binding PrimaryHealthGlyph}" Foreground="{Binding PrimaryHealthBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Spacing="2">
+                                        <TextBlock Text="{Binding PrimaryHealthTitle}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                        <TextBlock Text="{Binding PrimaryHealthDetail}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                    <FontIcon FontSize="20" Glyph="{Binding MicrophoneHealthGlyph}" Foreground="{Binding MicrophoneHealthBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Spacing="2">
+                                        <TextBlock Text="{Binding MicrophoneHealthTitle}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                        <TextBlock Text="{Binding MicrophoneHealthDetail}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <TextBlock Text="{Binding AudioHealthSummaryText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                         <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                             <StackPanel><TextBlock Text="經過時間" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><TextBlock Text="{Binding ElapsedText}" Style="{StaticResource TitleTextBlockStyle}" /></StackPanel>
                             <StackPanel Grid.Column="1"><TextBlock Text="峰值 / 剪裁" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><TextBlock Text="{Binding PeakText}" Style="{StaticResource TitleTextBlockStyle}" /><ProgressBar Maximum="100" Value="{Binding PeakPercent}" /></StackPanel>

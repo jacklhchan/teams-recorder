@@ -89,6 +89,22 @@ internal static class TeamsIntegrationTests
         Equal(TeamsMuteSyncStatus.WaitingForPairingApproval, coordinator.Snapshot.Status);
     }
 
+    public static void MuteCoordinatorKeepsTrustedStateWhenPairingIsAlreadyComplete()
+    {
+        var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
+        using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
+        coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(false, false, true, false), true, false), true));
+        client.Publish(new TeamsThirdPartyApiEvent.Error(null, "Device already paired"));
+
+        Equal(TeamsMuteSyncStatus.Ready, coordinator.Snapshot.Status);
+        Equal(true, coordinator.Snapshot.IsPairingAuthenticated);
+        if (coordinator.Snapshot.LastMeetingState is null)
+        {
+            throw new InvalidOperationException("An already-paired response must not discard a trusted meeting snapshot.");
+        }
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private sealed class FakeTeamsClient : ITeamsThirdPartyApiClient
     {

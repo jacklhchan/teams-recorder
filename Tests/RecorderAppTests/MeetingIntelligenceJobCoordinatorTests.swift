@@ -436,9 +436,9 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         fixture.coordinator.generate(for: fixture.session)
         await fulfillment(of: [entered], timeout: 1)
         fixture.coordinator.cancel(sessionID: fixture.session.id)
-        await fixture.waitForIdle()
         release.signal()
         await fulfillment(of: [finished], timeout: 1)
+        await fixture.waitForIdle()
 
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .cancelled)
     }

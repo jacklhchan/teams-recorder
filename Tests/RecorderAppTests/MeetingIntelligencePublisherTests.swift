@@ -3,6 +3,18 @@ import XCTest
 @testable import RecorderApp
 
 final class MeetingIntelligencePublisherTests: XCTestCase {
+    func testLeaseInvalidatedBeforeCommitReservationRejectsButAfterReservationCommitWins() throws {
+        let lease = MeetingIntelligenceAttemptLease()
+        lease.invalidate()
+        XCTAssertNil(lease.beginCommit())
+
+        let committed = MeetingIntelligenceAttemptLease()
+        let reservation = try XCTUnwrap(committed.beginCommit())
+        committed.invalidate()
+        XCTAssertFalse(committed.isValid)
+        XCTAssertTrue(reservation.isCurrent)
+        reservation.finish()
+    }
     func testUnsetTitlePublishesArtifactAndAppliesGeneratedTitle() async throws {
         let fixture = try PublicationFixture(metadata: .init(title: nil, titleOrigin: .unset))
         defer { fixture.remove() }
@@ -133,17 +145,16 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertNil(beforeMetadataWrite.metadata.title)
     }
 
-    func testLeaseInvalidatedAfterPromotionDoesNotWriteTitle() async throws {
+    func testLeaseInvalidatedAfterCommitReservationCompletesPublication() async throws {
         let fixture = try PublicationFixture(metadata: .init())
         defer { fixture.remove() }
         fixture.artifactStore.onPromote = { fixture.request.lease.invalidate() }
 
-        await assertPublicationError(.leaseInvalid) {
-            _ = try await fixture.publisher.publish(fixture.request)
-        }
+        let outcome = try await fixture.publisher.publish(fixture.request)
 
         XCTAssertEqual(fixture.artifactStore.promotions, 1)
-        XCTAssertNil(fixture.metadata.title)
+        XCTAssertTrue(outcome.titleWasApplied)
+        XCTAssertEqual(fixture.metadata.title, "Project decision")
     }
 
     func testMetadataSaveFailurePreservesPublishedArtifactAndReturnsWarning() async throws {

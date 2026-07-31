@@ -1,5 +1,11 @@
 import Foundation
 
+private actor MeetingIntelligenceFileMutationExecutor {
+    func run<T: Sendable>(_ operation: @Sendable () throws -> T) throws -> T {
+        try operation()
+    }
+}
+
 /// The only boundary used by meeting-intelligence UI actions to mutate a
 /// recording title.  All blocking filesystem work is deliberately performed
 /// off the main actor while holding the same gate used by transcript and
@@ -8,6 +14,7 @@ struct MeetingIntelligenceSuggestedTitleApplier: @unchecked Sendable {
     private let mutationGate: RecordingSessionMutationGate
     private let transcriptReader: any TranscriptDocumentReading
     private let metadataStore: any RecordingSessionMetadataStoring
+    private let executor: MeetingIntelligenceFileMutationExecutor
 
     init(
         mutationGate: RecordingSessionMutationGate,
@@ -17,10 +24,11 @@ struct MeetingIntelligenceSuggestedTitleApplier: @unchecked Sendable {
         self.mutationGate = mutationGate
         self.transcriptReader = transcriptReader
         self.metadataStore = metadataStore
+        executor = .init()
     }
 
     func applySuggestedTitle(_ request: MeetingIntelligenceSuggestedTitleRequest) async throws -> Bool {
-        try await Task.detached(priority: .userInitiated) {
+        try await executor.run {
             let folder = try normalizedFolder(for: request.session)
             return try mutationGate.withMutation(for: folder) {
                 try validate(request, in: folder)
@@ -31,13 +39,17 @@ struct MeetingIntelligenceSuggestedTitleApplier: @unchecked Sendable {
                 // The reader check is intentionally repeated immediately
                 // before the metadata write: a manually edited transcript
                 // must never receive a title generated from old bytes.
-                try validate(request, in: folder)
+                try validateTranscript(request, in: folder)
+                guard let commit = request.lease.beginCommit() else {
+                    throw MeetingIntelligencePublicationError.leaseInvalid
+                }
+                defer { commit.finish() }
                 metadata.applyTitleEdit(.applyMeetingIntelligence(request.artifact.suggestedTitle))
-                try validate(request, in: folder)
+                try validateTranscript(request, in: folder)
                 try metadataStore.save(metadata, in: folder)
                 return true
             }
-        }.value
+        }
     }
 
     private func validate(
@@ -47,6 +59,13 @@ struct MeetingIntelligenceSuggestedTitleApplier: @unchecked Sendable {
         guard !Task.isCancelled, request.lease.isValid else {
             throw MeetingIntelligencePublicationError.leaseInvalid
         }
+        try validateTranscript(request, in: folder)
+    }
+
+    private func validateTranscript(
+        _ request: MeetingIntelligenceSuggestedTitleRequest,
+        in folder: URL
+    ) throws {
         let current = try transcriptReader.readCanonical(in: folder, allowLegacy: false)
         guard current.revision == request.sourceRevision,
               request.artifact.sourceTranscriptSHA256 == current.revision.sha256,

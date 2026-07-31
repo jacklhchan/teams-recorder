@@ -33,8 +33,35 @@ enum MeetingIntelligencePublicationError: LocalizedError, Equatable, Sendable {
 }
 
 final class MeetingIntelligenceAttemptLease: @unchecked Sendable {
+    /// The reservation is the linearization point for durable meeting-intelligence
+    /// publication. `invalidate()` wins only before `beginCommit()` returns one.
+    /// Once reserved, filesystem work happens outside this lock and is allowed to
+    /// finish; cancellation never waits for that work.
+    final class CommitReservation: @unchecked Sendable {
+        private let lease: MeetingIntelligenceAttemptLease
+        private let identifier: UInt64
+        private var finished = false
+
+        fileprivate init(lease: MeetingIntelligenceAttemptLease, identifier: UInt64) {
+            self.lease = lease
+            self.identifier = identifier
+        }
+
+        var isCurrent: Bool { lease.isReservationCurrent(identifier) }
+
+        func finish() {
+            guard !finished else { return }
+            finished = true
+            lease.finishCommit(identifier)
+        }
+
+        deinit { finish() }
+    }
+
     private let lock = NSLock()
     private var valid = true
+    private var activeReservation: UInt64?
+    private var nextReservation: UInt64 = 0
 
     var isValid: Bool {
         lock.withLock { valid }
@@ -42,6 +69,28 @@ final class MeetingIntelligenceAttemptLease: @unchecked Sendable {
 
     func invalidate() {
         lock.withLock { valid = false }
+    }
+
+    /// Reserves the durable commit. This is deliberately tiny: no filesystem or
+    /// gate work occurs under the lock, so a MainActor cancellation cannot block.
+    func beginCommit() -> CommitReservation? {
+        lock.withLock {
+            guard valid, activeReservation == nil else { return nil }
+            nextReservation &+= 1
+            activeReservation = nextReservation
+            return CommitReservation(lease: self, identifier: nextReservation)
+        }
+    }
+
+    private func isReservationCurrent(_ identifier: UInt64) -> Bool {
+        lock.withLock { activeReservation == identifier }
+    }
+
+    private func finishCommit(_ identifier: UInt64) {
+        lock.withLock {
+            guard activeReservation == identifier else { return }
+            activeReservation = nil
+        }
     }
 }
 
@@ -118,14 +167,17 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
 
         return try mutationGate.withMutation(for: folder) {
             try validate(request, in: folder)
+            guard let commit = request.lease.beginCommit() else {
+                throw MeetingIntelligencePublicationError.leaseInvalid
+            }
+            defer { commit.finish() }
             try artifactStore.promoteStaged(staged, in: folder)
             promoted = true
-            try validate(request, in: folder)
 
             var metadata = metadataStore.load(in: folder)
             // A transcript editor or retranscription may have settled while
             // metadata was loaded. Recheck immediately before any title write.
-            try validate(request, in: folder)
+            try validateTranscript(request, in: folder)
             guard canApplyGeneratedTitle(
                 current: metadata,
                 capturedTitle: request.capturedTitle,
@@ -165,6 +217,13 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
         guard request.lease.isValid else {
             throw MeetingIntelligencePublicationError.leaseInvalid
         }
+        try validateTranscript(request, in: folder)
+    }
+
+    private func validateTranscript(
+        _ request: MeetingIntelligencePublicationRequest,
+        in folder: URL
+    ) throws {
         let snapshot = try transcriptReader.readCanonical(
             in: folder,
             allowLegacy: false

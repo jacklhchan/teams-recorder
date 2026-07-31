@@ -232,9 +232,13 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             fileSize: opened.fileSize,
             metadata: .init(title: "Generated meeting title", isFavorite: true)
         )
+        let visibleSessions: [RecordingSession] = []
+        let allSessions = [resolved]
+        XCTAssertTrue(visibleSessions.isEmpty)
+
         let current = TranscriptDetailActionProjection.current(
             opened: opened,
-            resolved: resolved
+            allSessions: allSessions
         )
 
         XCTAssertEqual(current.id, opened.id)

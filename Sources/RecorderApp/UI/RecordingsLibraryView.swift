@@ -17,6 +17,7 @@ struct RecordingsLibraryView: View {
 
         SessionListView(
             sessions: visibleSessions,
+            allSessions: model.sessions,
             query: query,
             transcribingSessionID: model.transcribingSessionID,
             transcriptionStatus: model.transcriptionStatus,
@@ -91,6 +92,7 @@ struct RecordingsLibraryView: View {
 
 private struct SessionListView: View {
     let sessions: [RecordingSession]
+    let allSessions: [RecordingSession]
     let query: RecordingLibraryQuery
     let transcribingSessionID: RecordingSession.ID?
     let transcriptionStatus: String
@@ -257,7 +259,10 @@ private struct SessionListView: View {
         .sheet(item: $transcriptSession) { session in
             TranscriptEditorView(
                 session: session,
-                resolvedSession: sessions.first(where: { $0.id == session.id }),
+                resolvedSession: TranscriptDetailActionProjection.current(
+                    opened: session,
+                    allSessions: allSessions
+                ),
                 load: { transcriptText(session) },
                 save: { saveTranscript($0, session) },
                 openFolder: { open(session) },
@@ -336,6 +341,16 @@ enum TranscriptEditorDraft {
 }
 
 enum TranscriptDetailActionProjection {
+    static func current(
+        opened: RecordingSession,
+        allSessions: [RecordingSession]
+    ) -> RecordingSession {
+        current(
+            opened: opened,
+            resolved: allSessions.first(where: { $0.id == opened.id })
+        )
+    }
+
     static func current(
         opened: RecordingSession,
         resolved: RecordingSession?

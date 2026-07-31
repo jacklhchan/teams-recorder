@@ -349,7 +349,7 @@ final class MeetingIntelligencePipelineTests: XCTestCase {
                 baseURLText: "https://api.example",
                 asrModel: "asr",
                 llmModel: "llm",
-                language: "English",
+                language: MeetingLanguage.english.rawValue,
                 prompt: ""
             ),
             apiKey: nil

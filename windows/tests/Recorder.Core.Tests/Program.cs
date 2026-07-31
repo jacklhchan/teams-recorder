@@ -77,7 +77,7 @@ var tests = new (string Name, Action Run)[]
     ,("recording library lists legacy root M4A files as playback-only", RecordingLibraryServiceTests.LegacyRootM4aFilesRemainDiscoverableAndPlaybackOnly)
     ,("video capture is gated until a frame pipeline is verified", VideoCaptureTests.FeatureGateFailsClosedUntilFramePipelineExists)
     ,("video capture target selection requires the same live window", VideoCaptureTests.TargetSelectionRequiresTheSameLiveWindow)
-    ,("Teams protocol uses a local endpoint and pairing only", TeamsIntegrationTests.ProtocolUsesLocalEndpointAndPairingOnly)
+    ,("Teams protocol uses a local endpoint with pairing and state query only", TeamsIntegrationTests.ProtocolUsesLocalEndpointAndPairingAndStateQueryOnly)
     ,("Teams protocol rejects partial meeting state", TeamsIntegrationTests.ProtocolDecodesCompleteMeetingStateOnly)
     ,("Teams mute sync routes supported updates and fails closed", TeamsIntegrationTests.MuteCoordinatorUsesAbsoluteStateAndFailsClosed)
     ,("Teams mute sync ignores out-of-meeting mute state", TeamsIntegrationTests.MuteCoordinatorDoesNotChangeMicForOutOfMeetingState)

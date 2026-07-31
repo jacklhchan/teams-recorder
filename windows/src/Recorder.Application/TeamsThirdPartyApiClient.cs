@@ -205,6 +205,10 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
                 await current.ConnectAsync(TeamsThirdPartyApi.CreateEndpoint(identity, token), cancellationToken).ConfigureAwait(false);
                 if (!TrySetConnection(runGeneration, current)) { await current.DisposeAsync().ConfigureAwait(false); return; }
                 PublishConnection(runGeneration, null);
+                // Meeting updates are not guaranteed to be pushed simply because a client
+                // connects. Query the current state so automatic recording also works when
+                // the user enabled it after already joining a real Teams meeting.
+                await SendCommandAsync(TeamsThirdPartyApiAction.QueryState, cancellationToken).ConfigureAwait(false);
                 var credentialWasRefreshed = await ReceiveLoopAsync(
                     runGeneration,
                     current,

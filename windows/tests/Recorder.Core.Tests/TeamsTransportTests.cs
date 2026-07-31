@@ -26,7 +26,8 @@ internal static class TeamsTransportTests
         client.StartAsync().GetAwaiter().GetResult();
         Wait(pairingSocket.Connected.Task, "The pairing socket did not connect.");
         Wait(pairingSocket.ReceiveEntered.Task, "The pairing socket did not begin receiving.");
-        Equal(0, pairingSocket.Sent.Count);
+        Equal(1, pairingSocket.Sent.Count);
+        AssertAction(pairingSocket.Sent[0], "query-state");
         pairingSocket.Publish("""{"tokenRefresh":"stored-only-in-fake"}""");
         WaitUntil(() => store.Token == "stored-only-in-fake", "The refreshed token was not saved.");
         Wait(authenticatedSocket.Connected.Task, "The client did not reconnect after token refresh.");
@@ -38,13 +39,14 @@ internal static class TeamsTransportTests
             if (connectionErrors.Count != 0)
                 throw new InvalidOperationException("A token refresh must not be reported as a Teams API disconnect.");
         }
-        Equal(0, authenticatedSocket.Sent.Count);
+        Equal(1, authenticatedSocket.Sent.Count);
+        AssertAction(authenticatedSocket.Sent[0], "query-state");
         authenticatedSocket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
         WaitUntil(() => Volatile.Read(ref events) == 1, "The WebSocket event was not delivered.");
         Equal("stored-only-in-fake", store.Token!);
         client.RequestPairingAsync().GetAwaiter().GetResult();
-        WaitUntil(() => authenticatedSocket.Sent.Count == 1, "The pairing command was not sent.");
-        AssertAction(authenticatedSocket.Sent[0], "pair");
+        WaitUntil(() => authenticatedSocket.Sent.Count == 2, "The pairing command was not sent.");
+        AssertAction(authenticatedSocket.Sent[1], "pair");
         client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
@@ -81,7 +83,8 @@ internal static class TeamsTransportTests
         client.StartAsync().GetAwaiter().GetResult();
         Wait(socket.Connected.Task, "The push socket did not connect.");
         Wait(socket.ReceiveEntered.Task, "The push socket did not begin receiving.");
-        Equal(0, socket.Sent.Count);
+        Equal(1, socket.Sent.Count);
+        AssertAction(socket.Sent[0], "query-state");
 
         socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
         WaitUntil(() => { lock (states) return states.Count == 1; }, "The initial authenticated state was not delivered.");
@@ -94,7 +97,7 @@ internal static class TeamsTransportTests
 
         client.StopAsync().GetAwaiter().GetResult();
         Wait(socket.Closed.Task, "Stopping the client did not close the push socket.");
-        Equal(0, socket.Sent.Count);
+        Equal(1, socket.Sent.Count);
         client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
@@ -112,7 +115,8 @@ internal static class TeamsTransportTests
         coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
         Wait(socket.Connected.Task, "The close-test socket did not connect.");
         Wait(socket.ReceiveEntered.Task, "The close-test socket did not begin receiving.");
-        Equal(0, socket.Sent.Count);
+        Equal(1, socket.Sent.Count);
+        AssertAction(socket.Sent[0], "query-state");
         socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":true},"meetingPermissions":{"canToggleMute":true}}}""");
         WaitUntil(() => coordinator.Snapshot.Status == TeamsMuteSyncStatus.InMeeting, "The authenticated meeting state was not applied.");
         socket.PublishClose();

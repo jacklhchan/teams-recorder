@@ -2,14 +2,17 @@ using TeamsRecorder.Windows.Application;
 
 internal static class TeamsIntegrationTests
 {
-    public static void ProtocolUsesLocalEndpointAndPairingOnly()
+    public static void ProtocolUsesLocalEndpointAndPairingAndStateQueryOnly()
     {
         var endpoint = TeamsThirdPartyApi.CreateEndpoint(TeamsThirdPartyApiIdentity.Recorder("1.2 test"), "token+/=");
         if (endpoint.Scheme != "ws" || endpoint.Host != "127.0.0.1" || endpoint.Port != 8124) throw new InvalidOperationException("Teams endpoint must remain local.");
         if (!endpoint.Query.Contains("token=token%2B%2F%3D", StringComparison.Ordinal)) throw new InvalidOperationException("Pairing token was not safely encoded.");
         var command = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.Pair, 7);
         if (command != "{\"action\":\"pair\",\"parameters\":{},\"requestId\":7}") throw new InvalidOperationException($"Unexpected Teams command: {command}");
-        if (command.Contains("mute", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Mute synchronization must not issue a Teams mute command.");
+        var query = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.QueryState, 8);
+        if (query != "{\"action\":\"query-state\",\"parameters\":{},\"requestId\":8}") throw new InvalidOperationException($"Unexpected Teams state query: {query}");
+        if (command.Contains("mute", StringComparison.OrdinalIgnoreCase) || query.Contains("mute", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Teams integration must not issue a Teams mute command.");
     }
 
     public static void ProtocolDecodesCompleteMeetingStateOnly()

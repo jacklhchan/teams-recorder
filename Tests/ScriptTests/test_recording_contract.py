@@ -6,6 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = ROOT / "contracts" / "recording-session.schema.json"
 FIXTURE = ROOT / "contracts" / "fixtures" / "recording-info-v1.json"
+V2_FIXTURE = (
+    ROOT / "contracts" / "fixtures" / "recording-info-v2-meeting-intelligence.json"
+)
+INTELLIGENCE_SCHEMA = ROOT / "contracts" / "meeting-intelligence.schema.json"
+INTELLIGENCE_FIXTURE = ROOT / "contracts" / "fixtures" / "meeting-intelligence-v1.json"
 
 
 class RecordingContractTests(unittest.TestCase):
@@ -13,7 +18,7 @@ class RecordingContractTests(unittest.TestCase):
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
-        self.assertEqual(schema["properties"]["schemaVersion"]["const"], 1)
+        self.assertIn(1, schema["properties"]["schemaVersion"]["enum"])
         self.assertEqual(fixture["schemaVersion"], 1)
         self.assertTrue(schema["additionalProperties"])
 
@@ -21,7 +26,12 @@ class RecordingContractTests(unittest.TestCase):
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
-        for key in schema["required"]:
+        v1_schema = next(
+            variant
+            for variant in schema["oneOf"]
+            if variant["properties"]["schemaVersion"]["const"] == 1
+        )
+        for key in v1_schema["required"]:
             self.assertIn(key, fixture)
         self.assertIsInstance(fixture["tags"], list)
         self.assertIsInstance(fixture["isFavorite"], bool)
@@ -48,6 +58,51 @@ class RecordingContractTests(unittest.TestCase):
             fixture["windowsCapture"]["endpointId"],
             "default",
         )
+
+    def test_v2_fixture_declares_title_origin_and_valid_intelligence(self):
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        fixture = json.loads(V2_FIXTURE.read_text(encoding="utf-8"))
+        intelligence_schema = json.loads(
+            INTELLIGENCE_SCHEMA.read_text(encoding="utf-8")
+        )
+        intelligence = json.loads(
+            INTELLIGENCE_FIXTURE.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(fixture["schemaVersion"], 2)
+        self.assertIn(
+            fixture["titleOrigin"],
+            {"unset", "meetingIntelligence", "manual"},
+        )
+        self.assertTrue(schema["additionalProperties"])
+        self.assertEqual(intelligence["schemaVersion"], 1)
+        self.assertEqual(
+            intelligence_schema["properties"]["schemaVersion"]["const"],
+            1,
+        )
+        self.assertEqual(
+            intelligence["intent"],
+            "automatic",
+        )
+        self.assertTrue(
+            intelligence["sourceTranscriptSHA256"].startswith("sha256:")
+        )
+        for forbidden in ("apiKey", "baseURL", "transcript", "prompt", "response"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, intelligence)
+
+    def test_schema_accepts_version_one_and_two_contracts(self):
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        v2 = json.loads(V2_FIXTURE.read_text(encoding="utf-8"))
+
+        versions = {
+            variant["properties"]["schemaVersion"]["const"]
+            for variant in schema["oneOf"]
+        }
+        self.assertEqual(versions, {1, 2})
+        self.assertEqual(v1["schemaVersion"], 1)
+        self.assertEqual(v2["schemaVersion"], 2)
 
 
 if __name__ == "__main__":

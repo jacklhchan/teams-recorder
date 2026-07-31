@@ -190,17 +190,36 @@ a bounded snippet. You can filter favorites, play recordings, drag the playback
 slider to seek, stop playback, transcribe with the configured provider, or open
 their folder directly from the app.
 
-## OpenAI-Compatible Transcription
+## OpenAI-Compatible Transcription and Meeting Intelligence
 
-Configure an OpenAI-compatible provider in the app:
+Choose one saved provider preset in Settings. Each preset retains its own ASR
+Model, LLM Model, meeting language, prompt, and Keychain credential. Switching
+presets reloads its saved values and does not overwrite the other preset.
 
-1. Enter the API Base URL ending in `/v1`.
-2. Enter the ASR Model identifier accepted by that provider.
-3. Enter the LLM Model identifier to reserve for future meeting intelligence.
-4. Enter an optional API key, language, and transcription prompt.
-5. Save, then use Test to check connectivity. Model discovery is optional;
-   manually entered model identifiers remain available when `/v1/models` is
-   unsupported.
+- `HKT GenAI Platform` takes a numeric Group ID (1–32 ASCII digits) and derives
+  the fixed, read-only endpoint
+  `https://api.uat.bot-builder.pccw.com/v1/groups/{groupID}/openai`. Its
+  credential is sent only as `X-API-KEY: <key>`.
+- `OpenAI-compatible API` takes an API Base URL ending in `/v1` (validated HTTPS
+  or loopback). Its credential is sent only as `Authorization: Bearer <key>`.
+
+Do not enter a real Group ID or API key in source files, fixtures, diagnostics,
+or screenshots. The app stores each optional provider API key in macOS Keychain.
+
+Enter the ASR Model identifier and LLM Model identifier accepted by the selected
+provider, plus an optional API key, language, and transcription prompt. ASR
+Model transcribes audio. LLM Model generates meeting summaries and contextual
+titles; the models may be the same or different identifiers. Meeting Language
+offers Cantonese (`yue`), English (`en`), and Mandarin (`zh`). A saved language
+change applies to future ASR jobs only; an active job retains its immutable
+snapshot.
+
+Use Save, then Test to check connectivity and model discovery. Model discovery
+is optional: manually entered model identifiers remain available when `/v1/models` is
+   unsupported. An exact `/models` match for the selected LLM Model is required
+only for automatic meeting intelligence. Unknown, unavailable, or unsupported
+discovery sends zero automatic chat requests. Generate and Regenerate are
+explicit and may still be attempted when discovery is unavailable.
 
 The app sends post-call audio chunks to:
 
@@ -234,9 +253,30 @@ Successful native jobs keep only the four canonical artifacts above plus
 bounded previous transcript backups. Logs and provider responses are capped,
 and credentials are not written to transcript artifacts.
 
-The optional provider API key and Teams pairing token are stored in macOS Keychain.
 Existing local oMLX settings are read only for a one-time migration; oMLX is
 not required, launched, installed, or managed by the recorder.
+
+The optional provider API key and Teams pairing token are stored in macOS Keychain.
+
+## Meeting Intelligence Results
+
+After a canonical transcript is published, an advertised LLM can automatically
+generate a bounded summary and contextual title. A transcript edit marks an
+existing result stale; it never triggers a new automatic request. Use Generate
+or Regenerate from the transcript detail when you want a later or replacement
+attempt, and Cancel to stop an active availability or generation attempt.
+
+Successful output is stored as `meeting-intelligence.json`; bounded lifecycle
+presentation is stored separately as `meeting-intelligence-state.json`. These
+artifacts contain the summary, suggested title, transcript digest and byte
+count, model, timestamp, and intent. They never contain a credential, provider
+base URL, prompt, raw transcript, raw response, or local path.
+
+Generated titles are applied only when title ownership permits it. Existing
+manual titles are preserved, including a deliberate manual blank; a new result
+is shown as a suggestion until the user chooses Apply Suggested Title. A later
+manual title edit remains manual. The packaged app contains no Python, FFmpeg,
+FFprobe, or development-only synthetic provider runtime helper.
 
 ## Teams Auto Recording
 

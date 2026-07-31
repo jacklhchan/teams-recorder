@@ -55,8 +55,8 @@ class PackagingContractTests(unittest.TestCase):
             "LLM Model identifier",
             "optional API key, language, and transcription prompt",
             "POST <API Base URL>/audio/transcriptions",
-            "Model discovery is optional",
-            "when `/v1/models` is\n   unsupported",
+            "Model discovery\nis optional",
+            "`/v1/models` is\n   unsupported",
             "manually entered model identifiers remain available",
             "transcript.txt",
             "transcript.raw.txt",
@@ -74,6 +74,17 @@ class PackagingContractTests(unittest.TestCase):
             "`.transcription-runs` is a legacy\nworkspace only",
             "Successful native jobs keep only the four canonical artifacts",
             "provider API key and Teams pairing token are stored in macOS Keychain",
+            "HKT GenAI Platform",
+            "https://api.uat.bot-builder.pccw.com/v1/groups/{groupID}/openai",
+            "X-API-KEY",
+            "OpenAI-compatible API",
+            "Authorization: Bearer",
+            "exact `/models` match",
+            "zero automatic chat",
+            "Generate and Regenerate are\nexplicit",
+            "meeting-intelligence.json",
+            "meeting-intelligence-state.json",
+            "manual titles are preserved",
             "oMLX settings are read only for a one-time migration",
             "oMLX is\nnot required, launched, installed, or managed by the recorder",
             "build/Local Meeting Recorder Staging.app",
@@ -261,3 +272,16 @@ class PackagingContractTests(unittest.TestCase):
                             errors="ignore",
                         )
         self.assertNotIn("BlackHole", text)
+
+    def test_development_meeting_intelligence_harness_and_raw_fixtures_are_not_bundled(self):
+        build = (ROOT / "scripts/build-app.sh").read_text(encoding="utf-8")
+        forbidden = (
+            "Tests/ManualFixtures",
+            "meeting_intelligence_provider.py",
+            "contracts/fixtures",
+            "meeting-intelligence-v1.json",
+            "recording-info-v2-meeting-intelligence.json",
+        )
+        for value in forbidden:
+            with self.subTest(value=value):
+                self.assertNotIn(value, build)

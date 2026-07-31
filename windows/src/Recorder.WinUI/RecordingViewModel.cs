@@ -20,7 +20,7 @@ namespace TeamsRecorder.Windows.WinUI;
 /// local playback at the WinUI edge. The coordinator remains the single owner
 /// of native start/stop serialization.
 /// </summary>
-public sealed class RecordingViewModel : INotifyPropertyChanged
+public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverlayStateSource
 {
     private const int WaveformBarCount = 48;
     private readonly DispatcherQueue dispatcherQueue;
@@ -116,6 +116,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         RequestTeamsPairingCommand = new AsyncRelayCommand(RequestTeamsPairingAsync, () => CanManageTeamsMuteSync && IsTeamsMuteSyncEnabled);
         EnableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(EnableTeamsAutomaticRecordingAsync, () => CanEnableTeamsAutomaticRecording);
         DisableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(DisableTeamsAutomaticRecordingAsync, () => CanDisableTeamsAutomaticRecording);
+        CancelTeamsAutomaticRecordingStartCommand = new AsyncRelayCommand(CancelTeamsAutomaticRecordingStartAsync, () => CanCancelTeamsAutomaticRecordingStart);
+        StopRecordingFromOverlayCommand = new AsyncRelayCommand(StopRecordingFromOverlayAsync, () => CanStopRecordingFromOverlay);
         ToggleLocalMicrophoneMuteCommand = new AsyncRelayCommand(ToggleLocalMicrophoneMuteAsync, () => !isShuttingDown);
         teamsInputMute.Changed += OnInputMuteChanged;
         CaptureSources.Add(CaptureSourceChoice.SystemAudio);
@@ -125,6 +127,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>
+    /// Raised on the WinUI thread whenever the compact recording-window state changes.
+    /// A presenter can subscribe instead of deriving state from unrelated VM properties.
+    /// </summary>
+    public event EventHandler<RecordingOverlayState>? RecordingOverlayStateChanged;
 
     public ObservableCollection<EndpointChoice> RenderEndpoints { get; } = [];
 
@@ -180,6 +188,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     public AsyncRelayCommand DisableTeamsAutomaticRecordingCommand { get; }
 
+    /// <summary>Cancel the pending Teams-only automatic start without disabling the opt-in.</summary>
+    public AsyncRelayCommand CancelTeamsAutomaticRecordingStartCommand { get; }
+
+    /// <summary>Stop the active capture from the compact recording window.</summary>
+    public AsyncRelayCommand StopRecordingFromOverlayCommand { get; }
+
     public AsyncRelayCommand ToggleLocalMicrophoneMuteCommand { get; }
 
     public bool IsRecordingMicrophoneMuted => teamsInputMute.IsMuted;
@@ -230,6 +244,43 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         !isShuttingDown &&
         !isTeamsAutomaticRecordingOperationInProgress &&
         IsTeamsAutomaticRecordingEnabled;
+
+    /// <summary>
+    /// State intended for the compact recording window. It is visible for any active capture
+    /// (manual, test, or Teams automatic), plus the Teams-only start countdown.
+    /// </summary>
+    public RecordingOverlayState RecordingOverlayState => new(
+        IsVisible: snapshot.State == RecordingCoordinatorState.Recording || IsTeamsAutomaticRecordingCountdownVisible,
+        IsRecording: snapshot.State == RecordingCoordinatorState.Recording,
+        IsTeamsAutomaticStartCountdown: IsTeamsAutomaticRecordingCountdownVisible,
+        CountdownSeconds: TeamsAutomaticRecordingCountdownSeconds,
+        CanCancelAutomaticStart: CanCancelTeamsAutomaticRecordingStart,
+        CanStopRecording: CanStopRecordingFromOverlay);
+
+    public bool IsTeamsAutomaticRecordingCountdownVisible => teamsAutomaticSnapshot.State is TeamsAutoMeetingState.StartCountdown;
+
+    public int? TeamsAutomaticRecordingCountdownSeconds => teamsAutomaticSnapshot.State is
+        TeamsAutoMeetingState.StartCountdown(var seconds) ? seconds : null;
+
+    public bool CanCancelTeamsAutomaticRecordingStart =>
+        !isShuttingDown &&
+        !isTeamsAutomaticRecordingOperationInProgress &&
+        teamsAutomaticSnapshot.State is TeamsAutoMeetingState.StartCountdown;
+
+    public bool CanStopRecordingFromOverlay =>
+        snapshot.State == RecordingCoordinatorState.Recording &&
+        CanStop;
+
+    /// <summary>Source label consumed by the compact-window presenter for an active capture.</summary>
+    public RecordingOverlayRecordingKind? ActiveRecordingOverlayKind =>
+        snapshot.State != RecordingCoordinatorState.Recording ? null :
+        recordingLifecycle?.ActiveSessionKind switch
+        {
+            RecordingSessionKind.Meeting => RecordingOverlayRecordingKind.TeamsAutomatic,
+            RecordingSessionKind.Test => RecordingOverlayRecordingKind.Test,
+            RecordingSessionKind.Manual => RecordingOverlayRecordingKind.Manual,
+            _ => snapshot.IsTestRecording ? RecordingOverlayRecordingKind.Test : RecordingOverlayRecordingKind.Manual,
+        };
 
     public string TeamsMuteEnableButtonText => IsTeamsMuteSyncEnabled ? "停用 Teams 靜音同步" : "啟用 Teams 靜音同步";
 
@@ -850,6 +901,37 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         }
     }
 
+    private async Task CancelTeamsAutomaticRecordingStartAsync()
+    {
+        var automatic = teamsAutomaticRecorder;
+        if (automatic is null || !CanCancelTeamsAutomaticRecordingStart)
+        {
+            return;
+        }
+
+        isTeamsAutomaticRecordingOperationInProgress = true;
+        UpdateCommandStates();
+        try
+        {
+            await automatic.CancelStartCountdownAsync();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Shutdown may win a click already queued by the compact window.
+        }
+        catch (Exception exception)
+        {
+            ErrorText = $"無法取消本次 Teams 自動開始：{exception.Message}";
+        }
+        finally
+        {
+            isTeamsAutomaticRecordingOperationInProgress = false;
+            UpdateCommandStates();
+        }
+    }
+
+    private Task StopRecordingFromOverlayAsync() => StopAsync();
+
     private async Task DisposeTeamsMuteSyncAsync()
     {
         await DisposeTeamsAutomaticRecordingAsync();
@@ -884,6 +966,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         teamsAutomaticSnapshot = TeamsAutoMeetingSnapshot.Initial;
         OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
         OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+        NotifyRecordingOverlayStateChanged();
 
         if (automatic is null)
         {
@@ -989,6 +1072,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             ErrorText = "Teams 會議狀態不再可信；已停用自動錄音。現有錄音會保留並交由使用者控制。";
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            NotifyRecordingOverlayStateChanged();
             UpdateCommandStates();
         }
         catch (ObjectDisposedException)
@@ -1012,6 +1096,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             teamsAutomaticSnapshot = changed;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            NotifyRecordingOverlayStateChanged();
             UpdateCommandStates();
         }
 
@@ -1800,6 +1885,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         }
 
         snapshot = changed;
+        NotifyRecordingOverlayStateChanged();
         RefreshElapsed();
         if (changed.State == RecordingCoordinatorState.Recording)
         {
@@ -1991,6 +2077,17 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
     }
 
+    private void NotifyRecordingOverlayStateChanged()
+    {
+        OnPropertyChanged(nameof(RecordingOverlayState));
+        OnPropertyChanged(nameof(ActiveRecordingOverlayKind));
+        OnPropertyChanged(nameof(IsTeamsAutomaticRecordingCountdownVisible));
+        OnPropertyChanged(nameof(TeamsAutomaticRecordingCountdownSeconds));
+        OnPropertyChanged(nameof(CanCancelTeamsAutomaticRecordingStart));
+        OnPropertyChanged(nameof(CanStopRecordingFromOverlay));
+        RecordingOverlayStateChanged?.Invoke(this, RecordingOverlayState);
+    }
+
     private void UpdateCommandStates()
     {
         StartCommand.RaiseCanExecuteChanged();
@@ -2012,6 +2109,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         RequestTeamsPairingCommand.RaiseCanExecuteChanged();
         EnableTeamsAutomaticRecordingCommand.RaiseCanExecuteChanged();
         DisableTeamsAutomaticRecordingCommand.RaiseCanExecuteChanged();
+        CancelTeamsAutomaticRecordingStartCommand.RaiseCanExecuteChanged();
+        StopRecordingFromOverlayCommand.RaiseCanExecuteChanged();
         ToggleLocalMicrophoneMuteCommand.RaiseCanExecuteChanged();
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
         OnPropertyChanged(nameof(CanSeek));

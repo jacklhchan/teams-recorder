@@ -95,6 +95,9 @@ var tests = new (string Name, Action Run)[]
     ,("Teams automatic recorder permits snapshot reentry", TeamsAutomaticRecordingControllerTests.SnapshotHandlerCanSynchronouslyReenterWithoutDeadlock)
     ,("Teams automatic recorder safely disposes late work", TeamsAutomaticRecordingControllerTests.DisposeDoesNotWaitForAnUncooperativeStartAndStillStopsItLater)
     ,("Teams automatic recorder retries a blocked start only after meeting re-entry", TeamsAutomaticRecordingControllerTests.BlockedStartWaitsForMeetingEndBeforeRetrying)
+    ,("Teams automatic recorder publishes each countdown snapshot", TeamsAutomaticRecordingControllerTests.PublishesEachCountdownSnapshot)
+    ,("Teams automatic recorder suppresses a cancelled countdown until meeting end", TeamsAutomaticRecordingControllerTests.UserCancellationSuppressesUntilMeetingEndsThenAllowsReentry)
+    ,("Teams automatic recorder does not restart after a manual stop in the same meeting", TeamsAutomaticRecordingControllerTests.ManualStopDuringAutomaticRecordingDoesNotRestartUntilMeetingReentry)
 };
 
 var failed = 0;

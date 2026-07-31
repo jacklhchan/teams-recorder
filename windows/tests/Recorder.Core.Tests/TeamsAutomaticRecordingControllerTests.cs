@@ -136,6 +136,93 @@ internal static class TeamsAutomaticRecordingControllerTests
         controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    public static void PublishesEachCountdownSnapshot()
+    {
+        var delay = new ControllableDelay();
+        var snapshots = new List<TeamsAutoMeetingSnapshot>();
+        var controller = new TeamsAutomaticRecordingController(
+            _ => Task.FromResult(TeamsAutomaticStartResult.Succeeded()),
+            _ => Task.CompletedTask,
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 3),
+            delay);
+        controller.SnapshotChanged += (_, snapshot) => snapshots.Add(snapshot);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => snapshots.Any(snapshot => snapshot.State is TeamsAutoMeetingState.StartCountdown(2)), "Countdown did not publish two seconds remaining.");
+        delay.Tick();
+        WaitUntil(() => snapshots.Any(snapshot => snapshot.State is TeamsAutoMeetingState.StartCountdown(1)), "Countdown did not publish one second remaining.");
+
+        var countdowns = snapshots
+            .Where(snapshot => snapshot.State is TeamsAutoMeetingState.StartCountdown)
+            .Select(snapshot => ((TeamsAutoMeetingState.StartCountdown)snapshot.State).SecondsRemaining)
+            .ToArray();
+        if (!countdowns.SequenceEqual(new[] { 3, 2, 1 }))
+            throw new InvalidOperationException($"Countdown snapshots were [{string.Join(", ", countdowns)}], not [3, 2, 1].");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void UserCancellationSuppressesUntilMeetingEndsThenAllowsReentry()
+    {
+        var delay = new ControllableDelay();
+        var starts = 0;
+        var controller = new TeamsAutomaticRecordingController(
+            _ => { Interlocked.Increment(ref starts); return Task.FromResult(TeamsAutomaticStartResult.Succeeded()); },
+            _ => Task.CompletedTask,
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        controller.CancelStartCountdownAsync().GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.SuppressedUntilMeetingEnd)
+            throw new InvalidOperationException("User cancellation did not suppress automatic recording for the meeting.");
+        delay.Tick();
+        Thread.Sleep(50);
+        if (Volatile.Read(ref starts) != 0)
+            throw new InvalidOperationException("Automatic recording started after the user cancelled the countdown.");
+
+        controller.SetMeetingPresenceAsync(false).GetAwaiter().GetResult();
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.StartCountdown(1))
+            throw new InvalidOperationException("Re-entering a meeting did not restore the automatic-recording countdown.");
+        delay.Tick();
+        WaitUntil(() => Volatile.Read(ref starts) == 1, "Automatic recording did not restart after entering a new meeting.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void ManualStopDuringAutomaticRecordingDoesNotRestartUntilMeetingReentry()
+    {
+        var delay = new ControllableDelay();
+        var starts = 0;
+        var controller = new TeamsAutomaticRecordingController(
+            _ => { Interlocked.Increment(ref starts); return Task.FromResult(TeamsAutomaticStartResult.Succeeded()); },
+            _ => Task.CompletedTask,
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => controller.Snapshot.State is TeamsAutoMeetingState.AutomaticRecording, "Automatic recording did not start.");
+
+        controller.SuppressUntilMeetingEndsAsync().GetAwaiter().GetResult();
+        controller.NotifyManualRecordingStoppedAsync().GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.SuppressedUntilMeetingEnd || controller.Snapshot.RecordingOwner != RecordingOwner.None)
+            throw new InvalidOperationException("Manual stop did not release automatic ownership and suppress the remainder of the meeting.");
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        Thread.Sleep(50);
+        if (Volatile.Read(ref starts) != 1)
+            throw new InvalidOperationException("Manual stop allowed automatic recording to restart in the same meeting.");
+
+        controller.SetMeetingPresenceAsync(false).GetAwaiter().GetResult();
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => Volatile.Read(ref starts) == 2, "Automatic recording did not become eligible after meeting re-entry.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     private static void WaitUntil(Func<bool> condition, string message)
     {
         var deadline = DateTime.UtcNow.AddSeconds(2);

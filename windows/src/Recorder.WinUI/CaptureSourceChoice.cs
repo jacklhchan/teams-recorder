@@ -19,13 +19,28 @@ public sealed record CaptureSourceChoice(
 {
     public static CaptureSourceChoice SystemAudio { get; } = new(
         CaptureSourceKind.SystemAudio,
-        "系統音訊",
-        "錄製目前所選輸出裝置播放的系統音訊。");
+        "系統音訊（建議）",
+        "建議的 Teams 錄音來源：透過系統 loopback 錄製目前輸出裝置播放的音訊，可靠包含參與者音訊。");
+
+    /// <summary>
+    /// System render loopback is the reliable default for Teams meetings: it
+    /// includes the audio heard by the local participant.
+    /// </summary>
+    public static CaptureSourceChoice Default { get; } = SystemAudio;
 
     public static CaptureSourceChoice SelectedApplication { get; } = new(
         CaptureSourceKind.SelectedApplication,
-        "指定應用程式",
-        "只錄製所選應用程式及其子處理程序的音訊。");
+        "指定應用程式（Preview／實驗性）",
+        "Preview／實驗性：只錄製所選 Teams 程序及其子處理程序的音訊，可能無法包含所有參與者音訊；若程序不可用，錄音會失敗且不會回退至系統音訊。");
+
+    /// <summary>
+    /// A cleared picker value must preserve the user's current choice. In
+    /// particular, it must not turn an explicit process-loopback choice into
+    /// an unannounced system-loopback session.
+    /// </summary>
+    public static CaptureSourceChoice ResolveSelection(
+        CaptureSourceChoice? requested,
+        CaptureSourceChoice? current) => requested ?? current ?? Default;
 }
 
 /// <summary>

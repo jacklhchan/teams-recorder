@@ -120,7 +120,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         teamsInputMute.Changed += OnInputMuteChanged;
         CaptureSources.Add(CaptureSourceChoice.SystemAudio);
         CaptureSources.Add(CaptureSourceChoice.SelectedApplication);
-        selectedCaptureSource = CaptureSourceChoice.SystemAudio;
+        selectedCaptureSource = CaptureSourceChoice.Default;
         ResetWaveforms();
     }
 
@@ -308,7 +308,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         get => selectedCaptureSource;
         set
         {
-            if (SetProperty(ref selectedCaptureSource, value ?? CaptureSourceChoice.SystemAudio))
+            if (SetProperty(
+                ref selectedCaptureSource,
+                CaptureSourceChoice.ResolveSelection(value, selectedCaptureSource)))
             {
                 OnPropertyChanged(nameof(SelectedCaptureSourceDescription));
                 OnPropertyChanged(nameof(RenderEndpointSelectionVisibility));
@@ -344,10 +346,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     public string SelectedCaptureSourceDescription => SelectedCaptureSource?.Kind switch
     {
         CaptureSourceKind.SelectedApplication when SelectedProcess is null =>
-            "請選擇一個可用的應用程式或背景程序。",
+            "Preview／實驗性模式：請選擇一個可用的 Teams 應用程式或背景程序；程序不可用時會拒絕錄音，不會改錄系統音訊。",
         CaptureSourceKind.SelectedApplication =>
-            $"只會錄製 {SelectedProcess!.DisplayName}（PID {SelectedProcess.ProcessId}）。",
-        _ => "錄製系統音訊，並使用所選輸出裝置。",
+            $"Preview／實驗性模式：只會錄製 {SelectedProcess!.DisplayName}（PID {SelectedProcess.ProcessId}）；不保證包含所有參與者音訊，也不會回退至系統音訊。",
+        _ => "建議來源：錄製系統 loopback 與所選輸出裝置，可靠包含 Teams 參與者音訊。",
     };
 
     public string ProcessCatalogStatusText
@@ -622,7 +624,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             recordingLifecycle.SnapshotChanged += OnSnapshotChanged;
             InitializeGlobalMuteHotKey();
             SetRecorderAvailable(true);
-            await RefreshEndpointsCoreAsync();
+            await RefreshEndpointsCoreAsync(announce: false);
             RefreshStorageReadiness();
             await RecoverAndRefreshLibraryAsync();
             ApplySnapshot(recordingLifecycle.Snapshot);
@@ -1152,7 +1154,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         !isShuttingDown;
 
     public bool CanManageLibrary =>
-        SelectedLibraryItem is not null &&
+        SelectedLibraryItem is { IsManaged: true } &&
         !isShuttingDown;
 
     public bool CanConfirmRecycle =>
@@ -1324,7 +1326,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         });
     }
 
-    private Task RefreshEndpointsAsync() => RunOperationAsync(RefreshEndpointsCoreAsync);
+    private Task RefreshEndpointsAsync() => RunOperationAsync(
+        () => RefreshEndpointsCoreAsync(announce: true));
 
     private Task RefreshProcessCatalogAsync() => RunOperationAsync(RefreshProcessCatalogCoreAsync);
 
@@ -1532,7 +1535,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         return started.Snapshot;
     }
 
-    private async Task RefreshEndpointsCoreAsync()
+    private async Task RefreshEndpointsCoreAsync(bool announce = false)
     {
         var result = await GetRecordingLifecycle().RefreshEndpointsAsync();
         if (!result.IsSuccess)
@@ -1541,8 +1544,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             return;
         }
 
-        var renderId = SelectedRenderEndpoint?.EndpointId;
-        var microphoneId = SelectedMicrophoneEndpoint?.EndpointId;
+        var renderSelection = EndpointRefreshSelection.Retain(
+            SelectedRenderEndpoint?.EndpointId,
+            result.Endpoints.Where(endpoint => endpoint.Flow == CaptureEndpointFlow.Render));
+        var microphoneSelection = EndpointRefreshSelection.Retain(
+            SelectedMicrophoneEndpoint?.EndpointId,
+            result.Endpoints.Where(endpoint => endpoint.Flow == CaptureEndpointFlow.Capture));
         ReplaceEndpoints(
             RenderEndpoints,
             result.Endpoints.Where(endpoint => endpoint.Flow == CaptureEndpointFlow.Render),
@@ -1552,13 +1559,19 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             result.Endpoints.Where(endpoint => endpoint.Flow == CaptureEndpointFlow.Capture),
             EndpointChoice.NoMicrophone);
 
+        if (announce)
+        {
+            StatusText = $"已重新整理 {RenderEndpoints.Count - 1} 個輸出裝置和 {CaptureEndpoints.Count - 1} 個麥克風。";
+            ErrorText = null;
+        }
+
         SelectedRenderEndpoint = RetainOrMarkUnavailable(
             RenderEndpoints,
-            renderId,
+            renderSelection,
             "輸出裝置");
         SelectedMicrophoneEndpoint = RetainOrMarkUnavailable(
             CaptureEndpoints,
-            microphoneId,
+            microphoneSelection,
             "麥克風");
     }
 
@@ -1591,7 +1604,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             foreach (var session in sessions)
             {
                 var displayName = string.IsNullOrWhiteSpace(session.Metadata.Title)
-                    ? Path.GetFileName(session.FolderPath)
+                    ? session.IsManaged
+                        ? Path.GetFileName(session.FolderPath)
+                        : Path.GetFileNameWithoutExtension(session.AudioPath)
                     : session.Metadata.Title;
                 LibraryItems.Add(new LibraryRecording(
                     displayName,
@@ -1603,7 +1618,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
                     session.Metadata.IsFavorite,
                     session.Kind,
                     session.AudioBytes,
-                    session.HasRecoverableBackup));
+                    session.HasRecoverableBackup,
+                    session.IsManaged));
             }
 
             SelectedLibraryItem = LibraryItems.FirstOrDefault(item =>
@@ -1706,12 +1722,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     private static EndpointChoice RetainOrMarkUnavailable(
         ObservableCollection<EndpointChoice> choices,
-        string? endpointId,
+        EndpointRefreshSelection selection,
         string kind)
     {
+        var endpointId = selection.EndpointId;
         var match = choices.FirstOrDefault(choice =>
             string.Equals(choice.EndpointId, endpointId, StringComparison.Ordinal));
-        if (match is not null)
+        if (selection.IsAvailable && match is not null)
         {
             return match;
         }
@@ -2108,7 +2125,8 @@ public sealed record LibraryRecording(
     bool IsFavorite,
     RecordingSessionKind Kind,
     long AudioBytes,
-    bool HasRecoverableBackup)
+    bool HasRecoverableBackup,
+    bool IsManaged)
 {
     public string KindText => Kind switch
     {
@@ -2116,6 +2134,8 @@ public sealed record LibraryRecording(
         RecordingSessionKind.Test => "測試",
         _ => "手動",
     };
+
+    public string AvailabilityText => IsManaged ? "受管理工作階段" : "舊版 M4A · 僅可播放";
 
     public string TagsText => Tags.Count == 0 ? "未加標籤" : string.Join("、", Tags);
 }

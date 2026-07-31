@@ -8,7 +8,28 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
     mc:Ignorable="d">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <CommandBar
+            Grid.Row="0"
+            ClosedDisplayMode="Compact"
+            DefaultLabelPosition="Right">
+            <AppBarButton Click="OnGoToRecordingSetupClick" Icon="Home" Label="錄音設定" />
+            <AppBarButton Command="{Binding RefreshDevicesCommand}" Icon="Refresh" Label="重新整理裝置" />
+            <AppBarSeparator />
+            <AppBarButton Click="OnGoToLibraryClick" Icon="Library" Label="錄音庫" />
+            <AppBarButton Command="{Binding RefreshLibraryCommand}" Icon="Refresh" Label="重新掃描錄音庫" />
+            <AppBarSeparator />
+            <AppBarButton Command="{Binding PlayCommand}" Icon="Play" Label="播放" />
+            <AppBarButton Command="{Binding PauseCommand}" Icon="Pause" Label="暫停" />
+            <AppBarButton Command="{Binding StopPlaybackCommand}" Icon="Stop" Label="停止播放" />
+        </CommandBar>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
         <StackPanel MaxWidth="1060" Padding="28,20,28,28" Spacing="16">
             <StackPanel Spacing="4">
                 <TextBlock Text="Teams Recorder — 音訊錄製 MVP" Style="{StaticResource TitleTextBlockStyle}" />
@@ -17,10 +38,17 @@
 
             <InfoBar IsOpen="{Binding HasError}" IsClosable="True" Severity="Error" Title="需要處理的問題" Message="{Binding ErrorText}" />
 
-            <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+            <Border x:Name="RecordingSetupSection" Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                 <StackPanel Spacing="14">
                     <TextBlock Text="設定與就緒狀態" Style="{StaticResource SubtitleTextBlockStyle}" />
                     <TextBlock Text="{Binding ReadinessText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="音訊裝置" VerticalAlignment="Center" />
+                        <Button
+                            Command="{Binding RefreshDevicesCommand}"
+                            Content="重新整理麥克風及輸出"
+                            ToolTipService.ToolTip="重新列出 Windows 麥克風和輸出裝置。保留已選裝置；若中斷，絕不會悄悄改用預設裝置。" />
+                    </StackPanel>
                     <Grid ColumnSpacing="16" RowSpacing="12">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="5" Visibility="{Binding RenderEndpointSelectionVisibility}">
@@ -95,7 +123,6 @@
                         <Button Command="{Binding StartCommand}" Content="開始錄製" />
                         <Button Command="{Binding StopCommand}" Content="停止並儲存" />
                         <Button Command="{Binding StartTestCommand}" Content="10 秒測試" />
-                        <Button Command="{Binding RefreshDevicesCommand}" Content="重新整理裝置" />
                         <ProgressRing Width="24" Height="24" IsActive="{Binding IsBusy}" />
                     </StackPanel>
                 </StackPanel>
@@ -116,6 +143,7 @@
                         <StackPanel Spacing="8">
                             <TextBlock Text="Teams 自動錄音（選用）" Style="{StaticResource BodyStrongTextBlockStyle}" />
                             <TextBlock Text="預設關閉。只有在 Teams 配對成功且收到可信會議狀態後，才能由使用者明確啟用；此功能只控制本機 M4A 工作階段，絕不向 Teams 發出錄音或靜音命令。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="測試限制" Message="Teams 的「Make a test call」可能不會推送會議狀態，因此不會觸發自動錄音。請在已配對的真實 Teams 會議中驗證此 Preview。" />
                             <TextBlock Text="{Binding TeamsAutomaticRecordingStatusText}" TextWrapping="Wrap" />
                             <StackPanel Orientation="Horizontal" Spacing="10">
                                 <Button Command="{Binding EnableTeamsAutomaticRecordingCommand}" Content="啟用自動錄音" />
@@ -186,20 +214,21 @@
                         <TextBlock Text="儲存空間與結果" Style="{StaticResource SubtitleTextBlockStyle}" />
                         <TextBlock Text="{Binding StorageReadinessText}" TextWrapping="Wrap" />
                         <TextBlock Text="{Binding ResultText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                        <Button Command="{Binding RefreshLibraryCommand}" Content="重新掃描 M4A 工作階段" HorizontalAlignment="Left" />
+                        <TextBlock Text="請使用上方固定操作列重新掃描錄音庫。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
             </Grid>
 
-            <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+            <Border x:Name="LibrarySection" Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                 <StackPanel Spacing="12">
                     <StackPanel Orientation="Horizontal" Spacing="10"><TextBlock Text="本機 M4A 資料庫" Style="{StaticResource SubtitleTextBlockStyle}" /><TextBlock Text="{Binding LibrarySummaryText}" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>
                     <ListView MaxHeight="220" ItemsSource="{Binding LibraryItems}" SelectedItem="{Binding SelectedLibraryItem, Mode=TwoWay}" SelectionMode="Single">
                         <ListView.ItemTemplate>
                             <DataTemplate>
-                                <StackPanel Spacing="2">
+                                <StackPanel Spacing="3">
                                     <TextBlock Text="{Binding DisplayName}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
                                     <TextBlock Text="{Binding KindText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Text="{Binding AvailabilityText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                     <TextBlock Text="{Binding TagsText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
                             </DataTemplate>
@@ -220,14 +249,13 @@
                         <Button Command="{Binding CancelRecycleLibraryCommand}" Content="取消" />
                     </StackPanel>
                     <TextBlock Text="{Binding RecycleConfirmationText}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" TextWrapping="Wrap" />
-                    <StackPanel Orientation="Horizontal" Spacing="10">
-                        <Button Command="{Binding PlayCommand}" Content="播放" /><Button Command="{Binding PauseCommand}" Content="暫停" /><Button Command="{Binding StopPlaybackCommand}" Content="停止" />
-                        <TextBlock Text="{Binding PlaybackText}" VerticalAlignment="Center" />
-                    </StackPanel>
+                    <TextBlock Text="{Binding PlaybackText}" VerticalAlignment="Center" />
+                    <TextBlock Text="播放控制可隨時從上方固定操作列使用。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <Slider Maximum="1" Minimum="0" Value="{Binding PlaybackProgress}" IsEnabled="{Binding CanSeek}" />
                 </StackPanel>
             </Border>
             <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此 MVP 專注音訊工作階段與本機播放。Teams 整合仍屬 Preview：靜音狀態更新需要在實際 Teams 租戶／用戶端重複驗證；不包含視訊、虛擬麥克風或逐字稿。" TextWrapping="Wrap" />
         </StackPanel>
-    </ScrollViewer>
+        </ScrollViewer>
+    </Grid>
 </Page>

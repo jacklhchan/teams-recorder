@@ -58,6 +58,20 @@ internal static class RecordingLibraryServiceTests
         }
     }
 
+    public static void LegacyRootM4aFilesRemainDiscoverableAndPlaybackOnly()
+    {
+        using var root = new TestRoot();
+        var legacyAudio = Path.Combine(root.Path, "teams-test-call-20260729-1733.m4a");
+        WriteM4a(legacyAudio);
+
+        var library = new RecordingLibraryService(new SessionStorageService(root.Path));
+        var item = library.ListSessions().Single();
+        if (item.IsManaged || item.AudioPath != legacyAudio || item.Metadata.Title != "teams-test-call-20260729-1733")
+        {
+            throw new InvalidOperationException("A legacy root M4A was not exposed as a playback-only library item.");
+        }
+    }
+
     private static void WriteM4a(string path)
     {
         using var stream = File.Create(path);

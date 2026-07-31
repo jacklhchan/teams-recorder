@@ -26,7 +26,19 @@ public sealed class SystemClock : IClock { public DateTimeOffset UtcNow => DateT
 public sealed class FileSystemCollisionProvider : ISessionPathCollisionProvider { public bool DirectoryExists(string path) => Directory.Exists(path); }
 
 public sealed record RecordingSessionPlan(RecordingSessionKind Kind, string FolderPath, string FinalAudioPath, string BackupAudioPath, string MetadataPath, StorageCapacityStatus Capacity);
-public sealed record RecordingSessionLibraryItem(RecordingSessionKind Kind, string FolderPath, string AudioPath, long AudioBytes, RecordingInfo Metadata, bool HasRecoverableBackup);
+/// <summary>
+/// A discoverable recording. <see cref="IsManaged"/> is false for pre-session-layout
+/// M4A files found directly in the selected root; they are deliberately playback-only
+/// so a library refresh never grants metadata-edit or recycle authority over them.
+/// </summary>
+public sealed record RecordingSessionLibraryItem(
+    RecordingSessionKind Kind,
+    string FolderPath,
+    string AudioPath,
+    long AudioBytes,
+    RecordingInfo Metadata,
+    bool HasRecoverableBackup,
+    bool IsManaged = true);
 
 /// <summary>Owns only the app's session-library filesystem layout; capture code can use the returned paths directly.</summary>
 public sealed class SessionStorageService
@@ -276,10 +288,30 @@ public sealed class SessionStorageService
                 var backup = Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName);
                 result.Add(new(kind, folder, final, new FileInfo(final).Length, metadata, IsSafeFile(backup) && new FileInfo(backup).Length > 0));
             }
+
+            // Early Windows builds wrote M4A files directly beneath the chosen
+            // output folder, before each recording had a managed session folder.
+            // Keep those recordings visible and playable after upgrade, but do
+            // not treat them as managed folders: metadata edits and recycle are
+            // intentionally restricted to the current owned-session layout.
+            foreach (var audio in Directory.EnumerateFiles(rootPath, "*.m4a", System.IO.SearchOption.TopDirectoryOnly))
+            {
+                if (!IsSafeFile(audio)) continue;
+                result.Add(new(
+                    RecordingSessionKind.Manual,
+                    rootPath,
+                    audio,
+                    new FileInfo(audio).Length,
+                    RecordingInfo.AudioOnly(Path.GetFileNameWithoutExtension(audio)),
+                    HasRecoverableBackup: false,
+                    IsManaged: false));
+            }
         }
         catch (IOException) { return Array.Empty<RecordingSessionLibraryItem>(); }
         catch (UnauthorizedAccessException) { return Array.Empty<RecordingSessionLibraryItem>(); }
-        return result.OrderByDescending(x => x.FolderPath, StringComparer.Ordinal).ToArray();
+        return result.OrderByDescending(x => File.GetLastWriteTimeUtc(x.AudioPath))
+            .ThenByDescending(x => x.AudioPath, StringComparer.Ordinal)
+            .ToArray();
     }
 
     internal RecordingInfo ReadMetadata(string metadataPath)

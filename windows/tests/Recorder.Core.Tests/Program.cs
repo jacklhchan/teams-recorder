@@ -18,6 +18,7 @@ var tests = new (string Name, Action Run)[]
     ("failed automatic start waits for meeting end", FailedStartWaitsForMeetingEnd),
     ("native recording coordinator starts, refreshes, and stops", NativeCoordinatorStartsRefreshesAndStops),
     ("native recording coordinator exposes copied endpoint snapshots", NativeCoordinatorExposesEndpointSnapshots),
+    ("endpoint refresh keeps explicit device choices without fallback", EndpointRefreshRetainsExplicitDeviceChoices),
     ("native recording coordinator reports a failed start and allows retry", NativeCoordinatorReportsFailedStartAndAllowsRetry),
     ("failed native stop faults the coordinator and blocks retries", NativeCoordinatorFaultsAfterFailedStop),
     ("an in-recording native fault requests one cleanup stop", NativeCoordinatorRequestsCleanupAfterInRecordingFault),
@@ -29,7 +30,10 @@ var tests = new (string Name, Action Run)[]
     ,("process capture rejects PID reuse", RecordingStartRequestTests.RejectsPidReuseRatherThanCapturingTheWrongProcess)
     ,("process capture never falls back when selection is unavailable", RecordingStartRequestTests.DoesNotFallbackWhenSelectedProcessIsUnavailable)
     ,("source selection maps system and microphone modes without fallback", RecordingStartRequestTests.MapsSystemAndMicrophoneWithoutInventingEndpoints)
+    ,("source selection preserves explicit system render endpoint", RecordingStartRequestTests.MapsSystemRenderEndpointThroughTheLegacyNativeRequest)
     ,("process targets and metadata share one executable-basename policy", RecordingStartRequestTests.UsesOneExecutableBasenamePolicyForProcessTargetsAndMetadata)
+    ,("Teams capture defaults to recommended system loopback", CaptureSourceChoiceTests.DefaultsToRecommendedSystemLoopback)
+    ,("process-loopback is preview and never silently changes source", CaptureSourceChoiceTests.MarksProcessLoopbackAsPreviewAndNeverSilentlyFallsBack)
     ,("Teams picker excludes unrelated process windows", TeamsProcessCatalogPolicyTests.ExposesOnlyMicrosoftTeamsWithoutUsingWindowTitles)
     ,("Windows capture metadata round trips its approved envelope", MetadataPrivacyTests.WindowsCaptureMetadataRoundTripsTheApprovedEnvelope)
     ,("Windows capture metadata removes transient process identifiers", MetadataPrivacyTests.MetadataPrivacyDropsTransientProcessIdentifiers)
@@ -62,6 +66,7 @@ var tests = new (string Name, Action Run)[]
     ,("metadata publication failures retain retryable media", SessionStorageTests.MetadataFailuresRetainRetryableMedia)
     ,("recording library startup recovery and metadata edits round trip", RecordingLibraryServiceTests.StartupRecoveryRefreshesLibraryAndMetadataEditsRoundTrip)
     ,("recording library requires recycle confirmation and preserves failed-start evidence", RecordingLibraryServiceTests.RecycleRequiresConfirmationAndFailedStartCleanupPreservesEvidence)
+    ,("recording library lists legacy root M4A files as playback-only", RecordingLibraryServiceTests.LegacyRootM4aFilesRemainDiscoverableAndPlaybackOnly)
     ,("video capture is gated until a frame pipeline is verified", VideoCaptureTests.FeatureGateFailsClosedUntilFramePipelineExists)
     ,("video capture target selection requires the same live window", VideoCaptureTests.TargetSelectionRequiresTheSameLiveWindow)
     ,("Teams protocol uses a local endpoint and pairing only", TeamsIntegrationTests.ProtocolUsesLocalEndpointAndPairingOnly)
@@ -89,6 +94,7 @@ var tests = new (string Name, Action Run)[]
     ,("Teams automatic recorder cleans up a late start", TeamsAutomaticRecordingControllerTests.CancelsLateAutomaticStartAndStopsLateCapture)
     ,("Teams automatic recorder permits snapshot reentry", TeamsAutomaticRecordingControllerTests.SnapshotHandlerCanSynchronouslyReenterWithoutDeadlock)
     ,("Teams automatic recorder safely disposes late work", TeamsAutomaticRecordingControllerTests.DisposeDoesNotWaitForAnUncooperativeStartAndStillStopsItLater)
+    ,("Teams automatic recorder retries a blocked start only after meeting re-entry", TeamsAutomaticRecordingControllerTests.BlockedStartWaitsForMeetingEndBeforeRetrying)
 };
 
 var failed = 0;
@@ -302,6 +308,32 @@ static void NativeCoordinatorExposesEndpointSnapshots()
     }
     Equal(1, endpoints.Endpoints.Count);
     Equal(expectedEndpoint, endpoints.Endpoints[0]);
+}
+
+static void EndpointRefreshRetainsExplicitDeviceChoices()
+{
+    var available = new[]
+    {
+        new NativeCaptureEndpoint(
+            CaptureEndpointFlow.Render,
+            EndpointDefaultRole.Console,
+            "render-speakers",
+            "Speakers"),
+    };
+
+    var retained = EndpointRefreshSelection.Retain("render-speakers", available);
+    Equal("render-speakers", retained.EndpointId!);
+    Equal(true, retained.IsAvailable);
+
+    var disconnected = EndpointRefreshSelection.Retain("render-headset", available);
+    Equal("render-headset", disconnected.EndpointId!);
+    Equal(false, disconnected.IsAvailable);
+
+    var intentionalDefault = EndpointRefreshSelection.Retain(null, available);
+    if (intentionalDefault.EndpointId is not null || !intentionalDefault.IsAvailable)
+    {
+        throw new InvalidOperationException("Refreshing endpoints must not replace an intentional default choice.");
+    }
 }
 
 static void NativeCoordinatorReportsFailedStartAndAllowsRetry()

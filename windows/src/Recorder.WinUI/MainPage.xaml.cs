@@ -23,4 +23,10 @@ public sealed partial class MainPage : Page
         Loaded -= OnLoaded;
         await viewModel.InitializeAsync();
     }
+
+    private void OnGoToRecordingSetupClick(object sender, RoutedEventArgs args) =>
+        RecordingSetupSection.StartBringIntoView();
+
+    private void OnGoToLibraryClick(object sender, RoutedEventArgs args) =>
+        LibrarySection.StartBringIntoView();
 }

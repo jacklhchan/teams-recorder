@@ -119,6 +119,19 @@ internal static class RecordingStartRequestTests
         Equal("ms-teams.exe", metadata.ProcessName!);
     }
 
+    public static void MapsSystemRenderEndpointThroughTheLegacyNativeRequest()
+    {
+        var request = new RecordingStartRequest(
+            RecordingSessionKind.Manual,
+            RecordingAudioSource.SystemLoopback,
+            RenderEndpointId: "render-headset");
+
+        var native = new CaptureSourceSelectionPolicy().CreateNativeRequest(request, "C:\\recordings\\system.wav");
+        Equal(RecordingCaptureMode.SystemLoopback, native.Mode);
+        Equal("render-headset", native.EndpointId!);
+        Equal(0U, native.TargetProcessId);
+    }
+
     public static void UsesOneExecutableBasenamePolicyForProcessTargetsAndMetadata()
     {
         foreach (var name in new[] { "My Meeting App", "會議助手", "normal-app" })

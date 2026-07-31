@@ -15,6 +15,14 @@ internal static class TeamsTransportTests
             () => sockets.Dequeue(),
             TimeSpan.Zero);
         var events = 0; client.EventReceived += (_, _) => Interlocked.Increment(ref events);
+        var connectionErrors = new List<string?>();
+        client.ConnectionChanged += (_, error) =>
+        {
+            if (error is not null)
+            {
+                lock (connectionErrors) connectionErrors.Add(error);
+            }
+        };
         client.StartAsync().GetAwaiter().GetResult();
         Wait(pairingSocket.Connected.Task, "The pairing socket did not connect.");
         Wait(pairingSocket.ReceiveEntered.Task, "The pairing socket did not begin receiving.");
@@ -25,6 +33,11 @@ internal static class TeamsTransportTests
         Wait(authenticatedSocket.ReceiveEntered.Task, "The authenticated socket did not begin receiving.");
         if (authenticatedSocket.Endpoint?.Query.Contains("token=stored-only-in-fake", StringComparison.Ordinal) != true)
             throw new InvalidOperationException("The refreshed token was not used for the authenticated reconnect.");
+        lock (connectionErrors)
+        {
+            if (connectionErrors.Count != 0)
+                throw new InvalidOperationException("A token refresh must not be reported as a Teams API disconnect.");
+        }
         Equal(0, authenticatedSocket.Sent.Count);
         authenticatedSocket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
         WaitUntil(() => Volatile.Read(ref events) == 1, "The WebSocket event was not delivered.");

@@ -205,12 +205,16 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
                 await current.ConnectAsync(TeamsThirdPartyApi.CreateEndpoint(identity, token), cancellationToken).ConfigureAwait(false);
                 if (!TrySetConnection(runGeneration, current)) { await current.DisposeAsync().ConfigureAwait(false); return; }
                 PublishConnection(runGeneration, null);
-                await ReceiveLoopAsync(
+                var credentialWasRefreshed = await ReceiveLoopAsync(
                     runGeneration,
                     current,
                     !string.IsNullOrWhiteSpace(token),
                     cancellationToken).ConfigureAwait(false);
-                if (!cancellationToken.IsCancellationRequested && IsCurrent(runGeneration, current))
+                // tokenRefresh is a normal, authenticated credential rotation.  Reporting it
+                // as a connection failure makes the coordinator discard its trusted meeting
+                // state and disable automatic recording just before this loop reconnects with
+                // the replacement token.
+                if (!credentialWasRefreshed && !cancellationToken.IsCancellationRequested && IsCurrent(runGeneration, current))
                     PublishConnection(runGeneration, "Teams API connection unavailable");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
@@ -229,7 +233,7 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
         }
     }
 
-    private async Task ReceiveLoopAsync(
+    private async Task<bool> ReceiveLoopAsync(
         long runGeneration,
         ITeamsWebSocketConnection current,
         bool isPairingAuthenticated,
@@ -240,14 +244,14 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
         while (!cancellationToken.IsCancellationRequested && IsCurrent(runGeneration, current))
         {
             var result = await current.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
-            if (result.MessageType == WebSocketMessageType.Close) return;
+            if (result.MessageType == WebSocketMessageType.Close) return false;
             if (result.MessageType != WebSocketMessageType.Text) continue;
             if (IsInboundMessageTooLarge(payload.Length, result.Count))
             {
                 // Treat this connection as unusable rather than retaining or decoding a partial,
                 // oversized message. Returning lets the owning run loop dispose and reconnect it.
                 await current.CloseAsync(cancellationToken).ConfigureAwait(false);
-                return;
+                return false;
             }
             payload.Write(buffer, 0, result.Count);
             if (!result.EndOfMessage) continue;
@@ -260,14 +264,14 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
                 // A credential refresh is transport-private; do not pass its plaintext to UI subscribers.
                 // Reconnect so the next socket proves it was opened with the newly issued token.
                 // State received on this unauthenticated pairing socket must not drive recording.
-                return;
+                return true;
             }
             if (@event is TeamsThirdPartyApiEvent.Error(_, var message) && IsInvalidPairingToken(message))
             {
                 // A revoked/expired token otherwise causes every reconnect to fail before
                 // Teams can advertise that this instance is eligible to pair again.
                 await tokens.ClearAsync(cancellationToken).ConfigureAwait(false);
-                return;
+                return false;
             }
             if (IsCurrent(runGeneration, current))
             {
@@ -276,6 +280,7 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
                 EventReceived?.Invoke(this, @event);
             }
         }
+        return false;
     }
 
     private bool TrySetConnection(long expectedGeneration, ITeamsWebSocketConnection value) { lock (gate) { if (generation != expectedGeneration || lifetime is null) return false; connection = value; return true; } }

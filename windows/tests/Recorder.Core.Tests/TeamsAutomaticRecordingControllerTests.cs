@@ -104,6 +104,38 @@ internal static class TeamsAutomaticRecordingControllerTests
             throw new InvalidOperationException("Disposed controller used a cancelled token to stop late capture.");
     }
 
+    public static void BlockedStartWaitsForMeetingEndBeforeRetrying()
+    {
+        var delay = new ControllableDelay();
+        var starts = 0;
+        var controller = new TeamsAutomaticRecordingController(
+            _ =>
+            {
+                Interlocked.Increment(ref starts);
+                return Task.FromResult(TeamsAutomaticStartResult.BlockedBy("No writable recording location."));
+            },
+            _ => Task.CompletedTask,
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => Volatile.Read(ref starts) == 1, "Blocked automatic start did not run.");
+        WaitUntil(() => controller.Snapshot.State is TeamsAutoMeetingState.StartBlocked, "Blocked automatic start was not surfaced.");
+
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        Thread.Sleep(50);
+        if (Volatile.Read(ref starts) != 1)
+            throw new InvalidOperationException("A blocked start retried without a meeting boundary.");
+
+        controller.SetMeetingPresenceAsync(false).GetAwaiter().GetResult();
+        controller.SetMeetingPresenceAsync(true).GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => Volatile.Read(ref starts) == 2, "Automatic recording did not retry after the meeting re-entered.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     private static void WaitUntil(Func<bool> condition, string message)
     {
         var deadline = DateTime.UtcNow.AddSeconds(2);

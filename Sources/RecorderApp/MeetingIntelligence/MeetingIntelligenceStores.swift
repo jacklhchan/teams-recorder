@@ -1,0 +1,333 @@
+import Darwin
+import Foundation
+
+enum MeetingIntelligenceStoreError: LocalizedError, Equatable, Sendable {
+    case unsupportedSchemaVersion(Int)
+    case malformed
+    case tooLarge
+    case unsafeFile
+    case missing
+}
+
+struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sendable {
+    static let fileName = "meeting-intelligence.json"
+    static let maximumBytes = 256 * 1_024
+
+    func load(in folder: URL) throws -> MeetingIntelligenceArtifact? {
+        guard let data = try MeetingIntelligenceStoreFileIO.read(
+            named: Self.fileName,
+            in: folder,
+            maximumBytes: Self.maximumBytes
+        ) else {
+            return nil
+        }
+        let version = try schemaVersion(in: data)
+        guard version == MeetingIntelligenceArtifact.currentSchemaVersion else {
+            throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
+        }
+        do {
+            return try JSONDecoder.meetingIntelligence.decode(
+                MeetingIntelligenceArtifact.self,
+                from: data
+            )
+        } catch {
+            throw MeetingIntelligenceStoreError.malformed
+        }
+    }
+
+    func stage(_ artifact: MeetingIntelligenceArtifact, in folder: URL) throws -> URL {
+        guard artifact.schemaVersion == MeetingIntelligenceArtifact.currentSchemaVersion else {
+            throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(artifact.schemaVersion)
+        }
+        let data = try JSONEncoder.meetingIntelligence.encode(artifact)
+        guard data.count <= Self.maximumBytes else {
+            throw MeetingIntelligenceStoreError.tooLarge
+        }
+        let name = ".meeting-intelligence-stage-\(UUID().uuidString)"
+        try MeetingIntelligenceStoreFileIO.create(
+            named: name,
+            data: data,
+            in: folder
+        )
+        return folder.standardizedFileURL.appendingPathComponent(name)
+    }
+
+    func promoteStaged(_ stagedURL: URL, in folder: URL) throws {
+        let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+        let staged = stagedURL.standardizedFileURL
+        guard staged.deletingLastPathComponent() == normalizedFolder,
+              staged.lastPathComponent.hasPrefix(".meeting-intelligence-stage-") else {
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+        _ = try MeetingIntelligenceStoreFileIO.requiredData(
+            named: staged.lastPathComponent,
+            in: normalizedFolder,
+            maximumBytes: Self.maximumBytes
+        )
+        try MeetingIntelligenceStoreFileIO.validateDestination(
+            named: Self.fileName,
+            in: normalizedFolder
+        )
+        try MeetingIntelligenceStoreFileIO.rename(
+            named: staged.lastPathComponent,
+            to: Self.fileName,
+            in: normalizedFolder
+        )
+    }
+}
+
+struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable {
+    static let fileName = "meeting-intelligence-state.json"
+    static let maximumBytes = 32 * 1_024
+
+    func load(in folder: URL) throws -> MeetingIntelligenceState? {
+        guard let data = try MeetingIntelligenceStoreFileIO.read(
+            named: Self.fileName,
+            in: folder,
+            maximumBytes: Self.maximumBytes
+        ) else {
+            return nil
+        }
+        let version = try schemaVersion(in: data)
+        guard version == MeetingIntelligenceState.currentSchemaVersion else {
+            throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
+        }
+        let state: MeetingIntelligenceState
+        do {
+            state = try JSONDecoder.meetingIntelligence.decode(
+                MeetingIntelligenceState.self,
+                from: data
+            )
+        } catch {
+            throw MeetingIntelligenceStoreError.malformed
+        }
+        guard [.checkingAvailability, .generating].contains(state.phase) else {
+            return state
+        }
+        let interrupted = MeetingIntelligenceState(
+            schemaVersion: state.schemaVersion,
+            phase: .interrupted,
+            message: "Meeting intelligence interrupted. You can generate again.",
+            sourceTranscriptSHA256: state.sourceTranscriptSHA256,
+            startedAt: state.startedAt,
+            finishedAt: Date()
+        )
+        try save(interrupted, in: folder)
+        return interrupted
+    }
+
+    func save(_ state: MeetingIntelligenceState, in folder: URL) throws {
+        guard state.schemaVersion == MeetingIntelligenceState.currentSchemaVersion else {
+            throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(state.schemaVersion)
+        }
+        let sanitized = MeetingIntelligenceState(
+            schemaVersion: state.schemaVersion,
+            phase: state.phase,
+            message: sanitize(state.message),
+            sourceTranscriptSHA256: state.sourceTranscriptSHA256,
+            startedAt: state.startedAt,
+            finishedAt: state.finishedAt
+        )
+        let data = try JSONEncoder.meetingIntelligence.encode(sanitized)
+        guard data.count <= Self.maximumBytes else {
+            throw MeetingIntelligenceStoreError.tooLarge
+        }
+        try MeetingIntelligenceStoreFileIO.replaceAtomically(
+            named: Self.fileName,
+            data: data,
+            in: folder
+        )
+    }
+
+    func remove(in folder: URL) throws {
+        try MeetingIntelligenceStoreFileIO.removeIfPresent(named: Self.fileName, in: folder)
+    }
+
+    private func sanitize(_ message: String) -> String {
+        let filtered = message.unicodeScalars.filter {
+            $0.properties.generalCategory != .control || $0 == "\n" || $0 == "\t"
+        }
+        return String(String.UnicodeScalarView(filtered)).prefix(1_024).description
+    }
+}
+
+private func schemaVersion(in data: Data) throws -> Int {
+    struct Header: Decodable { let schemaVersion: Int }
+    do {
+        return try JSONDecoder().decode(Header.self, from: data).schemaVersion
+    } catch {
+        throw MeetingIntelligenceStoreError.malformed
+    }
+}
+
+private enum MeetingIntelligenceStoreFileIO {
+    private struct Identity: Equatable {
+        let device: Int64
+        let inode: Int64
+        let byteCount: Int64
+    }
+
+    static func normalizedFolder(_ folder: URL) throws -> URL {
+        let normalized = folder.standardizedFileURL
+        guard normalized == folder.resolvingSymlinksInPath().standardizedFileURL else {
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+        return normalized
+    }
+
+    static func read(named name: String, in folder: URL, maximumBytes: Int) throws -> Data? {
+        let normalizedFolder = try normalizedFolder(folder)
+        let directory = try openFolder(normalizedFolder)
+        defer { Darwin.close(directory) }
+        let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW)
+        if descriptor < 0 {
+            if errno == ENOENT { return nil }
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+        defer { Darwin.close(descriptor) }
+        return try readValidated(descriptor, maximumBytes: maximumBytes)
+    }
+
+    static func requiredData(named name: String, in folder: URL, maximumBytes: Int) throws -> Data {
+        guard let data = try read(named: name, in: folder, maximumBytes: maximumBytes) else {
+            throw MeetingIntelligenceStoreError.missing
+        }
+        return data
+    }
+
+    static func create(named name: String, data: Data, in folder: URL) throws {
+        let directory = try openFolder(try normalizedFolder(folder))
+        defer { Darwin.close(directory) }
+        let descriptor = openat(
+            directory,
+            name,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR
+        )
+        guard descriptor >= 0 else { throw MeetingIntelligenceStoreError.unsafeFile }
+        defer { Darwin.close(descriptor) }
+        try writeAll(data, to: descriptor)
+    }
+
+    static func replaceAtomically(named name: String, data: Data, in folder: URL) throws {
+        let normalizedFolder = try normalizedFolder(folder)
+        let stage = ".meeting-intelligence-state-stage-\(UUID().uuidString)"
+        try create(named: stage, data: data, in: normalizedFolder)
+        do {
+            try validateDestination(named: name, in: normalizedFolder)
+            try rename(named: stage, to: name, in: normalizedFolder)
+        } catch {
+            try? removeIfPresent(named: stage, in: normalizedFolder)
+            throw error
+        }
+    }
+
+    static func validateDestination(named name: String, in folder: URL) throws {
+        let directory = try openFolder(try normalizedFolder(folder))
+        defer { Darwin.close(directory) }
+        let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW)
+        if descriptor < 0 {
+            if errno == ENOENT { return }
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+        defer { Darwin.close(descriptor) }
+        _ = try identity(of: descriptor)
+    }
+
+    static func rename(named source: String, to destination: String, in folder: URL) throws {
+        let directory = try openFolder(folder)
+        defer { Darwin.close(directory) }
+        guard renameat(directory, source, directory, destination) == 0 else {
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+    }
+
+    static func removeIfPresent(named name: String, in folder: URL) throws {
+        let directory = try openFolder(try normalizedFolder(folder))
+        defer { Darwin.close(directory) }
+        let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW)
+        if descriptor < 0 {
+            if errno == ENOENT { return }
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+        defer { Darwin.close(descriptor) }
+        _ = try identity(of: descriptor)
+        guard unlinkat(directory, name, 0) == 0 else {
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+    }
+
+    private static func openFolder(_ folder: URL) throws -> Int32 {
+        let descriptor = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw MeetingIntelligenceStoreError.unsafeFile }
+        return descriptor
+    }
+
+    private static func readValidated(_ descriptor: Int32, maximumBytes: Int) throws -> Data {
+        let before = try identity(of: descriptor)
+        guard before.byteCount <= Int64(maximumBytes) else {
+            throw MeetingIntelligenceStoreError.tooLarge
+        }
+        var data = Data()
+        while data.count <= maximumBytes {
+            let remaining = maximumBytes + 1 - data.count
+            let size = min(64 * 1_024, remaining)
+            var bytes = [UInt8](repeating: 0, count: size)
+            let count = Darwin.read(descriptor, &bytes, size)
+            guard count >= 0 else { throw MeetingIntelligenceStoreError.unsafeFile }
+            if count == 0 { break }
+            data.append(contentsOf: bytes.prefix(Int(count)))
+        }
+        guard data.count <= maximumBytes else {
+            throw MeetingIntelligenceStoreError.tooLarge
+        }
+        guard try identity(of: descriptor) == before else {
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+        return data
+    }
+
+    private static func identity(of descriptor: Int32) throws -> Identity {
+        var attributes = stat()
+        guard fstat(descriptor, &attributes) == 0,
+              (attributes.st_mode & S_IFMT) == S_IFREG,
+              attributes.st_nlink == 1 else {
+            throw MeetingIntelligenceStoreError.unsafeFile
+        }
+        return Identity(
+            device: Int64(attributes.st_dev),
+            inode: Int64(attributes.st_ino),
+            byteCount: Int64(attributes.st_size)
+        )
+    }
+
+    private static func writeAll(_ data: Data, to descriptor: Int32) throws {
+        try data.withUnsafeBytes { buffer in
+            guard var address = buffer.baseAddress else { return }
+            var remaining = data.count
+            while remaining > 0 {
+                let count = Darwin.write(descriptor, address, remaining)
+                guard count > 0 else { throw MeetingIntelligenceStoreError.unsafeFile }
+                remaining -= Int(count)
+                address = address.advanced(by: Int(count))
+            }
+        }
+    }
+}
+
+private extension JSONEncoder {
+    static var meetingIntelligence: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+}
+
+private extension JSONDecoder {
+    static var meetingIntelligence: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+}

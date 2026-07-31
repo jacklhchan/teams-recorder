@@ -6,6 +6,18 @@ enum RecordingSource: String, Codable, Equatable, Hashable, Sendable {
     case imported
 }
 
+enum RecordingTitleOrigin: String, Codable, Equatable, Hashable, Sendable {
+    case unset
+    case meetingIntelligence
+    case manual
+}
+
+enum RecordingTitleEdit: Equatable, Sendable {
+    case unchanged
+    case manual(String?)
+    case applyMeetingIntelligence(String)
+}
+
 enum JSONValue: Codable, Equatable, Hashable, Sendable {
     case null
     case bool(Bool)
@@ -56,10 +68,11 @@ enum JSONValue: Codable, Equatable, Hashable, Sendable {
 }
 
 struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     var schemaVersion: Int
     var title: String?
+    var titleOrigin: RecordingTitleOrigin
     var tags: [String]
     var isFavorite: Bool
     var mediaKind: RecordingMediaKind
@@ -74,6 +87,7 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
     init(
         schemaVersion: Int = currentSchemaVersion,
         title: String? = nil,
+        titleOrigin: RecordingTitleOrigin? = nil,
         tags: [String] = [],
         isFavorite: Bool = false,
         mediaKind: RecordingMediaKind = .audio,
@@ -87,6 +101,7 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
     ) {
         self.schemaVersion = schemaVersion
         self.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        self.titleOrigin = titleOrigin ?? (self.title == nil ? .unset : .manual)
         self.tags = tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -110,6 +125,7 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case schemaVersion
         case title
+        case titleOrigin
         case tags
         case isFavorite
         case mediaKind
@@ -143,6 +159,10 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
                     forKey: .schemaVersion
                 )) ?? Self.currentSchemaVersion,
             title: (try? container.decodeIfPresent(String.self, forKey: .title)) ?? nil,
+            titleOrigin: try? container.decodeIfPresent(
+                RecordingTitleOrigin.self,
+                forKey: .titleOrigin
+            ),
             tags: (try? container.decodeIfPresent([String].self, forKey: .tags)) ?? [],
             isFavorite: (try? container.decodeIfPresent(Bool.self, forKey: .isFavorite)) ?? false,
             mediaKind: (try? container.decodeIfPresent(RecordingMediaKind.self, forKey: .mediaKind)) ?? .audio,
@@ -160,6 +180,7 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encodeIfPresent(title, forKey: .title)
+        try container.encode(titleOrigin, forKey: .titleOrigin)
         try container.encode(tags, forKey: .tags)
         try container.encode(isFavorite, forKey: .isFavorite)
         try container.encode(mediaKind, forKey: .mediaKind)
@@ -185,6 +206,21 @@ struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
     private static let knownKeyNames = Set(
         CodingKeys.allCases.map(\.rawValue)
     )
+
+    mutating func applyTitleEdit(_ edit: RecordingTitleEdit) {
+        switch edit {
+        case .unchanged:
+            break
+        case .manual(let value):
+            title = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            titleOrigin = .manual
+        case .applyMeetingIntelligence(let value):
+            title = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            titleOrigin = .meetingIntelligence
+        }
+    }
 }
 
 private struct DynamicCodingKey: CodingKey {
@@ -213,6 +249,8 @@ enum RecordingSessionMetadataStore {
     }
 
     static func save(_ metadata: RecordingSessionMetadata, in folder: URL) throws {
+        var metadata = metadata
+        metadata.schemaVersion = max(metadata.schemaVersion, 2)
         let data = try JSONEncoder.pretty.encode(metadata)
         try data.write(to: fileURL(in: folder), options: .atomic)
     }

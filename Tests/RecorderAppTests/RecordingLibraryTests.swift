@@ -3,6 +3,40 @@ import XCTest
 @testable import RecorderApp
 
 final class RecordingLibraryTests: XCTestCase {
+    func testLegacyTitleDecodesAsManualAndMissingTitleAsUnset() throws {
+        let withTitle = Data(#"{"title":"Customer migration"}"#.utf8)
+        let withoutTitle = Data(#"{}"#.utf8)
+
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                RecordingSessionMetadata.self,
+                from: withTitle
+            ).titleOrigin,
+            .manual
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                RecordingSessionMetadata.self,
+                from: withoutTitle
+            ).titleOrigin,
+            .unset
+        )
+    }
+
+    func testTagOnlyEditPreservesGeneratedOriginAndManualClearIsProtected() {
+        var metadata = RecordingSessionMetadata(
+            title: "Generated context",
+            titleOrigin: .meetingIntelligence
+        )
+
+        metadata.applyTitleEdit(.unchanged)
+        XCTAssertEqual(metadata.titleOrigin, .meetingIntelligence)
+
+        metadata.applyTitleEdit(.manual(nil))
+        XCTAssertNil(metadata.title)
+        XCTAssertEqual(metadata.titleOrigin, .manual)
+    }
+
     func testLegacyMetadataDefaultsToCurrentSchemaVersionAndManualSource() throws {
         let metadata = try JSONDecoder().decode(
             RecordingSessionMetadata.self,
@@ -45,7 +79,7 @@ final class RecordingLibraryTests: XCTestCase {
         ).write(to: RecordingSessionMetadataStore.fileURL(in: folder))
 
         var metadata = RecordingSessionMetadataStore.load(in: folder)
-        metadata.title = "Edited"
+        metadata.applyTitleEdit(.manual("Edited"))
         try RecordingSessionMetadataStore.save(metadata, in: folder)
 
         let object = try XCTUnwrap(
@@ -57,8 +91,9 @@ final class RecordingLibraryTests: XCTestCase {
                 )
             ) as? [String: Any]
         )
-        XCTAssertEqual(object["schemaVersion"] as? Int, 1)
+        XCTAssertEqual(object["schemaVersion"] as? Int, 2)
         XCTAssertEqual(object["title"] as? String, "Edited")
+        XCTAssertEqual(object["titleOrigin"] as? String, "manual")
         XCTAssertEqual(
             (object["windowsCapture"] as? [String: Any])?["device"]
                 as? String,

@@ -1,4 +1,5 @@
 using Recorder.Core;
+using TeamsRecorder.Windows.Application.Diagnostics;
 using TeamsRecorder.Windows.Application.Storage;
 
 namespace TeamsRecorder.Windows.Application;
@@ -18,6 +19,7 @@ public sealed class RecordingLifecycleService : IDisposable
     private RecordingSessionPlan? activeSession;
     private Task<RecordingSessionPublicationResult>? publication;
     private readonly CaptureSourceSelectionPolicy captureSourcePolicy;
+    private readonly IRecordingDiagnostics diagnostics;
     private CancellationTokenSource? pendingStartCancellation;
     private long generation;
     private RecordingSessionKind? activeSessionKind;
@@ -28,13 +30,15 @@ public sealed class RecordingLifecycleService : IDisposable
         INativeRecorderBridge nativeBridge,
         string storageRoot,
         IProcessCatalog? processCatalog = null,
-        IRecordingDelay? recordingDelay = null)
+        IRecordingDelay? recordingDelay = null,
+        IRecordingDiagnostics? diagnostics = null)
     {
         this.nativeBridge = nativeBridge ?? throw new ArgumentNullException(nameof(nativeBridge));
         coordinator = new RecordingCoordinator(nativeBridge, recordingDelay);
         coordinator.SnapshotChanged += OnSnapshotChanged;
         storage = new SessionStorageService(storageRoot);
         captureSourcePolicy = new CaptureSourceSelectionPolicy(processCatalog);
+        this.diagnostics = diagnostics ?? LocalDiagnosticLog.CreateDefault();
     }
 
     public event EventHandler<RecordingCoordinatorSnapshot>? SnapshotChanged;
@@ -60,6 +64,13 @@ public sealed class RecordingLifecycleService : IDisposable
     public bool HasPublicationInProgress { get { lock (stateGate) return publication is { IsCompleted: false }; } }
     public StorageCapacityStatus GetCapacityStatus() { lock (stateGate) return storage.GetCapacityStatus(); }
 
+    /// <summary>Exports the in-process, privacy-filtered diagnostic trail to a user-selected folder.</summary>
+    public Task<DiagnosticExportResult> ExportDiagnosticsAsync(string destinationDirectory, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return diagnostics.ExportAsync(destinationDirectory, cancellationToken);
+    }
+
     public void SetStorageRoot(string storageRoot)
     {
         ThrowIfDisposed();
@@ -76,6 +87,23 @@ public sealed class RecordingLifecycleService : IDisposable
     {
         ThrowIfDisposed();
         return coordinator.RefreshEndpointsAsync();
+    }
+
+    /// <summary>
+    /// Reads the transient Windows audio-session hint for Teams playback. This
+    /// is strictly a non-blocking preflight: an unavailable capability or an
+    /// empty session snapshot must never change the requested capture source.
+    /// </summary>
+    public NativeTeamsRenderEndpointProbeResult ProbeTeamsRenderEndpoints()
+    {
+        ThrowIfDisposed();
+        return nativeBridge is INativeTeamsRenderEndpointProbe probe
+            ? probe.ProbeTeamsRenderEndpoints()
+            : new NativeTeamsRenderEndpointProbeResult(
+                NativeOperationResult.Failure(
+                    NativeRecorderResult.NotImplemented,
+                    "The native recorder bridge does not support the Teams playback endpoint preflight."),
+                Array.Empty<NativeCaptureEndpoint>());
     }
 
     public Task<RecordingCoordinatorSnapshot> RefreshAsync()
@@ -96,6 +124,7 @@ public sealed class RecordingLifecycleService : IDisposable
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
         request.Validate();
+        diagnostics.RecordStart(request);
         await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         CancellationTokenSource? operationCancellation = null;
         RecordingSessionPlan? plan = null;
@@ -155,8 +184,9 @@ public sealed class RecordingLifecycleService : IDisposable
             if (started.State != RecordingCoordinatorState.Recording) ClearFailedStart(plan);
             return new RecordingLifecycleStartResult(started, plan);
         }
-        catch
+        catch (Exception error)
         {
+            diagnostics.RecordFailure("start", error);
             if (plan is not null) ClearFailedStart(plan);
             throw;
         }
@@ -326,7 +356,11 @@ public sealed class RecordingLifecycleService : IDisposable
         }
     }
 
-    private void OnSnapshotChanged(object? sender, RecordingCoordinatorSnapshot snapshot) => SnapshotChanged?.Invoke(this, snapshot);
+    private void OnSnapshotChanged(object? sender, RecordingCoordinatorSnapshot snapshot)
+    {
+        diagnostics.RecordSnapshot(snapshot);
+        SnapshotChanged?.Invoke(this, snapshot);
+    }
     private void ThrowIfDisposed() { if (disposed) throw new ObjectDisposedException(nameof(RecordingLifecycleService)); }
     public void Dispose()
     {

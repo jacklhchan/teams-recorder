@@ -85,6 +85,8 @@ int main() {
         !Expect(recorder_native_get_state(nullptr) == RECORDER_NATIVE_STATE_FAULTED) ||
         !Expect(recorder_native_enumerate_endpoints(nullptr, &endpoint_list) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(endpoint_list == nullptr) ||
+        !Expect(recorder_native_probe_teams_render_endpoints(nullptr, &endpoint_list) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(endpoint_list == nullptr) ||
         !Expect(recorder_native_endpoint_list_get_count(nullptr, &endpoint_count) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_endpoint_list_get(nullptr, 0U, nullptr, nullptr, nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(std::strstr(recorder_native_get_last_error(nullptr), "null") != nullptr)) {

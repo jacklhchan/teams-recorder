@@ -1,16 +1,24 @@
 #include "recorder_native_bridge.h"
 
 #if defined(_WIN32)
+#include <audiopolicy.h>
 #include "capture_session.h"
 #include "mixed_capture_session.h"
 #include "wasapi_capture.h"
 
+#include <propkey.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <mfapi.h>
+#include <mmdeviceapi.h>
+#include <propvarutil.h>
 #include <windows.h>
 #endif
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cwctype>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -75,6 +83,89 @@ struct RecorderNativeEndpointEntry {
     std::string endpoint_id;
     std::string friendly_name;
 };
+
+template <typename T>
+class ComPtr final {
+public:
+    ~ComPtr() { Reset(); }
+    T* Get() const { return value_; }
+    T** Put() { Reset(); return &value_; }
+    T* operator->() const { return value_; }
+    void Reset() { if (value_ != nullptr) { value_->Release(); value_ = nullptr; } }
+private:
+    T* value_ = nullptr;
+};
+
+class ScopedCoInitialize final {
+public:
+    ScopedCoInitialize() : result_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
+    ~ScopedCoInitialize() { if (SUCCEEDED(result_)) { CoUninitialize(); } }
+    HRESULT result() const { return result_; }
+private:
+    HRESULT result_;
+};
+
+HRESULT GetFriendlyEndpointName(IMMDevice* device, std::wstring* name) {
+    if (device == nullptr || name == nullptr) { return E_POINTER; }
+    ComPtr<IPropertyStore> properties;
+    HRESULT result = device->OpenPropertyStore(STGM_READ, properties.Put());
+    if (FAILED(result)) { return result; }
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    result = properties->GetValue(PKEY_Device_FriendlyName, &value);
+    if (SUCCEEDED(result)) {
+        *name = value.vt == VT_LPWSTR && value.pwszVal != nullptr
+            ? value.pwszVal : L"(unnamed endpoint)";
+    }
+    PropVariantClear(&value);
+    return result;
+}
+
+bool IsTeamsProcessId(DWORD process_id) {
+    if (process_id == 0) { return false; }
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (process == nullptr) { return false; }
+    wchar_t image_path[32'768]{};
+    DWORD length = static_cast<DWORD>(std::size(image_path));
+    const BOOL queried = QueryFullProcessImageNameW(process, 0, image_path, &length);
+    CloseHandle(process);
+    if (queried == FALSE || length == 0) { return false; }
+
+    std::wstring executable(image_path, length);
+    const std::size_t separator = executable.find_last_of(L"\\/");
+    executable = separator == std::wstring::npos ? executable : executable.substr(separator + 1U);
+    std::transform(executable.begin(), executable.end(), executable.begin(),
+                   [](wchar_t value) { return static_cast<wchar_t>(std::towlower(value)); });
+    return executable == L"teams.exe" || executable == L"ms-teams.exe";
+}
+
+bool EndpointHasActiveTeamsSession(IMMDevice* device) {
+    ComPtr<IAudioSessionManager2> manager;
+    if (FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void**>(manager.Put())))) {
+        return false;
+    }
+    ComPtr<IAudioSessionEnumerator> sessions;
+    if (FAILED(manager->GetSessionEnumerator(sessions.Put()))) { return false; }
+    int count = 0;
+    if (FAILED(sessions->GetCount(&count))) { return false; }
+    for (int index = 0; index < count; ++index) {
+        ComPtr<IAudioSessionControl> control;
+        if (FAILED(sessions->GetSession(index, control.Put()))) { continue; }
+        AudioSessionState state = AudioSessionStateInactive;
+        if (FAILED(control->GetState(&state)) || state != AudioSessionStateActive) { continue; }
+        ComPtr<IAudioSessionControl2> control2;
+        if (FAILED(control->QueryInterface(__uuidof(IAudioSessionControl2),
+                                           reinterpret_cast<void**>(control2.Put())))) {
+            continue;
+        }
+        DWORD process_id = 0;
+        if (SUCCEEDED(control2->GetProcessId(&process_id)) && IsTeamsProcessId(process_id)) {
+            return true;
+        }
+    }
+    return false;
+}
 #endif
 
 struct RecorderNativeEndpointList {
@@ -806,6 +897,111 @@ extern "C" RecorderNativeResult recorder_native_enumerate_endpoints(
             bridge,
             RECORDER_NATIVE_INTERNAL_ERROR,
             "Enumerating audio endpoints failed unexpectedly.");
+    }
+#endif
+}
+
+extern "C" RecorderNativeResult recorder_native_probe_teams_render_endpoints(
+    RecorderNativeBridge* bridge,
+    RecorderNativeEndpointList** out_list) {
+    if (out_list == nullptr) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+    *out_list = nullptr;
+    if (bridge == nullptr) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+
+#if !defined(_WIN32)
+    return Reject(
+        bridge,
+        RECORDER_NATIVE_NOT_IMPLEMENTED,
+        "Teams render-session probing is implemented only on Windows.");
+#else
+    ScopedCoInitialize com;
+    if (FAILED(com.result()) && com.result() != RPC_E_CHANGED_MODE) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_CAPTURE_ERROR,
+            "Initializing COM for the Teams render-session probe failed.");
+    }
+
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    HRESULT result = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(enumerator.Put()));
+    if (FAILED(result)) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_CAPTURE_ERROR,
+            "Creating the Windows audio endpoint enumerator for the Teams render-session probe failed.");
+    }
+
+    ComPtr<IMMDeviceCollection> devices;
+    result = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, devices.Put());
+    if (FAILED(result)) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_CAPTURE_ERROR,
+            "Enumerating active render endpoints for the Teams render-session probe failed.");
+    }
+
+    UINT count = 0;
+    result = devices->GetCount(&count);
+    if (FAILED(result)) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_CAPTURE_ERROR,
+            "Reading the active render endpoint count for the Teams render-session probe failed.");
+    }
+
+    try {
+        auto list = std::make_unique<RecorderNativeEndpointList>();
+        list->entries.reserve(count);
+        for (UINT index = 0; index < count; ++index) {
+            ComPtr<IMMDevice> device;
+            if (FAILED(devices->Item(index, device.Put())) ||
+                !EndpointHasActiveTeamsSession(device.Get())) {
+                continue;
+            }
+
+            LPWSTR endpoint_id = nullptr;
+            std::wstring friendly_name;
+            const HRESULT id_result = device->GetId(&endpoint_id);
+            const HRESULT name_result = SUCCEEDED(id_result)
+                ? GetFriendlyEndpointName(device.Get(), &friendly_name)
+                : id_result;
+            if (FAILED(name_result)) {
+                if (endpoint_id != nullptr) { CoTaskMemFree(endpoint_id); }
+                continue;
+            }
+
+            const std::wstring endpoint_id_text(endpoint_id);
+            RecorderNativeEndpointEntry entry;
+            entry.flow = RECORDER_NATIVE_ENDPOINT_FLOW_RENDER;
+            if (!WideToUtf8(endpoint_id_text, &entry.endpoint_id) ||
+                !WideToUtf8(friendly_name, &entry.friendly_name)) {
+                CoTaskMemFree(endpoint_id);
+                return Reject(
+                    bridge,
+                    RECORDER_NATIVE_INTERNAL_ERROR,
+                    "Converting a Teams render-session endpoint to UTF-8 failed.");
+            }
+            CoTaskMemFree(endpoint_id);
+            list->entries.push_back(std::move(entry));
+        }
+        *out_list = list.release();
+        return RECORDER_NATIVE_OK;
+    } catch (const std::bad_alloc&) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_INTERNAL_ERROR,
+            "Allocating the Teams render-session endpoint snapshot failed.");
+    } catch (...) {
+        return Reject(
+            bridge,
+            RECORDER_NATIVE_INTERNAL_ERROR,
+            "The Teams render-session probe failed unexpectedly.");
     }
 #endif
 }

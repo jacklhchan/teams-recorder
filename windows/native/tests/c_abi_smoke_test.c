@@ -93,6 +93,9 @@ int main(void) {
         !expect(recorder_native_enumerate_endpoints(NULL, &endpoint_list) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "endpoint enumerate(NULL) must reject the handle") ||
         !expect(endpoint_list == NULL, "failed endpoint enumerate must clear the output list") ||
+        !expect(recorder_native_probe_teams_render_endpoints(NULL, &endpoint_list) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "Teams render probe(NULL) must reject the handle") ||
+        !expect(endpoint_list == NULL, "failed Teams render probe must clear the output list") ||
         !expect(recorder_native_endpoint_list_get_count(NULL, &endpoint_count) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "endpoint count(NULL) must reject the list") ||
         !expect(recorder_native_endpoint_list_get(NULL, 0U, NULL, NULL, NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,

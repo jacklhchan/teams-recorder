@@ -12,7 +12,7 @@ public sealed class NativeRecorderInteropException : Exception
     }
 }
 
-public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge
+public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge, INativeTeamsRenderEndpointProbe
 {
     private const string RequiredAbiVersion = "0.7.0";
     private readonly object gate = new();
@@ -425,6 +425,90 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         public uint Reserved;
     }
 
+    public NativeTeamsRenderEndpointProbeResult ProbeTeamsRenderEndpoints()
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            NativeRecorderResult result;
+            IntPtr rawList;
+            try
+            {
+                result = NativeMethods.ProbeTeamsRenderEndpoints(handle, out rawList);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return new NativeTeamsRenderEndpointProbeResult(
+                    NativeOperationResult.Failure(
+                        NativeRecorderResult.NotImplemented,
+                        "The installed native recorder bridge does not support the Teams playback endpoint preflight."),
+                    Array.Empty<NativeCaptureEndpoint>());
+            }
+            if (result != NativeRecorderResult.Ok)
+            {
+                return new NativeTeamsRenderEndpointProbeResult(
+                    ToOperationResult(result),
+                    Array.Empty<NativeCaptureEndpoint>());
+            }
+
+            if (rawList == IntPtr.Zero)
+            {
+                return new NativeTeamsRenderEndpointProbeResult(
+                    NativeOperationResult.Failure(
+                        NativeRecorderResult.InternalError,
+                        "The native audio bridge returned an empty Teams render-session snapshot."),
+                    Array.Empty<NativeCaptureEndpoint>());
+            }
+
+            using var list = NativeEndpointListHandle.FromOwned(rawList);
+            var countResult = NativeMethods.GetEndpointCount(list, out var count);
+            if (countResult != NativeRecorderResult.Ok || count > 4_096)
+            {
+                return new NativeTeamsRenderEndpointProbeResult(
+                    NativeOperationResult.Failure(
+                        countResult == NativeRecorderResult.Ok ? NativeRecorderResult.InternalError : countResult,
+                        "The native audio bridge returned an invalid Teams render-session snapshot."),
+                    Array.Empty<NativeCaptureEndpoint>());
+            }
+
+            var endpoints = new List<NativeCaptureEndpoint>(checked((int)count));
+            var addedReference = false;
+            list.DangerousAddRef(ref addedReference);
+            try
+            {
+                for (uint index = 0; index < count; index++)
+                {
+                    var itemResult = NativeMethods.GetEndpoint(
+                        list, index, out var flow, out var defaultRoles, out var endpointId, out var friendlyName);
+                    var copiedEndpointId = Marshal.PtrToStringUTF8(endpointId);
+                    var copiedFriendlyName = Marshal.PtrToStringUTF8(friendlyName);
+                    if (itemResult != NativeRecorderResult.Ok ||
+                        flow != CaptureEndpointFlow.Render ||
+                        string.IsNullOrEmpty(copiedEndpointId) || copiedFriendlyName is null)
+                    {
+                        return new NativeTeamsRenderEndpointProbeResult(
+                            NativeOperationResult.Failure(
+                                itemResult == NativeRecorderResult.Ok ? NativeRecorderResult.InternalError : itemResult,
+                                "The native audio bridge returned an invalid Teams render-session endpoint."),
+                            Array.Empty<NativeCaptureEndpoint>());
+                    }
+                    endpoints.Add(new NativeCaptureEndpoint(flow, (EndpointDefaultRole)defaultRoles,
+                        copiedEndpointId, copiedFriendlyName));
+                }
+            }
+            finally
+            {
+                if (addedReference)
+                {
+                    list.DangerousRelease();
+                }
+            }
+
+            return new NativeTeamsRenderEndpointProbeResult(
+                NativeOperationResult.Success(), endpoints.AsReadOnly());
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential, Pack = 8)]
     private struct NativeSelectedAudioStartOptions
     {
@@ -594,6 +678,12 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         [LibraryImport(LibraryName, EntryPoint = "recorder_native_enumerate_endpoints")]
         [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
         internal static partial NativeRecorderResult EnumerateEndpoints(
+            NativeBridgeHandle bridge,
+            out IntPtr endpointList);
+
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_probe_teams_render_endpoints")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial NativeRecorderResult ProbeTeamsRenderEndpoints(
             NativeBridgeHandle bridge,
             out IntPtr endpointList);
 

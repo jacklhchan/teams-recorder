@@ -349,6 +349,19 @@ public sealed record NativeEndpointEnumerationResult(
     public bool IsSuccess => Operation.IsSuccess;
 }
 
+/// <summary>
+/// In-memory preflight hint describing render endpoints on which Windows sees
+/// an active Teams audio session. An empty successful result is deliberately
+/// non-blocking: Teams may be silent, use a broker process, or have no active
+/// render session at the instant of the probe.
+/// </summary>
+public sealed record NativeTeamsRenderEndpointProbeResult(
+    NativeOperationResult Operation,
+    IReadOnlyList<NativeCaptureEndpoint> ActiveEndpoints)
+{
+    public bool IsSuccess => Operation.IsSuccess;
+}
+
 public interface INativeRecorderBridge : IDisposable
 {
     NativeOperationResult Start(NativeRecordingRequest request);
@@ -382,4 +395,10 @@ public interface INativeRecorderMicrophoneMuteControl
 public interface INativeSelectedAudioRecorderBridge
 {
     NativeOperationResult StartSelectedAudio(NativeSelectedAudioRequest request);
+}
+
+/// <summary>Optional native capability used only for a non-blocking Teams endpoint preflight.</summary>
+public interface INativeTeamsRenderEndpointProbe
+{
+    NativeTeamsRenderEndpointProbeResult ProbeTeamsRenderEndpoints();
 }

@@ -245,6 +245,18 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_enumerate_endpoints(
     RecorderNativeBridge* bridge,
     RecorderNativeEndpointList** out_list);
 
+/*
+ * Returns the active render endpoints that currently contain an audio session
+ * owned by Teams.exe (classic Teams) or ms-teams.exe (new Teams). The returned
+ * list uses the normal endpoint-list accessors and is an in-memory preflight
+ * hint only: an empty list is successful and means unknown/no active Teams
+ * render session. This probe never starts capture and never changes the
+ * selected endpoint or falls back to a different capture source.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_probe_teams_render_endpoints(
+    RecorderNativeBridge* bridge,
+    RecorderNativeEndpointList** out_list);
+
 /* Releases an endpoint snapshot. NULL is accepted. */
 RECORDER_NATIVE_API void recorder_native_endpoint_list_destroy(
     RecorderNativeEndpointList* list);

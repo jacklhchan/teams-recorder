@@ -36,7 +36,29 @@
                 <TextBlock Text="錄製系統或指定應用程式音訊，並可混入麥克風；工作階段以 M4A 為目標格式。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
             </StackPanel>
 
-            <InfoBar IsOpen="{Binding HasError}" IsClosable="True" Severity="Error" Title="需要處理的問題" Message="{Binding ErrorText}" />
+            <InfoBar IsOpen="{Binding HasError}" IsClosable="True" Severity="Error" Title="需要處理的問題" Message="{Binding ErrorText}">
+                <InfoBar.ActionButton>
+                    <Button
+                        Command="{Binding SaveDiagnosticsCommand}"
+                        Content="儲存診斷報告"
+                        ToolTipService.ToolTip="將已遮罩的錯誤與裝置診斷資料儲存為檔案，方便提供給支援人員。" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button
+                    Command="{Binding SaveDiagnosticsCommand}"
+                    Content="儲存診斷報告"
+                    ToolTipService.ToolTip="儲存目前診斷資料至本機安全資料夾。" />
+                <Button
+                    Command="{Binding OpenDiagnosticsFolderCommand}"
+                    Content="開啟診斷資料夾" />
+                <TextBlock
+                    Text="{Binding DiagnosticsExportStatusText}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    TextWrapping="Wrap"
+                    VerticalAlignment="Center" />
+            </StackPanel>
 
             <Border x:Name="RecordingSetupSection" Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                 <StackPanel Spacing="14">
@@ -55,6 +77,12 @@
                             <TextBlock Text="系統輸出裝置" />
                             <ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding RenderEndpoints}" SelectedItem="{Binding SelectedRenderEndpoint, Mode=TwoWay}" />
                             <TextBlock Text="{Binding SelectedRenderDescription}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <InfoBar
+                                IsOpen="{Binding HasTeamsPlaybackEndpointWarning}"
+                                IsClosable="False"
+                                Severity="Warning"
+                                Title="確認 Teams 播放裝置"
+                                Message="{Binding TeamsPlaybackEndpointWarning}" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Spacing="5">
                             <TextBlock Text="麥克風（可選）" />

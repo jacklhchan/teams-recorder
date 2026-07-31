@@ -14,8 +14,11 @@
 #include <cmath>
 #include <chrono>
 #include <condition_variable>
+#include <cwctype>
 #include <deque>
+#include <iomanip>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -93,6 +96,47 @@ RawAudioBlock ToRaw(recorder::audio::AudioBlock&& block) {
     return {std::move(block.bytes), std::move(block.mix_format_bytes), block.frame_count,
             block.device_position_frames, block.qpc_position, block.silent,
             block.discontinuity, block.event_driven};
+}
+
+std::string HresultText(HRESULT value) {
+    std::ostringstream text;
+    text << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0')
+         << static_cast<std::uint32_t>(value);
+    return text.str();
+}
+
+std::string SupportLogText(std::wstring value) {
+    // Friendly endpoint names are OS-provided, not application-controlled,
+    // but normalise them before placing them in a single-line support log.
+    // The shared-WASAPI initialization context may contain a persistent
+    // endpoint ID after this marker, so do not surface that part.
+    const auto endpoint_detail = value.find(L" (endpoint=");
+    if (endpoint_detail != std::wstring::npos) {
+        value.erase(endpoint_detail);
+    }
+    for (wchar_t& character : value) {
+        if (character < L' ' || character == 0x7f) {
+            character = L' ';
+        }
+    }
+    while (!value.empty() && std::iswspace(value.front())) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && std::iswspace(value.back())) {
+        value.pop_back();
+    }
+    constexpr std::size_t kMaxSupportTextCharacters = 160;
+    if (value.size() > kMaxSupportTextCharacters) {
+        value.resize(kMaxSupportTextCharacters);
+        value += L"...";
+    }
+    return WideToUtf8(value);
+}
+
+std::string CaptureSourceType(const selected_audio::MixedSourceRole role) {
+    return role == selected_audio::MixedSourceRole::Primary
+        ? "systemLoopback"
+        : "microphone";
 }
 
 RawAudioBlock ToRaw(teams_recorder::process_loopback::ProcessLoopbackAudioBlock&& block) {
@@ -325,9 +369,32 @@ private:
     }
 
     std::string SourceErrorText(const Source& source) const {
-        if (source.capture) return WideToUtf8(source.capture->last_error().message);
-        if (source.process_capture) return WideToUtf8(source.process_capture->last_error().message);
-        return "A mixed audio source could not start.";
+        if (source.capture) {
+            const auto error = source.capture->last_error();
+            std::ostringstream diagnostic;
+            diagnostic << "source=" << CaptureSourceType(source.role)
+                       << "; stage=" << SupportLogText(error.stage)
+                       << "; hresult=" << HresultText(error.hresult)
+                       << "; deviceInvalidated="
+                       << (error.device_invalidated ? "true" : "false");
+            if (!error.endpoint_name.empty()) {
+                diagnostic << "; endpointName=" << SupportLogText(error.endpoint_name);
+            }
+            // Endpoint IDs are persistent device identifiers. Keep them in
+            // the in-memory capture object for native debugging, but never
+            // copy them into an error string that the application may retain
+            // or export as a support log.
+            return diagnostic.str();
+        }
+        if (source.process_capture) {
+            const auto error = source.process_capture->last_error();
+            std::ostringstream diagnostic;
+            diagnostic << "source=selectedProcess"
+                       << "; stage=" << SupportLogText(error.message)
+                       << "; hresult=" << HresultText(error.hresult);
+            return diagnostic.str();
+        }
+        return "source=unknown; stage=creating mixed audio source; hresult=0x80004005";
     }
 
     void StopSource(Source& source) {
@@ -583,9 +650,8 @@ private:
         }
         FailLocked(
             RECORDER_NATIVE_CAPTURE_ERROR,
-            SourceErrorText(source).empty()
-                ? "The primary mixed audio source stopped unexpectedly."
-                : SourceErrorText(source));
+            std::string("The primary mixed audio source stopped unexpectedly. ") +
+                SourceErrorText(source));
     }
 
     void MixerThread() {

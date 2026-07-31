@@ -34,6 +34,14 @@ var tests = new (string Name, Action Run)[]
     ,("process targets and metadata share one executable-basename policy", RecordingStartRequestTests.UsesOneExecutableBasenamePolicyForProcessTargetsAndMetadata)
     ,("Teams capture defaults to recommended system loopback", CaptureSourceChoiceTests.DefaultsToRecommendedSystemLoopback)
     ,("process-loopback is preview and never silently changes source", CaptureSourceChoiceTests.MarksProcessLoopbackAsPreviewAndNeverSilentlyFallsBack)
+    ,("Teams playback mismatch does not warn without an observation", TeamsPlaybackEndpointMismatchPolicyTests.DoesNotWarnWithoutAnIndependentTeamsObservation)
+    ,("Teams playback mismatch warns for Windows default", TeamsPlaybackEndpointMismatchPolicyTests.WarnsWhenTeamsDiffersFromTheWindowsDefault)
+    ,("Teams playback mismatch warns for an explicit endpoint", TeamsPlaybackEndpointMismatchPolicyTests.WarnsWhenTeamsDiffersFromAnExplicitSelection)
+    ,("Teams playback mismatch ignores matching and process audio", TeamsPlaybackEndpointMismatchPolicyTests.DoesNotWarnForMatchingOrProcessAudioRequests)
+    ,("Teams playback mismatch accepts any active Teams endpoint match", TeamsPlaybackEndpointMismatchPolicyTests.DoesNotWarnWhenAnyObservedTeamsEndpointMatches)
+    ,("initial microphone selection prefers Windows communications default", MicrophoneDefaultSelectionPolicyTests.PrefersTheCommunicationsDefaultForInitialMicrophone)
+    ,("initial microphone selection uses an available capture endpoint", MicrophoneDefaultSelectionPolicyTests.UsesAnyAvailableCaptureWhenWindowsHasNoDefaultRole)
+    ,("initial microphone selection excludes render endpoints", MicrophoneDefaultSelectionPolicyTests.NeverSelectsRenderEndpointsAsMicrophones)
     ,("Teams picker excludes unrelated process windows", TeamsProcessCatalogPolicyTests.ExposesOnlyMicrosoftTeamsWithoutUsingWindowTitles)
     ,("Windows capture metadata round trips its approved envelope", MetadataPrivacyTests.WindowsCaptureMetadataRoundTripsTheApprovedEnvelope)
     ,("Windows capture metadata removes transient process identifiers", MetadataPrivacyTests.MetadataPrivacyDropsTransientProcessIdentifiers)
@@ -98,6 +106,8 @@ var tests = new (string Name, Action Run)[]
     ,("Teams automatic recorder publishes each countdown snapshot", TeamsAutomaticRecordingControllerTests.PublishesEachCountdownSnapshot)
     ,("Teams automatic recorder suppresses a cancelled countdown until meeting end", TeamsAutomaticRecordingControllerTests.UserCancellationSuppressesUntilMeetingEndsThenAllowsReentry)
     ,("Teams automatic recorder does not restart after a manual stop in the same meeting", TeamsAutomaticRecordingControllerTests.ManualStopDuringAutomaticRecordingDoesNotRestartUntilMeetingReentry)
+    ,("local diagnostic export is sanitized and includes capture choices", LocalDiagnosticLogTests.ExportsBoundedSanitizedCaptureDiagnostics)
+    ,("local diagnostic export remains bounded", LocalDiagnosticLogTests.BoundsItsInMemoryExport)
 };
 
 var failed = 0;

@@ -77,6 +77,15 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private GlobalMuteHotKeyService? globalMuteHotKey;
     private string processCatalogStatusText = "選擇「指定應用程式」後，按一下重新整理以列出可選程序。";
     private string globalMuteHotKeyStatus = "正在準備 Ctrl+Alt+M 全域麥克風靜音快捷鍵。";
+    private readonly string diagnosticsDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Teams Recorder",
+        "Diagnostics");
+    private string diagnosticsExportStatusText = "診斷報告會儲存在本機的 Teams Recorder\\Diagnostics 資料夾。";
+    // Endpoint IDs stay in memory only. They are used solely to compare the
+    // active Windows Teams audio session with the current loopback choice.
+    private TeamsPlaybackEndpointObservation teamsPlaybackEndpointObservation = TeamsPlaybackEndpointObservation.Unknown;
+    private string? windowsConsoleDefaultRenderEndpointId;
 
     public RecordingViewModel()
     {
@@ -100,6 +109,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         StartCommand = new AsyncRelayCommand(StartAsync, () => CanStart);
         StopCommand = new AsyncRelayCommand(StopAsync, () => CanStop);
         StartTestCommand = new AsyncRelayCommand(StartTestAsync, () => CanStart);
+        SaveDiagnosticsCommand = new AsyncRelayCommand(SaveDiagnosticsAsync, () => CanSaveDiagnostics);
+        OpenDiagnosticsFolderCommand = new AsyncRelayCommand(OpenDiagnosticsFolderAsync, () => CanOpenDiagnosticsFolder);
         RefreshDevicesCommand = new AsyncRelayCommand(RefreshEndpointsAsync, () => CanRefreshDevices);
         RefreshProcessCatalogCommand = new AsyncRelayCommand(RefreshProcessCatalogAsync, () => CanRefreshProcessCatalog);
         RefreshLibraryCommand = new AsyncRelayCommand(RefreshLibraryAsync, () => CanRefreshLibrary);
@@ -155,6 +166,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public AsyncRelayCommand StopCommand { get; }
 
     public AsyncRelayCommand StartTestCommand { get; }
+
+    /// <summary>Exports redacted local diagnostics without copying audio or recording media.</summary>
+    public AsyncRelayCommand SaveDiagnosticsCommand { get; }
+
+    /// <summary>Opens the local folder only after a diagnostic report exists there.</summary>
+    public AsyncRelayCommand OpenDiagnosticsFolderCommand { get; }
 
     public AsyncRelayCommand RefreshDevicesCommand { get; }
 
@@ -334,6 +351,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             if (SetProperty(ref selectedRenderEndpoint, value))
             {
                 OnPropertyChanged(nameof(SelectedRenderDescription));
+                OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+                OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
                 UpdateCommandStates();
             }
         }
@@ -366,6 +385,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 OnPropertyChanged(nameof(SelectedCaptureSourceDescription));
                 OnPropertyChanged(nameof(RenderEndpointSelectionVisibility));
                 OnPropertyChanged(nameof(SelectedApplicationPanelVisibility));
+                OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+                OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
                 UpdateCommandStates();
             }
         }
@@ -525,6 +546,16 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public bool HasError => !string.IsNullOrWhiteSpace(ErrorText);
 
+    public string DiagnosticsExportStatusText
+    {
+        get => diagnosticsExportStatusText;
+        private set => SetProperty(ref diagnosticsExportStatusText, value);
+    }
+
+    public bool CanSaveDiagnostics => !isShuttingDown && recordingLifecycle is not null;
+
+    public bool CanOpenDiagnosticsFolder => !isShuttingDown && Directory.Exists(diagnosticsDirectory);
+
     public bool IsBusy
     {
         get => isBusy;
@@ -551,6 +582,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         { EndpointId: null } => "使用 Windows 預設輸出裝置。",
         _ => $"指定輸出：{SelectedRenderEndpoint.DisplayName}",
     };
+
+    /// <summary>
+    /// A prompt to manually align the system-loopback endpoint with Teams.
+    /// Teams' public API does not expose its speaker selection, so this is
+    /// advisory only and never changes Teams or blocks a recording.
+    /// </summary>
+    public string? TeamsPlaybackEndpointWarning =>
+        TeamsPlaybackEndpointAdvice.GetWarning(
+            SelectedCaptureSource?.Kind,
+            SelectedRenderEndpoint,
+            windowsConsoleDefaultRenderEndpointId,
+            teamsPlaybackEndpointObservation);
+
+    public bool HasTeamsPlaybackEndpointWarning => !string.IsNullOrWhiteSpace(TeamsPlaybackEndpointWarning);
 
     public string SelectedMicrophoneDescription => SelectedMicrophoneEndpoint switch
     {
@@ -1521,6 +1566,29 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         return Task.CompletedTask;
     });
 
+    private Task SaveDiagnosticsAsync() => RunOperationAsync(async () =>
+    {
+        var result = await GetRecordingLifecycle().ExportDiagnosticsAsync(diagnosticsDirectory);
+        DiagnosticsExportStatusText = $"已儲存診斷報告：{result.FileName}（{result.EntryCount:N0} 筆）。可按「開啟診斷資料夾」取得檔案。";
+        StatusText = "診斷報告已儲存。";
+        UpdateCommandStates();
+    });
+
+    private Task OpenDiagnosticsFolderAsync() => RunOperationAsync(() =>
+    {
+        if (!Directory.Exists(diagnosticsDirectory))
+        {
+            throw new DirectoryNotFoundException("尚未儲存診斷報告；請先按「儲存診斷報告」。");
+        }
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = diagnosticsDirectory,
+            UseShellExecute = true,
+        });
+        return Task.CompletedTask;
+    });
+
     private Task RequestRecycleLibraryAsync() => RunOperationAsync(() =>
     {
         if (SelectedLibraryItem is null)
@@ -1572,6 +1640,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             throw new InvalidOperationException("請重新選取可用的輸出裝置與麥克風後再開始錄製。");
         }
 
+        await RefreshTeamsPlaybackEndpointObservationAsync();
         RefreshStorageReadiness();
         var lifecycle = GetRecordingLifecycle();
         RecordingLifecycleStartResult started;
@@ -1650,6 +1719,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             ErrorText = null;
         }
 
+        var initialMicrophoneEndpointId = SelectedMicrophoneEndpoint is null
+            ? MicrophoneDefaultSelectionPolicy.SelectInitialCaptureEndpointId(result.Endpoints)
+            : null;
         SelectedRenderEndpoint = RetainOrMarkUnavailable(
             RenderEndpoints,
             renderSelection,
@@ -1658,6 +1730,48 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             CaptureEndpoints,
             microphoneSelection,
             "麥克風");
+        if (initialMicrophoneEndpointId is not null)
+        {
+            SelectedMicrophoneEndpoint = CaptureEndpoints.FirstOrDefault(choice =>
+                string.Equals(choice.EndpointId, initialMicrophoneEndpointId, StringComparison.Ordinal));
+        }
+        windowsConsoleDefaultRenderEndpointId = result.Endpoints
+            .FirstOrDefault(endpoint => endpoint.Flow == CaptureEndpointFlow.Render &&
+                                        endpoint.DefaultRoles.HasFlag(EndpointDefaultRole.Console))
+            ?.EndpointId;
+        await RefreshTeamsPlaybackEndpointObservationAsync();
+        OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+        OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
+    }
+
+    private async Task RefreshTeamsPlaybackEndpointObservationAsync()
+    {
+        if (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication || recordingLifecycle is null)
+        {
+            teamsPlaybackEndpointObservation = TeamsPlaybackEndpointObservation.Unknown;
+            OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+            OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
+            return;
+        }
+
+        try
+        {
+            var result = await Task.Run(recordingLifecycle.ProbeTeamsRenderEndpoints);
+            teamsPlaybackEndpointObservation = result.IsSuccess
+                ? TeamsPlaybackEndpointObservation.Known(
+                    result.ActiveEndpoints.Select(endpoint => endpoint.EndpointId))
+                : TeamsPlaybackEndpointObservation.Unknown;
+        }
+        // The probe is advisory only. It must not prevent manual/test/Teams
+        // starts if a driver, an old bridge, or an audio-session broker cannot
+        // provide a useful answer.
+        catch (Exception)
+        {
+            teamsPlaybackEndpointObservation = TeamsPlaybackEndpointObservation.Unknown;
+        }
+
+        OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+        OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
     }
 
     private async Task RecoverAndRefreshLibraryAsync()
@@ -2093,6 +2207,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         StartCommand.RaiseCanExecuteChanged();
         StopCommand.RaiseCanExecuteChanged();
         StartTestCommand.RaiseCanExecuteChanged();
+        SaveDiagnosticsCommand.RaiseCanExecuteChanged();
+        OpenDiagnosticsFolderCommand.RaiseCanExecuteChanged();
         RefreshDevicesCommand.RaiseCanExecuteChanged();
         RefreshProcessCatalogCommand.RaiseCanExecuteChanged();
         RefreshLibraryCommand.RaiseCanExecuteChanged();
@@ -2113,6 +2229,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         StopRecordingFromOverlayCommand.RaiseCanExecuteChanged();
         ToggleLocalMicrophoneMuteCommand.RaiseCanExecuteChanged();
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
+        OnPropertyChanged(nameof(CanSaveDiagnostics));
+        OnPropertyChanged(nameof(CanOpenDiagnosticsFolder));
         OnPropertyChanged(nameof(CanSeek));
         OnPropertyChanged(nameof(CanManageLibrary));
         OnPropertyChanged(nameof(CanConfirmRecycle));

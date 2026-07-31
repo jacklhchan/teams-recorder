@@ -196,7 +196,23 @@ void WasapiCapture::SetError(HRESULT hresult, const wchar_t* context) {
     std::lock_guard<std::mutex> lock(mutex_);
     last_error_.hresult = hresult;
     last_error_.device_invalidated = IsDeviceInvalidated(hresult);
+    last_error_.stage = context == nullptr ? L"(unspecified)" : context;
     last_error_.message = std::wstring(context) + L": " + DescribeHresult(hresult);
+}
+
+void WasapiCapture::SetEndpointDiagnostics(
+    const std::wstring& endpoint_id,
+    const std::wstring& endpoint_name,
+    const wchar_t* stage) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_error_.endpoint_id = endpoint_id;
+    last_error_.endpoint_name = endpoint_name;
+    last_error_.stage = stage == nullptr ? L"(unspecified)" : stage;
+}
+
+void WasapiCapture::SetStage(const wchar_t* stage) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_error_.stage = stage == nullptr ? L"(unspecified)" : stage;
 }
 
 HRESULT WasapiCapture::EnumerateEndpoints(std::vector<EndpointInfo>* endpoints, CaptureError* error) {
@@ -227,9 +243,21 @@ bool WasapiCapture::Start(CaptureRequest request, AudioBlockCallback callback) {
     if (started.Get() == nullptr) { SetError(HRESULT_FROM_WIN32(GetLastError()), L"CreateEvent(started) failed"); return false; }
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (worker_.joinable() || running_) { last_error_ = { E_UNEXPECTED, false, L"Capture is already active." }; return false; }
+        if (worker_.joinable() || running_) {
+            last_error_.hresult = E_UNEXPECTED;
+            last_error_.device_invalidated = false;
+            last_error_.stage = L"starting capture";
+            last_error_.message = L"Capture is already active.";
+            return false;
+        }
         stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (stop_event_ == nullptr) { last_error_ = { HRESULT_FROM_WIN32(GetLastError()), false, L"CreateEvent(stop) failed." }; return false; }
+        if (stop_event_ == nullptr) {
+            last_error_.hresult = HRESULT_FROM_WIN32(GetLastError());
+            last_error_.device_invalidated = false;
+            last_error_.stage = L"creating stop event";
+            last_error_.message = L"CreateEvent(stop) failed.";
+            return false;
+        }
         last_error_ = {};
         worker_ = std::thread(&WasapiCapture::CaptureThread, this, std::move(request), std::move(callback), started.Get());
     }
@@ -494,6 +522,12 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
         CoTaskMemFree(selected_id);
     }
     (void)GetFriendlyName(device.Get(), &selected_friendly_name);
+    SetEndpointDiagnostics(
+        selected_endpoint_id,
+        selected_friendly_name,
+        request.flow == EndpointFlow::Render
+            ? L"selected render loopback endpoint"
+            : L"selected microphone endpoint");
     result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(client.Put()));
     if (FAILED(result)) {
         if (request.flow == EndpointFlow::Capture && IsDeviceInvalidated(result)) {
@@ -817,6 +851,8 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
     result = client->Start();
     if (FAILED(result)) { fail(result, L"Starting WASAPI capture failed"); return; }
     { std::lock_guard<std::mutex> lock(mutex_); running_ = true; }
+    SetStage(event_driven ? L"reading event-driven WASAPI packets"
+                          : L"reading polling WASAPI packets");
     SetEvent(started_event);
 
     HANDLE waits[] = { stop_event_, audio_event.Get() };
@@ -859,7 +895,13 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
         (SUCCEEDED(result) || stop_result == AUDCLNT_E_DEVICE_INVALIDATED)) {
         SetError(stop_result, L"Stopping WASAPI capture failed");
     }
-    { std::lock_guard<std::mutex> lock(mutex_); running_ = false; }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_ = false;
+        if (last_error_.hresult == S_OK && WaitForSingleObject(stop_event_, 0) != WAIT_OBJECT_0) {
+            last_error_.stage = L"WASAPI capture worker stopped without an HRESULT";
+        }
+    }
 }
 
 }  // namespace recorder::audio

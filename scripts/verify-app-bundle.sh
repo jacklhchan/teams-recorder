@@ -48,16 +48,16 @@ FORBIDDEN_BUNDLE_CONTENT="$(
       -name '*.schema.json' -o \
       -name 'recording-info-v*.json' -o \
       -name 'meeting-intelligence-v*.json' -o \
-      -name 'meeting_intelligence_provider.py' -o \
-      -name '*.py' -o \
-      -name '*.pyc' -o \
-      -name '__pycache__' -o \
+      -iname 'meeting_intelligence_provider.py' -o \
+      -iname '*.py' -o \
+      -iname '*.pyc' -o \
+      -iname '__pycache__' -o \
       -iname 'python*' -o \
-      -name 'ffmpeg' -o \
-      -name 'ffprobe' -o \
-      -name 'transcribe-openai-compatible.sh' -o \
-      -name 'transcribe-qwen-asr.sh' -o \
-      -name 'openai_asr_longform.py' \
+      -iname 'ffmpeg' -o \
+      -iname 'ffprobe' -o \
+      -iname 'transcribe-openai-compatible.sh' -o \
+      -iname 'transcribe-qwen-asr.sh' -o \
+      -iname 'openai_asr_longform.py' \
     \) \
     -print -quit
 )"

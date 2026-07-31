@@ -523,6 +523,16 @@ esac
             "Contents/Resources/runtime/__pycache__/helper",
             "Contents/Helpers/ffmpeg",
             "Contents/Helpers/ffprobe",
+            "Contents/Resources/MEETING_INTELLIGENCE_PROVIDER.PY",
+            "Contents/Frameworks/PYTHON3",
+            "Contents/Resources/runtime/HELPER.PY",
+            "Contents/Resources/runtime/HELPER.PYC",
+            "Contents/Resources/runtime/__PYCACHE__/helper",
+            "Contents/Helpers/FFMPEG",
+            "Contents/Helpers/FfPrObE",
+            "Contents/Resources/TRANSCRIBE-OPENAI-COMPATIBLE.SH",
+            "Contents/Resources/TRANSCRIBE-QWEN-ASR.SH",
+            "Contents/Resources/OPENAI_ASR_LONGFORM.PY",
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

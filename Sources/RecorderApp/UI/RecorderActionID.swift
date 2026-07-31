@@ -1,0 +1,31 @@
+enum RecorderActionID {
+    static let startStop = "recorder.action.start-stop"
+    static let refreshCapture = "recorder.action.refresh-capture"
+    static let muteMic = "recorder.action.mute-mic"
+    static let testAudio = "recorder.action.test-audio"
+    static let moreRecordActions = "recorder.action.more-record-actions"
+    static let chooseOutputFolder = "recorder.action.choose-output-folder"
+    static let openOutputFolder = "recorder.action.open-output-folder"
+    static let uploadAudio = "recorder.action.upload-audio"
+    static let refreshRecordings = "recorder.action.refresh-recordings"
+    static let filterFavorites = "recorder.action.filter-favorites"
+    static let openTranscript = "recorder.action.open-transcript"
+    static let saveTranscript = "recorder.action.save-transcript"
+    static let captureRecovery = "recorder.action.capture-recovery"
+
+    static let all = [
+        startStop,
+        refreshCapture,
+        muteMic,
+        testAudio,
+        moreRecordActions,
+        chooseOutputFolder,
+        openOutputFolder,
+        uploadAudio,
+        refreshRecordings,
+        filterFavorites,
+        openTranscript,
+        saveTranscript,
+        captureRecovery
+    ]
+}

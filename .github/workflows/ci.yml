@@ -18,9 +18,11 @@ jobs:
         run: swift test --filter OpenAICompatibleTranscriptionClientTests
       - name: Swift tests
         run: swift test
-      - name: Swift tests stability pass
+      - name: Workspace stability tests
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: swift test
+        env:
+          RECORDER_STABILITY: "1"
+        run: swift test --filter RecorderWorkspaceStabilityTests
 
   script-tests:
     runs-on: macos-26

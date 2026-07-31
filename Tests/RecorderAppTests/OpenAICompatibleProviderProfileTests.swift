@@ -54,6 +54,25 @@ final class OpenAICompatibleProviderProfileTests: XCTestCase {
         XCTAssertEqual(profile.prompt, "Hong Kong meeting")
     }
 
+    func testHKTBuildsExactFixedUATURLAtBothGroupIDBoundaries() throws {
+        for groupID in ["1", String(repeating: "8", count: 32)] {
+            let profile = try OpenAICompatibleProviderProfile.hktValidated(
+                groupID: groupID, asrModel: "asr", llmModel: "llm", language: "yue", prompt: ""
+            )
+            XCTAssertEqual(profile.providerKind, .hktGenAI)
+            XCTAssertEqual(profile.baseURL.absoluteString, "https://api.uat.bot-builder.pccw.com/v1/groups/\(groupID)/openai")
+            XCTAssertEqual(profile.groupID, groupID)
+        }
+    }
+
+    func testHKTRejectsAnythingOtherThanOneTo32ASCIIDigits() {
+        for groupID in ["", String(repeating: "1", count: 33), " 1", "+1", "１２", "١٢", "https://example.test"] {
+            XCTAssertThrowsError(try OpenAICompatibleProviderProfile.hktValidated(groupID: groupID, asrModel: "asr", llmModel: "llm", language: "yue", prompt: "")) {
+                XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidHKTGroupID)
+            }
+        }
+    }
+
     private func makeProfile(
         baseURL: String = "https://api.example.com/v1"
     ) throws -> OpenAICompatibleProviderProfile {

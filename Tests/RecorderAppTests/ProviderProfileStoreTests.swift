@@ -68,6 +68,42 @@ final class ProviderProfileStoreTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: OpenAICompatibleProviderProfileStore.key))
     }
 
+    func testIndependentPresetsAndActiveKindRoundTripWithoutCopyingFields() throws {
+        let store = OpenAICompatibleProviderProfileStore(defaults: makeDefaults())
+        let generic = try makeProfile()
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(groupID: "42", asrModel: "hkt-asr", llmModel: "hkt-llm", language: "en", prompt: "hkt")
+
+        try store.save(generic)
+        try store.save(hkt, makingActive: false)
+        try store.setActiveProviderKind(.hktGenAI)
+
+        XCTAssertEqual(try store.activeProviderKind(), .hktGenAI)
+        XCTAssertEqual(try store.load(), hkt)
+        XCTAssertEqual(try store.loadProfile(for: .openAICompatible), generic)
+        XCTAssertEqual(try store.loadProfile(for: .hktGenAI), hkt)
+    }
+
+    func testLegacyV1ProfileMigratesAsGenericAndFutureEnvelopeIsRejected() throws {
+        let defaults = makeDefaults()
+        defaults.set(storedProfileData(baseURL: "https://api.example.com/v1"), forKey: OpenAICompatibleProviderProfileStore.key)
+        let store = OpenAICompatibleProviderProfileStore(defaults: defaults)
+        XCTAssertEqual(try store.load()?.providerKind, .openAICompatible)
+        XCTAssertEqual(try store.activeProviderKind(), .openAICompatible)
+
+        defaults.set(Data(#"{"schemaVersion":99,"activeProviderKind":"hktGenAI","genericProfile":null,"hktProfile":null}"#.utf8), forKey: OpenAICompatibleProviderProfileStore.key)
+        XCTAssertThrowsError(try store.load()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .unsupportedSchemaVersion(99))
+        }
+    }
+
+    func testTamperedHKTFixedEndpointIsRejected() throws {
+        let defaults = makeDefaults()
+        defaults.set(Data(#"{"schemaVersion":2,"activeProviderKind":"hktGenAI","genericProfile":null,"hktProfile":{"schemaVersion":1,"providerKind":"hktGenAI","baseURL":"https://attacker.example/v1","groupID":"42","asrModel":"asr","llmModel":"llm","language":"yue","prompt":""}}"#.utf8), forKey: OpenAICompatibleProviderProfileStore.key)
+        XCTAssertThrowsError(try OpenAICompatibleProviderProfileStore(defaults: defaults).load()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidProviderConfiguration)
+        }
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "ProviderProfileStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

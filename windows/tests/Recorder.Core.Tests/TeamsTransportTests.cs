@@ -45,6 +45,43 @@ internal static class TeamsTransportTests
         client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    public static void ClientCorrelatesOverlappingStateQueryReplies()
+    {
+        var socket = new FakeSocket();
+        var store = new FakeTokenStore { Token = "paired-token" };
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"),
+            store,
+            () => socket,
+            TimeSpan.FromHours(1));
+        var events = 0;
+        var connectionErrors = 0;
+        client.EventReceived += (_, _) => Interlocked.Increment(ref events);
+        client.ConnectionChanged += (_, error) =>
+        {
+            if (error is not null) Interlocked.Increment(ref connectionErrors);
+        };
+
+        client.StartAsync().GetAwaiter().GetResult();
+        Wait(socket.Connected.Task, "The overlapping-query socket did not connect.");
+        Wait(socket.ReceiveEntered.Task, "The overlapping-query socket did not begin receiving.");
+        WaitUntil(() => socket.Sent.Count == 1, "The startup state query was not sent.");
+
+        socket.Publish("""{"tokenRefresh":"refreshed-token"}""");
+        WaitUntil(() => socket.Sent.Count == 2, "The token refresh state query was not sent.");
+        socket.Publish("""{"requestId":1,"errorMsg":"First query completed late"}""");
+        socket.Publish("""{"requestId":2,"errorMsg":"Second query unavailable"}""");
+        Thread.Sleep(50);
+        Equal(0, Volatile.Read(ref events));
+        Equal(0, Volatile.Read(ref connectionErrors));
+
+        socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
+        WaitUntil(() => Volatile.Read(ref events) == 1,
+            "A delayed state-query reply escaped correlation and blocked a later meeting push.");
+        client.StopAsync().GetAwaiter().GetResult();
+        client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     public static void ClientDropsLateEventsAfterStop()
     {
         var socket = new FakeSocket(); var client = new TeamsThirdPartyApiClient(TeamsThirdPartyApiIdentity.Recorder("test"), new FakeTokenStore(), () => socket, TimeSpan.FromHours(1));

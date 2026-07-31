@@ -35,6 +35,9 @@ internal static class RecorderAppSettingsTests
 
     public static void PreservesNoMicrophoneAndRejectsUnsafeFutureSettings()
     {
+        if (new RecorderAppSettings().RecordMicrophone)
+            throw new InvalidOperationException("First-run settings must default to no microphone.");
+
         var noMicrophone = RecorderAppSettings.Validate(new RecorderAppSettings
         {
             RecordMicrophone = false,

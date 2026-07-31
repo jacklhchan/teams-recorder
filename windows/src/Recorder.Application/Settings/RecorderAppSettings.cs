@@ -15,7 +15,7 @@ public sealed record RecorderAppSettings
     [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; init; } = CurrentSchemaVersion;
     [JsonPropertyName("outputFolder")] public string? OutputFolder { get; init; }
     [JsonPropertyName("renderEndpointId")] public string? RenderEndpointId { get; init; }
-    [JsonPropertyName("recordMicrophone")] public bool RecordMicrophone { get; init; } = true;
+    [JsonPropertyName("recordMicrophone")] public bool RecordMicrophone { get; init; }
     [JsonPropertyName("microphoneEndpointId")] public string? MicrophoneEndpointId { get; init; }
     [JsonPropertyName("captureSource")] public RecorderPersistedCaptureSource CaptureSource { get; init; } = RecorderPersistedCaptureSource.SystemLoopback;
     // These are local opt-ins only. Pairing material remains in the separate DPAPI store.

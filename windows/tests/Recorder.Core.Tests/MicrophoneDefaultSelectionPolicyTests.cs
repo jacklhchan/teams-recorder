@@ -2,21 +2,21 @@ using TeamsRecorder.Windows.Application;
 
 internal static class MicrophoneDefaultSelectionPolicyTests
 {
-    public static void PrefersTheCommunicationsDefaultForInitialMicrophone()
+    public static void DefaultsToNoMicrophoneDespiteWindowsDefaultRoles()
     {
         var choice = MicrophoneDefaultSelectionPolicy.SelectInitialCaptureEndpointId(
         [Endpoint("console", EndpointDefaultRole.Console, "Built-in microphone"),
          Endpoint("multimedia", EndpointDefaultRole.Multimedia, "USB microphone"),
          Endpoint("communications", EndpointDefaultRole.Communications, "Headset microphone")]);
-        Equal("communications", choice);
+        Equal(null, choice);
     }
 
-    public static void UsesAnyAvailableCaptureWhenWindowsHasNoDefaultRole()
+    public static void DefaultsToNoMicrophoneWhenCaptureDevicesAreAvailable()
     {
         var choice = MicrophoneDefaultSelectionPolicy.SelectInitialCaptureEndpointId(
         [Endpoint("zeta", EndpointDefaultRole.None, "Zeta"),
          Endpoint("alpha", EndpointDefaultRole.None, "Alpha")]);
-        Equal("alpha", choice);
+        Equal(null, choice);
     }
 
     public static void NeverSelectsRenderEndpointsAsMicrophones()
@@ -30,7 +30,7 @@ internal static class MicrophoneDefaultSelectionPolicyTests
     private static NativeCaptureEndpoint Endpoint(string id, EndpointDefaultRole roles, string name) =>
         new(CaptureEndpointFlow.Capture, roles, id, name);
 
-    private static void Equal(string expected, string? actual)
+    private static void Equal(string? expected, string? actual)
     {
         if (!string.Equals(expected, actual, StringComparison.Ordinal))
             throw new InvalidOperationException($"Expected {expected}; got {actual ?? "<null>"}.");

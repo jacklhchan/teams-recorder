@@ -135,7 +135,7 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
     private CancellationTokenSource? lifetime;
     private Task? runTask;
     private ITeamsWebSocketConnection? connection;
-    private StateQueryRequest? pendingStateQuery;
+    private readonly Dictionary<int, StateQueryRequest> pendingStateQueries = [];
     private long generation;
     private int requestId;
 
@@ -172,7 +172,7 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         Task? running; ITeamsWebSocketConnection? active; CancellationTokenSource? source;
-        lock (gate) { source = lifetime; lifetime = null; running = runTask; runTask = null; active = connection; connection = null; ++generation; }
+        lock (gate) { source = lifetime; lifetime = null; running = runTask; runTask = null; active = connection; connection = null; pendingStateQueries.Clear(); ++generation; }
         if (source is null) return;
         source.Cancel();
         try { if (active is not null) await active.CloseAsync(cancellationToken).ConfigureAwait(false); }
@@ -361,8 +361,14 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
         {
             if (generation != expectedGeneration || !ReferenceEquals(connection, expectedConnection) || lifetime is null)
                 return false;
-            pendingStateQuery = new StateQueryRequest(expectedGeneration, expectedConnection, queryRequestId);
-            return true;
+            // Token refreshes can arrive before the startup query replies. Keep
+            // each request ID so an older acknowledgement/error can never fall
+            // through into generic pairing/error handling. Bound the set to
+            // avoid retaining an unlimited number of unanswered local queries.
+            if (pendingStateQueries.Count >= 8) return false;
+            return pendingStateQueries.TryAdd(
+                queryRequestId,
+                new StateQueryRequest(expectedGeneration, expectedConnection, queryRequestId));
         }
     }
 
@@ -377,12 +383,12 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
         if (!responseId.HasValue) return false;
         lock (gate)
         {
-            if (pendingStateQuery is not { } query ||
+            if (!pendingStateQueries.TryGetValue(responseId.Value, out var query) ||
                 query.Generation != expectedGeneration ||
                 !ReferenceEquals(query.Connection, expectedConnection) ||
                 query.RequestId != responseId.Value)
                 return false;
-            pendingStateQuery = null;
+            pendingStateQueries.Remove(responseId.Value);
             return true;
         }
     }
@@ -391,9 +397,10 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
     {
         lock (gate)
         {
-            if (pendingStateQuery is { } query && query.Generation == expectedGeneration &&
-                ReferenceEquals(query.Connection, expectedConnection) && query.RequestId == queryRequestId)
-                pendingStateQuery = null;
+            if (pendingStateQueries.TryGetValue(queryRequestId, out var query) &&
+                query.Generation == expectedGeneration &&
+                ReferenceEquals(query.Connection, expectedConnection))
+                pendingStateQueries.Remove(queryRequestId);
         }
     }
 
@@ -406,8 +413,12 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
     {
         lock (gate)
         {
-            if (pendingStateQuery is { } query && query.Generation == expectedGeneration && ReferenceEquals(query.Connection, value))
-                pendingStateQuery = null;
+            foreach (var queryRequestId in pendingStateQueries
+                         .Where(entry => entry.Value.Generation == expectedGeneration &&
+                             ReferenceEquals(entry.Value.Connection, value))
+                         .Select(entry => entry.Key)
+                         .ToArray())
+                pendingStateQueries.Remove(queryRequestId);
             if (generation == expectedGeneration && ReferenceEquals(connection, value)) connection = null;
         }
     }

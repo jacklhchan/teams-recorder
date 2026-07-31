@@ -259,7 +259,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public string GlobalMuteHotKeyStatus => globalMuteHotKeyStatus;
 
-    /// <summary>Teams integration is deliberately opt-in and is off at every app launch.</summary>
+    /// <summary>Teams integration is an explicit, persisted non-secret opt-in; pairing credentials remain in DPAPI storage.</summary>
     public bool IsTeamsMuteSyncEnabled
     {
         get => isTeamsMuteSyncEnabled;

@@ -1,12 +1,18 @@
 # Meeting Intelligence Summary and Contextual Title Design
 
-**Date:** 2026-07-31  
-**Status:** Approved design; written spec independently reviewed  
-**Approved product decision:** 2026-07-31  
+**Date:** 2026-07-31
+
+**Status:** Approved design; written spec independently reviewed
+
+**Approved product decision:** 2026-07-31
+
 **Approved provider-preset amendment:** 2026-07-31, from the user's explicit
 request after the original approval
-**Baseline:** `main` at `c7f1aeb6a0ca6833e6af6cd01febbc1cbfc2a5cf`  
-**Branch:** `codex/meeting-intelligence-summary-title`  
+
+**Baseline:** `main` at `c7f1aeb6a0ca6833e6af6cd01febbc1cbfc2a5cf`
+
+**Branch:** `codex/meeting-intelligence-summary-title`
+
 **Platform:** macOS 26.0 and later
 
 ## 1. Context

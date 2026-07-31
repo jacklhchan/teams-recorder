@@ -215,9 +215,10 @@ change applies to future ASR jobs only; an active job retains its immutable
 snapshot.
 
 Use Save, then Test to check connectivity and model discovery. Model discovery
-is optional: manually entered model identifiers remain available when `/v1/models` is
-   unsupported. An exact `/models` match for the selected LLM Model is required
-only for automatic meeting intelligence. Unknown, unavailable, or unsupported
+is optional: manually entered model identifiers remain available when
+`/v1/models` is unsupported. An exact `/models` match for the selected LLM
+Model is required only for automatic meeting intelligence. Unknown, unavailable,
+or unsupported
 discovery sends zero automatic chat requests. Generate and Regenerate are
 explicit and may still be attempted when discovery is unavailable.
 

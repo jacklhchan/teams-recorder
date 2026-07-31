@@ -321,6 +321,20 @@ final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
         XCTAssertTrue(secure.operations.isEmpty)
     }
 
+    func testTamperedUnsupportedLanguageIsRejectedBeforeSnapshotKeychainRead() throws {
+        let profile = try JSONDecoder().decode(
+            OpenAICompatibleProviderProfile.self,
+            from: Data(#"{"schemaVersion":1,"providerKind":"hktGenAI","baseURL":"https://api.uat.bot-builder.pccw.com/v1/groups/42/openai","groupID":"42","asrModel":"asr","llmModel":"llm","language":"English","prompt":""}"#.utf8)
+        )
+        let secure = KeyedSecureValueStore()
+        let repository = makeRepository(profileStore: InMemoryProfileStore(profile: profile), secureStore: secure)
+
+        XCTAssertThrowsError(try repository.snapshot()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidLanguage)
+        }
+        XCTAssertTrue(secure.operations.isEmpty)
+    }
+
     func testRemovingActiveHKTKeyDoesNotDeleteGenericKey() throws {
         let store = OpenAICompatibleProviderProfileStore(defaults: makeDefaults())
         let secure = KeyedSecureValueStore()

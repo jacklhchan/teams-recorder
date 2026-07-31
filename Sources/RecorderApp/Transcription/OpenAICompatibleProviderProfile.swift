@@ -81,9 +81,18 @@ struct OpenAICompatibleProviderProfile: Codable, Equatable, Sendable {
     private static func make(providerKind: AIProviderKind, baseURL: URL, groupID: String?, asrModel: String, llmModel: String, language: String, prompt: String) throws -> Self {
         let asr = asrModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let llm = llmModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let language = try validatedLanguage(language)
         guard !asr.isEmpty else { throw ProviderProfileValidationError.missingASRModel }
         guard !llm.isEmpty else { throw ProviderProfileValidationError.missingLLMModel }
-        return Self(providerKind: providerKind, baseURL: baseURL, groupID: groupID, asrModel: asr, llmModel: llm, language: language.trimmingCharacters(in: .whitespacesAndNewlines), prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines))
+        return Self(providerKind: providerKind, baseURL: baseURL, groupID: groupID, asrModel: asr, llmModel: llm, language: language, prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func validatedLanguage(_ value: String) throws -> String {
+        let language = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ["yue", "en", "zh"].contains(language) else {
+            throw ProviderProfileValidationError.invalidLanguage
+        }
+        return language
     }
 
     private static func normalizedGenericURL(_ text: String) throws -> URL {
@@ -110,7 +119,7 @@ struct OpenAICompatibleProviderProfile: Codable, Equatable, Sendable {
 }
 
 enum ProviderProfileValidationError: LocalizedError, Equatable {
-    case invalidBaseURL, unsupportedURLComponents, insecureRemoteURL, missingASRModel, missingLLMModel, invalidHKTGroupID, invalidProviderConfiguration, unsupportedSchemaVersion(Int)
+    case invalidBaseURL, unsupportedURLComponents, insecureRemoteURL, missingASRModel, missingLLMModel, invalidLanguage, invalidHKTGroupID, invalidProviderConfiguration, unsupportedSchemaVersion(Int)
     var errorDescription: String? {
         switch self {
         case .invalidBaseURL: "Enter a valid API base URL."
@@ -118,6 +127,7 @@ enum ProviderProfileValidationError: LocalizedError, Equatable {
         case .insecureRemoteURL: "Remote providers must use HTTPS."
         case .missingASRModel: "Enter an ASR model identifier."
         case .missingLLMModel: "Enter an LLM model identifier."
+        case .invalidLanguage: "Choose Cantonese, English, or Chinese."
         case .invalidHKTGroupID: "Enter a group ID containing 1 to 32 ASCII digits."
         case .invalidProviderConfiguration: "The saved provider configuration is invalid."
         case let .unsupportedSchemaVersion(version): "Provider profile version \(version) is not supported."

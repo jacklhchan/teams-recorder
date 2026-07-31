@@ -104,6 +104,22 @@ final class ProviderProfileStoreTests: XCTestCase {
         }
     }
 
+    func testTamperedEnvelopeAndLegacyProfileRejectUnsupportedLanguage() {
+        let envelopeDefaults = makeDefaults()
+        envelopeDefaults.set(Data(#"{"schemaVersion":2,"activeProviderKind":"openAICompatible","genericProfile":{"schemaVersion":1,"providerKind":"openAICompatible","baseURL":"https://api.example.com/v1","asrModel":"asr","llmModel":"llm","language":"zh-HK","prompt":""},"hktProfile":null}"#.utf8), forKey: OpenAICompatibleProviderProfileStore.key)
+
+        XCTAssertThrowsError(try OpenAICompatibleProviderProfileStore(defaults: envelopeDefaults).load()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidLanguage)
+        }
+
+        let legacyDefaults = makeDefaults()
+        legacyDefaults.set(storedProfileData(baseURL: "https://api.example.com/v1", language: ""), forKey: OpenAICompatibleProviderProfileStore.key)
+
+        XCTAssertThrowsError(try OpenAICompatibleProviderProfileStore(defaults: legacyDefaults).load()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidLanguage)
+        }
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "ProviderProfileStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -124,7 +140,7 @@ final class ProviderProfileStoreTests: XCTestCase {
         )
     }
 
-    private func storedProfileData(baseURL: String) -> Data {
+    private func storedProfileData(baseURL: String, language: String = "yue") -> Data {
         Data(
             """
             {
@@ -132,7 +148,7 @@ final class ProviderProfileStoreTests: XCTestCase {
               "baseURL": "\(baseURL)",
               "asrModel": "asr",
               "llmModel": "llm",
-              "language": "yue",
+              "language": "\(language)",
               "prompt": ""
             }
             """.utf8

@@ -10,8 +10,9 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
             maximumBackupsPerArtifact: 3
         )
 
+        var artifacts: PublishedTranscriptionArtifacts?
         for index in 0..<5 {
-            _ = try publisher.publish(
+            artifacts = try publisher.publish(
                 rawText: "raw-\(index)",
                 finalText: "final-\(index)",
                 manifest: .init(
@@ -63,6 +64,10 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
         )
         XCTAssertFalse(manifest.contains("apiKey"))
         XCTAssertFalse(manifest.contains("baseURL"))
+        XCTAssertEqual(
+            artifacts?.committedTranscriptRevision.byteCount,
+            Data("final-4".utf8).count
+        )
     }
 
     func testExpiredLegacyRunsAreRemovedButRecentRunRemains() throws {

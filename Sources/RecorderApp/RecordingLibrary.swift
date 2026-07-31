@@ -55,7 +55,7 @@ enum JSONValue: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-struct RecordingSessionMetadata: Codable, Equatable, Hashable {
+struct RecordingSessionMetadata: Codable, Equatable, Hashable, Sendable {
     static let currentSchemaVersion = 1
 
     var schemaVersion: Int

@@ -31,6 +31,7 @@ struct PublishedTranscriptionArtifacts: Equatable, Sendable {
     let rawTranscriptURL: URL
     let manifestURL: URL
     let logURL: URL
+    let committedTranscriptRevision: TranscriptDocumentRevision
 }
 
 enum TranscriptionArtifactPublicationError:
@@ -57,16 +58,19 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
 
     let maximumBackupsPerArtifact: Int
     private let fileManager: FileManager
+    private let mutationGate: RecordingSessionMutationGate
 
     init(
         maximumBackupsPerArtifact: Int = 3,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        mutationGate: RecordingSessionMutationGate = .init()
     ) {
         self.maximumBackupsPerArtifact = max(
             0,
             maximumBackupsPerArtifact
         )
         self.fileManager = fileManager
+        self.mutationGate = mutationGate
     }
 
     func publish(
@@ -77,6 +81,7 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         sessionFolder: URL,
         now: Date = Date()
     ) throws -> PublishedTranscriptionArtifacts {
+        try mutationGate.withMutation(for: sessionFolder) {
         let staging = sessionFolder.appendingPathComponent(
             ".transcription-publish-\(UUID().uuidString)",
             isDirectory: true
@@ -137,6 +142,10 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             now: now
         )
 
+        let revision = try SecureTranscriptDocumentReader().readCanonical(
+            in: sessionFolder,
+            allowLegacy: false
+        ).revision
         return .init(
             transcriptURL: sessionFolder.appendingPathComponent(
                 "transcript.txt"
@@ -149,8 +158,10 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             ),
             logURL: sessionFolder.appendingPathComponent(
                 "transcription.log"
-            )
+            ),
+            committedTranscriptRevision: revision
         )
+        }
     }
 
     func expireLegacyRuns(

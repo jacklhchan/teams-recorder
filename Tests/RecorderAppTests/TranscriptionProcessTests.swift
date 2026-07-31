@@ -70,6 +70,30 @@ final class TranscriptionProcessTests: XCTestCase {
         XCTAssertEqual(result.output, expectedOutput)
         XCTAssertEqual(liveOutput.value, expectedOutput)
     }
+
+    func testLegacyServiceReturnsCommittedRevisionForCanonicalTranscript() async throws {
+        let fixture = try StdinFixture.make()
+        defer { fixture.remove() }
+        let transcript = fixture.root.appendingPathComponent("transcript.txt")
+        let script = "#!/bin/bash\nprintf 'TRANSCRIPT_PATH=%s\\n' \"$2/transcript.txt\"\n"
+        try Data(script.utf8).write(to: fixture.scriptURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fixture.scriptURL.path)
+        try Data("legacy transcript".utf8).write(to: transcript)
+        let service = LegacyProcessTranscriptionService(
+            launcher: FoundationTranscriptionProcessLauncher(), scriptURL: fixture.scriptURL
+        )
+        let result = try await service.transcribe(
+            .init(audioURL: fixture.audioURL, sessionFolder: fixture.root, snapshot: try makeSnapshot()),
+            onProgress: { _ in }
+        )
+        XCTAssertEqual(result.committedTranscriptRevision.byteCount, Data("legacy transcript".utf8).count)
+    }
+}
+
+private func makeSnapshot() throws -> OpenAICompatibleProviderSnapshot {
+    .init(profile: try OpenAICompatibleProviderProfile.validated(
+        baseURLText: "https://api.example/v1", asrModel: "asr", llmModel: "llm", language: "", prompt: ""
+    ), apiKey: nil)
 }
 
 private struct StdinFixture {

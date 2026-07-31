@@ -324,6 +324,7 @@ final class AppModel: ObservableObject {
             repository: activeProviderRepository,
             loadImmediately: false
         )
+        let transcriptMutationGate = RecordingSessionMutationGate()
         let activeTranscriptionService:
             any TranscriptionServicing
         if let transcriptionService {
@@ -335,13 +336,17 @@ final class AppModel: ObservableObject {
                     scriptURL: transcriptionScriptURL
                 )
         } else {
-            activeTranscriptionService =
-                NativeOpenAICompatibleTranscriptionService()
+            activeTranscriptionService = NativeOpenAICompatibleTranscriptionService(
+                publisher: TranscriptionArtifactPublisher(
+                    mutationGate: transcriptMutationGate
+                )
+            )
         }
         transcriptionCoordinator = TranscriptionJobCoordinator(
             providerRepository: activeProviderRepository,
             audioPreparer: transcriptionAudioPreparer,
-            service: activeTranscriptionService
+            service: activeTranscriptionService,
+            mutationGate: transcriptMutationGate
         )
         self.appPaths = appPaths
         teamsMuteSyncEnabled = defaults.object(
@@ -413,8 +418,8 @@ final class AppModel: ObservableObject {
             self?.statusMessage = message
         }
         transcriptionCoordinator.onSuccessfulPublication = {
-            [weak self] session in
-            self?.rebuildSearchDocument(for: session)
+            [weak self] event in
+            self?.rebuildSearchDocument(for: event.session)
         }
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state

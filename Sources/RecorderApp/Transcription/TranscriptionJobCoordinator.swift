@@ -16,12 +16,15 @@ final class TranscriptionJobCoordinator: ObservableObject {
         [RecordingSession.ID: TranscriptionState] = [:]
 
     var onStatusMessage: ((String) -> Void)?
-    var onSuccessfulPublication: ((RecordingSession) -> Void)?
+    var onSuccessfulPublication: ((TranscriptPublished) -> Void)?
 
     private let providerRepository:
         any OpenAICompatibleProviderManaging
     private let audioPreparer: any TranscriptionAudioPreparing
     private let service: any TranscriptionServicing
+    private let mutationGate: RecordingSessionMutationGate
+    private let transcriptReader: any TranscriptDocumentReading
+    private let coordinatorInstanceID: UUID
     private var task: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var activeAttempt: UUID?
@@ -31,11 +34,18 @@ final class TranscriptionJobCoordinator: ObservableObject {
     init(
         providerRepository: any OpenAICompatibleProviderManaging,
         audioPreparer: any TranscriptionAudioPreparing,
-        service: any TranscriptionServicing
+        service: any TranscriptionServicing,
+        mutationGate: RecordingSessionMutationGate = .init(),
+        transcriptReader: any TranscriptDocumentReading =
+            SecureTranscriptDocumentReader(),
+        coordinatorInstanceID: UUID = UUID()
     ) {
         self.providerRepository = providerRepository
         self.audioPreparer = audioPreparer
         self.service = service
+        self.mutationGate = mutationGate
+        self.transcriptReader = transcriptReader
+        self.coordinatorInstanceID = coordinatorInstanceID
     }
 
     deinit {
@@ -150,14 +160,44 @@ final class TranscriptionJobCoordinator: ObservableObject {
                    ) == nil {
                     throw CoordinatorError.invalidArtifact
                 }
-                self?.transcriptURLsBySessionID[session.id] =
-                    transcriptURL
-                if let logURL = result.logURL {
-                    self?.transcriptLogURLsBySessionID[session.id] =
-                        logURL
+                guard let self else { return }
+                let event = try self.mutationGate.withMutation(
+                    for: session.folderURL
+                ) {
+                    guard self.isActive(
+                        generation: attemptGeneration,
+                        attempt: attempt
+                    ), !self.cancellationRequested else {
+                        throw CoordinatorError.staleAttempt
+                    }
+                    let snapshot = try self.transcriptReader.readCanonical(
+                        in: session.folderURL,
+                        allowLegacy: true
+                    )
+                    guard snapshot.url == transcriptURL,
+                          snapshot.revision == result.committedTranscriptRevision else {
+                        throw CoordinatorError.committedRevisionMismatch
+                    }
+                    self.transcriptURLsBySessionID[session.id] = transcriptURL
+                    if let logURL = result.logURL {
+                        self.transcriptLogURLsBySessionID[session.id] = logURL
+                    }
+                    return TranscriptPublished(
+                        session: session,
+                        canonicalURL: transcriptURL,
+                        revision: result.committedTranscriptRevision,
+                        normalizedSessionFolder: session.folderURL
+                            .resolvingSymlinksInPath()
+                            .standardizedFileURL,
+                        identity: .init(
+                            coordinatorInstanceID: self.coordinatorInstanceID,
+                            generation: attemptGeneration,
+                            attemptID: attempt
+                        )
+                    )
                 }
-                self?.onSuccessfulPublication?(session)
-                self?.finishSuccess(
+                self.onSuccessfulPublication?(event)
+                self.finishSuccess(
                     session: session,
                     generation: attemptGeneration,
                     attempt: attempt
@@ -388,9 +428,18 @@ final class TranscriptionJobCoordinator: ObservableObject {
 
     private enum CoordinatorError: LocalizedError {
         case invalidArtifact
+        case committedRevisionMismatch
+        case staleAttempt
 
         var errorDescription: String? {
-            "Transcription reported an invalid artifact path."
+            switch self {
+            case .invalidArtifact:
+                "Transcription reported an invalid artifact path."
+            case .committedRevisionMismatch:
+                "Committed transcript revision did not match the canonical file."
+            case .staleAttempt:
+                "Transcription attempt is no longer active."
+            }
         }
     }
 }

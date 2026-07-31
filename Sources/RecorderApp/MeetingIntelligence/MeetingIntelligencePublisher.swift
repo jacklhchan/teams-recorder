@@ -284,13 +284,10 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
                     matches: metadataSnapshot.directoryIdentity
                 )
             }
-            guard let commit = request.lease.beginCommit() else {
-                throw MeetingIntelligencePublicationError.leaseInvalid
-            }
-            defer { commit.finish() }
-            try artifactStore.promoteStaged(staged, in: folder)
-            promoted = true
-
+            // Every check that can reject publication belongs before the
+            // artifact becomes visible.  Once promoted, publication is a
+            // durable success even if the optional title metadata update
+            // cannot be persisted.
             var metadata: RecordingSessionMetadata
             if let secure = metadataStore as? any RecordingSessionMetadataSecureStoring,
                let metadataSnapshot {
@@ -298,14 +295,20 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
             } else {
                 metadata = metadataStore.load(in: folder)
             }
-            // A transcript editor or retranscription may have settled while
-            // metadata was loaded. Recheck immediately before any title write.
             try validateTranscript(request, in: folder)
-            guard canApplyGeneratedTitle(
+            let shouldApplyGeneratedTitle = canApplyGeneratedTitle(
                 current: metadata,
                 capturedTitle: request.capturedTitle,
                 capturedTitleOrigin: request.capturedTitleOrigin
-            ) else {
+            )
+            guard let commit = request.lease.beginCommit() else {
+                throw MeetingIntelligencePublicationError.leaseInvalid
+            }
+            defer { commit.finish() }
+            try artifactStore.promoteStaged(staged, in: folder)
+            promoted = true
+
+            guard shouldApplyGeneratedTitle else {
                 return .init(
                     artifact: artifact,
                     titleWasApplied: false,

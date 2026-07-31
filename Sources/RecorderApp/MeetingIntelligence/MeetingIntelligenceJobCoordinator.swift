@@ -448,13 +448,17 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                                                       capturedTitleOrigin: session.metadata.titleOrigin,
                                                       content: content, snapshot: snapshot, intent: intent,
                                                       generatedAt: now(), lease: ticket.lease))
+            // A successful publisher return is the durable semantic boundary.
+            // Lifecycle ownership still controls the terminal UI state below,
+            // but cannot suppress the one library/search refresh for an
+            // artifact that was already committed.
+            onSuccessfulPublication?(session)
             guard owns(ticket, for: session), !Task.isCancelled else { return }
             setPresentation(from: outcome.artifact, phase: .ready,
                             message: outcome.titleWarning ?? "Ready.", session: session)
             // Publication is the semantic success boundary. State persistence
             // is recovery-only and may be delayed/cancelled without changing
             // the one successful library/search refresh callback.
-            onSuccessfulPublication?(session)
             await persist(.completed, message: outcome.titleWarning ?? "Ready.", revision: transcript.revision,
                           ticket: ticket, for: session)
             clearTaskIfOwned(ticket, for: session)

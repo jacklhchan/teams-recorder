@@ -279,7 +279,7 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .cancelled)
     }
 
-    func testCancellationDuringPublisherKeepsCancelledPresentationAndNoCallback() async throws {
+    func testCancellationAfterDurablePublisherReturnKeepsCancelledPresentationAndEmitsCallback() async throws {
         let entered = expectation(description: "publisher entered")
         let gate = GenerationGate()
         let publisher = BlockingPublisher(entered: entered, gate: gate)
@@ -295,7 +295,54 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         await fulfillment(of: [publisher.finished], timeout: 1)
 
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .cancelled)
-        XCTAssertEqual(callbacks, 0)
+        XCTAssertEqual(callbacks, 1)
+    }
+
+    func testNewerReadyPresentationWinsWhenEarlierDurablePublisherReturnsLateAndEachEmitsOneCallback() async throws {
+        let firstPublisherEntered = expectation(description: "first publisher entered")
+        let firstPublisherReturned = expectation(description: "first publisher returned")
+        let gate = GenerationGate()
+        let generator = SequencedCoordinatorGenerator(contents: [
+            .init(title: "A title", summary: "A summary"),
+            .init(title: "B title", summary: "B summary")
+        ])
+        let publisher = FirstCallBlockingPublisher(
+            firstEntered: firstPublisherEntered,
+            firstReturned: firstPublisherReturned,
+            gate: gate
+        )
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            generatorOverride: generator,
+            publisherOverride: publisher
+        )
+        let callbacks = CallbackCount()
+        let bothCallbacks = expectation(description: "two durable publication callbacks")
+        bothCallbacks.expectedFulfillmentCount = 2
+        fixture.coordinator.onSuccessfulPublication = { _ in
+            callbacks.increment()
+            bothCallbacks.fulfill()
+        }
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [firstPublisherEntered], timeout: 1)
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .ready)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).summary, "B summary")
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).suggestedTitle, "B title")
+        XCTAssertEqual(callbacks.value, 1)
+
+        await gate.release()
+        await fulfillment(of: [firstPublisherReturned, bothCallbacks], timeout: 1)
+
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .ready)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).summary, "B summary")
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).suggestedTitle, "B title")
+        XCTAssertEqual(callbacks.value, 2)
+        XCTAssertEqual(publisher.requests, 2)
     }
 
     func testRemoveInvalidatesBlockedGenerationWithoutLatePublication() async throws {
@@ -669,6 +716,39 @@ private final class BlockingPublisher: MeetingIntelligencePublishing, @unchecked
     }
 }
 
+private final class FirstCallBlockingPublisher: MeetingIntelligencePublishing, @unchecked Sendable {
+    let firstEntered: XCTestExpectation
+    let firstReturned: XCTestExpectation
+    let gate: GenerationGate
+    private let lock = NSLock()
+    private var blocksFirstCall = true
+    private(set) var requests = 0
+
+    init(firstEntered: XCTestExpectation, firstReturned: XCTestExpectation, gate: GenerationGate) {
+        self.firstEntered = firstEntered
+        self.firstReturned = firstReturned
+        self.gate = gate
+    }
+
+    func publish(_ request: MeetingIntelligencePublicationRequest) async throws -> MeetingIntelligencePublicationOutcome {
+        let blocks = lock.withLock {
+            requests += 1
+            defer { blocksFirstCall = false }
+            return blocksFirstCall
+        }
+        if blocks {
+            firstEntered.fulfill()
+            await gate.wait()
+            firstReturned.fulfill()
+        }
+        return .init(artifact: .init(schemaVersion: 1, summary: request.content.summary, suggestedTitle: request.content.title,
+                                     sourceTranscriptSHA256: request.sourceRevision.sha256,
+                                     sourceTranscriptByteCount: request.sourceRevision.byteCount,
+                                     model: request.snapshot.profile.llmModel, generatedAt: request.generatedAt, intent: request.intent),
+                     titleWasApplied: false, titleWarning: nil)
+    }
+}
+
 private struct ImmediateTestStateSaveScheduler: MeetingIntelligenceStateSaveScheduling {
     func awaitAdmission() async {}
 }
@@ -777,6 +857,21 @@ private final class CoordinatorGenerator: MeetingIntelligenceGenerating, @unchec
                   onProgress _: @escaping @Sendable (MeetingIntelligenceProgress) -> Void) async throws -> MeetingIntelligenceGeneratedContent {
         requests += 1
         return .init(title: "Generated", summary: "Summary")
+    }
+}
+
+private final class SequencedCoordinatorGenerator: MeetingIntelligenceGenerating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var contents: [MeetingIntelligenceGeneratedContent]
+
+    init(contents: [MeetingIntelligenceGeneratedContent]) { self.contents = contents }
+
+    func generate(transcript _: TranscriptDocumentSnapshot, snapshot _: OpenAICompatibleProviderSnapshot,
+                  onProgress _: @escaping @Sendable (MeetingIntelligenceProgress) -> Void) async throws -> MeetingIntelligenceGeneratedContent {
+        lock.withLock {
+            precondition(!contents.isEmpty, "Missing generated test content")
+            return contents.removeFirst()
+        }
     }
 }
 

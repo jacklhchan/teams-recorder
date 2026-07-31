@@ -77,18 +77,22 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertEqual(fixture.artifactStore.visibleArtifact?.summary, "Decision summary")
     }
 
-    func testGeneratedTitleReplacesOnlyCapturedGeneratedTitle() async throws {
-        let fixture = try PublicationFixture(
-            metadata: .init(title: "Previous generated", titleOrigin: .meetingIntelligence),
-            capturedTitle: "Previous generated",
-            capturedTitleOrigin: .meetingIntelligence
-        )
+    func testMeetingIntelligenceOwnedTitleIsReplacedByNextCapturedMeetingIntelligenceTitle() async throws {
+        let fixture = try PublicationFixture(metadata: .init(title: nil, titleOrigin: .unset))
         defer { fixture.remove() }
 
-        let outcome = try await fixture.publisher.publish(fixture.request)
+        let first = try await fixture.publisher.publish(fixture.request)
+        let next = fixture.request.replacing(
+            capturedTitle: fixture.metadata.title,
+            capturedTitleOrigin: fixture.metadata.titleOrigin,
+            content: .init(title: "Follow-up decision", summary: "Follow-up summary")
+        )
+        let second = try await fixture.publisher.publish(next)
 
-        XCTAssertTrue(outcome.titleWasApplied)
-        XCTAssertEqual(fixture.metadata.title, "Project decision")
+        XCTAssertTrue(first.titleWasApplied)
+        XCTAssertTrue(second.titleWasApplied)
+        XCTAssertEqual(fixture.metadata.title, "Follow-up decision")
+        XCTAssertEqual(fixture.metadata.titleOrigin, .meetingIntelligence)
     }
 
     func testManualTitleAndManualClearStoreSuggestionWithoutOverwriting() async throws {
@@ -167,28 +171,37 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertEqual(fixture.metadata.titleOrigin, .manual)
     }
 
-    func testTranscriptChangeAfterPromotionOrMetadataLoadDoesNotWriteTitle() async throws {
-        let afterPromotion = try PublicationFixture(metadata: .init())
-        defer { afterPromotion.remove() }
-        afterPromotion.artifactStore.onPromote = {
-            afterPromotion.reader.revision = .init(sha256: "sha256:new", byteCount: 1)
+    func testTranscriptChangeAtMetadataLoadBeforeCommitDoesNotPromoteArtifact() async throws {
+        let fixture = try PublicationFixture(metadata: .init())
+        defer { fixture.remove() }
+        fixture.metadataStore.beforeLoad = {
+            fixture.reader.revision = .init(sha256: "sha256:new", byteCount: 1)
         }
-        await assertPublicationError(.transcriptChanged) {
-            _ = try await afterPromotion.publisher.publish(afterPromotion.request)
-        }
-        XCTAssertEqual(afterPromotion.artifactStore.promotions, 1)
-        XCTAssertNil(afterPromotion.metadata.title)
 
-        let beforeMetadataWrite = try PublicationFixture(metadata: .init())
-        defer { beforeMetadataWrite.remove() }
-        beforeMetadataWrite.metadataStore.beforeLoad = {
-            beforeMetadataWrite.reader.revision = .init(sha256: "sha256:new", byteCount: 1)
-        }
         await assertPublicationError(.transcriptChanged) {
-            _ = try await beforeMetadataWrite.publisher.publish(beforeMetadataWrite.request)
+            _ = try await fixture.publisher.publish(fixture.request)
         }
-        XCTAssertEqual(beforeMetadataWrite.artifactStore.promotions, 1)
-        XCTAssertNil(beforeMetadataWrite.metadata.title)
+        XCTAssertEqual(fixture.artifactStore.promotions, 0)
+        XCTAssertNil(fixture.metadata.title)
+    }
+
+    func testMalformedSecureMetadataDoesNotPromoteArtifact() async throws {
+        let fixture = try SecureMetadataPublicationFixture(metadataData: Data("not json".utf8))
+        defer { fixture.remove() }
+
+        do {
+            _ = try await fixture.publisher.publish(fixture.request)
+            XCTFail("Expected secure metadata decoding failure")
+        } catch is DecodingError {
+            // The secure adapter deliberately preserves its JSON decoder category.
+        } catch {
+            XCTFail("Expected DecodingError, got \(error)")
+        }
+
+        XCTAssertEqual(fixture.artifactStore.promotions, 0)
+        XCTAssertEqual(fixture.artifactStore.cleanups, 1)
+        XCTAssertNil(fixture.artifactStore.stagedArtifact)
+        XCTAssertNil(fixture.artifactStore.visibleArtifact)
     }
 
     func testLeaseInvalidatedAfterCommitReservationCompletesPublication() async throws {
@@ -242,6 +255,50 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
 }
 
 private enum TestError: Error { case saveFailed }
+
+private extension MeetingIntelligencePublicationRequest {
+    func replacing(
+        capturedTitle: String?,
+        capturedTitleOrigin: RecordingTitleOrigin,
+        content: MeetingIntelligenceGeneratedContent
+    ) -> Self {
+        .init(session: session, sourceRevision: sourceRevision, capturedTitle: capturedTitle,
+              capturedTitleOrigin: capturedTitleOrigin, content: content, snapshot: snapshot,
+              intent: intent, generatedAt: generatedAt, lease: .init())
+    }
+}
+
+private final class SecureMetadataPublicationFixture: @unchecked Sendable {
+    let root: URL
+    let folder: URL
+    let reader: PublisherTranscriptReader
+    let artifactStore = PublisherArtifactStore()
+    let publisher: MeetingIntelligencePublisher
+    let request: MeetingIntelligencePublicationRequest
+
+    init(metadataData: Data) throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        folder = root.appendingPathComponent("secure-session", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let transcript = folder.appendingPathComponent("transcript.txt")
+        let data = Data("Transcript text".utf8)
+        try data.write(to: transcript)
+        try metadataData.write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+        let revision = TranscriptDocumentRevision(sha256: "sha256:expected", byteCount: data.count)
+        reader = PublisherTranscriptReader(url: transcript, data: data, revision: revision)
+        let session = RecordingSession(id: folder, folderURL: folder,
+                                       recordingURL: folder.appendingPathComponent("recording.m4a"),
+                                       createdAt: .distantPast, duration: 0, fileSize: 0, metadata: .init())
+        publisher = .init(mutationGate: .init(), transcriptReader: reader, artifactStore: artifactStore,
+                          metadataStore: RecordingSessionMetadataStoreAdapter())
+        request = .init(session: session, sourceRevision: revision, capturedTitle: nil, capturedTitleOrigin: .unset,
+                        content: .init(title: "Project decision", summary: "Decision summary"),
+                        snapshot: try .validated(profile: .validated(baseURLText: "http://127.0.0.1:8080", asrModel: "asr", llmModel: "llm", language: "en", prompt: ""), apiKey: nil),
+                        intent: .generate, generatedAt: .distantPast, lease: .init())
+    }
+
+    func remove() { try? FileManager.default.removeItem(at: root) }
+}
 
 private final class PublicationFixture: @unchecked Sendable {
     let root: URL

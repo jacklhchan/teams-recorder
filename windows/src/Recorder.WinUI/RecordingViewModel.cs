@@ -44,6 +44,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private readonly IRecorderAppSettingsStore appSettingsStore = new JsonRecorderAppSettingsStore();
     private readonly SemaphoreSlim appSettingsWriteGate = new(1, 1);
     private RecorderAppSettings? pendingAppSettings;
+    private bool restoreTeamsMuteSyncAfterInitialization;
+    private bool restoreTeamsAutomaticRecordingAfterInitialization;
     // AI provider settings are deliberately application-layer services. The view model
     // owns no persisted API key: the repository keeps it separately in per-user DPAPI.
     private OpenAICompatibleProviderRepository? openAiProviderRepository;
@@ -1045,6 +1047,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         try
         {
             pendingAppSettings = await appSettingsStore.LoadAsync();
+            restoreTeamsMuteSyncAfterInitialization = pendingAppSettings?.TeamsMuteSyncEnabled == true;
+            restoreTeamsAutomaticRecordingAfterInitialization = restoreTeamsMuteSyncAfterInitialization &&
+                pendingAppSettings?.TeamsAutomaticRecordingEnabled == true;
             if (!string.IsNullOrWhiteSpace(pendingAppSettings?.OutputFolder))
             {
                 // This occurs before the native lifecycle is constructed, so the restored
@@ -1058,6 +1063,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             // Its detailed content (including the user's local folder) is intentionally
             // not surfaced in the UI or diagnostic status.
             pendingAppSettings = null;
+            restoreTeamsMuteSyncAfterInitialization = false;
+            restoreTeamsAutomaticRecordingAfterInitialization = false;
             StatusText = "無法還原先前的應用程式設定；將使用安全預設值。";
         }
     }
@@ -1128,6 +1135,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         CaptureSource = SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
             ? RecorderPersistedCaptureSource.SelectedApplication
             : RecorderPersistedCaptureSource.SystemLoopback,
+        TeamsMuteSyncEnabled = IsTeamsMuteSyncEnabled,
+        TeamsAutomaticRecordingEnabled = IsTeamsAutomaticRecordingEnabled,
     };
 
     private void PersistAppSettingsInBackground()
@@ -1178,6 +1187,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             await RefreshEndpointsCoreAsync(announce: false);
             RefreshStorageReadiness();
             await RecoverAndRefreshLibraryAsync();
+            await RestoreTeamsIntegrationAsync();
             ApplySnapshot(recordingLifecycle.Snapshot);
         }
         catch (Exception exception)
@@ -1269,7 +1279,21 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         SetRecorderAvailable(false);
     }
 
-    private async Task EnableTeamsMuteSyncAsync()
+    private Task EnableTeamsMuteSyncAsync() => EnableTeamsMuteSyncAsync(restoreAutomaticRecording: false);
+
+    private async Task RestoreTeamsIntegrationAsync()
+    {
+        var restoreSync = restoreTeamsMuteSyncAfterInitialization;
+        var restoreAutomaticRecording = restoreTeamsAutomaticRecordingAfterInitialization;
+        restoreTeamsMuteSyncAfterInitialization = false;
+        restoreTeamsAutomaticRecordingAfterInitialization = false;
+        if (restoreSync)
+        {
+            await EnableTeamsMuteSyncAsync(restoreAutomaticRecording);
+        }
+    }
+
+    private async Task EnableTeamsMuteSyncAsync(bool restoreAutomaticRecording)
     {
         if (IsTeamsMuteSyncEnabled || isShuttingDown)
         {
@@ -1294,8 +1318,21 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             await teamsMuteSync.SetEnabledAsync(true);
             teamsMuteSnapshot = teamsMuteSync.Snapshot;
             IsTeamsMuteSyncEnabled = true;
+            if (restoreAutomaticRecording && teamsAutomaticRecorder is { } automatic)
+            {
+                await automatic.SetEnabledAsync(true);
+                teamsAutomaticSnapshot = automatic.Snapshot;
+                var meeting = teamsMuteSnapshot.LastMeetingState;
+                if (meeting is { } trustedMeeting && HasTrustedTeamsMeetingState)
+                {
+                    await automatic.SetMeetingPresenceAsync(trustedMeeting.IsInMeeting);
+                }
+                OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
+                OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            }
             OnPropertyChanged(nameof(TeamsMuteStatusText));
             OnPropertyChanged(nameof(TeamsMuteRoutingText));
+            PersistAppSettingsInBackground();
         }
         catch (Exception exception)
         {
@@ -1316,6 +1353,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         try
         {
             await DisposeTeamsMuteSyncAsync();
+            PersistAppSettingsInBackground();
         }
         catch (Exception exception)
         {
@@ -1376,6 +1414,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             teamsAutomaticSnapshot = automatic.Snapshot;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            PersistAppSettingsInBackground();
         }
         catch (Exception exception)
         {
@@ -1406,6 +1445,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             teamsAutomaticSnapshot = automatic.Snapshot;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            PersistAppSettingsInBackground();
         }
         catch (Exception exception)
         {

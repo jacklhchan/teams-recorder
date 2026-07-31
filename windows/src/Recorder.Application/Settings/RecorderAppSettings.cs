@@ -18,6 +18,9 @@ public sealed record RecorderAppSettings
     [JsonPropertyName("recordMicrophone")] public bool RecordMicrophone { get; init; } = true;
     [JsonPropertyName("microphoneEndpointId")] public string? MicrophoneEndpointId { get; init; }
     [JsonPropertyName("captureSource")] public RecorderPersistedCaptureSource CaptureSource { get; init; } = RecorderPersistedCaptureSource.SystemLoopback;
+    // These are local opt-ins only. Pairing material remains in the separate DPAPI store.
+    [JsonPropertyName("teamsMuteSyncEnabled")] public bool TeamsMuteSyncEnabled { get; init; }
+    [JsonPropertyName("teamsAutomaticRecordingEnabled")] public bool TeamsAutomaticRecordingEnabled { get; init; }
 
     public static RecorderAppSettings Validate(RecorderAppSettings value)
     {
@@ -33,6 +36,8 @@ public sealed record RecorderAppSettings
             OutputFolder = NormalizeFolder(value.OutputFolder),
             RenderEndpointId = NormalizeIdentifier(value.RenderEndpointId),
             MicrophoneEndpointId = value.RecordMicrophone ? NormalizeIdentifier(value.MicrophoneEndpointId) : null,
+            // Automatic recording has no meaning without its separately opted-in Teams connection.
+            TeamsAutomaticRecordingEnabled = value.TeamsMuteSyncEnabled && value.TeamsAutomaticRecordingEnabled,
         };
     }
 

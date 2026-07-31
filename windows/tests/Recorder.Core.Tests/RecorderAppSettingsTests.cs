@@ -15,6 +15,8 @@ internal static class RecorderAppSettingsTests
             RecordMicrophone = true,
             MicrophoneEndpointId = "mic-id",
             CaptureSource = RecorderPersistedCaptureSource.SelectedApplication,
+            TeamsMuteSyncEnabled = true,
+            TeamsAutomaticRecordingEnabled = true,
         }).GetAwaiter().GetResult();
 
         var loaded = store.LoadAsync().GetAwaiter().GetResult()
@@ -22,7 +24,8 @@ internal static class RecorderAppSettingsTests
         if (loaded.SchemaVersion != RecorderAppSettings.CurrentSchemaVersion ||
             loaded.OutputFolder != Path.GetFullPath(expectedFolder) ||
             loaded.RenderEndpointId != "render-id" || loaded.MicrophoneEndpointId != "mic-id" ||
-            loaded.CaptureSource != RecorderPersistedCaptureSource.SelectedApplication)
+            loaded.CaptureSource != RecorderPersistedCaptureSource.SelectedApplication ||
+            !loaded.TeamsMuteSyncEnabled || !loaded.TeamsAutomaticRecordingEnabled)
             throw new InvalidOperationException("Public app settings did not round trip.");
 
         var json = File.ReadAllText(path);
@@ -39,6 +42,22 @@ internal static class RecorderAppSettingsTests
         });
         if (noMicrophone.MicrophoneEndpointId is not null)
             throw new InvalidOperationException("Explicit no-microphone choice was not preserved.");
+
+        var automaticWithoutTeams = RecorderAppSettings.Validate(new RecorderAppSettings
+        {
+            TeamsMuteSyncEnabled = false,
+            TeamsAutomaticRecordingEnabled = true,
+        });
+        if (automaticWithoutTeams.TeamsAutomaticRecordingEnabled)
+            throw new InvalidOperationException("Automatic recording must require the Teams opt-in.");
+
+        using var root = new TestRoot();
+        var legacyPath = Path.Combine(root.Path, "legacy-app-settings.json");
+        File.WriteAllText(legacyPath, "{\"schemaVersion\":1,\"recordMicrophone\":true}");
+        var legacy = new JsonRecorderAppSettingsStore(legacyPath).LoadAsync().GetAwaiter().GetResult()
+            ?? throw new InvalidOperationException("Expected legacy settings.");
+        if (legacy.TeamsMuteSyncEnabled || legacy.TeamsAutomaticRecordingEnabled)
+            throw new InvalidOperationException("Legacy settings must default Teams opt-ins to disabled.");
 
         Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { SchemaVersion = 2 }));
         Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { RenderEndpointId = "unsafe\u0001id" }));

@@ -140,6 +140,21 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         XCTAssertTrue(transport.hasReleasedTaskAndSessionForTesting)
     }
 
+    func testModelDiscoveryRejectsActual307And308RedirectBeforeDestinationLoadsOrReceivesAuthorization() async {
+        for status in [307, 308] {
+            ControlledURLProtocol.reset()
+            let transport = URLSessionProviderHTTPTransport(configuration: controlledSessionConfiguration())
+            ControlledURLProtocol.install { instance in
+                instance.redirect(status: status, to: URL(string: "https://provider.test/models-redirected")!)
+            }
+            var request = URLRequest(url: URL(string: "https://provider.test/models")!)
+            request.httpMethod = "GET"
+            request.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+            await assertTransportError(transport, maximumBodyBytes: 32, equals: .redirectRejected, request: request)
+            XCTAssertEqual(ControlledURLProtocol.requests.count, 1)
+        }
+    }
+
     func testListsModelsWithOptionalBearerHeader() async throws {
         let transport = RecordingProviderTransport(
             response: .success(.init(
@@ -279,11 +294,12 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
     private func assertTransportError(
         _ transport: URLSessionProviderHTTPTransport,
         maximumBodyBytes: Int,
-        equals expected: ProviderHTTPTransportError
+        equals expected: ProviderHTTPTransportError,
+        request: URLRequest = URLRequest(url: URL(string: "https://provider.test/models")!)
     ) async {
         do {
             _ = try await transport.response(
-                for: URLRequest(url: URL(string: "https://provider.test/models")!),
+                for: request,
                 maximumBodyBytes: maximumBodyBytes
             )
             XCTFail("Expected transport failure")
@@ -317,7 +333,10 @@ private final class ControlledURLProtocol: URLProtocol, @unchecked Sendable {
     private static var started = false
     private static var stopped = 0
     private static var request: URLRequest?
+    private static var requestHistory: [URLRequest] = []
+    private static var generation = 0
     private var finished = false
+    private var instanceGeneration = 0
 
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.host == "provider.test"
@@ -327,14 +346,18 @@ private final class ControlledURLProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         Self.lock.withLock {
+            instanceGeneration = Self.generation
             Self.request = request
+            Self.requestHistory.append(request)
             Self.latest = self
         }
         Self.handler?(self)
     }
 
     override func stopLoading() {
-        Self.lock.withLock { Self.stopped += 1 }
+        Self.lock.withLock {
+            if instanceGeneration == Self.generation { Self.stopped += 1 }
+        }
     }
 
     func respond(
@@ -343,6 +366,15 @@ private final class ControlledURLProtocol: URLProtocol, @unchecked Sendable {
         body: Data?
     ) {
         respond(status: status, headers: headers, bodyChunks: body.map { [$0] })
+    }
+
+    func redirect(status: Int, to url: URL) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Location": url.absoluteString])!
+        var proposed = URLRequest(url: url)
+        proposed.httpMethod = request.httpMethod
+        proposed.httpBody = request.httpBody
+        proposed.allHTTPHeaderFields = request.allHTTPHeaderFields
+        client?.urlProtocol(self, wasRedirectedTo: proposed, redirectResponse: response)
     }
 
     func respond(
@@ -377,10 +409,13 @@ private final class ControlledURLProtocol: URLProtocol, @unchecked Sendable {
             started = false
             stopped = 0
             request = nil
+            requestHistory = []
+            generation += 1
         }
     }
 
     static var lastRequest: URLRequest? { lock.withLock { request } }
+    static var requests: [URLRequest] { lock.withLock { requestHistory } }
     static var stopLoadingCount: Int { lock.withLock { stopped } }
 
     static func markRequestStarted() {

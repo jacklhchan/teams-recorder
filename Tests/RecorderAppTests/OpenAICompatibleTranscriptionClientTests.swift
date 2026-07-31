@@ -171,6 +171,32 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         )
     }
 
+    func testRedirectPolicyAcceptsNormalizedJSONAndRejectsGETOrContentTypeChangesWithoutAuthorization() throws {
+        var source = URLRequest(url: try XCTUnwrap(URL(string: "https://api.example/v1/chat/completions")))
+        source.httpMethod = "POST"
+        source.httpBody = Data("{}".utf8)
+        source.setValue("Application/JSON; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        source.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        var proposed = source
+        proposed.url = try XCTUnwrap(URL(string: "https://api.example/v1/chat/redirected"))
+        proposed.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        proposed.setValue("Bearer leaked", forHTTPHeaderField: "Authorization")
+        XCTAssertEqual(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 308)?.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        proposed.httpMethod = "GET"
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 307))
+        proposed.httpMethod = "POST"
+        proposed.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 307))
+
+        let multipart = try uploadRequest(url: "https://api.example/v1/audio/transcriptions")
+        var changedBoundary = multipart
+        changedBoundary.url = try XCTUnwrap(URL(string: "https://api.example/v1/audio/redirected"))
+        changedBoundary.setValue("multipart/form-data; boundary=changed", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: multipart, proposed: changedBoundary, statusCode: 307))
+        changedBoundary.setValue("multipart/form-data; boundary=test-BOUNDARY", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: multipart, proposed: changedBoundary, statusCode: 307))
+    }
+
     func testMultipartBuilderCapsAudioAndIncludesTypedFields() throws {
         let builder = TranscriptionMultipartBuilder(
             maximumAudioBytes: 3,

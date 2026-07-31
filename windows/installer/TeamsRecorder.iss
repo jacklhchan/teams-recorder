@@ -42,6 +42,7 @@ RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+Name: "autostart"; Description: "Start Teams Recorder when I sign in to Windows"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -50,5 +51,36 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
+[Registry]
+; Deliberately use HKCU: this is a per-user installer and must neither require
+; elevation nor create startup entries for other Windows accounts.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Teams Recorder"; ValueData: """{app}\{#AppExeName}"""; Tasks: autostart; Flags: uninsdeletevalue
+
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+const
+  AutoStartKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  AutoStartValue = 'Teams Recorder';
+
+procedure RemoveAutoStart();
+begin
+  RegDeleteValue(HKCU, AutoStartKey, AutoStartValue);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  { An upgrade does not run the old uninstaller.  Remove a previously enabled
+    entry if the user clears the optional task during this installation. }
+  if (CurStep = ssPostInstall) and (not WizardIsTaskSelected('autostart')) then
+    RemoveAutoStart();
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  { Only our named HKCU Run value is removed; recordings and other user data
+    under LocalAppData remain untouched. }
+  if CurUninstallStep = usUninstall then
+    RemoveAutoStart();
+end;

@@ -247,6 +247,31 @@
                 </Border>
             </Grid>
 
+            <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="AI 逐字稿與摘要（OpenAI 相容 API）" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="明確同意後才會傳送資料"
+                             Message="ASR 只會在您選取一段已完成的錄音並按下「開始 ASR」後，才上傳該音訊。LLM 摘要只會在您另行按下「產生摘要」後，才上傳逐字稿文字；不會再次上傳音訊。" />
+                    <TextBlock Text="API 金鑰以目前 Windows 使用者的 DPAPI 加密儲存，並會以遮罩顯示；絕不寫入診斷報告、應用程式日誌或錄音工作階段。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <Grid ColumnSpacing="12" RowSpacing="8">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0" Header="API Base URL" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiApiBaseUrl, Mode=TwoWay}" />
+                        <PasswordBox x:Name="OpenAiApiKeyPasswordBox" Grid.Column="1" Header="API Key（已遮罩）" IsEnabled="{Binding IsOpenAiProviderAvailable}" PasswordChar="●" PlaceholderText="以目前 Windows 使用者的 DPAPI 加密儲存" />
+                        <TextBox Grid.Column="0" Header="ASR Model" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiAsrModel, Mode=TwoWay}" />
+                        <TextBox Grid.Column="1" Header="LLM Model" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiLlmModel, Mode=TwoWay}" />
+                        <TextBox Grid.Column="0" Header="語言（選填）" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiLanguage, Mode=TwoWay}" />
+                        <TextBox Grid.Column="1" Header="ASR 提示詞（選填）" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiPrompt, Mode=TwoWay}" />
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button IsEnabled="{Binding CanSaveOpenAiProvider}" Click="OnSaveOpenAiProviderSettingsClick" Content="儲存供應商設定" />
+                        <Button IsEnabled="{Binding CanSaveOpenAiProvider}" Click="OnClearOpenAiApiKeyClick" Content="移除 API Key" />
+                        <Button IsEnabled="{Binding CanStartOpenAiTranscription}" Click="OnStartOpenAiTranscriptionClick" Content="開始 ASR（上傳音訊）" />
+                        <Button IsEnabled="{Binding CanGenerateOpenAiSummary}" Click="OnGenerateOpenAiSummaryClick" Content="產生摘要（上傳逐字稿）" />
+                    </StackPanel>
+                    <TextBlock Text="{Binding OpenAiProviderIntegrationStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
             <Border x:Name="LibrarySection" Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                 <StackPanel Spacing="12">
                     <StackPanel Orientation="Horizontal" Spacing="10"><TextBlock Text="本機 M4A 資料庫" Style="{StaticResource SubtitleTextBlockStyle}" /><TextBlock Text="{Binding LibrarySummaryText}" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>

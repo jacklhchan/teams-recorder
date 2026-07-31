@@ -38,6 +38,17 @@ final class RecorderActionIDTests: XCTestCase {
         XCTAssertEqual(RecorderActionID.providerTest, "recorder.provider.test")
         XCTAssertEqual(RecorderActionID.providerRemoveKey, "recorder.provider.remove-key")
         XCTAssertEqual(RecorderActionID.providerStatus, "recorder.provider.status")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceCard, "recorder.meeting-intelligence.card")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceStatus, "recorder.meeting-intelligence.status")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceSummary, "recorder.meeting-intelligence.summary")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceGenerate, "recorder.meeting-intelligence.generate")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceRegenerate, "recorder.meeting-intelligence.regenerate")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceCancel, "recorder.meeting-intelligence.cancel")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceCheckAgain, "recorder.meeting-intelligence.check-again")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceRetryGeneration, "recorder.meeting-intelligence.retry-generation")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceSuggestedTitle, "recorder.meeting-intelligence.suggested-title")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceApplyTitle, "recorder.meeting-intelligence.apply-title")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceManualTitleProtection, "recorder.meeting-intelligence.manual-title-protection")
         XCTAssertEqual(Set(RecorderActionID.all).count, RecorderActionID.all.count)
     }
 }

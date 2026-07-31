@@ -25,6 +25,17 @@ enum RecorderActionID {
     static let providerTest = "recorder.provider.test"
     static let providerRemoveKey = "recorder.provider.remove-key"
     static let providerStatus = "recorder.provider.status"
+    static let meetingIntelligenceCard = "recorder.meeting-intelligence.card"
+    static let meetingIntelligenceStatus = "recorder.meeting-intelligence.status"
+    static let meetingIntelligenceSummary = "recorder.meeting-intelligence.summary"
+    static let meetingIntelligenceGenerate = "recorder.meeting-intelligence.generate"
+    static let meetingIntelligenceRegenerate = "recorder.meeting-intelligence.regenerate"
+    static let meetingIntelligenceCancel = "recorder.meeting-intelligence.cancel"
+    static let meetingIntelligenceCheckAgain = "recorder.meeting-intelligence.check-again"
+    static let meetingIntelligenceRetryGeneration = "recorder.meeting-intelligence.retry-generation"
+    static let meetingIntelligenceSuggestedTitle = "recorder.meeting-intelligence.suggested-title"
+    static let meetingIntelligenceApplyTitle = "recorder.meeting-intelligence.apply-title"
+    static let meetingIntelligenceManualTitleProtection = "recorder.meeting-intelligence.manual-title-protection"
 
     static let all = [
         startStop,
@@ -52,6 +63,17 @@ enum RecorderActionID {
         providerSave,
         providerTest,
         providerRemoveKey,
-        providerStatus
+        providerStatus,
+        meetingIntelligenceCard,
+        meetingIntelligenceStatus,
+        meetingIntelligenceSummary,
+        meetingIntelligenceGenerate,
+        meetingIntelligenceRegenerate,
+        meetingIntelligenceCancel,
+        meetingIntelligenceCheckAgain,
+        meetingIntelligenceRetryGeneration,
+        meetingIntelligenceSuggestedTitle,
+        meetingIntelligenceApplyTitle,
+        meetingIntelligenceManualTitleProtection
     ]
 }

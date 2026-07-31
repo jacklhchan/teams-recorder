@@ -35,6 +35,13 @@ struct RecordingsLibraryView: View {
             saveTranscript: model.saveTranscript,
             exportTranscript: model.exportTranscript,
             copyTranscript: model.copyTranscript,
+            meetingIntelligencePresentation: model.meetingIntelligencePresentation,
+            checkMeetingIntelligenceAvailability: model.checkMeetingIntelligenceAvailability,
+            generateMeetingIntelligence: model.generateMeetingIntelligence,
+            regenerateMeetingIntelligence: model.regenerateMeetingIntelligence,
+            retryMeetingIntelligenceGeneration: model.retryMeetingIntelligenceGeneration,
+            cancelMeetingIntelligence: model.cancelMeetingIntelligence,
+            applyMeetingIntelligenceSuggestedTitle: model.applyMeetingIntelligenceSuggestedTitle,
             saveMetadata: model.saveMetadata,
             moveToTrash: model.moveSessionToTrash
         )
@@ -102,6 +109,13 @@ private struct SessionListView: View {
     let saveTranscript: (String, RecordingSession) -> Void
     let exportTranscript: (RecordingSession) -> Void
     let copyTranscript: (RecordingSession) -> Void
+    let meetingIntelligencePresentation: (RecordingSession) -> MeetingIntelligencePresentation
+    let checkMeetingIntelligenceAvailability: (RecordingSession) -> Void
+    let generateMeetingIntelligence: (RecordingSession) -> Void
+    let regenerateMeetingIntelligence: (RecordingSession) -> Void
+    let retryMeetingIntelligenceGeneration: (RecordingSession) -> Void
+    let cancelMeetingIntelligence: (RecordingSession) -> Void
+    let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
     let saveMetadata: (String, String, Bool, RecordingSession) -> Void
     let moveToTrash: (RecordingSession) -> Void
 
@@ -241,7 +255,25 @@ private struct SessionListView: View {
             }
         }
         .sheet(item: $transcriptSession) { session in
-            TranscriptEditorView(session: session, load: { transcriptText(session) }, save: { saveTranscript($0, session) }, export: { exportTranscript(session) }, copy: { copyTranscript(session) })
+            TranscriptEditorView(
+                session: session,
+                load: { transcriptText(session) },
+                save: { saveTranscript($0, session) },
+                openFolder: { open(session) },
+                play: { play(session) },
+                export: { exportTranscript(session) },
+                copy: { copyTranscript(session) },
+                editDetails: { metadataSession = session },
+                meetingIntelligencePresentation: meetingIntelligencePresentation(session),
+                meetingIntelligenceActions: .init(
+                    generate: { generateMeetingIntelligence(session) },
+                    regenerate: { regenerateMeetingIntelligence(session) },
+                    checkAgain: { checkMeetingIntelligenceAvailability(session) },
+                    retryGeneration: { retryMeetingIntelligenceGeneration(session) },
+                    cancel: { cancelMeetingIntelligence(session) },
+                    applySuggestedTitle: { applyMeetingIntelligenceSuggestedTitle(session) }
+                )
+            )
         }
         .sheet(item: $metadataSession) { session in
             RecordingMetadataEditorView(session: session) { title, tags, favorite in
@@ -294,35 +326,146 @@ private struct SessionListView: View {
     }
 }
 
-private struct TranscriptEditorView: View {
+struct TranscriptEditorView: View {
     let session: RecordingSession
     let load: () -> String
     let save: (String) -> Void
+    let openFolder: () -> Void
+    /// Requests playback through the existing external presenter. This sheet
+    /// never creates an AVPlayerView or owns player lifetime.
+    let play: () -> Void
     let export: () -> Void
     let copy: () -> Void
+    let editDetails: () -> Void
+    let meetingIntelligencePresentation: MeetingIntelligencePresentation
+    let meetingIntelligenceActions: MeetingIntelligenceActions
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
 
+    init(
+        session: RecordingSession,
+        load: @escaping () -> String,
+        save: @escaping (String) -> Void,
+        openFolder: @escaping () -> Void = {},
+        play: @escaping () -> Void = {},
+        export: @escaping () -> Void,
+        copy: @escaping () -> Void,
+        editDetails: @escaping () -> Void = {},
+        meetingIntelligencePresentation: MeetingIntelligencePresentation = .empty,
+        meetingIntelligenceActions: MeetingIntelligenceActions = .init()
+    ) {
+        self.session = session
+        self.load = load
+        self.save = save
+        self.openFolder = openFolder
+        self.play = play
+        self.export = export
+        self.copy = copy
+        self.editDetails = editDetails
+        self.meetingIntelligencePresentation = meetingIntelligencePresentation
+        self.meetingIntelligenceActions = meetingIntelligenceActions
+    }
+
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text(session.displayName).font(.headline)
-                Spacer()
-                Button { copy() } label: { Image(systemName: "doc.on.doc") }.help("Copy transcript")
-                Button { export() } label: { Image(systemName: "square.and.arrow.up") }.help("Export transcript")
+        VStack(spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    playbackControls
+                    MeetingIntelligenceSectionView(
+                        presentation: meetingIntelligencePresentation,
+                        actions: meetingIntelligenceActions
+                    )
+                    transcriptEditor
+                    details
+                }
+                .padding(20)
             }
-            TextEditor(text: $text).font(.body).frame(minHeight: 360)
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Save") { save(text); dismiss() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier(RecorderActionID.saveTranscript)
-            }
+            Divider()
+            footer
         }
-        .padding(20)
-        .frame(minWidth: 660, minHeight: 480)
+        .frame(width: 860, height: 680)
         .onAppear { text = load() }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Button(action: dismiss.callAsFunction) {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            .help("Back")
+            Text(session.displayName)
+                .font(.headline)
+                .lineLimit(1)
+            Spacer()
+            Button(action: editDetails) {
+                Image(systemName: session.isFavorite ? "star.fill" : "star")
+            }
+            .buttonStyle(.borderless)
+            .help("Edit recording details")
+            Button(action: editDetails) { Image(systemName: "pencil") }
+                .buttonStyle(.borderless)
+                .help("Edit recording details")
+            Button("Open Folder", action: openFolder).buttonStyle(.bordered)
+            Button(action: copy) { Image(systemName: "doc.on.doc") }
+                .buttonStyle(.bordered)
+                .help("Copy transcript")
+            Button(action: export) { Image(systemName: "square.and.arrow.up") }
+                .buttonStyle(.bordered)
+                .help("Export transcript")
+        }
+        .padding(.horizontal, 20)
+        .frame(height: 52)
+    }
+
+    private var playbackControls: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "waveform")
+                .foregroundStyle(.tint)
+            Text("Recording playback")
+                .font(.callout.weight(.medium))
+            Spacer()
+            Button("Play in separate window", action: play)
+                .buttonStyle(.bordered)
+        }
+        .padding(12)
+        .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var transcriptEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Transcript").font(.headline)
+            TextEditor(text: $text)
+                .font(.body)
+                .frame(minHeight: 260)
+                .accessibilityIdentifier("recorder.transcript.editor")
+        }
+    }
+
+    private var details: some View {
+        HStack {
+            Label(session.durationText, systemImage: "clock")
+            Spacer()
+            Label(session.fileSizeText, systemImage: "internaldrive")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.vertical, 4)
+    }
+
+    private var footer: some View {
+        HStack {
+            Spacer()
+            Button("Cancel") { dismiss() }
+            Button("Save") { save(text); dismiss() }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier(RecorderActionID.saveTranscript)
+                .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.saveTranscript))
+        }
+        .padding(.horizontal, 20)
+        .frame(height: 60)
     }
 }
 

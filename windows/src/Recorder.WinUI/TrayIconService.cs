@@ -15,6 +15,7 @@ internal sealed class TrayIconService : IDisposable
     private const uint TrayCallbackMessage = WmApp + 41;
     private const uint WmLButtonUp = 0x0202;
     private const uint WmRButtonUp = 0x0205;
+    private const uint WmContextMenu = 0x007B;
     private const uint NifMessage = 0x00000001;
     private const uint NifIcon = 0x00000002;
     private const uint NifTip = 0x00000004;
@@ -87,14 +88,20 @@ internal sealed class TrayIconService : IDisposable
     {
         if (message == TrayCallbackMessage)
         {
-            var notification = unchecked((uint)lParam.ToInt64());
+            // NOTIFYICON_VERSION_4 packs the callback event in LOWORD(lParam)
+            // and the icon ID in HIWORD(lParam). Comparing the complete value
+            // made right-clicks from the notification area invisible whenever
+            // the shell supplied our non-zero icon ID.
+            var notification = unchecked((uint)lParam.ToInt64()) & 0xFFFFU;
             if (notification == WmLButtonUp)
             {
                 show();
                 return nint.Zero;
             }
 
-            if (notification == WmRButtonUp)
+            // Modern Windows normally sends WM_CONTEXTMENU for a tray-icon
+            // right click; accept WM_RBUTTONUP too for compatible shells.
+            if (notification is WmRButtonUp or WmContextMenu)
             {
                 ShowContextMenu();
                 return nint.Zero;

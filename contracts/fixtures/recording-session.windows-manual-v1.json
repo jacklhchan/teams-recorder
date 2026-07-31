@@ -7,5 +7,10 @@
   "screenIntervals": [],
   "recoveryState": "none",
   "source": "manual",
-  "participants": []
+  "participants": [],
+  "windowsCapture": {
+    "audioSource": "systemLoopback",
+    "includedProcessTree": false,
+    "endpointId": "default"
+  }
 }

@@ -18,15 +18,45 @@ var tests = new (string Name, Action Run)[]
     ("failed automatic start waits for meeting end", FailedStartWaitsForMeetingEnd),
     ("native recording coordinator starts, refreshes, and stops", NativeCoordinatorStartsRefreshesAndStops),
     ("native recording coordinator exposes copied endpoint snapshots", NativeCoordinatorExposesEndpointSnapshots),
+    ("endpoint refresh keeps explicit device choices without fallback", EndpointRefreshRetainsExplicitDeviceChoices),
     ("native recording coordinator reports a failed start and allows retry", NativeCoordinatorReportsFailedStartAndAllowsRetry),
     ("failed native stop faults the coordinator and blocks retries", NativeCoordinatorFaultsAfterFailedStop),
     ("an in-recording native fault requests one cleanup stop", NativeCoordinatorRequestsCleanupAfterInRecordingFault),
     ("native recording coordinator does not publish a late start after stop", NativeCoordinatorSuppressesLateStartAfterStop),
     ("test recording stops exactly once after its scheduled delay", TestRecordingStopsExactlyOnce)
+    ,("recording start request validates sources and optional microphone endpoints", RecordingStartRequestTests.ValidatesSystemAndSelectedProcessWithOptionalMicrophone)
+    ,("recording start request rejects ambiguous source selections", RecordingStartRequestTests.RejectsAmbiguousOrIncompatibleSelections)
+    ,("process capture selection requires its full current identity", RecordingStartRequestTests.SelectsProcessOnlyWhenItsFullIdentityIsCurrent)
+    ,("process capture rejects PID reuse", RecordingStartRequestTests.RejectsPidReuseRatherThanCapturingTheWrongProcess)
+    ,("process capture never falls back when selection is unavailable", RecordingStartRequestTests.DoesNotFallbackWhenSelectedProcessIsUnavailable)
+    ,("source selection maps system and microphone modes without fallback", RecordingStartRequestTests.MapsSystemAndMicrophoneWithoutInventingEndpoints)
+    ,("source selection preserves explicit system render endpoint", RecordingStartRequestTests.MapsSystemRenderEndpointThroughTheLegacyNativeRequest)
+    ,("process targets and metadata share one executable-basename policy", RecordingStartRequestTests.UsesOneExecutableBasenamePolicyForProcessTargetsAndMetadata)
+    ,("Teams capture defaults to recommended system loopback", CaptureSourceChoiceTests.DefaultsToRecommendedSystemLoopback)
+    ,("process-loopback is preview and never silently changes source", CaptureSourceChoiceTests.MarksProcessLoopbackAsPreviewAndNeverSilentlyFallsBack)
+    ,("Teams playback mismatch does not warn without an observation", TeamsPlaybackEndpointMismatchPolicyTests.DoesNotWarnWithoutAnIndependentTeamsObservation)
+    ,("Teams playback mismatch warns for Windows default", TeamsPlaybackEndpointMismatchPolicyTests.WarnsWhenTeamsDiffersFromTheWindowsDefault)
+    ,("Teams playback mismatch warns for an explicit endpoint", TeamsPlaybackEndpointMismatchPolicyTests.WarnsWhenTeamsDiffersFromAnExplicitSelection)
+    ,("Teams playback mismatch ignores matching and process audio", TeamsPlaybackEndpointMismatchPolicyTests.DoesNotWarnForMatchingOrProcessAudioRequests)
+    ,("Teams playback mismatch accepts any active Teams endpoint match", TeamsPlaybackEndpointMismatchPolicyTests.DoesNotWarnWhenAnyObservedTeamsEndpointMatches)
+    ,("initial microphone selection ignores Windows default roles", MicrophoneDefaultSelectionPolicyTests.DefaultsToNoMicrophoneDespiteWindowsDefaultRoles)
+    ,("initial microphone selection stays off when capture devices exist", MicrophoneDefaultSelectionPolicyTests.DefaultsToNoMicrophoneWhenCaptureDevicesAreAvailable)
+    ,("initial microphone selection excludes render endpoints", MicrophoneDefaultSelectionPolicyTests.NeverSelectsRenderEndpointsAsMicrophones)
+    ,("Teams picker excludes unrelated process windows", TeamsProcessCatalogPolicyTests.ExposesOnlyMicrosoftTeamsWithoutUsingWindowTitles)
+    ,("Windows capture metadata round trips its approved envelope", MetadataPrivacyTests.WindowsCaptureMetadataRoundTripsTheApprovedEnvelope)
+    ,("Windows capture metadata removes transient process identifiers", MetadataPrivacyTests.MetadataPrivacyDropsTransientProcessIdentifiers)
+    ,("Windows executable basenames retain ordinary spaces and Unicode provenance", MetadataPrivacyTests.ExecutableBasenamesSupportOrdinarySpacesAndUnicodeWithoutDroppingProvenance)
     ,("mixed recording request validates its audio-only contract", AudioMvpTests.MixedRequestValidatesAudioOnlyContract)
     ,("mixed recording coordinator starts, stops, and retries", AudioMvpTests.MixedCoordinatorStartsStopsAndRetries)
     ,("mixed test recording stops after its scheduled delay", AudioMvpTests.MixedTestRecordingStopsAfterScheduledDelay)
     ,("recoverable mixed fault retains evidence and permits restart", AudioMvpTests.RecoverableFaultRetainsEvidenceAndAllowsRestart)
+    ,("selected-audio test cancellation does not fall back or double-stop", AudioMvpTests.SelectedAudioTestCancelsWithoutFallbackOrDoubleStop)
+    ,("selected-audio request rejects fallback-shaped options", AudioMvpTests.SelectedAudioRequestRejectsFallbackShapedOptions)
+    ,("selected-audio test auto-stop publishes exactly once", SelectedAudioLifecycleTests.TestAutoStopPublishesExactlyOnce)
+    ,("selected process disappearance fails closed and cleans empty state", SelectedAudioLifecycleTests.ProcessDisappearanceFailsClosedAndCleansOnlyEmptyFolder)
+    ,("selected-audio fault retains recoverable backup", SelectedAudioLifecycleTests.RecoverableSelectedFaultKeepsAccumulatedBackup)
+    ,("selected-audio fault cleanup permits a new recording and invalidates old generation", SelectedAudioLifecycleTests.FaultFinalizationAllowsRestartAndInvalidatesOldGeneration)
+    ,("selected-audio relaunch recovery retains bounded capture provenance", SelectedAudioLifecycleTests.RelaunchRecoveryRetainsSelectedCaptureProvenance)
     ,("session capacity respects block and warning boundaries", SessionStorageTests.CapacityBoundariesAreExact)
     ,("session allocation and publishing do not overwrite media", SessionStorageTests.AllocationAndPublishDoNotOverwrite)
     ,("session library ignores unsafe and incomplete entries", SessionStorageTests.LibraryIgnoresUnsafeIncompleteAndMalformedEntries)
@@ -45,21 +75,30 @@ var tests = new (string Name, Action Run)[]
     ,("metadata publication failures retain retryable media", SessionStorageTests.MetadataFailuresRetainRetryableMedia)
     ,("recording library startup recovery and metadata edits round trip", RecordingLibraryServiceTests.StartupRecoveryRefreshesLibraryAndMetadataEditsRoundTrip)
     ,("recording library requires recycle confirmation and preserves failed-start evidence", RecordingLibraryServiceTests.RecycleRequiresConfirmationAndFailedStartCleanupPreservesEvidence)
+    ,("recording library lists legacy root M4A files as playback-only", RecordingLibraryServiceTests.LegacyRootM4aFilesRemainDiscoverableAndPlaybackOnly)
     ,("video capture is gated until a frame pipeline is verified", VideoCaptureTests.FeatureGateFailsClosedUntilFramePipelineExists)
     ,("video capture target selection requires the same live window", VideoCaptureTests.TargetSelectionRequiresTheSameLiveWindow)
-    ,("Teams protocol uses a local endpoint and pairing only", TeamsIntegrationTests.ProtocolUsesLocalEndpointAndPairingOnly)
+    ,("Teams protocol uses a local endpoint with pairing only", TeamsIntegrationTests.ProtocolUsesLocalEndpointAndPairingOnly)
     ,("Teams protocol rejects partial meeting state", TeamsIntegrationTests.ProtocolDecodesCompleteMeetingStateOnly)
     ,("Teams mute sync routes supported updates and fails closed", TeamsIntegrationTests.MuteCoordinatorUsesAbsoluteStateAndFailsClosed)
     ,("Teams mute sync ignores out-of-meeting mute state", TeamsIntegrationTests.MuteCoordinatorDoesNotChangeMicForOutOfMeetingState)
     ,("Teams mute sync rejects unauthenticated meeting state", TeamsIntegrationTests.MuteCoordinatorRejectsUnauthenticatedMeetingState)
+    ,("Teams issued credential remains valid when pairing is available", TeamsIntegrationTests.MuteCoordinatorKeepsIssuedCredentialWhenTeamsOffersPairing)
     ,("Teams mute sync fails closed on API errors", TeamsIntegrationTests.MuteCoordinatorFailsClosedOnApiError)
-    ,("Teams WebSocket client reconnects after pairing token refresh", TeamsTransportTests.ClientReconnectsWithTokenRefreshBeforeSendingPairing)
+    ,("Teams WebSocket client promotes pairing token without losing state", TeamsTransportTests.ClientPromotesTokenRefreshWithoutDroppingConnection)
+    ,("Teams WebSocket client correlates overlapping state-query replies", TeamsTransportTests.ClientCorrelatesOverlappingStateQueryReplies)
     ,("Teams WebSocket client delivers authenticated push updates", TeamsTransportTests.ClientDeliversAuthenticatedPushUpdates)
+    ,("Teams state-query rejection preserves later meeting pushes", TeamsTransportTests.StateQueryFailureDoesNotBlockLaterMeetingPush)
     ,("Teams WebSocket client fails closed after a remote close", TeamsTransportTests.ClientFailsClosedWhenRemoteSocketClosesDuringMeeting)
     ,("Teams WebSocket client drops events after stop", TeamsTransportTests.ClientDropsLateEventsAfterStop)
     ,("Teams WebSocket client bounds fragmented payloads", TeamsTransportTests.ClientClosesAndReconnectsAfterOversizedFragmentedPayload)
     ,("Teams WebSocket client clears an invalid pairing token", TeamsTransportTests.ClientClearsAnInvalidPairingTokenBeforeReconnecting)
+    ,("Teams WebSocket client requests fresh pairing once", TeamsTransportTests.ClientRequestsPairingOnceForAnUncredentialedConnection)
     ,("Teams pairing requires an enabled, connected client", TeamsIntegrationTests.MuteCoordinatorOnlyReportsPairingAfterEnabledClientAcceptsIt)
+    ,("Teams pairing only accepts already-paired after an explicit pair command", TeamsIntegrationTests.MuteCoordinatorOnlyTreatsAlreadyPairedAsAReplyToAnExplicitPairCommand)
+    ,("live health is neutral before capture and healthy with signals", LiveAudioHealthAdvisorTests.ReportsNeutralBeforeCaptureAndHealthySignalsDuringCapture)
+    ,("live health distinguishes silence, disconnect, and microphone mute", LiveAudioHealthAdvisorTests.WarnsOnSilentOrDisconnectedInputsButKeepsMutedMicNeutral)
+    ,("live health reports a recovered signal after historical interruptions", LiveAudioHealthAdvisorTests.ReportsRecoveryAfterHistoricalInterruptionsWhenSignalsAreLive)
     ,("Windows global hotkey routes messages and unregisters once", WindowsGlobalHotKeyRegistrarTests.RoutesCtrlAltMAndUnregistersExactlyOnce)
     ,("Windows global hotkey reports unavailable registrations", WindowsGlobalHotKeyRegistrarTests.FailsWithWin32ErrorWhenCtrlAltMIsUnavailable)
     ,("input mute only publishes effective transitions", InputMuteTests.IndependentMuteCausesOnlyPublishEffectiveTransitions)
@@ -72,6 +111,37 @@ var tests = new (string Name, Action Run)[]
     ,("Teams automatic recorder cleans up a late start", TeamsAutomaticRecordingControllerTests.CancelsLateAutomaticStartAndStopsLateCapture)
     ,("Teams automatic recorder permits snapshot reentry", TeamsAutomaticRecordingControllerTests.SnapshotHandlerCanSynchronouslyReenterWithoutDeadlock)
     ,("Teams automatic recorder safely disposes late work", TeamsAutomaticRecordingControllerTests.DisposeDoesNotWaitForAnUncooperativeStartAndStillStopsItLater)
+    ,("Teams automatic recorder retries a blocked start only after meeting re-entry", TeamsAutomaticRecordingControllerTests.BlockedStartWaitsForMeetingEndBeforeRetrying)
+    ,("Teams automatic recorder publishes each countdown snapshot", TeamsAutomaticRecordingControllerTests.PublishesEachCountdownSnapshot)
+    ,("Teams automatic recorder suppresses a cancelled countdown until meeting end", TeamsAutomaticRecordingControllerTests.UserCancellationSuppressesUntilMeetingEndsThenAllowsReentry)
+    ,("Teams automatic recorder does not restart after a manual stop in the same meeting", TeamsAutomaticRecordingControllerTests.ManualStopDuringAutomaticRecordingDoesNotRestartUntilMeetingReentry)
+    ,("local diagnostic export is sanitized and includes capture choices", LocalDiagnosticLogTests.ExportsBoundedSanitizedCaptureDiagnostics)
+    ,("local diagnostic export remains bounded", LocalDiagnosticLogTests.BoundsItsInMemoryExport)
+    ,("public app choices survive restart without credentials", RecorderAppSettingsTests.RoundTripsPublicChoicesWithoutSecrets)
+    ,("app settings preserve no-microphone and reject unsafe future data", RecorderAppSettingsTests.PreservesNoMicrophoneAndRejectsUnsafeFutureSettings)
+    ,("OpenAI-compatible meeting summary sends consented JSON safely", OpenAiCompatibleMeetingSummaryClientTests.SendsOpenAiCompatibleJsonOnlyAfterConsent)
+    ,("OpenAI-compatible meeting summary rejects unsafe requests before network", OpenAiCompatibleMeetingSummaryClientTests.RejectsConsentOversizeAndUnsafeProfileBeforeNetwork)
+    ,("OpenAI-compatible meeting summary retries and bounds provider responses", OpenAiCompatibleMeetingSummaryClientTests.RetriesTransientFailureAndBoundsResponse)
+    ,("OpenAI-compatible provider defaults and normalizes its profile", OpenAICompatibleProviderTests.DefaultsMatchOpenAiAndNormalizeVersionedBaseUrl)
+    ,("OpenAI-compatible provider rejects unsafe URLs and future schemas", OpenAICompatibleProviderTests.ProfileRejectsInsecureOrSensitiveUrlsAndFutureSchema)
+    ,("OpenAI-compatible provider keeps API key out of profile JSON", OpenAICompatibleProviderTests.RepositoryKeepsKeyOutOfProfileJsonAndSnapshotsItSeparately)
+    ,("OpenAI-compatible provider discovers models with a request-scoped key", OpenAICompatibleProviderConnectionTests.DiscoversModelsAndKeepsAuthenticationRequestScoped)
+    ,("OpenAI-compatible provider allows manual models and rejects unsafe failures", OpenAICompatibleProviderConnectionTests.AcceptsManualModelProvidersAndRejectsUnsafeFailures)
+    ,("transcription artifacts publish atomically with bounded prior copies", TranscriptionArtifactTests.PublishesAtomicallyWithBoundedPreviousArtifacts)
+    ,("transcription startup recovery marks in-progress work interrupted", TranscriptionArtifactTests.StartupRecoveryMarksOnlyInProgressStateInterrupted)
+    ,("transcription publisher rejects foreign artifact folders", TranscriptionArtifactTests.RefusesForeignOrReparseArtifactLocation)
+    ,("meeting summary publishes only owned consented transcripts safely", MeetingSummaryArtifactTests.CoordinatorReadsOnlyOwnedTranscriptAndPublishesBoundedArtifacts)
+    ,("meeting summary requires consent and owned session folders", MeetingSummaryArtifactTests.CoordinatorRequiresConsentAndRefusesForeignSessions)
+    ,("meeting summary retains redacted failure state", MeetingSummaryArtifactTests.CoordinatorKeepsSafeFailureState)
+    ,("OpenAI-compatible ASR uses the multipart contract and bearer key", OpenAICompatibleAsrClientTests.UsesOpenAiMultipartContractAndBearerKey)
+    ,("OpenAI-compatible ASR falls back to JSON when verbose JSON is rejected", OpenAICompatibleAsrClientTests.FallsBackToJsonOnlyForUnsupportedVerboseJson)
+    ,("OpenAI-compatible ASR retries transient responses", OpenAICompatibleAsrClientTests.RetriesTransientResponsesWithRetryAfter)
+    ,("OpenAI-compatible ASR bounds data and honors cancellation", OpenAICompatibleAsrClientTests.BoundsAudioAndResponseAndHonorsCancellation)
+    ,("OpenAI-compatible ASR rejects bad authentication and responses", OpenAICompatibleAsrClientTests.DoesNotRetryAuthenticationOrAcceptInvalidPayload)
+    ,("OpenAI-compatible ASR uses the shared provider snapshot", OpenAICompatibleAsrClientTests.UsesTheSharedProviderSnapshotWithoutPersistingItsKey)
+    ,("post-recording ASR requires opt-in and publishes a completed M4A transcript", RecordingSessionAsrJobCoordinatorTests.TranscribesOnlyAnExplicitCompletedSessionAndPublishesArtifacts)
+    ,("post-recording ASR rejects partial, foreign, and oversized media before upload", RecordingSessionAsrJobCoordinatorTests.RejectsPartialForeignAndOversizedMediaWithoutUploading)
+    ,("post-recording ASR serializes jobs and retains terminal cancellation or failure", RecordingSessionAsrJobCoordinatorTests.EnforcesOneJobAndRecordsCancellationOrProviderFailure)
 };
 
 var failed = 0;
@@ -285,6 +355,32 @@ static void NativeCoordinatorExposesEndpointSnapshots()
     }
     Equal(1, endpoints.Endpoints.Count);
     Equal(expectedEndpoint, endpoints.Endpoints[0]);
+}
+
+static void EndpointRefreshRetainsExplicitDeviceChoices()
+{
+    var available = new[]
+    {
+        new NativeCaptureEndpoint(
+            CaptureEndpointFlow.Render,
+            EndpointDefaultRole.Console,
+            "render-speakers",
+            "Speakers"),
+    };
+
+    var retained = EndpointRefreshSelection.Retain("render-speakers", available);
+    Equal("render-speakers", retained.EndpointId!);
+    Equal(true, retained.IsAvailable);
+
+    var disconnected = EndpointRefreshSelection.Retain("render-headset", available);
+    Equal("render-headset", disconnected.EndpointId!);
+    Equal(false, disconnected.IsAvailable);
+
+    var intentionalDefault = EndpointRefreshSelection.Retain(null, available);
+    if (intentionalDefault.EndpointId is not null || !intentionalDefault.IsAvailable)
+    {
+        throw new InvalidOperationException("Refreshing endpoints must not replace an intentional default choice.");
+    }
 }
 
 static void NativeCoordinatorReportsFailedStartAndAllowsRetry()

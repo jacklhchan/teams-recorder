@@ -96,14 +96,50 @@ void DriftLateAndFaultCountersAreBounded() {
                counters.source_disconnects == 1,
            "source counters incomplete");
 }
+
+void SourceWatermarksRequireBothInputsBeforeMixCommit() {
+    CanonicalTimeline timeline;
+    (void)timeline.Place(Source::Render, 0, 0, 48'000, 480, false);
+    (void)timeline.Place(Source::Microphone, 0, 0, 48'000, 480, false);
+    (void)timeline.Place(Source::Render, 100'000, 480, 48'000, 480, false);
+    Expect(timeline.end_frame(Source::Render) == 960,
+           "render watermark did not reach one mixer block");
+    Expect(timeline.end_frame(Source::Microphone) == 480,
+           "microphone watermark unexpectedly advanced");
+    // A 20 ms mixer block cannot yet be committed: doing so would silently
+    // discard the microphone's second 10 ms packet if its callback arrives
+    // just after the render callback.
+    Expect(timeline.end_frame(Source::Microphone) < 960,
+           "late microphone packet would be lost by an early mixer commit");
+    (void)timeline.Place(Source::Microphone, 100'000, 480, 48'000, 480, false);
+    Expect(timeline.end_frame(Source::Microphone) == 960,
+           "microphone watermark did not complete the mixer block");
+}
+
+void SelectedProcessUsesCanonicalGapsAndCounters() {
+    CanonicalTimeline timeline;
+    (void)timeline.Place(Source::Process, 0, 0, 48'000, 960, false);
+    const auto resumed = timeline.Place(Source::Process, 600'000, 2'880, 48'000, 960, true);
+    Expect(resumed.frame == 2'880 && resumed.silence_before_frames == 1'920,
+           "selected-process gap was compressed");
+    const auto late = timeline.Place(Source::Process, 100'000, 480, 48'000, 960, false);
+    Expect(late.late_frames_dropped > 0, "selected-process late packet not dropped");
+    timeline.MarkQueueOverflow(Source::Process);
+    timeline.MarkDisconnected(Source::Process);
+    const auto& counters = timeline.counters(Source::Process);
+    Expect(counters.discontinuities == 1 && counters.late_packets == 1 &&
+               counters.queue_overflows == 1 && counters.source_disconnects == 1,
+           "selected-process counters incomplete");
+}
 }  // namespace
 
 int main() {
-    const std::array<void (*)(), 8> tests = {LongDurationHasNoTimelineCompression,
+    const std::array<void (*)(), 10> tests = {LongDurationHasNoTimelineCompression,
         SilenceGapsArePreserved, ExplicitSessionOriginPreservesInitialSilence,
         SessionClockAdvancesAcrossPacketlessSilence, MicrophoneMuteGapMapsToSilence,
         LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
-        DriftLateAndFaultCountersAreBounded};
+        SourceWatermarksRequireBothInputsBeforeMixCommit, DriftLateAndFaultCountersAreBounded,
+        SelectedProcessUsesCanonicalGapsAndCounters};
     try { for (const auto test : tests) test(); }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
     std::cout << "PASS canonical timeline\n";

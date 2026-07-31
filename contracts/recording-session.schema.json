@@ -87,6 +87,87 @@
         "recoveredAfterInterruption"
       ]
     },
+    "windowsCapture": {
+      "type": "object",
+      "properties": {
+        "audioSource": {
+          "enum": [
+            "systemLoopback",
+            "selectedProcessLoopback"
+          ]
+        },
+        "processName": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 128,
+          "pattern": "^[^<>:\"/\\\\|?*\\u0000-\\u001F]+\\.[eE][xX][eE]$",
+          "not": {
+            "pattern": "^[.]?[eE][xX][eE]$"
+          }
+        },
+        "includedProcessTree": {
+          "type": "boolean"
+        },
+        "endpointId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "audioSource": {
+                "const": "selectedProcessLoopback"
+              }
+            },
+            "required": [
+              "audioSource"
+            ]
+          },
+          "then": {
+            "required": [
+              "processName",
+              "includedProcessTree"
+            ],
+            "properties": {
+              "includedProcessTree": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "audioSource": {
+                "const": "systemLoopback"
+              }
+            },
+            "required": [
+              "audioSource"
+            ]
+          },
+          "then": {
+            "required": [
+              "includedProcessTree"
+            ],
+            "properties": {
+              "includedProcessTree": {
+                "const": false
+              }
+            },
+            "not": {
+              "required": [
+                "processName"
+              ]
+            }
+          }
+        }
+      ]
+    },
     "source": {
       "enum": [
         "manual",

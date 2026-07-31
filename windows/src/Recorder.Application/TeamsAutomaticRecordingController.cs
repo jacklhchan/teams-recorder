@@ -60,6 +60,13 @@ public sealed class TeamsAutomaticRecordingController : IAsyncDisposable
     public Task NotifyManualRecordingStoppedAsync(CancellationToken cancellationToken = default) =>
         DispatchAsync(new TeamsAutoMeetingEvent.ManualRecordingStopped(), cancellationToken);
 
+    /// <summary>
+    /// Cancels only the pending automatic start for the current meeting. The opt-in setting
+    /// remains enabled; automation becomes eligible again after Teams reports meeting end.
+    /// </summary>
+    public Task CancelStartCountdownAsync(CancellationToken cancellationToken = default) =>
+        DispatchAsync(new TeamsAutoMeetingEvent.StartCountdownCancelled(), cancellationToken);
+
     public Task SuppressUntilMeetingEndsAsync(CancellationToken cancellationToken = default) =>
         DispatchAsync(new TeamsAutoMeetingEvent.SuppressUntilMeetingEnd(), cancellationToken);
 

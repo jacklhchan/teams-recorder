@@ -26,7 +26,19 @@ public sealed class SystemClock : IClock { public DateTimeOffset UtcNow => DateT
 public sealed class FileSystemCollisionProvider : ISessionPathCollisionProvider { public bool DirectoryExists(string path) => Directory.Exists(path); }
 
 public sealed record RecordingSessionPlan(RecordingSessionKind Kind, string FolderPath, string FinalAudioPath, string BackupAudioPath, string MetadataPath, StorageCapacityStatus Capacity);
-public sealed record RecordingSessionLibraryItem(RecordingSessionKind Kind, string FolderPath, string AudioPath, long AudioBytes, RecordingInfo Metadata, bool HasRecoverableBackup);
+/// <summary>
+/// A discoverable recording. <see cref="IsManaged"/> is false for pre-session-layout
+/// M4A files found directly in the selected root; they are deliberately playback-only
+/// so a library refresh never grants metadata-edit or recycle authority over them.
+/// </summary>
+public sealed record RecordingSessionLibraryItem(
+    RecordingSessionKind Kind,
+    string FolderPath,
+    string AudioPath,
+    long AudioBytes,
+    RecordingInfo Metadata,
+    bool HasRecoverableBackup,
+    bool IsManaged = true);
 
 /// <summary>Owns only the app's session-library filesystem layout; capture code can use the returned paths directly.</summary>
 public sealed class SessionStorageService
@@ -86,6 +98,37 @@ public sealed class SessionStorageService
 
     public async Task PublishCompletedMediaAsync(RecordingSessionPlan plan, string? title = null, CancellationToken cancellationToken = default)
     {
+        await PublishCompletedMediaAsync(plan, title, windowsCapture: null, cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes the bounded session intent before native ingress starts. This is
+    /// deliberately durable so startup recovery can retain selected-app
+    /// provenance after a source exits or capture faults.
+    /// </summary>
+    public Task WriteProvisionalMetadataAsync(
+        RecordingSessionPlan plan,
+        WindowsCaptureMetadata? windowsCapture,
+        CancellationToken cancellationToken = default)
+    {
+        EnsurePlan(plan);
+        var info = RecordingInfoJson.WithWindowsCapture(
+            RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, plan.Kind),
+            windowsCapture);
+        return WriteMetadataAsync(plan.MetadataPath, info, cancellationToken);
+    }
+
+    /// <summary>
+    /// Finalizes a recording and stores only the privacy-bounded Windows
+    /// capture description. The native request's PID and output path are
+    /// intentionally not accepted here and therefore cannot reach metadata.
+    /// </summary>
+    public async Task PublishCompletedMediaAsync(
+        RecordingSessionPlan plan,
+        string? title,
+        WindowsCaptureMetadata? windowsCapture,
+        CancellationToken cancellationToken = default)
+    {
         EnsurePlan(plan);
         if (!File.Exists(plan.BackupAudioPath)) throw new FileNotFoundException("The recording work file does not exist.", plan.BackupAudioPath);
         if (new FileInfo(plan.BackupAudioPath).Length <= 0) throw new IOException("The recording work file is empty.");
@@ -93,7 +136,12 @@ public sealed class SessionStorageService
         // Publish the metadata first. If it cannot be atomically written, the
         // backup remains in place for startup recovery instead of creating a
         // final media file that recovery would previously skip forever.
-        var info = RecordingInfoJson.CreateAudioOnly(null, title, RecordingRecoveryState.None, plan.Kind);
+        var existing = IsSafeFile(plan.MetadataPath)
+            ? ReadMetadata(plan.MetadataPath)
+            : RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, plan.Kind);
+        var info = RecordingInfoJson.WithWindowsCapture(
+            RecordingInfoJson.CreateAudioOnly(existing.Document, title, RecordingRecoveryState.None, plan.Kind),
+            windowsCapture ?? existing.WindowsCapture);
         await WriteMetadataAsync(plan.MetadataPath, info, cancellationToken).ConfigureAwait(false);
         File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
     }
@@ -116,6 +164,34 @@ public sealed class SessionStorageService
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>
+    /// A failed start may remove only its own known provisional metadata and
+    /// then only an otherwise empty owned folder. Media, partial media,
+    /// diagnostics, and unknown files are always retained as evidence.
+    /// </summary>
+    public bool CleanupFailedProvisionalStart(RecordingSessionPlan plan)
+    {
+        EnsurePlan(plan);
+        if (!Directory.Exists(plan.FolderPath) || IsReparsePoint(plan.FolderPath)) return false;
+
+        try
+        {
+            var entries = Directory.EnumerateFileSystemEntries(plan.FolderPath).ToArray();
+            if (entries.Length == 1 && PathEquals(entries[0], plan.MetadataPath) && IsSafeFile(plan.MetadataPath))
+            {
+                File.Delete(plan.MetadataPath);
+            }
+            else if (entries.Length != 0)
+            {
+                return false;
+            }
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+
+        return CleanupEmptyOwnedSession(plan);
     }
 
     /// <summary>
@@ -212,10 +288,30 @@ public sealed class SessionStorageService
                 var backup = Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName);
                 result.Add(new(kind, folder, final, new FileInfo(final).Length, metadata, IsSafeFile(backup) && new FileInfo(backup).Length > 0));
             }
+
+            // Early Windows builds wrote M4A files directly beneath the chosen
+            // output folder, before each recording had a managed session folder.
+            // Keep those recordings visible and playable after upgrade, but do
+            // not treat them as managed folders: metadata edits and recycle are
+            // intentionally restricted to the current owned-session layout.
+            foreach (var audio in Directory.EnumerateFiles(rootPath, "*.m4a", System.IO.SearchOption.TopDirectoryOnly))
+            {
+                if (!IsSafeFile(audio)) continue;
+                result.Add(new(
+                    RecordingSessionKind.Manual,
+                    rootPath,
+                    audio,
+                    new FileInfo(audio).Length,
+                    RecordingInfo.AudioOnly(Path.GetFileNameWithoutExtension(audio)),
+                    HasRecoverableBackup: false,
+                    IsManaged: false));
+            }
         }
         catch (IOException) { return Array.Empty<RecordingSessionLibraryItem>(); }
         catch (UnauthorizedAccessException) { return Array.Empty<RecordingSessionLibraryItem>(); }
-        return result.OrderByDescending(x => x.FolderPath, StringComparer.Ordinal).ToArray();
+        return result.OrderByDescending(x => File.GetLastWriteTimeUtc(x.AudioPath))
+            .ThenByDescending(x => x.AudioPath, StringComparer.Ordinal)
+            .ToArray();
     }
 
     internal RecordingInfo ReadMetadata(string metadataPath)

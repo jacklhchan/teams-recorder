@@ -6,6 +6,18 @@ public enum RecordingCaptureMode
     Microphone = 1,
     ProcessLoopback = 2,
     Mixed = 3,
+    SelectedAppMixed = 4,
+}
+
+/// <summary>
+/// The root timeline source for the additive selected-audio C ABI.  A process
+/// request always means the selected root PID plus its complete process tree;
+/// it never degrades into an all-system loopback request.
+/// </summary>
+public enum NativeSelectedAudioSource : uint
+{
+    SystemLoopback = 0,
+    ProcessTreeLoopback = 1,
 }
 
 public enum NativeRecorderState
@@ -62,7 +74,8 @@ public sealed record NativeRecordingRequest(
 {
     public void Validate()
     {
-        if (!Enum.IsDefined(Mode) || Mode == RecordingCaptureMode.Mixed)
+        if (!Enum.IsDefined(Mode) ||
+            Mode is RecordingCaptureMode.Mixed or RecordingCaptureMode.SelectedAppMixed)
         {
             throw new ArgumentOutOfRangeException(nameof(Mode), "The capture mode is not supported.");
         }
@@ -174,6 +187,84 @@ public sealed record NativeMixedRecordingRequest(
     }
 }
 
+/// <summary>
+/// M4A request for the selected-audio C ABI.  This is deliberately separate
+/// from <see cref="NativeRecordingRequest"/> so legacy WAV/process entry
+/// points cannot accidentally be used for the selected-app product path.
+/// </summary>
+public sealed record NativeSelectedAudioRequest(
+    NativeSelectedAudioSource AudioSource,
+    string OutputPath,
+    string? RenderEndpointId = null,
+    string? MicrophoneEndpointId = null,
+    uint TargetProcessId = 0,
+    bool IncludedProcessTree = false,
+    ulong ExpectedProcessCreationTime100Nanoseconds = 0,
+    uint AacBitRate = 128_000) : INativeRecordingRequest
+{
+    public RecordingCaptureMode Mode => RecordingCaptureMode.SelectedAppMixed;
+
+    public bool IncludesMicrophone => !string.IsNullOrEmpty(MicrophoneEndpointId);
+
+    public void Validate()
+    {
+        if (!Enum.IsDefined(AudioSource))
+        {
+            throw new ArgumentOutOfRangeException(nameof(AudioSource));
+        }
+
+        if (string.IsNullOrWhiteSpace(OutputPath) || OutputPath.IndexOf('\0') >= 0)
+        {
+            throw new ArgumentException("An output path is required.", nameof(OutputPath));
+        }
+
+        if (!string.Equals(Path.GetExtension(OutputPath), ".m4a", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Selected-audio output must use the .m4a extension.", nameof(OutputPath));
+        }
+
+        ValidateEndpointId(RenderEndpointId, nameof(RenderEndpointId));
+        ValidateEndpointId(MicrophoneEndpointId, nameof(MicrophoneEndpointId));
+
+        if (AacBitRate is < 64_000 or > 320_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(AacBitRate));
+        }
+
+        switch (AudioSource)
+        {
+            case NativeSelectedAudioSource.SystemLoopback when
+                TargetProcessId == 0 && !IncludedProcessTree &&
+                ExpectedProcessCreationTime100Nanoseconds == 0:
+                return;
+            case NativeSelectedAudioSource.ProcessTreeLoopback when
+                TargetProcessId != 0 && IncludedProcessTree &&
+                ExpectedProcessCreationTime100Nanoseconds != 0 &&
+                string.IsNullOrEmpty(RenderEndpointId):
+                return;
+            case NativeSelectedAudioSource.ProcessTreeLoopback:
+                throw new ArgumentException(
+                    "Selected-process audio requires a root PID, its complete tree, and no render endpoint.");
+            default:
+                throw new ArgumentException(
+                    "System loopback cannot include a process identity or process-tree declaration.");
+        }
+    }
+
+    private static void ValidateEndpointId(string? endpointId, string parameterName)
+    {
+        if (endpointId is { Length: > 0 } && string.IsNullOrWhiteSpace(endpointId))
+        {
+            throw new ArgumentException("The endpoint ID cannot consist only of whitespace.", parameterName);
+        }
+
+        if (endpointId?.IndexOf('\0') >= 0)
+        {
+            throw new ArgumentException("The endpoint ID contains a null character.", parameterName);
+        }
+    }
+}
+
 public sealed record NativeCaptureStats(
     RecordingCaptureMode Mode,
     uint SourceSampleRate,
@@ -192,6 +283,13 @@ public sealed record NativeCaptureStats(
     NativeSourceTimelineStats RenderTimeline,
     NativeSourceTimelineStats MicrophoneTimeline)
 {
+    /// <summary>Latest normalized output/primary-source envelope for live UI metering.</summary>
+    public float PrimaryLevelPeak { get; init; }
+    public float PrimaryLevelRms { get; init; }
+    /// <summary>Latest normalized optional-microphone envelope for live UI metering.</summary>
+    public float MicrophoneLevelPeak { get; init; }
+    public float MicrophoneLevelRms { get; init; }
+
     public static NativeCaptureStats Empty(RecordingCaptureMode mode) => new(
         mode,
         SourceSampleRate: 0,
@@ -251,6 +349,19 @@ public sealed record NativeEndpointEnumerationResult(
     public bool IsSuccess => Operation.IsSuccess;
 }
 
+/// <summary>
+/// In-memory preflight hint describing render endpoints on which Windows sees
+/// an active Teams audio session. An empty successful result is deliberately
+/// non-blocking: Teams may be silent, use a broker process, or have no active
+/// render session at the instant of the probe.
+/// </summary>
+public sealed record NativeTeamsRenderEndpointProbeResult(
+    NativeOperationResult Operation,
+    IReadOnlyList<NativeCaptureEndpoint> ActiveEndpoints)
+{
+    public bool IsSuccess => Operation.IsSuccess;
+}
+
 public interface INativeRecorderBridge : IDisposable
 {
     NativeOperationResult Start(NativeRecordingRequest request);
@@ -273,4 +384,21 @@ public interface INativeRecorderBridge : IDisposable
 public interface INativeRecorderMicrophoneMuteControl
 {
     NativeOperationResult SetMicrophoneMuted(bool muted);
+}
+
+/// <summary>
+/// Optional additive capability for bridges that expose the selected-process
+/// M4A ABI. Callers that depend only on the original bridge remain source
+/// compatible, while selected-process starts fail closed when the capability
+/// is absent.
+/// </summary>
+public interface INativeSelectedAudioRecorderBridge
+{
+    NativeOperationResult StartSelectedAudio(NativeSelectedAudioRequest request);
+}
+
+/// <summary>Optional native capability used only for a non-blocking Teams endpoint preflight.</summary>
+public interface INativeTeamsRenderEndpointProbe
+{
+    NativeTeamsRenderEndpointProbeResult ProbeTeamsRenderEndpoints();
 }

@@ -59,6 +59,63 @@ internal static class AudioMvpTests
         Equal(1, bridge.StopCalls);
     }
 
+    public static void SelectedAudioTestCancelsWithoutFallbackOrDoubleStop()
+    {
+        var bridge = new MixedBridge();
+        var delay = new TestDelay();
+        var coordinator = new RecordingCoordinator(bridge, delay);
+        var request = new NativeSelectedAudioRequest(
+            NativeSelectedAudioSource.ProcessTreeLoopback,
+            "C:\\recordings\\selected-test.m4a",
+            MicrophoneEndpointId: "capture-usb",
+            TargetProcessId: 71,
+            IncludedProcessTree: true,
+            ExpectedProcessCreationTime100Nanoseconds: 1);
+
+        var started = coordinator.StartSelectedAudioTestAsync(request, TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+        Equal(RecordingCoordinatorState.Recording, started.State);
+        if (!started.IsTestRecording) throw new InvalidOperationException("Expected a selected-audio test recording.");
+        if (!delay.Entered.Task.Wait(TimeSpan.FromSeconds(2))) throw new InvalidOperationException("The selected-audio test delay was not scheduled.");
+
+        Equal(RecordingCoordinatorState.Stopped, coordinator.StopAsync().GetAwaiter().GetResult().State);
+        delay.Complete();
+        Thread.Sleep(50);
+        Equal(1, bridge.SelectedStartCalls);
+        Equal(0, bridge.MixedStartCalls);
+        Equal(1, bridge.StopCalls);
+    }
+
+    public static void SelectedAudioRequestRejectsFallbackShapedOptions()
+    {
+        new NativeSelectedAudioRequest(
+            NativeSelectedAudioSource.SystemLoopback,
+            "C:\\recordings\\system.m4a",
+            MicrophoneEndpointId: "capture-usb").Validate();
+        new NativeSelectedAudioRequest(
+            NativeSelectedAudioSource.ProcessTreeLoopback,
+            "C:\\recordings\\process.m4a",
+            TargetProcessId: 71,
+            IncludedProcessTree: true,
+            ExpectedProcessCreationTime100Nanoseconds: 1).Validate();
+
+        Throws<ArgumentException>(() => new NativeSelectedAudioRequest(
+            NativeSelectedAudioSource.ProcessTreeLoopback,
+            "C:\\recordings\\process.m4a",
+            RenderEndpointId: "render-default",
+            TargetProcessId: 71,
+            IncludedProcessTree: true,
+            ExpectedProcessCreationTime100Nanoseconds: 1).Validate());
+        Throws<ArgumentException>(() => new NativeSelectedAudioRequest(
+            NativeSelectedAudioSource.SystemLoopback,
+            "C:\\recordings\\system.m4a",
+            TargetProcessId: 71).Validate());
+        Throws<ArgumentException>(() => new NativeSelectedAudioRequest(
+            NativeSelectedAudioSource.ProcessTreeLoopback,
+            "C:\\recordings\\process.m4a",
+            TargetProcessId: 71,
+            IncludedProcessTree: true).Validate());
+    }
+
     public static void RecoverableFaultRetainsEvidenceAndAllowsRestart()
     {
         using var root = new TemporaryRoot();
@@ -112,11 +169,13 @@ internal static class AudioMvpTests
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private static void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new InvalidOperationException($"Expected {typeof(T).Name}."); }
 
-    private sealed class MixedBridge : INativeRecorderBridge
+    private sealed class MixedBridge : INativeRecorderBridge, INativeSelectedAudioRecorderBridge
     {
         public NativeOperationResult MixedStartResult { get; set; } = NativeOperationResult.Success();
         public NativeMixedRecordingRequest? LastMixedRequest { get; private set; }
+        public NativeSelectedAudioRequest? LastSelectedRequest { get; private set; }
         public int MixedStartCalls { get; private set; }
+        public int SelectedStartCalls { get; private set; }
         public int RegularStartCalls { get; private set; }
         public int StopCalls { get; private set; }
         public bool SourceFaulted { get; set; }
@@ -135,6 +194,7 @@ internal static class AudioMvpTests
             }
             return MixedStartResult;
         }
+        public NativeOperationResult StartSelectedAudio(NativeSelectedAudioRequest request) { request.Validate(); LastSelectedRequest = request; SelectedStartCalls++; state = NativeRecorderState.Recording; return NativeOperationResult.Success(); }
         public NativeOperationResult Stop() { StopCalls++; state = NativeRecorderState.Stopped; return NativeOperationResult.Success(); }
         public NativeRecorderSnapshot GetSnapshot() => SourceFaulted
             ? new(

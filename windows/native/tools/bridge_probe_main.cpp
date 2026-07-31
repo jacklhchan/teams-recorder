@@ -17,7 +17,8 @@ void PrintUsage() {
         << "  Recorder.BridgeProbe.exe system <seconds> <output.wav> [endpoint-id]\n"
         << "  Recorder.BridgeProbe.exe mic <seconds> <output.wav> [endpoint-id]\n"
         << "  Recorder.BridgeProbe.exe process <pid> <seconds> <output.wav>\n"
-        << "  Recorder.BridgeProbe.exe mixed <seconds> <output.m4a> [render-endpoint-id|-] [microphone-endpoint-id|-]\n";
+        << "  Recorder.BridgeProbe.exe mixed <seconds> <output.m4a> [render-endpoint-id|-] [microphone-endpoint-id|-]\n"
+        << "  Recorder.BridgeProbe.exe selected <pid> <seconds> <output.m4a> [microphone-endpoint-id|-]\n";
 }
 
 bool ParsePositiveU32(std::string_view text, std::uint32_t* value) {
@@ -33,6 +34,24 @@ bool ParsePositiveU32(std::string_view text, std::uint32_t* value) {
     }
     *value = parsed;
     return true;
+}
+
+bool ReadProcessCreationTime100ns(std::uint32_t process_id, std::uint64_t* value) {
+    if (value == nullptr) return false;
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (process == nullptr) return false;
+    FILETIME creation{};
+    FILETIME exit{};
+    FILETIME kernel{};
+    FILETIME user{};
+    const BOOL result = GetProcessTimes(process, &creation, &exit, &kernel, &user);
+    CloseHandle(process);
+    if (!result) return false;
+    ULARGE_INTEGER timestamp{};
+    timestamp.LowPart = creation.dwLowDateTime;
+    timestamp.HighPart = creation.dwHighDateTime;
+    *value = timestamp.QuadPart;
+    return *value != 0;
 }
 
 const char* ResultName(RecorderNativeResult result) {
@@ -92,6 +111,8 @@ int main(int argc, char** argv) {
     options.struct_size = sizeof(options);
     RecorderNativeMixedStartOptions mixed_options{};
     mixed_options.struct_size = sizeof(mixed_options);
+    RecorderNativeSelectedAudioStartOptions selected_options{};
+    selected_options.struct_size = sizeof(selected_options);
     std::uint32_t seconds = 0;
 
     if (mode_text == "system" || mode_text == "mic") {
@@ -128,6 +149,22 @@ int main(int argc, char** argv) {
             argc >= 5 && std::string_view(argv[4]) != "-" ? argv[4] : nullptr;
         mixed_options.microphone_endpoint_id_utf8 =
             argc >= 6 && std::string_view(argv[5]) != "-" ? argv[5] : nullptr;
+    } else if (mode_text == "selected") {
+        if ((argc != 5 && argc != 6) ||
+            !ParsePositiveU32(argv[2], &selected_options.target_process_id) ||
+            !ParsePositiveU32(argv[3], &seconds) || seconds > 86'400U ||
+            !ReadProcessCreationTime100ns(
+                selected_options.target_process_id,
+                &selected_options.expected_process_creation_time_100ns)) {
+            PrintUsage();
+            return 64;
+        }
+        selected_options.audio_source = RECORDER_NATIVE_SELECTED_AUDIO_PROCESS_TREE_LOOPBACK;
+        selected_options.output_path_utf8 = argv[4];
+        selected_options.microphone_endpoint_id_utf8 =
+            argc == 6 && std::string_view(argv[5]) != "-" ? argv[5] : nullptr;
+        selected_options.included_process_tree = 1U;
+        selected_options.aac_bitrate_bps = 128000U;
     } else {
         PrintUsage();
         return 64;
@@ -142,7 +179,9 @@ int main(int argc, char** argv) {
     int exit_code = 0;
     RecorderNativeResult result = mode_text == "mixed"
         ? recorder_native_start_mixed(bridge, &mixed_options)
-        : recorder_native_start_with_options(bridge, &options);
+        : mode_text == "selected"
+            ? recorder_native_start_selected_audio(bridge, &selected_options)
+            : recorder_native_start_with_options(bridge, &options);
     if (result != RECORDER_NATIVE_OK) {
         PrintFailure(bridge, "start", result);
         exit_code = 1;
@@ -150,7 +189,9 @@ int main(int argc, char** argv) {
         std::cout << "recording mode=" << mode_text << " seconds=" << seconds
                   << " output=" << (mode_text == "mixed"
                       ? mixed_options.output_path_utf8
-                      : options.output_path_utf8) << "\n";
+                      : mode_text == "selected"
+                          ? selected_options.output_path_utf8
+                          : options.output_path_utf8) << "\n";
         Sleep(seconds * 1000U);
         result = recorder_native_stop(bridge);
         if (result != RECORDER_NATIVE_OK) {

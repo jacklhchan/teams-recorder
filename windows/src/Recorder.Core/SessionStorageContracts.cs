@@ -7,6 +7,26 @@ public enum RecordingSessionKind { Meeting, Test, Manual }
 
 public enum RecordingRecoveryState { None, VideoLostAudioPreserved, RecoveredAfterInterruption }
 
+/// <summary>
+/// The deliberately small, portable description of a Windows audio capture.
+/// It identifies a capture *kind*, never the transient process that supplied it.
+/// </summary>
+public sealed record WindowsCaptureMetadata(
+    string AudioSource,
+    string? ProcessName,
+    bool IncludedProcessTree,
+    string? EndpointId)
+{
+    public const string SystemLoopback = "systemLoopback";
+    public const string SelectedProcessLoopback = "selectedProcessLoopback";
+
+    public static WindowsCaptureMetadata ForSystemLoopback(string? endpointId = null) =>
+        new(SystemLoopback, null, false, endpointId);
+
+    public static WindowsCaptureMetadata ForSelectedProcessLoopback(string processName) =>
+        new(SelectedProcessLoopback, WindowsExecutableBasename.ToExecutableBasename(processName), true, null);
+}
+
 public static class RecordingSessionLayout
 {
     public const string FinalAudioFileName = "recording.m4a";
@@ -48,7 +68,8 @@ public sealed record RecordingInfo(
     string Source,
     JsonArray Participants,
     int? SchemaVersion,
-    JsonObject Document)
+    JsonObject Document,
+    WindowsCaptureMetadata? WindowsCapture = null)
 {
     public static RecordingInfo AudioOnly(string? title = null) =>
         RecordingInfoJson.CreateAudioOnly(null, title, RecordingRecoveryState.None, RecordingSessionKind.Manual);
@@ -71,6 +92,7 @@ public static class RecordingInfoJson
         var favorite = BoolValue(document["isFavorite"]);
         var mediaKind = StringValue(document["mediaKind"]) is "video" ? "video" : "audio";
         var recovery = recoveryOverride ?? RecoveryValue(StringValue(document["recoveryState"]));
+        var windowsCapture = NormalizeWindowsCapture(document);
         var schemaVersion = SchemaVersion(document["schemaVersion"]);
         // A newer writer may have added semantics that this app does not understand.
         // Keep its version byte-for-byte rather than relabelling its document as v1.
@@ -92,7 +114,7 @@ public static class RecordingInfoJson
             participants = new JsonArray();
             document["participants"] = participants;
         }
-        return new RecordingInfo(title, tags, favorite, mediaKind, recovery, sessionSource, participants.DeepClone() as JsonArray ?? new JsonArray(), schemaVersion, document);
+        return new RecordingInfo(title, tags, favorite, mediaKind, recovery, sessionSource, participants.DeepClone() as JsonArray ?? new JsonArray(), schemaVersion, document, windowsCapture);
     }
 
     /// <summary>
@@ -125,7 +147,8 @@ public static class RecordingInfoJson
             StringValue(document["source"]) ?? SessionSource(sessionKind),
             document["participants"]?.DeepClone() as JsonArray ?? new JsonArray(),
             normalized.SchemaVersion,
-            document);
+            document,
+            normalized.WindowsCapture);
     }
 
     public static string SessionSource(RecordingSessionKind kind) =>
@@ -158,6 +181,114 @@ public static class RecordingInfoJson
         var trimmed = value.Trim();
         return trimmed.Length == 0 ? null : trimmed;
     }
+
+    /// <summary>Applies the bounded Windows capture envelope to compatible metadata.</summary>
+    public static RecordingInfo WithWindowsCapture(RecordingInfo info, WindowsCaptureMetadata? windowsCapture)
+    {
+        ArgumentNullException.ThrowIfNull(info);
+        var document = info.Document.DeepClone() as JsonObject ?? new JsonObject();
+        if (windowsCapture is null)
+        {
+            document.Remove("windowsCapture");
+        }
+        else
+        {
+            if (windowsCapture.AudioSource == WindowsCaptureMetadata.SelectedProcessLoopback &&
+                (!windowsCapture.IncludedProcessTree ||
+                 !WindowsExecutableBasename.TryNormalize(
+                     windowsCapture.ProcessName,
+                     requireExeExtension: true,
+                     out _)))
+            {
+                throw new ArgumentException(
+                    "Selected-process capture metadata requires a safe executable basename and process-tree declaration.",
+                    nameof(windowsCapture));
+            }
+            var capture = new JsonObject
+            {
+                ["audioSource"] = windowsCapture.AudioSource,
+                ["includedProcessTree"] = windowsCapture.IncludedProcessTree,
+            };
+            if (windowsCapture.ProcessName is not null) capture["processName"] = windowsCapture.ProcessName;
+            if (windowsCapture.EndpointId is not null) capture["endpointId"] = windowsCapture.EndpointId;
+            document["windowsCapture"] = capture;
+        }
+        return Normalize(document, null, null);
+    }
+
+    private static WindowsCaptureMetadata? NormalizeWindowsCapture(JsonObject document)
+    {
+        // Never retain arbitrary values from this Windows-only envelope. In
+        // particular, a PID, executable path, command line, token, or profile
+        // path is not useful session metadata and can expose private data.
+        if (document["windowsCapture"] is not JsonObject source)
+        {
+            document.Remove("windowsCapture");
+            return null;
+        }
+
+        var audioSource = StringValue(source["audioSource"]);
+        audioSource = audioSource switch
+        {
+            WindowsCaptureMetadata.SystemLoopback => WindowsCaptureMetadata.SystemLoopback,
+            WindowsCaptureMetadata.SelectedProcessLoopback => WindowsCaptureMetadata.SelectedProcessLoopback,
+            _ => null,
+        };
+
+        var endpointId = SafeEndpointId(StringValue(source["endpointId"]));
+        var processName = audioSource == WindowsCaptureMetadata.SelectedProcessLoopback &&
+            WindowsExecutableBasename.TryNormalize(
+                StringValue(source["processName"]), requireExeExtension: true, out var safeProcessName)
+            ? safeProcessName
+            : null;
+
+        // A selected-process declaration without a safe executable basename
+        // is not useful and would violate the contract. Retain a legacy
+        // endpoint ID, if any, but discard the unsafe selection claim.
+        if (audioSource == WindowsCaptureMetadata.SelectedProcessLoopback && processName is null)
+        {
+            audioSource = null;
+        }
+
+        // Older writers may have persisted only endpointId. Preserve that
+        // compatible value, but do not infer an app selection from it.
+        if (audioSource is null && endpointId is null)
+        {
+            document.Remove("windowsCapture");
+            return null;
+        }
+
+        var sanitized = new JsonObject();
+        if (audioSource is not null)
+        {
+            sanitized["audioSource"] = audioSource;
+            if (audioSource == WindowsCaptureMetadata.SelectedProcessLoopback)
+            {
+                // A selected-process capture always includes its process tree;
+                // a supplied false value cannot change the recorded meaning.
+                sanitized["includedProcessTree"] = true;
+                if (processName is not null) sanitized["processName"] = processName;
+            }
+            else
+            {
+                sanitized["includedProcessTree"] = false;
+            }
+        }
+        if (endpointId is not null) sanitized["endpointId"] = endpointId;
+        document["windowsCapture"] = sanitized;
+        return new WindowsCaptureMetadata(
+            audioSource ?? WindowsCaptureMetadata.SystemLoopback,
+            processName,
+            audioSource == WindowsCaptureMetadata.SelectedProcessLoopback,
+            endpointId);
+    }
+
+    private static string? SafeEndpointId(string? value)
+    {
+        if (value is null || value.Length > 512 || value.Any(char.IsControl)) return null;
+        return value;
+    }
+
 }
 
 public sealed record StorageCapacityStatus(long? AvailableBytes, RecordingStorageDecision Decision)

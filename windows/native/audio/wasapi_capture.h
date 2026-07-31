@@ -31,6 +31,14 @@ struct EndpointInfo {
 struct CaptureError {
     HRESULT hresult = S_OK;
     bool device_invalidated = false;
+    // These values describe only the Windows audio endpoint selected by the
+    // caller. endpoint_id is retained only for in-memory native diagnostics;
+    // callers must not persist or export it. endpoint_name and stage are safe
+    // support-log fields and exclude application, account, command-line, and
+    // user-profile data.
+    std::wstring endpoint_id;
+    std::wstring endpoint_name;
+    std::wstring stage;
     std::wstring message;
 };
 
@@ -77,7 +85,17 @@ public:
 
 private:
     void CaptureThread(CaptureRequest request, AudioBlockCallback callback, HANDLE started_event);
+    void CaptureWithMediaFoundationFallback(
+        const CaptureRequest& request,
+        const AudioBlockCallback& callback,
+        HANDLE started_event,
+        const std::wstring& wasapi_error);
     void SetError(HRESULT hresult, const wchar_t* context);
+    void SetEndpointDiagnostics(
+        const std::wstring& endpoint_id,
+        const std::wstring& endpoint_name,
+        const wchar_t* stage);
+    void SetStage(const wchar_t* stage);
 
     mutable std::mutex mutex_;
     std::thread worker_;

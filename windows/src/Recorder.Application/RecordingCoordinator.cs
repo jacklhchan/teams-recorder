@@ -92,6 +92,18 @@ public sealed class RecordingCoordinator
         return StartCoreAsync(request, () => nativeBridge.StartMixed(request));
     }
 
+    public Task<RecordingCoordinatorSnapshot> StartSelectedAudioAsync(NativeSelectedAudioRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return StartCoreAsync(
+            request,
+            () => nativeBridge is INativeSelectedAudioRecorderBridge selectedAudio
+                ? selectedAudio.StartSelectedAudio(request)
+                : NativeOperationResult.Failure(
+                    NativeRecorderResult.NotImplemented,
+                    "The native recorder does not expose selected-process audio capture."));
+    }
+
     private Task<RecordingCoordinatorSnapshot> StartCoreAsync(
         INativeRecordingRequest request,
         Func<NativeOperationResult> startOperation)
@@ -145,6 +157,14 @@ public sealed class RecordingCoordinator
     {
         ArgumentNullException.ThrowIfNull(request);
         return await StartTestCoreAsync(() => StartMixedAsync(request), duration).ConfigureAwait(false);
+    }
+
+    public async Task<RecordingCoordinatorSnapshot> StartSelectedAudioTestAsync(
+        NativeSelectedAudioRequest request,
+        TimeSpan duration)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return await StartTestCoreAsync(() => StartSelectedAudioAsync(request), duration).ConfigureAwait(false);
     }
 
     private async Task<RecordingCoordinatorSnapshot> StartTestCoreAsync(

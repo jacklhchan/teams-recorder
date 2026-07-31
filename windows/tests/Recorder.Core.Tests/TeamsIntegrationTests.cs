@@ -9,7 +9,10 @@ internal static class TeamsIntegrationTests
         if (!endpoint.Query.Contains("token=token%2B%2F%3D", StringComparison.Ordinal)) throw new InvalidOperationException("Pairing token was not safely encoded.");
         var command = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.Pair, 7);
         if (command != "{\"action\":\"pair\",\"parameters\":{},\"requestId\":7}") throw new InvalidOperationException($"Unexpected Teams command: {command}");
-        if (command.Contains("mute", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Mute synchronization must not issue a Teams mute command.");
+        var stateQuery = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.QueryState, 8);
+        if (stateQuery != "{\"action\":\"query-state\",\"parameters\":{},\"requestId\":8}") throw new InvalidOperationException($"Unexpected Teams state query: {stateQuery}");
+        if (command.Contains("mute", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Teams integration must not issue a Teams mute command.");
     }
 
     public static void ProtocolDecodesCompleteMeetingStateOnly()
@@ -62,6 +65,22 @@ internal static class TeamsIntegrationTests
         if (coordinator.Snapshot.LastMeetingState is not null) throw new InvalidOperationException("Unauthenticated meeting state must not be retained.");
     }
 
+    public static void MuteCoordinatorKeepsIssuedCredentialWhenTeamsOffersPairing()
+    {
+        var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
+        using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
+        coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
+
+        // The current macOS implementation keeps a Teams-issued credential authoritative even
+        // when Teams also advertises canPair. This preserves existing auto-recording users.
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, true), true, true), true));
+
+        Equal(TeamsMuteSyncStatus.InMeeting, coordinator.Snapshot.Status);
+        Equal(true, coordinator.Snapshot.IsPairingAuthenticated);
+        Equal(true, coordinator.Snapshot.IsPairingKnown);
+        if (coordinator.Snapshot.LastMeetingState is null) throw new InvalidOperationException("An issued credential must retain the meeting state.");
+    }
+
     public static void MuteCoordinatorFailsClosedOnApiError()
     {
         var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
@@ -89,6 +108,38 @@ internal static class TeamsIntegrationTests
         Equal(TeamsMuteSyncStatus.WaitingForPairingApproval, coordinator.Snapshot.Status);
     }
 
+    public static void MuteCoordinatorOnlyTreatsAlreadyPairedAsAReplyToAnExplicitPairCommand()
+    {
+        var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
+        using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
+        coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(false, false, true, false), true, false), true));
+        client.Publish(new TeamsThirdPartyApiEvent.Error(99, "Device already paired"));
+
+        Equal(TeamsMuteSyncStatus.Ready, coordinator.Snapshot.Status);
+        Equal(true, coordinator.Snapshot.IsPairingAuthenticated);
+        Equal(true, coordinator.Snapshot.IsPairingKnown);
+        if (coordinator.Snapshot.LastMeetingState is null)
+        {
+            throw new InvalidOperationException("An unrelated already-paired response must not discard trusted meeting state.");
+        }
+
+        var waitingClient = new FakeTeamsClient(); var waitingMicrophone = new RecordingMuteSink();
+        using var waiting = new TeamsMuteSyncCoordinator(waitingClient, waitingMicrophone);
+        waiting.SetEnabledAsync(true).GetAwaiter().GetResult();
+        waitingClient.Publish(new TeamsThirdPartyApiEvent.Error(99, "Device already paired"));
+        Equal(TeamsMuteSyncStatus.WaitingForTeamsApi, waiting.Snapshot.Status);
+        Equal(false, waiting.Snapshot.IsPairingKnown);
+        Equal(false, waiting.Snapshot.IsPairingAuthenticated);
+
+        waiting.RequestPairingAsync().GetAwaiter().GetResult();
+        waitingClient.Publish(new TeamsThirdPartyApiEvent.Error(null, "Device already paired"));
+        Equal(TeamsMuteSyncStatus.Failed, waiting.Snapshot.Status);
+        Equal(false, waiting.Snapshot.IsPairingKnown);
+        if (!waiting.Snapshot.Detail!.Contains("Manage API", StringComparison.Ordinal))
+            throw new InvalidOperationException("An explicit pairing conflict must explain how to reset the Teams pairing.");
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private sealed class FakeTeamsClient : ITeamsThirdPartyApiClient
     {
@@ -97,7 +148,11 @@ internal static class TeamsIntegrationTests
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public int PairingRequests { get; private set; }
-        public Task RequestPairingAsync(CancellationToken cancellationToken = default) { PairingRequests++; return Task.CompletedTask; }
+        public Task RequestPairingAsync(CancellationToken cancellationToken = default)
+        {
+            PairingRequests++;
+            return Task.CompletedTask;
+        }
         public void Publish(TeamsThirdPartyApiEvent value) => EventReceived?.Invoke(this, value);
         public void Disconnect(string detail) => ConnectionChanged?.Invoke(this, detail);
     }

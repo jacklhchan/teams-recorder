@@ -1,82 +1,32 @@
-# 實作狀態更新（2026-07-29）
+# Windows 功能對等狀態矩陣
 
-本文件是原始 parity／驗收規格，表中的 Phase 1 目標不應視為已交付宣告。最新已實作範圍、端對端缺口和實機發行驗證請見 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md)。特別是，MVP 不聲稱 Teams-only process recording、一般可用的 Teams API、視訊、虛擬麥克風、轉寫、安裝程式或 Start Menu 安裝；實體麥克風的成功錄製仍需在發行前驗證。Teams Third-party App API Preview 已在單一環境完成 pairing、meeting presence 及自動 M4A，但 Teams UI mute/unmute 未可靠推送後續 mute-state；不得宣稱 mute sync 可用或可靠，也不得以 `query-state` polling 補救。
+此表是 Windows 發行判斷的唯一 live status matrix；「已實作」只表示程式及自動化證據存在，**不**表示硬體驗收、一般可用或 Teams-only 隔離已通過。macOS 行為的來源是根目錄 `README.md` 與 `Sources/RecorderApp/**`。
 
-# Windows Migration：功能對等與 Phase 0/1 驗收規格
+| 能力 | macOS 行為 | Windows 實作狀態 | 自動化證據 | 人工證據 | 發行 gate | 目前 PR |
+| --- | --- | --- | --- | --- | --- | --- |
+| 全系統音訊 | ScreenCaptureKit system audio capture | 已實作 WASAPI system loopback 與可選 render endpoint；仍待實體硬體 smoke | native Debug/Release CTest、managed lifecycle tests | 實機開始、停止、可播放 M4A、實際錄音長度 | 實機 duration 成功，沒有未處理例外 | PR #1 基礎；本 branch 沿用 |
+| 實體麥克風及混音 | 可選 physical microphone 與錄音同一 capture session | 已實作 endpoint 選取、optional microphone、48 kHz mix；仍待實體麥克風 smoke | managed request/coordinator tests、native timeline tests | 選取實體 microphone，與 system/selected-app 同時錄製 | 可辨識 mic 訊號、可播放輸出及健康計數 | PR #1 基礎；本 branch 沿用 |
+| 指定應用程式音訊 | 選取 app 的系統音訊 capture | **Draft 實作**：root PID 加完整 process tree、optional microphone、M4A；程序失效時 fail-closed，絕不轉成全系統 loopback | C ABI contract/smoke、process-loopback、timeline、selected-session facade、managed no-fallback/stale-PID/test-stop tests | [dual-tone isolation script](selected-app-audio-isolation-acceptance.md) | 目標 tone 存在、干擾 tone 不存在；目標退出後為 unavailable/停止且無 fallback | [Draft PR #3](https://github.com/jacklhchan/teams-recorder/pull/3) (`codex/windows-selected-app-audio`) |
+| canonical 48 kHz timeline | Timestamped mixer 保持時序 | 已實作 QPC/device-position mapping、silence gaps、mic mute、late/overflow/disconnect counters | deterministic long/silence timeline tests | 長時錄音比對 duration、silence 與健康摘要 | PTS 單調、沒有壓縮 loopback silence | PR #1 基礎；本 branch 延伸 selected source |
+| M4A session、library、播放與復原 | MP4 primary，必要時 M4A audio fallback；library/playback | 已實作 AAC/M4A、library、播放、bounded recovery、partial retention | M4A writer fault/recovery tests、storage/recovery tests | 可重開啟播放、來源/寫檔失敗後重啟復原 | 實機 playback 與 fault-recovery smoke 記錄 | PR #1 基礎；本 branch 使用同一 publication path |
+| recording-session metadata | 共享 root session contract | 已使用 root Draft 2020-12 contract；selected capture 只寫 `audioSource`、安全 `processName`、`includedProcessTree`，不寫 PID、路徑、命令列、token | schema validation、cross-platform fixture 與 privacy round-trip tests | 檢查產生的 session metadata 不含敏感欄位 | 真實錄製 metadata 通過 schema 且 privacy review | PR #1 contract；本 branch 加 selected metadata |
+| 手動／10 秒測試／Teams 自動擁有權 | manual 不被 auto stop；Teams 自動有 countdown/debounce | manual、test、Teams-automatic 皆進 application lifecycle；10 秒 selected test 可取消且只 stop 一次 | coordinator/lifecycle/Teams state-machine tests | 手動開始、10 秒取消、Teams Preview pairing 狀態 | 記錄 ownership 與取消 smoke；Teams 仍不是 Selected App 的隔離證據 | PR #1 基礎；本 branch 追加 selected path |
+| Teams API／mute／自動錄製 | macOS Third-party App API 功能 | Windows 僅 Preview，非本 PR 交付或 release 主張 | protocol/transport state tests | per-tenant pairing 與 meeting-state probe | 另立 Teams API gate；不可作為 Teams-only isolation 或 GA 證明 | PR #1 Preview，非本 branch scope |
+| 視訊、WGC product capture、虛擬麥克風、轉錄、signed distribution | macOS 有較完整的對應功能 | Deferred／非目標 | 僅有各自的 probe 或 feature gate | 不適用 | 不可標示 feature complete | 不在本 branch |
 
-**狀態：** 實作前規格
-**範圍：** 新 Windows 原生應用程式；不修改既有 macOS Swift Package。
-**依據：** `README.md`、`Sources/RecorderApp/**`、`Tests/RecorderAppTests/**` 與既有 Teams／錄影規格。
+## Selected App 的範圍與隱私界線
 
-目前 Phase 0 的首輪實機結果記錄於
-[`2026-07-28-wasapi-probe-results.md`](2026-07-28-wasapi-probe-results.md)：
-system loopback、WAV publish及process-loopback activation已通過短 probe；
-physical mic及process-only隔離仍未通過 gate。
+- 「指定程序」意指啟動時驗證的 root PID 加其完整 process tree；PID 與 start time 在 application 層再確認一次，以拒絕 PID reuse。
+- process loopback 不可用、程序在開始前消失或錄製中退出時，錄製必須停止／fault 並保留可復原的已累積媒體；不得改錄 system loopback。
+- process catalog 是 process picker：可選無頂層視窗的有效程序，但有視窗的項目優先顯示；只短暫顯示 app name、process name、PID、可選 window title 及 availability。選取只在 PID 與 start time 均相同時保留；不持久化 executable path 或 command line。
+- completed session 的 Windows extension 僅可包含 `audioSource`、`processName`、`includedProcessTree`（舊有 system fixture 的 `endpointId` 仍可讀取）。
 
-## 成功定義
+## Selected App 人工隔離驗收
 
-Windows 不是把 SwiftUI 或 ScreenCaptureKit 逐字移植。Phase 1 的完成條件是：使用者可在 Windows 上選擇全系統音訊或指定應用程式、選擇麥克風、看到即時健康資訊、可靠地完成本機音訊錄音、在程式內播放及管理 session，並在故障時保留可播放的音訊。所有跨平台 session 檔案均須能被兩端安全讀取；未驗證的 Windows 能力不得出現在產品承諾中。
+執行 [Test-SelectedAppAudioIsolation.ps1](../scripts/Test-SelectedAppAudioIsolation.ps1) 時，使用兩個不同程序產生可區分的 tone。選取目標程序後，錄音必須只含目標 tone（及使用者明確選取的麥克風）；在干擾程序繼續播放時終止目標程序，確認 UI/health 進入 unavailable 或停止，並證明沒有切換成全系統 loopback。
 
-## 來源功能矩陣
+完整步驟、最小 evidence checklist 和失敗判定見 [selected-app-audio-isolation-acceptance.md](selected-app-audio-isolation-acceptance.md)。腳本不讀取產品、不分析錄音、不保存路徑或命令列，也不會產生 isolation pass verdict。
 
-| 來源行為（目前 macOS） | 來源證據 | Windows 對應／決策 | 優先級 | 目標階段與驗收 gate |
-| --- | --- | --- | --- | --- |
-| 全系統音訊錄製 | README；`ScreenCaptureSource.swift` | WASAPI loopback capture adapter；以實機 loopback 測試為先決 | P0 | P0 probe：連續 30 分鐘、48 kHz stereo、無未處理例外；P1：錄製可播放並有訊號健康結果 |
-| 指定 app 音訊 | README；`CaptureSelectionResolver`、`ScreenCaptureSource` | **待驗證** Windows process loopback capture；不得以混入全系統音訊冒充 app-only | P0 | P0：目標 app 有聲、另一 app 有聲時輸出只含目標；失敗即以明確 unavailable 狀態降級，不能進 P1 承諾 |
-| 選擇實體麥克風 | README；`AudioDevice.swift` | WASAPI capture device enumeration + capture adapter | P0 | P1：列舉、儲存 endpoint ID、實機 10 秒錄音有 mic 訊號 |
-| 48 kHz 時戳混音 | `TimestampedAudioMixer.swift` | 平台無關核心的 frame/sample-clock mixer；輸入須正規化為 48 kHz stereo float PCM | P0 | P1：單元測試覆蓋亂序、缺口、靜音、麥克風 mute、來源斷線；輸出 PTS 單調 |
-| 一個 session 一個完成媒體檔 | README；`MixedAudioWriter.swift` | Media Foundation sink writer 產出 `recording.m4a`（AAC），先以 audio-only 為可靠基線 | P0 | P1：開始／停止／重複停止均只完成一次，檔案可由 Windows Media Foundation 重新開啟 |
-| 10 秒測試錄音、立即播放與健康摘要 | README；`AudioHealthAdvisor` | 相同工作流程；Windows 播放 adapter | P0 | P1：system/mic 訊號、clipping、dropped buffer 及失敗訊息可見；測試自行停止後可播放 |
-| session library、標題、標籤、最愛、開啟資料夾、移至資源回收筒 | `RecordingSession.swift`、`RecordingLibrary.swift` | 採用同一 session folder 與 JSON contract；Windows Shell recycle-bin adapter | P1 | P1：掃描只接受白名單 session folder 與 regular file；metadata 壞欄位不破壞其他欄位 |
-| 已完成音訊播放與 seek | README；`PlaybackCoordinator.swift` | Media Foundation playback adapter | P1 | P1：對 m4a session 可播放、暫停、seek、停止；不要求跨平台精確 frame seek |
-| 儲存空間政策 | `RecordingStoragePolicy.swift` | 以目標 volume 可用空間實作同一門檻：warn 5 GiB、video 不足 1 GiB 則 audio-only、audio 少於 256 MiB 停止 | P0 | P1：邊界值單測；無法查詢容量時阻擋開始並明示原因 |
-| 中斷後音訊復原 | `IncompleteSessionRecovery.swift` | 啟動時僅嘗試提升已驗證、同資料夾的 audio backup；不得覆寫現有 final | P1 | P1：crash fixture 能復原；目的檔存在、backup 無效、路徑重解析失敗均不覆寫 |
-| 手動匯入音訊轉寫 | `ManualTranscriptionImporter` | 先保留檔案匯入與 session shell；轉寫執行器後置 | P2 | Deferred（見下） |
-| 本機 Qwen/oMLX 檔案型轉寫 | README；`TranscriptionProcess.swift` | Windows model/runtime、FFmpeg 散布與憑證策略皆未定，不複製 macOS shell script | P2 | Deferred；先維持既有 transcript/read state JSON 相容 |
-| Teams Third-party App API mute sync | README；`TeamsThirdPartyAPI.swift`、`TeamsMuteSyncClient.swift` | Windows 已有 local WebSocket、DPAPI token、pairing 與 push-only/fail-closed 預覽層；單一環境已完成 pairing 與 authoritative meeting presence，但 Teams UI mute/unmute 未可靠推送後續 mute-state。 | P2 | Preview，非 MVP release gate；不得宣稱 Teams mute sync／控制可用或可靠，且不得以 `query-state` polling 補救。 |
-| Teams 自動錄製 | `TeamsAutoMeetingCoordinator` 與其設計規格 | 依賴 authoritative meeting presence，且不屬錄音核心；單一環境已成功自動完成一個 M4A 工作階段。 | P2 | Preview，非 MVP release gate；仍須重複驗證開始、停止、取消與跨 tenant/client 行為。 |
-| Teams 視窗錄影與 runtime 切換 | `ScreenCaptureSource.swift`、`RecordingMediaCoordinator.swift`、viability gate | Windows.Graphics.Capture + Media Foundation 的可行性須獨立驗證；此主機的 WGC probe 已失敗，Phase 1 不交付 | P2 | Deferred；目前僅有失敗的可行性證據，不能標記 feature complete 或泛化到其他主機 |
-| 虛擬麥克風與硬體 mute | README；`VirtualMic/**`、`MicrophoneMuteCoordinator.swift` | app 可偵測受信任 endpoint identity，但需要簽署並已安裝的 Windows audio driver / virtual endpoint，且與 app 進程分離 | P3 | Deferred；driver 供應、安裝、音訊路由與硬體 mute 實測皆為必要前置條件 |
-| 全域 hotkey | README；`GlobalHotKeyManager.swift` | Windows `RegisterHotKey` 的 `Ctrl+Alt+M` registrar 與獨立 local/input mute 狀態已有程式和測試 | P3 | Preview；尚未作為硬體 mute、Teams sync 或虛擬麥克風可用性的證據 |
+## 明確非目標
 
-P0 表示「無此能力不能聲稱 Windows MVP 可錄音」；P1 表示第一個可交付的 Windows MVP；P2/P3 不是拒絕，而是有明確前置條件後的後續工作。
-
-## Phase 0：可行性與骨架（必須先完成）
-
-Phase 0 只產出探針程式、測試、決策紀錄及空的可替換 adapter；不把未證實的媒體路徑接入產品 UI。
-
-1. 建立 Windows solution：UI、Application、Domain、Infrastructure、Tests 五個專案或等價分層；Domain 不得參考 WinRT、COM、Media Foundation 或 UI assemblies。
-2. 以每個 adapter 可替換的 interface 建立 fake，先移植純邏輯測試：capture lifecycle、storage decision、session metadata 寬容解碼、recovery 的 no-replace 行為、audio timeline/mixer。
-3. 完成受控實機 probe：WASAPI loopback、選取麥克風、process loopback（若系統版本支援）。每次 probe 記錄 Windows edition/build、音訊 endpoint、sample rate、目標程式、持續時間、輸入是否非靜音、丟失／斷線／HRESULT 與產物雜湊；資料不得含錄音內容或 token。
-4. 選擇 Media Foundation 寫檔路徑，驗證 m4a 可重新開啟；同時故意中斷 writer，證明 audio backup 不會覆寫既有 final。
-5. 寫入 ADR：process loopback 是否可靠可用、是否需要最低 Windows build、無法支援時的 UI 文案與 release scope。沒有通過 app-only 隔離 probe，即從 Phase 1 產品要求移除「Selected App」。
-
-### Phase 0 exit gate
-
-- 所有純邏輯單元測試通過，且至少包含 stale lifecycle completion、時間倒退／重複 PTS、空間三門檻、metadata malformed field、現存 final 不覆寫。
-- 全系統 loopback、麥克風、m4a 重新開啟與 crash recovery probe 各至少一次成功；失敗有可重現證據與明確結論。
-- process loopback 有通過隔離證據，或已正式降級為 Phase 1 不提供的選項。
-- 不得在此階段引入 Teams、螢幕影像、虛擬麥克風或模型下載。
-
-## Phase 1：audio-first Windows MVP
-
-交付範圍：裝置與來源選擇、permissions/readiness、開始／停止、音量／波形與健康摘要、10 秒測試、m4a session 寫入、library／metadata、播放／seek、容量政策與復原。選定 app 音訊只在 Phase 0 gate 已通過時顯示；否則只提供全系統音訊並說明限制。
-
-### Phase 1 產品驗收
-
-1. 新使用者拒絕 microphone 或 capture 相關存取時，開始按鈕不會半開 session，畫面提供可操作的修正說明；手動開始才可觸發權限流程。
-2. 使用全系統音訊和選定麥克風的 10 秒測試，完成後生成一個可播放 `recording.m4a`、顯示 system/mic 訊號與健康 counters，且不遺留 partial 當作完成品。
-3. 連續 60 分鐘 audio-only 錄音後，停止可在既定 timeout 內完成；輸出可重新開啟、音訊 PTS 單調、沒有未處理例外。效能數字與目標硬體須記錄在 release evidence，不把單一機器結果泛化。
-4. 在 writer 失敗、來源斷線或強制程序終止 fixture 中，既有完成檔不會消失；若 backup 可驗證，下一次啟動產出 `recording.m4a` 並標示 `recoveredAfterInterruption`。
-5. library 不跟隨 symlink/reparse point、不把 `recording.partial.*` 或 backup 視為 session；刪除只針對使用者選中的 session folder。
-6. 若 app-only 已納入：目標與干擾 app 同時發聲時，驗收錄音只能量到目標 app；目標程序離開後 UI 顯示需 reconnect／不可用，不得靜默改錄全系統。
-
-## 明確 deferred（不屬 Phase 0/1）
-
-- Teams mute sync：Preview；已完成單一環境 pairing 與 meeting presence，但 Teams UI mute/unmute 的後續 mute-state 未可靠推送，且不應以 `query-state` polling 補救。Teams auto recording：Preview；已有一次成功 M4A 證據，仍不屬 Phase 0/1 release scope。
-- Teams / 任意視窗影像錄製、影像與音訊 mux、動態 capture filter、screen interval metadata 的產生。
-- Windows 虛擬麥克風 driver、裝置 mute 手勢同步與安裝器權限提升；driver 已簽署／安裝及 endpoint 可用是任何整合的必要前置條件。
-- **刻意 deferred：** Qwen ASR、本機／遠端模型散布、FFmpeg packaging、串流轉寫、speaker diarization。
-- 全域 hotkey 的產品化／實機驗證、企業部署／簽章／自動更新、跨裝置同步或雲端上傳。
-
-Deferred 功能可讀取既有相容 metadata，但不會在 Phase 1 產生其宣稱的資料。例如 audio-only session 必須寫 `mediaKind: "audio"`、空 `screenIntervals`，且沒有 `capturedTeamsWindow`。
+本 Draft 不包含 waveform UI、ASR/轉錄、video/WGC product capture、virtual microphone driver、signed distribution，或任何「一般可用 Teams-only isolation」主張。Teams pairing、mute sync 與自動錄製仍然是獨立 Preview，不能取代 selected-app dual-tone gate。

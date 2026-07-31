@@ -10,6 +10,9 @@
     <ProjectReference Include="../../src/Recorder.Application/Recorder.Application.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="../../src/Recorder.WinUI/CaptureSourceChoice.cs" Link="CaptureSourceChoice.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="../../../contracts/fixtures/recording-info-v1.json" Link="contracts/fixtures/recording-info-v1.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

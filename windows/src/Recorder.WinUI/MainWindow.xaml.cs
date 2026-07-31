@@ -8,6 +8,7 @@ namespace TeamsRecorder.Windows.WinUI;
 /// </summary>
 public sealed partial class MainWindow : Window
 {
+    private readonly TrayIconService trayIcon;
     private bool shutdownInProgress;
     private bool shutdownComplete;
 
@@ -17,10 +18,11 @@ public sealed partial class MainWindow : Window
 
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.SetIcon("Assets/AppIcon.ico");
+        AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
 
         RootFrame.Navigate(typeof(MainPage));
         AppWindow.Closing += OnAppWindowClosing;
+        trayIcon = new TrayIconService(this, ShowFromTray, HideToTray, RequestExitFromTray);
     }
 
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
@@ -31,12 +33,12 @@ public sealed partial class MainWindow : Window
         }
 
         args.Cancel = true;
-        if (shutdownInProgress)
+        if (!shutdownInProgress)
         {
+            HideToTray();
             return;
         }
 
-        shutdownInProgress = true;
         try
         {
             if (RootFrame.Content is MainPage page)
@@ -47,7 +49,23 @@ public sealed partial class MainWindow : Window
         finally
         {
             shutdownComplete = true;
+            trayIcon.Dispose();
             Close();
         }
+    }
+
+    private void ShowFromTray() => trayIcon.ShowWindow();
+
+    private void HideToTray() => trayIcon.HideWindow();
+
+    private void RequestExitFromTray()
+    {
+        if (shutdownInProgress || shutdownComplete)
+        {
+            return;
+        }
+
+        shutdownInProgress = true;
+        Close();
     }
 }

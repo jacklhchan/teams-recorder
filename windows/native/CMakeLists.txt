@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(RecorderNativeBridge VERSION 0.5.0 LANGUAGES C CXX)
+project(RecorderNativeBridge VERSION 0.7.0 LANGUAGES C CXX)
 
 option(RECORDER_NATIVE_BUILD_TESTS "Build native bridge contract tests" ON)
 
@@ -70,7 +70,7 @@ if(WIN32)
     )
     target_compile_features(Recorder.WasapiCapture PUBLIC cxx_std_17)
     target_include_directories(Recorder.WasapiCapture PUBLIC audio)
-    target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid)
+target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadwrite mfuuid)
     recorder_enable_strict_warnings(Recorder.WasapiCapture)
 
     add_library(Recorder.ProcessLoopback STATIC
@@ -178,6 +178,7 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     add_test(NAME Recorder.M4aWriter.TailOneFrame COMMAND Recorder.M4aWriter.Tests tail --frames 1)
     add_test(NAME Recorder.M4aWriter.Tail960Frames COMMAND Recorder.M4aWriter.Tests tail --frames 960)
     add_test(NAME Recorder.M4aWriter.Tail1024Frames COMMAND Recorder.M4aWriter.Tests tail --frames 1024)
+    add_test(NAME Recorder.M4aWriter.AudibleSignalRoundTrip COMMAND Recorder.M4aWriter.Tests signal)
     # One deterministic in-process exercise. For teardown isolation, repeat
     # this CTest test from the command line so every repetition is a fresh EXE.
     add_test(NAME Recorder.M4aWriter.Stress COMMAND Recorder.M4aWriter.Tests stress --iterations 16 --frames 960)
@@ -206,6 +207,7 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         Recorder.M4aWriter.TailOneFrame
         Recorder.M4aWriter.Tail960Frames
         Recorder.M4aWriter.Tail1024Frames
+        Recorder.M4aWriter.AudibleSignalRoundTrip
         Recorder.M4aWriter.Stress
         Recorder.M4aWriter.Duration
         Recorder.M4aWriter.Abort
@@ -272,6 +274,15 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         target_link_libraries(Recorder.Timeline.Tests PRIVATE Recorder.Timeline)
         recorder_enable_strict_warnings(Recorder.Timeline.Tests)
         add_test(NAME Recorder.Timeline.Tests COMMAND Recorder.Timeline.Tests)
+
+        add_executable(Recorder.SelectedAudioSessionFacade.Tests
+            tests/selected_audio_session_facade_tests.cpp
+        )
+        target_compile_features(Recorder.SelectedAudioSessionFacade.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.SelectedAudioSessionFacade.Tests PRIVATE src)
+        recorder_enable_strict_warnings(Recorder.SelectedAudioSessionFacade.Tests)
+        add_test(NAME Recorder.SelectedAudioSessionFacade.Tests
+            COMMAND Recorder.SelectedAudioSessionFacade.Tests)
 
     endif()
 endif()

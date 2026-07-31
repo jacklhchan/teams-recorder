@@ -61,7 +61,9 @@ ProcessIdParseResult ParseProcessId(std::wstring_view text) noexcept;
 
 // Verifies that a process currently exists. Access denied is returned unchanged:
 // callers must not reinterpret it as a valid capture target.
-HRESULT ValidateTargetProcess(DWORD process_id) noexcept;
+HRESULT ValidateTargetProcess(
+    DWORD process_id,
+    std::uint64_t expected_creation_time_100ns = 0) noexcept;
 
 // Returns ERROR_OLD_WIN_VERSION when process-loopback activation is unavailable.
 HRESULT CheckProcessLoopbackOSSupport() noexcept;
@@ -74,6 +76,33 @@ enum class ActivationCompletionDisposition {
 // Kept public so the late-completion contract is independently testable.
 ActivationCompletionDisposition ActivationCompletionDispositionFor(
     bool activation_abandoned) noexcept;
+
+// The virtual endpoint is scoped to one explicitly selected root process and
+// every process in the tree rooted at that PID; it never means system audio.
+enum class ProcessLoopbackTargetScope : std::uint32_t {
+    include_selected_root_process_tree = 1,
+};
+
+struct ProcessLoopbackCaptureMetadata {
+    DWORD selected_root_process_id = 0;
+    ProcessLoopbackTargetScope target_scope =
+        ProcessLoopbackTargetScope::include_selected_root_process_tree;
+    bool system_audio_fallback_permitted = false;
+};
+
+// Stable metadata for a session/mixer consumer. Performs no OS access.
+ProcessLoopbackCaptureMetadata DescribeProcessLoopbackTarget(
+    DWORD selected_root_process_id) noexcept;
+
+enum class TargetProcessWaitDisposition {
+    still_running,
+    exited,
+    wait_failed,
+};
+
+// The selected root exiting is terminal even if a former child remains alive.
+TargetProcessWaitDisposition TargetProcessWaitDispositionFor(
+    DWORD wait_result) noexcept;
 
 struct ProcessLoopbackActivationResult {
     HRESULT hr = E_FAIL;
@@ -91,7 +120,8 @@ struct ProcessLoopbackActivationResult {
 // cannot write into caller-owned memory.
 ProcessLoopbackActivationResult ActivateProcessLoopback(
     DWORD target_process_id,
-    DWORD timeout_ms = 10'000) noexcept;
+    DWORD timeout_ms = 10'000,
+    std::uint64_t expected_creation_time_100ns = 0) noexcept;
 
 struct ProcessLoopbackCaptureError {
     HRESULT hresult = S_OK;
@@ -114,6 +144,9 @@ struct ProcessLoopbackAudioBlock {
     // False only when the process virtual endpoint rejected event callbacks
     // and this same target PID was reactivated for bounded polling.
     bool event_driven = true;
+    // Appended so existing fields and their order are preserved. Every block
+    // declares the exact root/tree contract that produced it.
+    ProcessLoopbackCaptureMetadata capture_metadata;
 };
 
 using ProcessLoopbackAudioBlockCallback =
@@ -121,6 +154,9 @@ using ProcessLoopbackAudioBlockCallback =
 
 struct ProcessLoopbackCaptureRequest {
     DWORD target_process_id = 0;
+    // Required by selected-process capture to prove the target has not been
+    // replaced by another process using the same PID.
+    std::uint64_t expected_process_creation_time_100ns = 0;
     DWORD activation_timeout_ms = 10'000;
     // Used only after event-callback initialization fails for this same
     // process-loopback virtual endpoint. Must be non-zero.
@@ -128,9 +164,9 @@ struct ProcessLoopbackCaptureRequest {
 };
 
 // A single-target, shared-mode process loopback session. Start/Stop are safe
-// from a control thread; callbacks run on the dedicated MTA capture thread and
-// must not call Stop synchronously. This class never activates a physical
-// endpoint or all-system loopback path.
+// from a control thread. A callback-thread Stop only signals shutdown (it never
+// self-joins); a later control-thread Stop/destruction joins the worker. This
+// class never activates a physical endpoint or all-system loopback path.
 class ProcessLoopbackCapture final {
 public:
     ProcessLoopbackCapture();

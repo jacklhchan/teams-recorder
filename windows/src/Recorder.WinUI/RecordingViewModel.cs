@@ -4,11 +4,16 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
 using Recorder.Core;
 using TeamsRecorder.Windows.Application;
+using TeamsRecorder.Windows.Application.AI;
 using TeamsRecorder.Windows.Application.Recovery;
 using TeamsRecorder.Windows.Application.Library;
+using TeamsRecorder.Windows.Application.Settings;
 using TeamsRecorder.Windows.Application.Storage;
+using TeamsRecorder.Windows.Application.Transcription;
 using Windows.Media.Core;
 using Windows.Media.Playback;
 
@@ -19,8 +24,13 @@ namespace TeamsRecorder.Windows.WinUI;
 /// local playback at the WinUI edge. The coordinator remains the single owner
 /// of native start/stop serialization.
 /// </summary>
-public sealed class RecordingViewModel : INotifyPropertyChanged
+public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverlayStateSource
 {
+    private const int WaveformBarCount = 48;
+    private static readonly Brush HealthyHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.ForestGreen);
+    private static readonly Brush WarningHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.DarkOrange);
+    private static readonly Brush RecoveredHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.Goldenrod);
+    private static readonly Brush NeutralHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.Gray);
     private readonly DispatcherQueue dispatcherQueue;
     private readonly DispatcherQueueTimer telemetryTimer;
     private readonly DispatcherQueueTimer playbackTimer;
@@ -28,12 +38,28 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     // and final publication in the Application layer.  This VM only maps that
     // state to WinUI properties and commands.
     private RecordingLifecycleService? recordingLifecycle;
+    private readonly IProcessCatalog processCatalog = new ProcessCatalog();
     private RecordingLibraryService? libraryService;
     private string? libraryServiceRoot;
+    private readonly IRecorderAppSettingsStore appSettingsStore = new JsonRecorderAppSettingsStore();
+    private readonly SemaphoreSlim appSettingsWriteGate = new(1, 1);
+    private RecorderAppSettings? pendingAppSettings;
+    private bool restoreTeamsMuteSyncAfterInitialization;
+    private bool restoreTeamsAutomaticRecordingAfterInitialization;
+    // AI provider settings are deliberately application-layer services. The view model
+    // owns no persisted API key: the repository keeps it separately in per-user DPAPI.
+    private OpenAICompatibleProviderRepository? openAiProviderRepository;
+    private OpenAICompatibleAsrHttpTransport? openAiAsrTransport;
+    private OpenAICompatibleProviderConnectionClient? openAiProviderConnectionClient;
+    private RecordingSessionAsrJobCoordinator? transcriptionCoordinator;
+    private OpenAiCompatibleMeetingSummaryClient? meetingSummaryClient;
+    private MeetingSummaryCoordinator? meetingSummaryCoordinator;
     private RecordingCoordinatorSnapshot snapshot = RecordingCoordinatorSnapshot.Initial;
     private MediaPlayer? mediaPlayer;
     private EndpointChoice? selectedRenderEndpoint;
     private EndpointChoice? selectedMicrophoneEndpoint;
+    private CaptureSourceChoice? selectedCaptureSource;
+    private ProcessSelectionChoice? selectedProcess;
     private LibraryRecording? selectedLibraryItem;
     private string? loadedPlaybackPath;
     private string outputFolder;
@@ -70,14 +96,36 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     private bool isTeamsAutomaticRecordingOperationInProgress;
     private WindowsGlobalHotKeyRegistrar? globalHotKeyRegistrar;
     private GlobalMuteHotKeyService? globalMuteHotKey;
+    private string processCatalogStatusText = "選擇「指定應用程式」後，按一下重新整理以列出可選程序。";
     private string globalMuteHotKeyStatus = "正在準備 Ctrl+Alt+M 全域麥克風靜音快捷鍵。";
+    private readonly string diagnosticsDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Teams Recorder",
+        "Diagnostics");
+    private string diagnosticsExportStatusText = "診斷報告會儲存在本機的 Teams Recorder\\Diagnostics 資料夾。";
+    private string openAiApiBaseUrl = "https://api.openai.com/v1";
+    private string openAiAsrModel = "gpt-4o-transcribe";
+    private string openAiLlmModel = "gpt-5.6-terra";
+    private string openAiLanguage = "zh";
+    private string openAiPrompt = "";
+    private bool isOpenAiProviderInitialized;
+    private bool hasOpenAiApiKey;
+    private bool isTestingOpenAiProvider;
+    private string openAiProviderIntegrationStatus = "正在準備本機 OpenAI 相容 API 設定。";
+    // Endpoint IDs stay in memory only. They are used solely to compare the
+    // active Windows Teams audio session with the current loopback choice.
+    private TeamsPlaybackEndpointObservation teamsPlaybackEndpointObservation = TeamsPlaybackEndpointObservation.Unknown;
+    private string? windowsConsoleDefaultRenderEndpointId;
 
     public RecordingViewModel()
     {
         dispatcherQueue = DispatcherQueue.GetForCurrentThread()
             ?? throw new InvalidOperationException("Teams Recorder 必須在 WinUI 執行緒上建立。");
         telemetryTimer = dispatcherQueue.CreateTimer();
-        telemetryTimer.Interval = TimeSpan.FromMilliseconds(400);
+        // The native bridge publishes compact level envelopes, so a 10 Hz UI
+        // refresh gives a useful live waveform without moving raw PCM across
+        // the C ABI or blocking the audio mixer.
+        telemetryTimer.Interval = TimeSpan.FromMilliseconds(100);
         telemetryTimer.Tick += OnTelemetryTimerTick;
         playbackTimer = dispatcherQueue.CreateTimer();
         playbackTimer.Interval = TimeSpan.FromMilliseconds(250);
@@ -91,7 +139,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         StartCommand = new AsyncRelayCommand(StartAsync, () => CanStart);
         StopCommand = new AsyncRelayCommand(StopAsync, () => CanStop);
         StartTestCommand = new AsyncRelayCommand(StartTestAsync, () => CanStart);
+        SaveDiagnosticsCommand = new AsyncRelayCommand(SaveDiagnosticsAsync, () => CanSaveDiagnostics);
+        OpenDiagnosticsFolderCommand = new AsyncRelayCommand(OpenDiagnosticsFolderAsync, () => CanOpenDiagnosticsFolder);
         RefreshDevicesCommand = new AsyncRelayCommand(RefreshEndpointsAsync, () => CanRefreshDevices);
+        RefreshProcessCatalogCommand = new AsyncRelayCommand(RefreshProcessCatalogAsync, () => CanRefreshProcessCatalog);
         RefreshLibraryCommand = new AsyncRelayCommand(RefreshLibraryAsync, () => CanRefreshLibrary);
         PlayCommand = new AsyncRelayCommand(PlayAsync, () => CanPlay);
         PauseCommand = new AsyncRelayCommand(PauseAsync, () => CanPause);
@@ -103,20 +154,46 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         CancelRecycleLibraryCommand = new AsyncRelayCommand(CancelRecycleLibraryAsync, () => IsRecycleConfirmationVisible);
         EnableTeamsMuteSyncCommand = new AsyncRelayCommand(EnableTeamsMuteSyncAsync, () => CanManageTeamsMuteSync && !IsTeamsMuteSyncEnabled);
         DisableTeamsMuteSyncCommand = new AsyncRelayCommand(DisableTeamsMuteSyncAsync, () => CanManageTeamsMuteSync && IsTeamsMuteSyncEnabled);
-        RequestTeamsPairingCommand = new AsyncRelayCommand(RequestTeamsPairingAsync, () => CanManageTeamsMuteSync && IsTeamsMuteSyncEnabled);
+        RequestTeamsPairingCommand = new AsyncRelayCommand(RequestTeamsPairingAsync, () => CanRequestTeamsPairing);
         EnableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(EnableTeamsAutomaticRecordingAsync, () => CanEnableTeamsAutomaticRecording);
         DisableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(DisableTeamsAutomaticRecordingAsync, () => CanDisableTeamsAutomaticRecording);
+        CancelTeamsAutomaticRecordingStartCommand = new AsyncRelayCommand(CancelTeamsAutomaticRecordingStartAsync, () => CanCancelTeamsAutomaticRecordingStart);
+        StopRecordingFromOverlayCommand = new AsyncRelayCommand(StopRecordingFromOverlayAsync, () => CanStopRecordingFromOverlay);
         ToggleLocalMicrophoneMuteCommand = new AsyncRelayCommand(ToggleLocalMicrophoneMuteAsync, () => !isShuttingDown);
+        TestOpenAiProviderConnectionCommand = new AsyncRelayCommand(TestOpenAiProviderConnectionAsync, () => CanTestOpenAiProvider);
         teamsInputMute.Changed += OnInputMuteChanged;
+        CaptureSources.Add(CaptureSourceChoice.SystemAudio);
+        CaptureSources.Add(CaptureSourceChoice.SelectedApplication);
+        selectedCaptureSource = CaptureSourceChoice.Default;
+        ResetWaveforms();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>
+    /// Raised on the WinUI thread whenever the compact recording-window state changes.
+    /// A presenter can subscribe instead of deriving state from unrelated VM properties.
+    /// </summary>
+    public event EventHandler<RecordingOverlayState>? RecordingOverlayStateChanged;
 
     public ObservableCollection<EndpointChoice> RenderEndpoints { get; } = [];
 
     public ObservableCollection<EndpointChoice> CaptureEndpoints { get; } = [];
 
+    public ObservableCollection<CaptureSourceChoice> CaptureSources { get; } = [];
+
+    public ObservableCollection<ProcessSelectionChoice> ProcessCatalog { get; } = [];
+
     public ObservableCollection<LibraryRecording> LibraryItems { get; } = [];
+
+    /// <summary>Model IDs discovered by the explicitly requested provider connection test.</summary>
+    public ObservableCollection<string> OpenAiDiscoveredModels { get; } = [];
+
+    /// <summary>Recent post-normalization Teams/system output peaks, oldest first.</summary>
+    public ObservableCollection<WaveformBar> OutputWaveformBars { get; } = [];
+
+    /// <summary>Recent post-normalization microphone peaks, oldest first.</summary>
+    public ObservableCollection<WaveformBar> InputWaveformBars { get; } = [];
 
     public AsyncRelayCommand StartCommand { get; }
 
@@ -124,7 +201,15 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     public AsyncRelayCommand StartTestCommand { get; }
 
+    /// <summary>Exports redacted local diagnostics without copying audio or recording media.</summary>
+    public AsyncRelayCommand SaveDiagnosticsCommand { get; }
+
+    /// <summary>Opens the local folder only after a diagnostic report exists there.</summary>
+    public AsyncRelayCommand OpenDiagnosticsFolderCommand { get; }
+
     public AsyncRelayCommand RefreshDevicesCommand { get; }
+
+    public AsyncRelayCommand RefreshProcessCatalogCommand { get; }
 
     public AsyncRelayCommand RefreshLibraryCommand { get; }
 
@@ -154,7 +239,15 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     public AsyncRelayCommand DisableTeamsAutomaticRecordingCommand { get; }
 
+    /// <summary>Cancel the pending Teams-only automatic start without disabling the opt-in.</summary>
+    public AsyncRelayCommand CancelTeamsAutomaticRecordingStartCommand { get; }
+
+    /// <summary>Stop the active capture from the compact recording window.</summary>
+    public AsyncRelayCommand StopRecordingFromOverlayCommand { get; }
+
     public AsyncRelayCommand ToggleLocalMicrophoneMuteCommand { get; }
+
+    public AsyncRelayCommand TestOpenAiProviderConnectionCommand { get; }
 
     public bool IsRecordingMicrophoneMuted => teamsInputMute.IsMuted;
 
@@ -166,7 +259,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     public string GlobalMuteHotKeyStatus => globalMuteHotKeyStatus;
 
-    /// <summary>Teams integration is deliberately opt-in and is off at every app launch.</summary>
+    /// <summary>Teams integration is an explicit, persisted non-secret opt-in; pairing credentials remain in DPAPI storage.</summary>
     public bool IsTeamsMuteSyncEnabled
     {
         get => isTeamsMuteSyncEnabled;
@@ -182,6 +275,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     public bool CanManageTeamsMuteSync => !isShuttingDown && !isTeamsMuteSyncOperationInProgress;
 
+    /// <summary>A paired connection does not need another pairing request.</summary>
+    public bool CanRequestTeamsPairing =>
+        CanManageTeamsMuteSync &&
+        IsTeamsMuteSyncEnabled &&
+        !teamsMuteSnapshot.IsPairingKnown;
+
     /// <summary>
     /// Automatic recording is deliberately a separate opt-in.  A Teams connection alone is
     /// insufficient: this remains false until a paired API supplies an authoritative meeting state.
@@ -190,20 +289,66 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     private bool HasTrustedTeamsMeetingState =>
         IsTeamsMuteSyncEnabled &&
-        teamsMuteSnapshot.IsPairingAuthenticated &&
+        teamsMuteSnapshot.IsPairingKnown &&
         teamsMuteSnapshot.Status is TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting &&
         teamsMuteSnapshot.LastMeetingState is not null;
+
+    /// <summary>
+    /// Automation may be enabled for a paired connection before it reports a meeting.
+    /// Starting capture still requires <see cref="HasTrustedTeamsMeetingState"/>.
+    /// </summary>
+    private bool HasPairedTeamsConnection =>
+        IsTeamsMuteSyncEnabled &&
+        teamsMuteSnapshot.IsPairingAuthenticated &&
+        teamsMuteSnapshot.Status is TeamsMuteSyncStatus.WaitingForMeeting or TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting;
 
     public bool CanEnableTeamsAutomaticRecording =>
         !isShuttingDown &&
         !isTeamsAutomaticRecordingOperationInProgress &&
         !IsTeamsAutomaticRecordingEnabled &&
-        HasTrustedTeamsMeetingState;
+        HasPairedTeamsConnection;
 
     public bool CanDisableTeamsAutomaticRecording =>
         !isShuttingDown &&
         !isTeamsAutomaticRecordingOperationInProgress &&
         IsTeamsAutomaticRecordingEnabled;
+
+    /// <summary>
+    /// State intended for the compact recording window. It is visible for any active capture
+    /// (manual, test, or Teams automatic), plus the Teams-only start countdown.
+    /// </summary>
+    public RecordingOverlayState RecordingOverlayState => new(
+        IsVisible: snapshot.State == RecordingCoordinatorState.Recording || IsTeamsAutomaticRecordingCountdownVisible,
+        IsRecording: snapshot.State == RecordingCoordinatorState.Recording,
+        IsTeamsAutomaticStartCountdown: IsTeamsAutomaticRecordingCountdownVisible,
+        CountdownSeconds: TeamsAutomaticRecordingCountdownSeconds,
+        CanCancelAutomaticStart: CanCancelTeamsAutomaticRecordingStart,
+        CanStopRecording: CanStopRecordingFromOverlay);
+
+    public bool IsTeamsAutomaticRecordingCountdownVisible => teamsAutomaticSnapshot.State is TeamsAutoMeetingState.StartCountdown;
+
+    public int? TeamsAutomaticRecordingCountdownSeconds => teamsAutomaticSnapshot.State is
+        TeamsAutoMeetingState.StartCountdown(var seconds) ? seconds : null;
+
+    public bool CanCancelTeamsAutomaticRecordingStart =>
+        !isShuttingDown &&
+        !isTeamsAutomaticRecordingOperationInProgress &&
+        teamsAutomaticSnapshot.State is TeamsAutoMeetingState.StartCountdown;
+
+    public bool CanStopRecordingFromOverlay =>
+        snapshot.State == RecordingCoordinatorState.Recording &&
+        CanStop;
+
+    /// <summary>Source label consumed by the compact-window presenter for an active capture.</summary>
+    public RecordingOverlayRecordingKind? ActiveRecordingOverlayKind =>
+        snapshot.State != RecordingCoordinatorState.Recording ? null :
+        recordingLifecycle?.ActiveSessionKind switch
+        {
+            RecordingSessionKind.Meeting => RecordingOverlayRecordingKind.TeamsAutomatic,
+            RecordingSessionKind.Test => RecordingOverlayRecordingKind.Test,
+            RecordingSessionKind.Manual => RecordingOverlayRecordingKind.Manual,
+            _ => snapshot.IsTestRecording ? RecordingOverlayRecordingKind.Test : RecordingOverlayRecordingKind.Manual,
+        };
 
     public string TeamsMuteEnableButtonText => IsTeamsMuteSyncEnabled ? "停用 Teams 靜音同步" : "啟用 Teams 靜音同步";
 
@@ -212,7 +357,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         TeamsMuteSyncStatus.Disabled => "未啟用：不會連線至 Teams，也不會變更任何音訊輸入。",
         TeamsMuteSyncStatus.WaitingForTeamsApi => "正在等待本機 Teams Third-party API。請先啟動相容的 Teams 桌面用戶端。",
         TeamsMuteSyncStatus.WaitingForPairingApproval => "需要在 Teams 中核准配對；核准後才會收到會議狀態。",
-        TeamsMuteSyncStatus.WaitingForMeeting => "已連線，正在等待 Teams 會議狀態。",
+        TeamsMuteSyncStatus.WaitingForMeeting => teamsMuteSnapshot.IsPairingKnown
+            ? "Teams 已配對，正在等待 Teams 會議狀態。"
+            : "已連線，正在等待 Teams 會議狀態。",
         TeamsMuteSyncStatus.Ready => "已取得 Teams 狀態；目前不在會議中。",
         TeamsMuteSyncStatus.InMeeting => teamsMuteSnapshot.LastMeetingState?.IsMuted == true
             ? "Teams 會議中：Teams 最近回報已靜音（Preview 快照）。"
@@ -232,8 +379,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             : "Teams 推送了後續未靜音狀態：本次 M4A 錄音內選取的麥克風來源可用；不會改變 Teams 本身。";
 
     public string TeamsAutomaticRecordingStatusText => !IsTeamsAutomaticRecordingEnabled
-        ? HasTrustedTeamsMeetingState
-            ? "未啟用自動錄音：必須由使用者明確啟用，才會依可信的 Teams 會議狀態開始或停止錄音。"
+        ? HasPairedTeamsConnection
+            ? "未啟用自動錄音：Teams 已配對。啟用後會等待可信的 Teams 會議狀態，才開始或停止錄音。"
             : "自動錄音尚未可用：請先啟用 Teams 同步、完成配對，並等待可信的會議狀態。"
         : teamsAutomaticSnapshot.State switch
         {
@@ -257,7 +404,11 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             if (SetProperty(ref selectedRenderEndpoint, value))
             {
                 OnPropertyChanged(nameof(SelectedRenderDescription));
+                OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+                OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
+                NotifyLiveAudioHealthChanged();
                 UpdateCommandStates();
+                PersistAppSettingsInBackground();
             }
         }
     }
@@ -272,9 +423,70 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
                 OnPropertyChanged(nameof(SelectedMicrophoneDescription));
                 OnPropertyChanged(nameof(MicrophoneHealthText));
                 OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
+                NotifyLiveAudioHealthChanged();
+                UpdateCommandStates();
+                PersistAppSettingsInBackground();
+            }
+        }
+    }
+
+    public CaptureSourceChoice? SelectedCaptureSource
+    {
+        get => selectedCaptureSource;
+        set
+        {
+            if (SetProperty(
+                ref selectedCaptureSource,
+                CaptureSourceChoice.ResolveSelection(value, selectedCaptureSource)))
+            {
+                OnPropertyChanged(nameof(SelectedCaptureSourceDescription));
+                OnPropertyChanged(nameof(RenderEndpointSelectionVisibility));
+                OnPropertyChanged(nameof(SelectedApplicationPanelVisibility));
+                OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+                OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
+                NotifyLiveAudioHealthChanged();
+                UpdateCommandStates();
+                PersistAppSettingsInBackground();
+            }
+        }
+    }
+
+    public ProcessSelectionChoice? SelectedProcess
+    {
+        get => selectedProcess;
+        set
+        {
+            if (SetProperty(ref selectedProcess, value))
+            {
+                OnPropertyChanged(nameof(SelectedCaptureSourceDescription));
                 UpdateCommandStates();
             }
         }
+    }
+
+    public Visibility RenderEndpointSelectionVisibility =>
+        SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+
+    public Visibility SelectedApplicationPanelVisibility =>
+        SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    public string SelectedCaptureSourceDescription => SelectedCaptureSource?.Kind switch
+    {
+        CaptureSourceKind.SelectedApplication when SelectedProcess is null =>
+            "Preview／實驗性模式：請選擇一個可用的 Teams 應用程式或背景程序；程序不可用時會拒絕錄音，不會改錄系統音訊。",
+        CaptureSourceKind.SelectedApplication =>
+            $"Preview／實驗性模式：只會錄製 {SelectedProcess!.DisplayName}（PID {SelectedProcess.ProcessId}）；不保證包含所有參與者音訊，也不會回退至系統音訊。",
+        _ => "建議來源：錄製系統 loopback 與所選輸出裝置，可靠包含 Teams 參與者音訊。",
+    };
+
+    public string ProcessCatalogStatusText
+    {
+        get => processCatalogStatusText;
+        private set => SetProperty(ref processCatalogStatusText, value);
     }
 
     public LibraryRecording? SelectedLibraryItem
@@ -363,6 +575,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             RefreshStorageReadiness();
             OnPropertyChanged(nameof(NextOutputPath));
             OnPropertyChanged(nameof(LibrarySummaryText));
+            PersistAppSettingsInBackground();
         }
     }
 
@@ -393,6 +606,80 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     public bool HasError => !string.IsNullOrWhiteSpace(ErrorText);
 
+    public string DiagnosticsExportStatusText
+    {
+        get => diagnosticsExportStatusText;
+        private set => SetProperty(ref diagnosticsExportStatusText, value);
+    }
+
+    /// <summary>
+    /// OpenAI-compatible provider fields. The public profile is stored locally;
+    /// a key entered in the password box is written only to the Windows DPAPI store.
+    /// </summary>
+    public string OpenAiApiBaseUrl
+    {
+        get => openAiApiBaseUrl;
+        set => SetProperty(ref openAiApiBaseUrl, value ?? string.Empty);
+    }
+
+    public string OpenAiAsrModel
+    {
+        get => openAiAsrModel;
+        set => SetProperty(ref openAiAsrModel, value ?? string.Empty);
+    }
+
+    public string OpenAiLlmModel
+    {
+        get => openAiLlmModel;
+        set => SetProperty(ref openAiLlmModel, value ?? string.Empty);
+    }
+
+    public string OpenAiLanguage
+    {
+        get => openAiLanguage;
+        set => SetProperty(ref openAiLanguage, value ?? string.Empty);
+    }
+
+    public string OpenAiPrompt
+    {
+        get => openAiPrompt;
+        set => SetProperty(ref openAiPrompt, value ?? string.Empty);
+    }
+
+    /// <summary>Settings are available only after the local DPAPI-backed repository is ready.</summary>
+    public bool IsOpenAiProviderAvailable => isOpenAiProviderInitialized && !isShuttingDown;
+
+    public bool CanSaveOpenAiProvider => IsOpenAiProviderAvailable && !IsBusy;
+
+    /// <summary>Tests only the configured provider endpoint; it never starts an upload.</summary>
+    public bool CanTestOpenAiProvider => IsOpenAiProviderAvailable && !IsBusy && !IsTestingOpenAiProvider;
+
+    public bool CanRemoveOpenAiApiKey => IsOpenAiProviderAvailable && !IsBusy && hasOpenAiApiKey;
+
+    /// <summary>The key itself is never returned to the view, only whether DPAPI has one.</summary>
+    public string OpenAiApiKeyFieldLabel => hasOpenAiApiKey ? "API Key（已儲存）" : "API Key（選填）";
+
+    public bool IsTestingOpenAiProvider
+    {
+        get => isTestingOpenAiProvider;
+        private set => SetProperty(ref isTestingOpenAiProvider, value);
+    }
+
+    public bool CanStartOpenAiTranscription =>
+        IsOpenAiProviderAvailable && !IsBusy && SelectedLibraryItem is { IsManaged: true, IsPlayable: true };
+
+    public bool CanGenerateOpenAiSummary => CanStartOpenAiTranscription;
+
+    public string OpenAiProviderIntegrationStatus
+    {
+        get => openAiProviderIntegrationStatus;
+        private set => SetProperty(ref openAiProviderIntegrationStatus, value);
+    }
+
+    public bool CanSaveDiagnostics => !isShuttingDown && recordingLifecycle is not null;
+
+    public bool CanOpenDiagnosticsFolder => !isShuttingDown && Directory.Exists(diagnosticsDirectory);
+
     public bool IsBusy
     {
         get => isBusy;
@@ -420,6 +707,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         _ => $"指定輸出：{SelectedRenderEndpoint.DisplayName}",
     };
 
+    /// <summary>
+    /// A prompt to manually align the system-loopback endpoint with Teams.
+    /// Teams' public API does not expose its speaker selection, so this is
+    /// advisory only and never changes Teams or blocks a recording.
+    /// </summary>
+    public string? TeamsPlaybackEndpointWarning =>
+        TeamsPlaybackEndpointAdvice.GetWarning(
+            SelectedCaptureSource?.Kind,
+            SelectedRenderEndpoint,
+            windowsConsoleDefaultRenderEndpointId,
+            teamsPlaybackEndpointObservation);
+
+    public bool HasTeamsPlaybackEndpointWarning => !string.IsNullOrWhiteSpace(TeamsPlaybackEndpointWarning);
+
     public string SelectedMicrophoneDescription => SelectedMicrophoneEndpoint switch
     {
         null => "正在讀取 Windows 麥克風…",
@@ -434,6 +735,43 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     public string PeakText => $"{PeakPercent:0.0}% / {(PeakPercent >= 99 ? "可能剪裁" : "未偵測剪裁")}";
 
+    public double OutputLevelPercent => Math.Clamp(snapshot.Stats.PrimaryLevelRms * 100d, 0d, 100d);
+
+    public string OutputLevelText => $"{OutputLevelPercent:0.0}%";
+
+    public double InputLevelPercent => Math.Clamp(snapshot.Stats.MicrophoneLevelRms * 100d, 0d, 100d);
+
+    public string InputLevelText => SelectedMicrophoneEndpoint?.EndpointId is null
+        ? "未啟用"
+        : $"{InputLevelPercent:0.0}%";
+
+    private LiveAudioHealthAssessment LiveAudioHealth => LiveAudioHealthAdvisor.Assess(
+        snapshot.Stats,
+        isCaptureActive: snapshot.State == RecordingCoordinatorState.Recording,
+        primaryTitle: PrimaryCaptureLabel,
+        primaryAvailable: IsPrimaryCaptureAvailable,
+        microphoneIncluded: SelectedMicrophoneEndpoint?.EndpointId is not null,
+        microphoneAvailable: SelectedMicrophoneEndpoint is not { IsAvailable: false },
+        microphoneMuted: IsRecordingMicrophoneMuted);
+
+    public string PrimaryHealthTitle => LiveAudioHealth.Primary.Title;
+
+    public string PrimaryHealthDetail => LiveAudioHealth.Primary.Detail;
+
+    public string PrimaryHealthGlyph => HealthGlyph(LiveAudioHealth.Primary.Status);
+
+    public Brush PrimaryHealthBrush => HealthBrush(LiveAudioHealth.Primary.Status);
+
+    public string MicrophoneHealthTitle => LiveAudioHealth.Microphone.Title;
+
+    public string MicrophoneHealthDetail => LiveAudioHealth.Microphone.Detail;
+
+    public string MicrophoneHealthGlyph => HealthGlyph(LiveAudioHealth.Microphone.Status);
+
+    public Brush MicrophoneHealthBrush => HealthBrush(LiveAudioHealth.Microphone.Status);
+
+    public string AudioHealthSummaryText => LiveAudioHealth.Summary;
+
     public string AggregateHealthText =>
         $"彙總：{snapshot.Stats.Packets:N0} 音訊封包、{snapshot.Stats.Discontinuities:N0} 次中斷；" +
         (snapshot.Stats.Packets == 0
@@ -442,15 +780,25 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
                 ? "無訊號（皆為靜音）"
                 : "偵測到訊號");
 
+    private string PrimaryCaptureLabel => SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+        ? $"指定應用程式：{SelectedProcess?.DisplayName ?? "已選程序"}"
+        : "系統音訊";
+
+    private bool IsPrimaryCaptureAvailable => SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+        ? SelectedProcess is { IsAvailable: true }
+        : SelectedRenderEndpoint is not { IsAvailable: false };
+
     public string RenderHealthText => snapshot.Stats.SourceSampleRate == 0
-        ? "系統輸出：等待第一個音訊封包。"
-        : $"系統輸出：bridge 輸出 48 kHz stereo；來源格式 {snapshot.Stats.SourceSampleRate:N0} Hz / {snapshot.Stats.SourceChannels} 聲道。";
+        ? $"{PrimaryCaptureLabel}：等待第一個音訊封包。"
+        : $"{PrimaryCaptureLabel}：bridge 輸出 48 kHz stereo；來源格式 {snapshot.Stats.SourceSampleRate:N0} Hz / {snapshot.Stats.SourceChannels} 聲道。";
 
     public string MicrophoneHealthText => SelectedMicrophoneEndpoint switch
     {
         { IsAvailable: false } => "麥克風：裝置中斷，已封鎖開始錄製。",
         { EndpointId: null } => "麥克風：未選取（不錄製）。",
-        _ => "麥克風：已選取並會納入 mixed 錄音；來源別統計待 bridge 擴充。",
+        _ when snapshot.Stats.MicrophoneTimeline.SourceDisconnects > 0 =>
+            $"麥克風：錄音期間中斷 {snapshot.Stats.MicrophoneTimeline.SourceDisconnects:N0} 次；Teams 主音訊會繼續，缺失區段已保留為靜音。",
+        _ => "麥克風：已選取並會納入 mixed 錄音。",
     };
 
     public string StorageReadinessText => storageCapacity switch
@@ -512,6 +860,313 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             dispatcherQueue.TryEnqueue(UpdateCommandStates);
     }
 
+    private async Task InitializeOpenAiProviderAsync()
+    {
+        openAiProviderRepository = new OpenAICompatibleProviderRepository(
+            new JsonOpenAICompatibleProviderProfileStore(),
+            new WindowsDpapiOpenAICompatibleApiKeyStore());
+        openAiAsrTransport = new OpenAICompatibleAsrHttpTransport();
+        openAiProviderConnectionClient = new OpenAICompatibleProviderConnectionClient();
+        transcriptionCoordinator = RecordingSessionAsrJobCoordinator.CreateOpenAiCompatible(
+            openAiProviderRepository,
+            new OpenAICompatibleAsrClient(openAiAsrTransport));
+        meetingSummaryClient = new OpenAiCompatibleMeetingSummaryClient();
+        meetingSummaryCoordinator = new MeetingSummaryCoordinator(meetingSummaryClient);
+
+        try
+        {
+            var profile = await openAiProviderRepository.LoadProfileAsync();
+            hasOpenAiApiKey = await openAiProviderRepository.HasApiKeyAsync();
+            if (profile is not null)
+            {
+                OpenAiApiBaseUrl = profile.BaseUrl;
+                OpenAiAsrModel = profile.AsrModel;
+                OpenAiLlmModel = profile.LlmModel;
+                OpenAiLanguage = profile.Language;
+                OpenAiPrompt = profile.Prompt;
+                OpenAiProviderIntegrationStatus = "已載入本機 AI 供應商設定。按下 ASR 或摘要前仍會逐次要求確認。";
+            }
+            else
+            {
+                OpenAiProviderIntegrationStatus = "尚未儲存 AI 供應商設定。可輸入 OpenAI 相容 API 設定後儲存。";
+            }
+        }
+        catch (Exception)
+        {
+            // A corrupted old profile must not block local recording. Keep the editor
+            // available so the user can replace it; do not display a possibly sensitive URL.
+            hasOpenAiApiKey = false;
+            OpenAiProviderIntegrationStatus = "無法讀取先前的 AI 設定；請重新輸入並儲存。";
+        }
+        finally
+        {
+            isOpenAiProviderInitialized = true;
+            OnPropertyChanged(nameof(IsOpenAiProviderAvailable));
+            OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
+            UpdateCommandStates();
+        }
+    }
+
+    /// <summary>
+    /// Saves only the public provider profile plus an optional replacement API key. An empty
+    /// password-box value deliberately preserves an existing key rather than clearing it.
+    /// </summary>
+    public Task SaveOpenAiProviderSettingsAsync(string? replacementApiKey) => RunOperationAsync(async () =>
+    {
+        var providers = openAiProviderRepository
+            ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
+        var profile = OpenAICompatibleProviderProfile.Validated(
+            OpenAiApiBaseUrl, OpenAiAsrModel, OpenAiLlmModel, OpenAiLanguage, OpenAiPrompt);
+        await providers.SaveAsync(profile, replacementApiKey);
+        OpenAiApiBaseUrl = profile.BaseUrl;
+        OpenAiAsrModel = profile.AsrModel;
+        OpenAiLlmModel = profile.LlmModel;
+        OpenAiLanguage = profile.Language;
+        OpenAiPrompt = profile.Prompt;
+        hasOpenAiApiKey = await providers.HasApiKeyAsync();
+        OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
+        OpenAiProviderIntegrationStatus = string.IsNullOrWhiteSpace(replacementApiKey)
+            ? "已儲存 AI 供應商設定；既有 API 金鑰保持不變。"
+            : "已儲存 AI 供應商設定與目前 Windows 使用者的加密 API 金鑰。";
+    });
+
+    public Task ClearOpenAiApiKeyAsync() => RunOperationAsync(async () =>
+    {
+        var providers = openAiProviderRepository
+            ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
+        await providers.ClearApiKeyAsync();
+        hasOpenAiApiKey = false;
+        OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
+        OpenAiProviderIntegrationStatus = "已移除目前 Windows 使用者的本機 API 金鑰；供應商設定仍保留。";
+    });
+
+    /// <summary>
+    /// Mirrors macOS' lightweight <c>GET /models</c> test. Draft values are used
+    /// directly, so users can verify a provider before saving a profile.
+    /// </summary>
+    public Task TestOpenAiProviderConnectionAsync() => RunOperationAsync(async () =>
+    {
+        var providers = openAiProviderRepository
+            ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
+        var connection = openAiProviderConnectionClient
+            ?? throw new InvalidOperationException("AI 供應商連線檢查尚未準備完成。");
+        var profile = OpenAICompatibleProviderProfile.Validated(
+            OpenAiApiBaseUrl, OpenAiAsrModel, OpenAiLlmModel, OpenAiLanguage, OpenAiPrompt);
+
+        IsTestingOpenAiProvider = true;
+        try
+        {
+            var snapshot = await providers.SnapshotAsync(profile);
+            var report = await connection.TestConnectionAsync(snapshot.Profile, snapshot.ApiKey);
+            OpenAiDiscoveredModels.Clear();
+            foreach (var model in report.Models)
+            {
+                OpenAiDiscoveredModels.Add(model);
+            }
+
+            OpenAiProviderIntegrationStatus = report.SupportsModelDiscovery
+                ? report.Models.Count == 0
+                    ? "已連線；此供應商沒有回傳可選模型，可手動輸入模型名稱。"
+                    : $"已連線；已找到 {report.Models.Count} 個模型，可從 ASR 或 LLM 清單選擇。"
+                : "已連線；此供應商未提供模型清單，請手動輸入模型名稱。";
+        }
+        catch
+        {
+            OpenAiProviderIntegrationStatus = "無法連線至 AI 供應商。請檢查 Base URL、API Key 與網路後再試。";
+            throw;
+        }
+        finally
+        {
+            IsTestingOpenAiProvider = false;
+        }
+    });
+
+    /// <summary>Starts a user-confirmed ASR job for one completed, managed M4A session.</summary>
+    public Task StartOpenAiTranscriptionAsync() => RunOperationAsync(async () =>
+    {
+        var coordinator = transcriptionCoordinator
+            ?? throw new InvalidOperationException("AI 逐字稿服務尚未準備完成。");
+        var plan = GetSelectedManagedSessionPlan();
+        var job = await coordinator.StartAsync(plan, explicitlyOptedIn: true);
+        OpenAiProviderIntegrationStatus = "正在上傳並產生逐字稿；此工作只處理已完成的 M4A。";
+        try
+        {
+            await job.Completion;
+            OpenAiProviderIntegrationStatus = "逐字稿已完成並安全儲存在此錄音工作階段。";
+            await RefreshLibraryCoreAsync();
+        }
+        catch
+        {
+            OpenAiProviderIntegrationStatus = "逐字稿未完成；已保留可檢查的本機工作階段狀態。";
+            throw;
+        }
+    });
+
+    /// <summary>Starts a separately user-confirmed meeting-summary request from an owned transcript.</summary>
+    public Task GenerateOpenAiSummaryAsync() => RunOperationAsync(async () =>
+    {
+        var providers = openAiProviderRepository
+            ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
+        var coordinator = meetingSummaryCoordinator
+            ?? throw new InvalidOperationException("AI 摘要服務尚未準備完成。");
+        var plan = GetSelectedManagedSessionPlan();
+        var snapshot = await providers.SnapshotAsync();
+        OpenAiProviderIntegrationStatus = "正在傳送已完成逐字稿以產生摘要。音訊不會再次上傳。";
+        try
+        {
+            await coordinator.SummarizeAndPublishAsync(plan, snapshot, userConsentGranted: true);
+            OpenAiProviderIntegrationStatus = "摘要已完成並安全儲存在此錄音工作階段。";
+        }
+        catch
+        {
+            OpenAiProviderIntegrationStatus = "摘要未完成；已保留可檢查的本機工作階段狀態。";
+            throw;
+        }
+    });
+
+    private RecordingSessionPlan GetSelectedManagedSessionPlan()
+    {
+        var item = SelectedLibraryItem is { IsManaged: true, IsPlayable: true } selected
+            ? selected
+            : throw new InvalidOperationException("請先選取一個已完成且受管理的 M4A 錄音。" );
+        var folder = Path.GetFullPath(item.SessionPath);
+        if (!RecordingSessionLayout.TryGetKind(Path.GetFileName(folder), out var kind) || kind != item.Kind ||
+            !PathEquals(item.MediaPath, Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName)))
+            throw new IOException("選取的項目不是可供 AI 處理的受管理錄音工作階段。");
+        return new RecordingSessionPlan(
+            item.Kind,
+            folder,
+            Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName),
+            Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName),
+            Path.Combine(folder, RecordingSessionLayout.MetadataFileName),
+            new StorageCapacityStatus(null, RecordingStorageDecision.Normal));
+    }
+
+    private async Task RestoreAppSettingsAsync()
+    {
+        try
+        {
+            pendingAppSettings = await appSettingsStore.LoadAsync();
+            restoreTeamsMuteSyncAfterInitialization = pendingAppSettings?.TeamsMuteSyncEnabled == true;
+            restoreTeamsAutomaticRecordingAfterInitialization = restoreTeamsMuteSyncAfterInitialization &&
+                pendingAppSettings?.TeamsAutomaticRecordingEnabled == true;
+            if (!string.IsNullOrWhiteSpace(pendingAppSettings?.OutputFolder))
+            {
+                // This occurs before the native lifecycle is constructed, so the restored
+                // folder becomes the lifecycle's initial storage root.
+                OutputFolder = pendingAppSettings.OutputFolder;
+            }
+        }
+        catch (Exception)
+        {
+            // Do not fail local recording because a non-secret preference file is stale.
+            // Its detailed content (including the user's local folder) is intentionally
+            // not surfaced in the UI or diagnostic status.
+            pendingAppSettings = null;
+            restoreTeamsMuteSyncAfterInitialization = false;
+            restoreTeamsAutomaticRecordingAfterInitialization = false;
+            StatusText = "無法還原先前的應用程式設定；將使用安全預設值。";
+        }
+    }
+
+    private void ApplyPendingAppSettingsAfterEndpointRefresh()
+    {
+        var saved = pendingAppSettings;
+        pendingAppSettings = null;
+        if (saved is null)
+        {
+            return;
+        }
+
+        SelectedRenderEndpoint = SelectSavedEndpoint(RenderEndpoints, saved.RenderEndpointId, EndpointChoice.SystemDefault, "已中斷的已儲存輸出裝置");
+        if (!saved.RecordMicrophone)
+        {
+            SelectedMicrophoneEndpoint = EndpointChoice.NoMicrophone;
+        }
+        else if (saved.MicrophoneEndpointId is not null)
+        {
+            SelectedMicrophoneEndpoint = SelectSavedEndpoint(CaptureEndpoints, saved.MicrophoneEndpointId, EndpointChoice.NoMicrophone, "已中斷的已儲存麥克風");
+        }
+        // When a microphone was enabled but had no stable endpoint id, retain the
+        // current communication/default selection chosen during endpoint refresh.
+
+        SelectedCaptureSource = CaptureSources.FirstOrDefault(source =>
+            source.Kind == (saved.CaptureSource == RecorderPersistedCaptureSource.SelectedApplication
+                ? CaptureSourceKind.SelectedApplication
+                : CaptureSourceKind.SystemAudio));
+        if (saved.CaptureSource == RecorderPersistedCaptureSource.SelectedApplication)
+        {
+            // A PID or executable path is intentionally not saved. Restarting into this
+            // mode requires the user to choose a currently live Teams process and never
+            // falls back to system loopback.
+            SelectedProcess = null;
+            ProcessCatalogStatusText = "已還原「指定應用程式」模式；請重新整理並選取目前的 Teams 程序後才可開始錄音。";
+        }
+        StatusText = "已還原本機錄音設定。";
+    }
+
+    private static EndpointChoice SelectSavedEndpoint(
+        ObservableCollection<EndpointChoice> choices,
+        string? endpointId,
+        EndpointChoice defaultChoice,
+        string unavailableLabel)
+    {
+        if (endpointId is null)
+        {
+            return defaultChoice;
+        }
+        var matching = choices.FirstOrDefault(choice => string.Equals(choice.EndpointId, endpointId, StringComparison.Ordinal));
+        if (matching is not null)
+        {
+            return matching;
+        }
+        var unavailable = new EndpointChoice(endpointId, unavailableLabel, EndpointDefaultRole.None, IsAvailable: false);
+        choices.Add(unavailable);
+        return unavailable;
+    }
+
+    private RecorderAppSettings CaptureAppSettings() => new()
+    {
+        OutputFolder = OutputFolder,
+        RenderEndpointId = SelectedRenderEndpoint?.EndpointId,
+        RecordMicrophone = SelectedMicrophoneEndpoint is not null &&
+            !ReferenceEquals(SelectedMicrophoneEndpoint, EndpointChoice.NoMicrophone),
+        MicrophoneEndpointId = SelectedMicrophoneEndpoint?.EndpointId,
+        CaptureSource = SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+            ? RecorderPersistedCaptureSource.SelectedApplication
+            : RecorderPersistedCaptureSource.SystemLoopback,
+        TeamsMuteSyncEnabled = IsTeamsMuteSyncEnabled,
+        TeamsAutomaticRecordingEnabled = IsTeamsAutomaticRecordingEnabled,
+    };
+
+    private void PersistAppSettingsInBackground()
+    {
+        if (!isInitialized || isShuttingDown)
+        {
+            return;
+        }
+        _ = PersistAppSettingsSilentlyAsync();
+    }
+
+    private async Task PersistAppSettingsSilentlyAsync()
+    {
+        try { await PersistAppSettingsAsync(); }
+        catch (Exception) { /* A later change or orderly shutdown will retry; recording remains local. */ }
+    }
+
+    private async Task PersistAppSettingsAsync()
+    {
+        await appSettingsWriteGate.WaitAsync();
+        try
+        {
+            await appSettingsStore.SaveAsync(CaptureAppSettings());
+        }
+        finally
+        {
+            appSettingsWriteGate.Release();
+        }
+    }
+
     public async Task InitializeAsync()
     {
         if (isInitialized || isInitializing)
@@ -523,13 +1178,16 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         IsBusy = true;
         try
         {
+            await RestoreAppSettingsAsync();
+            await InitializeOpenAiProviderAsync();
             recordingLifecycle = new RecordingLifecycleService(new NativeRecorderBridge(), OutputFolder);
             recordingLifecycle.SnapshotChanged += OnSnapshotChanged;
             InitializeGlobalMuteHotKey();
             SetRecorderAvailable(true);
-            await RefreshEndpointsCoreAsync();
+            await RefreshEndpointsCoreAsync(announce: false);
             RefreshStorageReadiness();
             await RecoverAndRefreshLibraryAsync();
+            await RestoreTeamsIntegrationAsync();
             ApplySnapshot(recordingLifecycle.Snapshot);
         }
         catch (Exception exception)
@@ -566,6 +1224,17 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         playbackTimer.Stop();
         UpdateCommandStates();
 
+        try
+        {
+            await PersistAppSettingsAsync();
+        }
+        catch (Exception)
+        {
+            // The recording lifecycle must still be finalized safely even if a public
+            // preference file cannot be written during shutdown.
+            ErrorText = "無法儲存應用程式設定；下次啟動可能需要重新選擇裝置。";
+        }
+
         await DisposeTeamsMuteSyncAsync();
         DisposeGlobalMuteHotKey();
         teamsInputMute.Changed -= OnInputMuteChanged;
@@ -597,10 +1266,34 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         activeLifecycle?.Dispose();
         mediaPlayer?.Dispose();
         mediaPlayer = null;
+        transcriptionCoordinator?.Dispose();
+        transcriptionCoordinator = null;
+        meetingSummaryClient?.Dispose();
+        meetingSummaryClient = null;
+        openAiAsrTransport?.Dispose();
+        openAiAsrTransport = null;
+        openAiProviderConnectionClient?.Dispose();
+        openAiProviderConnectionClient = null;
+        openAiProviderRepository = null;
+        isOpenAiProviderInitialized = false;
         SetRecorderAvailable(false);
     }
 
-    private async Task EnableTeamsMuteSyncAsync()
+    private Task EnableTeamsMuteSyncAsync() => EnableTeamsMuteSyncAsync(restoreAutomaticRecording: false);
+
+    private async Task RestoreTeamsIntegrationAsync()
+    {
+        var restoreSync = restoreTeamsMuteSyncAfterInitialization;
+        var restoreAutomaticRecording = restoreTeamsAutomaticRecordingAfterInitialization;
+        restoreTeamsMuteSyncAfterInitialization = false;
+        restoreTeamsAutomaticRecordingAfterInitialization = false;
+        if (restoreSync)
+        {
+            await EnableTeamsMuteSyncAsync(restoreAutomaticRecording);
+        }
+    }
+
+    private async Task EnableTeamsMuteSyncAsync(bool restoreAutomaticRecording)
     {
         if (IsTeamsMuteSyncEnabled || isShuttingDown)
         {
@@ -625,8 +1318,21 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             await teamsMuteSync.SetEnabledAsync(true);
             teamsMuteSnapshot = teamsMuteSync.Snapshot;
             IsTeamsMuteSyncEnabled = true;
+            if (restoreAutomaticRecording && teamsAutomaticRecorder is { } automatic)
+            {
+                await automatic.SetEnabledAsync(true);
+                teamsAutomaticSnapshot = automatic.Snapshot;
+                var meeting = teamsMuteSnapshot.LastMeetingState;
+                if (meeting is { } trustedMeeting && HasTrustedTeamsMeetingState)
+                {
+                    await automatic.SetMeetingPresenceAsync(trustedMeeting.IsInMeeting);
+                }
+                OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
+                OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            }
             OnPropertyChanged(nameof(TeamsMuteStatusText));
             OnPropertyChanged(nameof(TeamsMuteRoutingText));
+            PersistAppSettingsInBackground();
         }
         catch (Exception exception)
         {
@@ -647,6 +1353,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         try
         {
             await DisposeTeamsMuteSyncAsync();
+            PersistAppSettingsInBackground();
         }
         catch (Exception exception)
         {
@@ -662,7 +1369,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
     private async Task RequestTeamsPairingAsync()
     {
         var sync = teamsMuteSync;
-        if (sync is null || !IsTeamsMuteSyncEnabled)
+        if (sync is null || !CanRequestTeamsPairing)
         {
             return;
         }
@@ -700,17 +1407,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         {
             await automatic.SetEnabledAsync(true);
             var meeting = teamsMuteSnapshot.LastMeetingState;
-            if (meeting is null || !HasTrustedTeamsMeetingState)
+            if (meeting is { } trustedMeeting && HasTrustedTeamsMeetingState)
             {
-                await automatic.SetEnabledAsync(false);
-                ErrorText = "Teams 會議狀態在啟用自動錄音前失去信任；未開始錄音。";
-                return;
+                await automatic.SetMeetingPresenceAsync(trustedMeeting.IsInMeeting);
             }
-
-            await automatic.SetMeetingPresenceAsync(meeting.IsInMeeting);
             teamsAutomaticSnapshot = automatic.Snapshot;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            PersistAppSettingsInBackground();
         }
         catch (Exception exception)
         {
@@ -741,6 +1445,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             teamsAutomaticSnapshot = automatic.Snapshot;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            PersistAppSettingsInBackground();
         }
         catch (Exception exception)
         {
@@ -752,6 +1457,37 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             UpdateCommandStates();
         }
     }
+
+    private async Task CancelTeamsAutomaticRecordingStartAsync()
+    {
+        var automatic = teamsAutomaticRecorder;
+        if (automatic is null || !CanCancelTeamsAutomaticRecordingStart)
+        {
+            return;
+        }
+
+        isTeamsAutomaticRecordingOperationInProgress = true;
+        UpdateCommandStates();
+        try
+        {
+            await automatic.CancelStartCountdownAsync();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Shutdown may win a click already queued by the compact window.
+        }
+        catch (Exception exception)
+        {
+            ErrorText = $"無法取消本次 Teams 自動開始：{exception.Message}";
+        }
+        finally
+        {
+            isTeamsAutomaticRecordingOperationInProgress = false;
+            UpdateCommandStates();
+        }
+    }
+
+    private Task StopRecordingFromOverlayAsync() => StopAsync();
 
     private async Task DisposeTeamsMuteSyncAsync()
     {
@@ -787,6 +1523,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         teamsAutomaticSnapshot = TeamsAutoMeetingSnapshot.Initial;
         OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
         OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+        NotifyRecordingOverlayStateChanged();
 
         if (automatic is null)
         {
@@ -818,7 +1555,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
             UpdateCommandStates();
 
-            if (!HasTrustedTeamsMeetingState && teamsAutomaticRecorder?.Snapshot.IsEnabled == true)
+            if (!HasPairedTeamsConnection && teamsAutomaticRecorder?.Snapshot.IsEnabled == true)
             {
                 _ = DisableTeamsAutomaticRecordingAfterTrustLossAsync();
             }
@@ -892,6 +1629,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             ErrorText = "Teams 會議狀態不再可信；已停用自動錄音。現有錄音會保留並交由使用者控制。";
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            NotifyRecordingOverlayStateChanged();
             UpdateCommandStates();
         }
         catch (ObjectDisposedException)
@@ -915,6 +1653,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             teamsAutomaticSnapshot = changed;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            NotifyRecordingOverlayStateChanged();
             UpdateCommandStates();
         }
 
@@ -982,6 +1721,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(IsRecordingMicrophoneMuted));
             OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
             OnPropertyChanged(nameof(MicrophoneHealthText));
+            NotifyLiveAudioHealthChanged();
             OnPropertyChanged(nameof(TeamsMuteRoutingText));
         }
 
@@ -1020,13 +1760,19 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             RecordingCoordinatorState.Failed;
 
     private bool SelectedDevicesReady =>
-        SelectedRenderEndpoint is { IsAvailable: true } &&
+        (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication ||
+         SelectedRenderEndpoint is { IsAvailable: true }) &&
         (SelectedMicrophoneEndpoint is null or { EndpointId: null } or { IsAvailable: true });
+
+    private bool SelectedProcessReady =>
+        SelectedCaptureSource?.Kind != CaptureSourceKind.SelectedApplication ||
+        SelectedProcess is { IsAvailable: true };
 
     private bool CanStart =>
         IsSetupEditable &&
         storageCanStart &&
         SelectedDevicesReady &&
+        SelectedProcessReady &&
         recordingLifecycle is not { HasPublicationInProgress: true };
 
     private bool CanStop =>
@@ -1040,6 +1786,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     private bool CanRefreshDevices => IsSetupEditable;
 
+    private bool CanRefreshProcessCatalog => IsSetupEditable;
+
     private bool CanRefreshLibrary => !IsBusy && !isShuttingDown;
 
     private bool CanPlay => mediaPlayer is not null && SelectedLibraryItem is { IsPlayable: true } && !isShuttingDown;
@@ -1049,7 +1797,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         !isShuttingDown;
 
     public bool CanManageLibrary =>
-        SelectedLibraryItem is not null &&
+        SelectedLibraryItem is { IsManaged: true } &&
         !isShuttingDown;
 
     public bool CanConfirmRecycle =>
@@ -1221,7 +1969,38 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         });
     }
 
-    private Task RefreshEndpointsAsync() => RunOperationAsync(RefreshEndpointsCoreAsync);
+    private Task RefreshEndpointsAsync() => RunOperationAsync(
+        () => RefreshEndpointsCoreAsync(announce: true));
+
+    private Task RefreshProcessCatalogAsync() => RunOperationAsync(RefreshProcessCatalogCoreAsync);
+
+    private async Task RefreshProcessCatalogCoreAsync()
+    {
+        // Process enumeration can be slow or deny access to individual processes.
+        // The Application catalog filters those cases and exposes no paths or command lines.
+        var entries = TeamsProcessCatalogPolicy.FilterForTeams(
+            await Task.Run(processCatalog.GetProcesses));
+        var previous = SelectedProcess;
+
+        ProcessCatalog.Clear();
+        foreach (var entry in entries)
+        {
+            ProcessCatalog.Add(new ProcessSelectionChoice(
+                entry.ProcessId,
+                entry.StartedAtUtc,
+                entry.ApplicationName,
+                entry.ProcessName,
+                entry.WindowTitle,
+                entry.HasWindow,
+                entry.Availability));
+        }
+
+        SelectedProcess = ProcessCatalog.FirstOrDefault(candidate =>
+            candidate.HasSameIdentity(previous));
+        ProcessCatalogStatusText = ProcessCatalog.Count == 0
+            ? "找不到可用的 Teams 程序；請先開啟 Microsoft Teams，然後重新整理。"
+            : $"已列出 {ProcessCatalog.Count} 個可用的 Teams 程序。";
+    }
 
     private Task RefreshLibraryAsync() => RunOperationAsync(RefreshLibraryCoreAsync);
 
@@ -1300,6 +2079,29 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         return Task.CompletedTask;
     });
 
+    private Task SaveDiagnosticsAsync() => RunOperationAsync(async () =>
+    {
+        var result = await GetRecordingLifecycle().ExportDiagnosticsAsync(diagnosticsDirectory);
+        DiagnosticsExportStatusText = $"已儲存診斷報告：{result.FileName}（{result.EntryCount:N0} 筆）。可按「開啟診斷資料夾」取得檔案。";
+        StatusText = "診斷報告已儲存。";
+        UpdateCommandStates();
+    });
+
+    private Task OpenDiagnosticsFolderAsync() => RunOperationAsync(() =>
+    {
+        if (!Directory.Exists(diagnosticsDirectory))
+        {
+            throw new DirectoryNotFoundException("尚未儲存診斷報告；請先按「儲存診斷報告」。");
+        }
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = diagnosticsDirectory,
+            UseShellExecute = true,
+        });
+        return Task.CompletedTask;
+    });
+
     private Task RequestRecycleLibraryAsync() => RunOperationAsync(() =>
     {
         if (SelectedLibraryItem is null)
@@ -1351,8 +2153,41 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             throw new InvalidOperationException("請重新選取可用的輸出裝置與麥克風後再開始錄製。");
         }
 
+        await RefreshTeamsPlaybackEndpointObservationAsync();
         RefreshStorageReadiness();
-        var started = await GetRecordingLifecycle().StartMixedAsync(kind, SelectedRenderEndpoint?.EndpointId, SelectedMicrophoneEndpoint?.EndpointId, testDuration);
+        var lifecycle = GetRecordingLifecycle();
+        RecordingLifecycleStartResult started;
+        if (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication)
+        {
+            var process = SelectedProcess
+                ?? throw new InvalidOperationException("請先選擇應用程式。");
+            if (!process.IsAvailable)
+            {
+                throw new InvalidOperationException("所選應用程式程序已無法使用。");
+            }
+
+            // The application layer verifies PID + start time immediately before
+            // native capture and fails closed if the identity is no longer current.
+            started = await lifecycle.StartAsync(new RecordingStartRequest(
+                kind,
+                RecordingAudioSource.SelectedProcessLoopback,
+                MicrophoneEndpointId: SelectedMicrophoneEndpoint?.EndpointId,
+                ProcessTarget: new SelectedProcessTarget(
+                    process.ProcessId,
+                    process.StartedAtUtc,
+                    process.ProcessName),
+                IncludeProcessTree: true,
+                TestDuration: testDuration));
+        }
+        else
+        {
+            started = await lifecycle.StartAsync(new RecordingStartRequest(
+                kind,
+                RecordingAudioSource.SystemLoopback,
+                RenderEndpointId: SelectedRenderEndpoint?.EndpointId,
+                MicrophoneEndpointId: SelectedMicrophoneEndpoint?.EndpointId,
+                TestDuration: testDuration));
+        }
         var plan = started.Session;
         NextOutputPath = plan.FinalAudioPath;
         lastResultText = $"正在建立工作階段：{plan.FinalAudioPath}";
@@ -1367,7 +2202,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         return started.Snapshot;
     }
 
-    private async Task RefreshEndpointsCoreAsync()
+    private async Task RefreshEndpointsCoreAsync(bool announce = false)
     {
         var result = await GetRecordingLifecycle().RefreshEndpointsAsync();
         if (!result.IsSuccess)
@@ -1376,8 +2211,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             return;
         }
 
-        var renderId = SelectedRenderEndpoint?.EndpointId;
-        var microphoneId = SelectedMicrophoneEndpoint?.EndpointId;
+        var renderSelection = EndpointRefreshSelection.Retain(
+            SelectedRenderEndpoint?.EndpointId,
+            result.Endpoints.Where(endpoint => endpoint.Flow == CaptureEndpointFlow.Render));
+        var microphoneSelection = EndpointRefreshSelection.Retain(
+            SelectedMicrophoneEndpoint?.EndpointId,
+            result.Endpoints.Where(endpoint => endpoint.Flow == CaptureEndpointFlow.Capture));
         ReplaceEndpoints(
             RenderEndpoints,
             result.Endpoints.Where(endpoint => endpoint.Flow == CaptureEndpointFlow.Render),
@@ -1387,14 +2226,66 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             result.Endpoints.Where(endpoint => endpoint.Flow == CaptureEndpointFlow.Capture),
             EndpointChoice.NoMicrophone);
 
+        if (announce)
+        {
+            StatusText = $"已重新整理 {RenderEndpoints.Count - 1} 個輸出裝置和 {CaptureEndpoints.Count - 1} 個麥克風。";
+            ErrorText = null;
+        }
+
+        var initialMicrophoneEndpointId = SelectedMicrophoneEndpoint is null
+            ? MicrophoneDefaultSelectionPolicy.SelectInitialCaptureEndpointId(result.Endpoints)
+            : null;
         SelectedRenderEndpoint = RetainOrMarkUnavailable(
             RenderEndpoints,
-            renderId,
+            renderSelection,
             "輸出裝置");
         SelectedMicrophoneEndpoint = RetainOrMarkUnavailable(
             CaptureEndpoints,
-            microphoneId,
+            microphoneSelection,
             "麥克風");
+        if (initialMicrophoneEndpointId is not null)
+        {
+            SelectedMicrophoneEndpoint = CaptureEndpoints.FirstOrDefault(choice =>
+                string.Equals(choice.EndpointId, initialMicrophoneEndpointId, StringComparison.Ordinal));
+        }
+        ApplyPendingAppSettingsAfterEndpointRefresh();
+        windowsConsoleDefaultRenderEndpointId = result.Endpoints
+            .FirstOrDefault(endpoint => endpoint.Flow == CaptureEndpointFlow.Render &&
+                                        endpoint.DefaultRoles.HasFlag(EndpointDefaultRole.Console))
+            ?.EndpointId;
+        await RefreshTeamsPlaybackEndpointObservationAsync();
+        OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+        OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
+    }
+
+    private async Task RefreshTeamsPlaybackEndpointObservationAsync()
+    {
+        if (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication || recordingLifecycle is null)
+        {
+            teamsPlaybackEndpointObservation = TeamsPlaybackEndpointObservation.Unknown;
+            OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+            OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
+            return;
+        }
+
+        try
+        {
+            var result = await Task.Run(recordingLifecycle.ProbeTeamsRenderEndpoints);
+            teamsPlaybackEndpointObservation = result.IsSuccess
+                ? TeamsPlaybackEndpointObservation.Known(
+                    result.ActiveEndpoints.Select(endpoint => endpoint.EndpointId))
+                : TeamsPlaybackEndpointObservation.Unknown;
+        }
+        // The probe is advisory only. It must not prevent manual/test/Teams
+        // starts if a driver, an old bridge, or an audio-session broker cannot
+        // provide a useful answer.
+        catch (Exception)
+        {
+            teamsPlaybackEndpointObservation = TeamsPlaybackEndpointObservation.Unknown;
+        }
+
+        OnPropertyChanged(nameof(TeamsPlaybackEndpointWarning));
+        OnPropertyChanged(nameof(HasTeamsPlaybackEndpointWarning));
     }
 
     private async Task RecoverAndRefreshLibraryAsync()
@@ -1426,7 +2317,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             foreach (var session in sessions)
             {
                 var displayName = string.IsNullOrWhiteSpace(session.Metadata.Title)
-                    ? Path.GetFileName(session.FolderPath)
+                    ? session.IsManaged
+                        ? Path.GetFileName(session.FolderPath)
+                        : Path.GetFileNameWithoutExtension(session.AudioPath)
                     : session.Metadata.Title;
                 LibraryItems.Add(new LibraryRecording(
                     displayName,
@@ -1438,7 +2331,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
                     session.Metadata.IsFavorite,
                     session.Kind,
                     session.AudioBytes,
-                    session.HasRecoverableBackup));
+                    session.HasRecoverableBackup,
+                    session.IsManaged));
             }
 
             SelectedLibraryItem = LibraryItems.FirstOrDefault(item =>
@@ -1541,12 +2435,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
 
     private static EndpointChoice RetainOrMarkUnavailable(
         ObservableCollection<EndpointChoice> choices,
-        string? endpointId,
+        EndpointRefreshSelection selection,
         string kind)
     {
+        var endpointId = selection.EndpointId;
         var match = choices.FirstOrDefault(choice =>
             string.Equals(choice.EndpointId, endpointId, StringComparison.Ordinal));
-        if (match is not null)
+        if (selection.IsAvailable && match is not null)
         {
             return match;
         }
@@ -1618,9 +2513,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         }
 
         snapshot = changed;
+        NotifyRecordingOverlayStateChanged();
         RefreshElapsed();
         if (changed.State == RecordingCoordinatorState.Recording)
         {
+            AppendWaveform(OutputWaveformBars, changed.Stats.PrimaryLevelPeak);
+            AppendWaveform(InputWaveformBars, changed.Stats.MicrophoneLevelPeak);
             ApplyRecordingMicrophoneMute(teamsInputMute.IsMuted);
             if (!telemetryTimer.IsRunning)
             {
@@ -1630,6 +2528,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         else
         {
             telemetryTimer.Stop();
+            ResetWaveforms();
         }
 
         if (changed.State is RecordingCoordinatorState.Stopped or
@@ -1645,7 +2544,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
             ErrorText = changed.Error;
         }
 
-        if (changed.State == RecordingCoordinatorState.Stopped)
+        if (changed.State == RecordingCoordinatorState.Stopped && !changed.HasRecoverableFault)
         {
             _ = EnsureSessionPublishedAsync();
         }
@@ -1657,11 +2556,66 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ElapsedText));
         OnPropertyChanged(nameof(PeakPercent));
         OnPropertyChanged(nameof(PeakText));
+        OnPropertyChanged(nameof(OutputLevelPercent));
+        OnPropertyChanged(nameof(OutputLevelText));
+        OnPropertyChanged(nameof(InputLevelPercent));
+        OnPropertyChanged(nameof(InputLevelText));
+        NotifyLiveAudioHealthChanged();
         OnPropertyChanged(nameof(AggregateHealthText));
         OnPropertyChanged(nameof(RenderHealthText));
         OnPropertyChanged(nameof(MicrophoneHealthText));
         OnPropertyChanged(nameof(ResultText));
         UpdateCommandStates();
+    }
+
+    private void NotifyLiveAudioHealthChanged()
+    {
+        OnPropertyChanged(nameof(PrimaryHealthTitle));
+        OnPropertyChanged(nameof(PrimaryHealthDetail));
+        OnPropertyChanged(nameof(PrimaryHealthGlyph));
+        OnPropertyChanged(nameof(PrimaryHealthBrush));
+        OnPropertyChanged(nameof(MicrophoneHealthTitle));
+        OnPropertyChanged(nameof(MicrophoneHealthDetail));
+        OnPropertyChanged(nameof(MicrophoneHealthGlyph));
+        OnPropertyChanged(nameof(MicrophoneHealthBrush));
+        OnPropertyChanged(nameof(AudioHealthSummaryText));
+    }
+
+    private static string HealthGlyph(LiveAudioHealthStatus status) => status switch
+    {
+        LiveAudioHealthStatus.Healthy => "\uE73E",
+        LiveAudioHealthStatus.Warning => "\uE7BA",
+        LiveAudioHealthStatus.Recovered => "\uE73E",
+        _ => "\uE946",
+    };
+
+    private static Brush HealthBrush(LiveAudioHealthStatus status) => status switch
+    {
+        LiveAudioHealthStatus.Healthy => HealthyHealthBrush,
+        LiveAudioHealthStatus.Warning => WarningHealthBrush,
+        LiveAudioHealthStatus.Recovered => RecoveredHealthBrush,
+        _ => NeutralHealthBrush,
+    };
+
+    private static void AppendWaveform(ObservableCollection<WaveformBar> bars, float peak)
+    {
+        if (bars.Count >= WaveformBarCount)
+        {
+            bars.RemoveAt(0);
+        }
+
+        bars.Add(WaveformBar.FromPeak(peak));
+    }
+
+    private void ResetWaveforms()
+    {
+        OutputWaveformBars.Clear();
+        InputWaveformBars.Clear();
+        for (var index = 0; index < WaveformBarCount; index++)
+        {
+            OutputWaveformBars.Add(WaveformBar.Silence);
+            InputWaveformBars.Add(WaveformBar.Silence);
+        }
     }
 
     private async Task FinalizeFaultedSessionAsync()
@@ -1781,12 +2735,26 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
     }
 
+    private void NotifyRecordingOverlayStateChanged()
+    {
+        OnPropertyChanged(nameof(RecordingOverlayState));
+        OnPropertyChanged(nameof(ActiveRecordingOverlayKind));
+        OnPropertyChanged(nameof(IsTeamsAutomaticRecordingCountdownVisible));
+        OnPropertyChanged(nameof(TeamsAutomaticRecordingCountdownSeconds));
+        OnPropertyChanged(nameof(CanCancelTeamsAutomaticRecordingStart));
+        OnPropertyChanged(nameof(CanStopRecordingFromOverlay));
+        RecordingOverlayStateChanged?.Invoke(this, RecordingOverlayState);
+    }
+
     private void UpdateCommandStates()
     {
         StartCommand.RaiseCanExecuteChanged();
         StopCommand.RaiseCanExecuteChanged();
         StartTestCommand.RaiseCanExecuteChanged();
+        SaveDiagnosticsCommand.RaiseCanExecuteChanged();
+        OpenDiagnosticsFolderCommand.RaiseCanExecuteChanged();
         RefreshDevicesCommand.RaiseCanExecuteChanged();
+        RefreshProcessCatalogCommand.RaiseCanExecuteChanged();
         RefreshLibraryCommand.RaiseCanExecuteChanged();
         PlayCommand.RaiseCanExecuteChanged();
         PauseCommand.RaiseCanExecuteChanged();
@@ -1801,15 +2769,28 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         RequestTeamsPairingCommand.RaiseCanExecuteChanged();
         EnableTeamsAutomaticRecordingCommand.RaiseCanExecuteChanged();
         DisableTeamsAutomaticRecordingCommand.RaiseCanExecuteChanged();
+        CancelTeamsAutomaticRecordingStartCommand.RaiseCanExecuteChanged();
+        StopRecordingFromOverlayCommand.RaiseCanExecuteChanged();
         ToggleLocalMicrophoneMuteCommand.RaiseCanExecuteChanged();
+        TestOpenAiProviderConnectionCommand.RaiseCanExecuteChanged();
         OnPropertyChanged(nameof(IsDeviceSelectionEnabled));
+        OnPropertyChanged(nameof(CanSaveDiagnostics));
+        OnPropertyChanged(nameof(CanOpenDiagnosticsFolder));
         OnPropertyChanged(nameof(CanSeek));
         OnPropertyChanged(nameof(CanManageLibrary));
         OnPropertyChanged(nameof(CanConfirmRecycle));
         OnPropertyChanged(nameof(CanManageTeamsMuteSync));
+        OnPropertyChanged(nameof(CanRequestTeamsPairing));
         OnPropertyChanged(nameof(IsRecordingMicrophoneMuted));
         OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
         OnPropertyChanged(nameof(GlobalMuteHotKeyStatus));
+        OnPropertyChanged(nameof(IsOpenAiProviderAvailable));
+        OnPropertyChanged(nameof(CanSaveOpenAiProvider));
+        OnPropertyChanged(nameof(CanTestOpenAiProvider));
+        OnPropertyChanged(nameof(CanRemoveOpenAiApiKey));
+        OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
+        OnPropertyChanged(nameof(CanStartOpenAiTranscription));
+        OnPropertyChanged(nameof(CanGenerateOpenAiSummary));
     }
 
     private static string GetStatusText(RecordingCoordinatorSnapshot snapshot) => snapshot.State switch
@@ -1819,6 +2800,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         RecordingCoordinatorState.Recording when snapshot.IsTestRecording => "10 秒測試錄音中",
         RecordingCoordinatorState.Recording => "錄音中",
         RecordingCoordinatorState.Stopping => "正在停止並儲存…",
+        RecordingCoordinatorState.Stopped when snapshot.HasRecoverableFault => "錄音異常已完成清理；保留可復原證據，可開始新的錄音。",
         RecordingCoordinatorState.Stopped => "正在發佈 M4A 工作階段…",
         RecordingCoordinatorState.Failed => "無法開始錄音",
         RecordingCoordinatorState.Faulted => "錄音異常，已保留可復原的工作檔（若存在）。",
@@ -1869,6 +2851,23 @@ public sealed class RecordingViewModel : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
 
+/// <summary>
+/// One column in the lightweight live level waveform.  The height keeps a
+/// visible floor so silence is distinguishable from a missing UI control.
+/// </summary>
+public sealed record WaveformBar(double Height, double Opacity)
+{
+    public static WaveformBar Silence { get; } = new(4, 0.25);
+
+    public static WaveformBar FromPeak(float peak)
+    {
+        var normalized = Math.Clamp(peak, 0F, 1F);
+        return new(
+            Height: 4 + normalized * 44,
+            Opacity: 0.3 + normalized * 0.7);
+    }
+}
+
 public sealed record EndpointChoice(
     string? EndpointId,
     string DisplayName,
@@ -1896,7 +2895,8 @@ public sealed record LibraryRecording(
     bool IsFavorite,
     RecordingSessionKind Kind,
     long AudioBytes,
-    bool HasRecoverableBackup)
+    bool HasRecoverableBackup,
+    bool IsManaged)
 {
     public string KindText => Kind switch
     {
@@ -1904,6 +2904,8 @@ public sealed record LibraryRecording(
         RecordingSessionKind.Test => "測試",
         _ => "手動",
     };
+
+    public string AvailabilityText => IsManaged ? "受管理工作階段" : "舊版 M4A · 僅可播放";
 
     public string TagsText => Tags.Count == 0 ? "未加標籤" : string.Join("、", Tags);
 }

@@ -11,7 +11,7 @@ namespace recorder::timeline {
 // WASAPI packet timestamp; device_position_frames is used as an independent
 // duration estimate.  The mapper never moves an already emitted packet back
 // in time and bounds clock correction to 10 ms per packet.
-enum class Source : std::uint8_t { Render, Microphone };
+enum class Source : std::uint8_t { Render, Microphone, Process };
 
 struct Placement {
     std::uint64_t frame = 0;
@@ -54,6 +54,10 @@ public:
     void MarkQueueOverflow(Source source) noexcept;
     void MarkDisconnected(Source source) noexcept;
     const SourceCounters& counters(Source source) const noexcept;
+    // The exclusive canonical frame reached by this source.  The mixer uses
+    // this watermark to wait for both inputs before committing a block: a
+    // faster callback must not make the other source late by one block.
+    std::uint64_t end_frame(Source source) const noexcept;
     bool has_origin() const noexcept { return has_origin_; }
 
 private:
@@ -71,6 +75,7 @@ private:
     std::uint64_t origin_qpc_100ns_ = 0;
     State render_{};
     State microphone_{};
+    State process_{};
 };
 
 }  // namespace recorder::timeline

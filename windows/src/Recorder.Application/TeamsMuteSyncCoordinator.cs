@@ -7,7 +7,8 @@ public sealed record TeamsMuteSyncSnapshot(
     TeamsMeetingState? LastMeetingState,
     string? Detail,
     bool IsPairingAuthenticated = false,
-    bool IsMicrophoneRoutingEngaged = false)
+    bool IsMicrophoneRoutingEngaged = false,
+    bool IsPairingKnown = false)
 {
     public static TeamsMuteSyncSnapshot Initial { get; } = new(TeamsMuteSyncStatus.Disabled, null, null);
 }
@@ -37,6 +38,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
     private readonly ITeamsThirdPartyApiClient client;
     private readonly IRecorderMicrophoneMuteSink microphone;
     private TeamsMuteSyncSnapshot snapshot = TeamsMuteSyncSnapshot.Initial;
+    private bool pairingRequestPending;
     private bool enabled;
     private bool microphoneRoutingEngaged;
     private bool disposed;
@@ -59,6 +61,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         lock (gate)
         {
             enabled = value;
+            if (!value) pairingRequestPending = false;
             if (!value && microphoneRoutingEngaged)
             {
                 microphone.SetMuted(false);
@@ -85,7 +88,10 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         lock (gate)
         {
             if (enabled)
+            {
+                pairingRequestPending = true;
                 SetSnapshotLocked(snapshot with { Status = TeamsMuteSyncStatus.WaitingForPairingApproval, Detail = null });
+            }
         }
     }
 
@@ -96,16 +102,21 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
             if (!enabled) return;
             switch (@event)
             {
-                case TeamsThirdPartyApiEvent.MeetingUpdate(var update, var isPairingAuthenticated):
-                    if (!isPairingAuthenticated)
+                case TeamsThirdPartyApiEvent.MeetingUpdate(var update, var hasStoredPairingCredential):
+                    // A Teams-issued credential remains authoritative for this local
+                    // connection. canPair announces that Teams can offer pairing; it does not
+                    // revoke an existing credential. Treating it as revocation prevented
+                    // existing users from entering the automatic-recording countdown.
+                    if (!hasStoredPairingCredential)
                     {
                         FailClosedForLostTrustLocked();
                         SetSnapshotLocked(new TeamsMuteSyncSnapshot(
-                            update.CanPair ? TeamsMuteSyncStatus.WaitingForPairingApproval : TeamsMuteSyncStatus.WaitingForMeeting,
+                            TeamsMuteSyncStatus.WaitingForPairingApproval,
                             null,
-                            null,
+                            update.CanPair ? "Teams is waiting for pairing approval." : null,
                             false,
-                            microphoneRoutingEngaged));
+                            microphoneRoutingEngaged,
+                            false));
                     }
                     else if (update.State is { } state)
                     {
@@ -117,6 +128,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             Detail = null,
                             IsPairingAuthenticated = true,
                             IsMicrophoneRoutingEngaged = microphoneRoutingEngaged,
+                            IsPairingKnown = true,
                         });
                         MeetingPresenceChanged?.Invoke(this, state.IsInMeeting);
                     }
@@ -128,10 +140,26 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             null,
                             null,
                             true,
+                            microphoneRoutingEngaged,
+                            true));
+                    }
+                    break;
+                case TeamsThirdPartyApiEvent.Error(_, var message) when IsAlreadyPairedResponse(message):
+                    // Only the user's own pair command can enter the actionable reset state.
+                    if (pairingRequestPending)
+                    {
+                        pairingRequestPending = false;
+                        FailClosedForLostTrustLocked();
+                        SetSnapshotLocked(new TeamsMuteSyncSnapshot(
+                            TeamsMuteSyncStatus.Failed,
+                            null,
+                            "Teams reports this recorder is already paired. In Teams, open Settings > Privacy > Manage API, forget Local Meeting Recorder, then request pairing again.",
+                            false,
                             microphoneRoutingEngaged));
                     }
                     break;
                 case TeamsThirdPartyApiEvent.Error(_, var message):
+                    pairingRequestPending = false;
                     FailClosedForLostTrustLocked();
                     SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.Failed, null, message, false, microphoneRoutingEngaged));
                     break;
@@ -144,6 +172,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         lock (gate)
         {
             if (!enabled) return;
+            pairingRequestPending = false;
             FailClosedForLostTrustLocked();
             SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.WaitingForTeamsApi, null, error, false, microphoneRoutingEngaged));
         }
@@ -181,6 +210,9 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         if (microphoneRoutingEngaged) microphone.SetMuted(true);
         if (wasTrustedMeeting) MeetingPresenceChanged?.Invoke(this, false);
     }
+
+    private static bool IsAlreadyPairedResponse(string message) =>
+        message.Contains("already paired", StringComparison.OrdinalIgnoreCase);
 
     private void SetSnapshotLocked(TeamsMuteSyncSnapshot value)
     {

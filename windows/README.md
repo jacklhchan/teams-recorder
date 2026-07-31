@@ -25,6 +25,14 @@ The repository now contains:
   layout with a backup M4A, no-replace promotion, library discovery, capacity
   decisions, and conservative interrupted-session recovery;
 - local M4A library discovery and playback controls in the WinUI shell.
+- an explicit OpenAI-compatible ASR workflow for one selected, completed M4A
+  session at a time, plus a separately confirmed transcript-only LLM meeting
+  summary. The API key is held only in the current Windows user's DPAPI store;
+  it is not written to recording metadata, diagnostics, or logs;
+- a notification-area icon: closing the main window hides it to the tray;
+  use the tray icon's right-click **Exit Teams Recorder** command to close it
+  and finalize recording safely. The Windows app, package, installer, and
+  tray icon are generated from the macOS `Assets/Generated/app-icon-source.png`;
 - deterministic native and managed tests, JSON contract fixtures, and real
   process-audio diagnostic tools.
 
@@ -37,9 +45,25 @@ or cross-tenant support. Teams UI mute/unmute actions did not deliver reliable
 mute-state updates in that validation. Teams Mute Sync therefore remains an
 unverified Preview and must not be presented as working, reliable, or capable of
 controlling Teams mute. The integration relies on supported pushed events and
-does not retain `query-state` polling as a workaround. Video capture,
-transcription, and a virtual microphone driver are not available. Aggregate
+uses one best-effort `query-state` request after its receive loop is active, so
+an authenticated connection can obtain its current meeting state even when Teams
+does not emit a new transition push. Video capture and a
+virtual microphone driver are not available. Aggregate
 health is available, but source-specific health statistics are not yet exposed.
+
+The AI workflow never uploads media automatically: each ASR request requires
+the user to select a completed managed M4A and confirm the upload, and each
+summary request separately confirms its transcript upload. This first Windows
+slice accepts completed M4A files up to 32 MiB; it deliberately refuses larger
+files rather than byte-splitting an M4A container into invalid audio. Recording
+and upload behaviour with the intended provider, real credentials, long
+recordings, and real meeting content remain manual release gates.
+
+The app also restores non-secret local choices after restart: the output folder,
+explicit render and microphone selection, microphone on/off choice, and capture
+source mode. An unavailable saved endpoint remains visibly unavailable instead
+of silently switching devices. Process selection itself is not persisted: after
+restart, selected-app mode requires choosing a current Teams process again.
 
 The WinUI recording command allocates managed `manual-*` or `test-*` session
 folders through the storage service, writes native capture to
@@ -92,7 +116,37 @@ The matching Release `Recorder.NativeBridge.dll` is copied next to it. Do not
 ship the Debug native DLL: it depends on the non-redistributable debug C++
 runtime.
 
-## Why the app is not installed yet
+## Per-user Setup.exe for another Windows computer
+
+After the Release native bridge has been verified, create a self-contained x64
+installer that does not require the target computer to have .NET installed:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\Build-Setup.ps1
+```
+
+The resulting installer is:
+
+```text
+windows\out\installer\TeamsRecorderSetup-1.0.0-win-x64.exe
+```
+
+It installs per-user under `%LocalAppData%\Programs\Teams Recorder`, creates a
+Start Menu shortcut, and can optionally create a desktop shortcut or start the
+app automatically when the installing user signs in to Windows. The startup
+option is unchecked by default, creates only that user's `HKCU\...\Run` entry,
+and is removed if it is disabled during an update or when the app is uninstalled.
+Uninstalling the app deliberately preserves `%LocalAppData%\Teams Recorder\Sessions`,
+including M4A sessions and recovery evidence. The installer also deploys the
+required Microsoft VC++ runtime DLLs app-local, so it does not need to make a
+machine-wide runtime installation on the target computer.
+
+This repository does not yet have a code-signing certificate. The generated
+Setup.exe is suitable for controlled internal testing, but Windows may identify
+it as an unknown publisher. Do not distribute it broadly until the installer
+and executable have been code-signed through the normal release process.
+
+## Why the app is not installed by a normal build
 
 Building an `.exe` does not register or install an app in Windows. The project
 defaults to an unpackaged, self-contained developer build so the Release EXE

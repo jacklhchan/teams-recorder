@@ -12,6 +12,13 @@
 before Task 1. No production or test implementation may start from an
 uncommitted plan.
 
+**Approved provider-preset amendment:** The user's 2026-07-31 request adds a
+saved provider picker with `HKT GenAI Platform` and
+`OpenAI-compatible API`. HKT uses a fixed UAT endpoint derived from a validated
+1–32 digit ASCII Group ID and `X-API-KEY`; generic retains its validated URL
+and Bearer authentication. Both configurations and credentials persist
+independently, and jobs capture immutable selected-provider snapshots.
+
 ## Global Constraints
 
 - Work only in `/Users/apple/Documents/recorder/.worktrees/meeting-intelligence-summary-title` on `codex/meeting-intelligence-summary-title`.
@@ -22,6 +29,13 @@ uncommitted plan.
   Cantonese (`yue`), English (`en`), and Mandarin (`zh`). Saving a choice
   affects only future immutable ASR snapshots; an active transcription keeps
   its captured language.
+- Provider Settings persists independent HKT and generic profiles. Switching
+  the provider picker must not overwrite the inactive profile or its distinct
+  Keychain credential. A legacy schema-v1 profile migrates as generic.
+- HKT accepts only a 1–32 ASCII-digit Group ID and reconstructs
+  `https://api.uat.bot-builder.pccw.com/v1/groups/{groupID}/openai`; its
+  host/path are never user-editable. HKT requests use only `X-API-KEY`;
+  generic requests use only `Authorization: Bearer`.
 - Automatic chat requires an exact `llmModel` match from a fresh `/models` response. Unsupported, unknown, failed, stale, or absent availability sends zero automatic chat requests.
 - Manual Generate, Regenerate, and Retry Generation may bypass discovery because they are explicit user authorization. `legacy-unconfigured-llm` is never sent.
 - LLM or title failure must never change a completed transcription to failed.
@@ -31,7 +45,10 @@ uncommitted plan.
 - Secure source reads must use exact-root/no-follow regular-file validation and pre/post device, inode, size, and link-count checks.
 - Source read is capped at 4 MiB plus one overflow byte; chunk content at 64 KiB; JSON body at 96 KiB; HTTP response at 256 KiB; partial summary at 4 KiB; final summary at 48 KiB; title at 120 grapheme clusters; source chunks at 64; reduction fan-in at 12; depth at 4; total LLM requests at 71; request timeout at 90 seconds; job deadline at 30 minutes.
 - Every LLM pipeline request has exactly one network attempt. Retry-After is a user-facing hint only; no automatic LLM resend is allowed.
-- Redirects may follow only same-origin 307/308 with identical POST method, body, and normalized content type. Model-discovery GET rejects all redirects. Authorization is restored only after every validation passes.
+- Redirects may follow only same-origin 307/308 with identical POST method,
+  body, and normalized content type. Model-discovery GET rejects all
+  redirects. Both credential headers are stripped before validation and only
+  the selected source header is restored after every validation passes.
 - Do not persist or log credentials, Authorization, transcript content, prompts, provider bodies, full provider URLs, or full local paths.
 - Do not add action items, `/responses`, timestamped transcripts, summary search, Windows changes, PR B/PR C refactors, or unrelated cleanup.
 - Keep the non-staging application untouched. Rebuild only `/Applications/Local Meeting Recorder Staging.app` after the Draft PR and CI gates.
@@ -48,6 +65,7 @@ uncommitted plan.
 | `Sources/RecorderApp/Library/RecordingSessionMutationGate.swift` | One shared serialized mutation boundary for ASR publication, transcript/metadata edits, and meeting-intelligence publication. |
 | `Sources/RecorderApp/Transcription/TranscriptPublication.swift` | Secure transcript snapshot/revision and immutable `TranscriptPublished` ownership event. |
 | `Sources/RecorderApp/Transcription/ProviderRedirectPolicy.swift` | Shared multipart/JSON same-origin 307/308 policy; GET redirects rejected. |
+| `Sources/RecorderApp/Transcription/ProviderAuthentication.swift` | Apply exactly one snapshot-selected credential header and identify both sensitive redirect headers. |
 | `Sources/RecorderApp/MeetingIntelligence/MeetingIntelligenceModels.swift` | Intent, availability, generated content, artifact, state, presentation, typed errors. |
 | `Sources/RecorderApp/MeetingIntelligence/MeetingIntelligenceAvailability.swift` | Exact-model automatic eligibility using the existing bounded provider client. |
 | `Sources/RecorderApp/MeetingIntelligence/MeetingIntelligenceStores.swift` | Safe bounded success/state artifact loading, staging, atomic replacement, and compatibility projection. |
@@ -84,10 +102,13 @@ uncommitted plan.
 | `Sources/RecorderApp/Transcription/TranscriptionJobCoordinator.swift` | Emit immutable, digest-bearing `TranscriptPublished` after active ownership validation. |
 | `Sources/RecorderApp/Transcription/OpenAICompatibleTranscriptionClient.swift` | Remove the in-file redirect policy and consume the shared policy without weakening multipart behavior. |
 | `Sources/RecorderApp/Transcription/OpenAICompatibleProviderClient.swift` | Preserve capped `/models`; expose no new persistence and reject redirected GET. |
+| `Sources/RecorderApp/Transcription/OpenAICompatibleProviderProfile.swift` | Add validated provider kind/HKT Group ID and trusted fixed-endpoint resolution while preserving generic normalization. |
+| `Sources/RecorderApp/Transcription/ProviderProfileStore.swift` | Persist a versioned active-kind envelope with independent HKT/generic configurations and migrate legacy v1 as generic. |
+| `Sources/RecorderApp/Transcription/OpenAICompatibleProviderRepository.swift` | Keep distinct Keychain identities and return immutable auth-aware snapshots. |
 | `Sources/RecorderApp/AppModel.swift` | Construct one shared mutation gate/coordinator, route semantic events and typed commands, no mirrored lifecycle state. |
 | `Sources/RecorderApp/UI/RecordingsLibraryView.swift` | Compose the coordinator-backed section into the existing transcript sheet and typed metadata edit. |
-| `Sources/RecorderApp/Views/AIProviderSettingsView.swift` | Clarifying ASR/LLM copy and stable identifiers. |
-| `Sources/RecorderApp/Transcription/AIProviderSettingsModel.swift` | Typed Cantonese/English/Mandarin UI selection and future-job persistence. |
+| `Sources/RecorderApp/Views/AIProviderSettingsView.swift` | Saved HKT/generic picker, conditional Group ID/base-URL fields, ASR/LLM clarity, and stable identifiers. |
+| `Sources/RecorderApp/Transcription/AIProviderSettingsModel.swift` | Retained per-preset drafts, stale-test rejection, typed language selection, and future-job persistence. |
 | `Sources/RecorderApp/UI/RecorderActionID.swift` | Meeting-intelligence and provider interaction IDs. |
 | `Sources/RecorderApp/Library/RecordingLibraryQuery.swift` | No summary indexing; only ensure refreshed generated title remains in metadata search. |
 | `Tests/RecorderAppTests/RecordingLibraryTests.swift` | Metadata v1/v2 migration, manual/generated ownership, unknown-field tests. |
@@ -96,7 +117,7 @@ uncommitted plan.
 | `Tests/RecorderAppTests/AppModelTranscriptionTests.swift` | Typed publication callback and existing search rebuild compatibility. |
 | `Tests/RecorderAppTests/OpenAICompatibleProviderClientTests.swift` | Actual delegate-path JSON/multipart redirect and GET rejection regressions. |
 | `Tests/RecorderAppTests/OpenAICompatibleTranscriptionClientTests.swift` | Preserve all current ASR redirect/auth/retry/cancellation behavior. |
-| `Tests/RecorderAppTests/AIProviderSettingsModelTests.swift` | Same/different model selection plus typed language save/reload behavior. |
+| `Tests/RecorderAppTests/AIProviderSettingsModelTests.swift` | Same/different model selection, typed language save/reload, independent preset retention, and stale discovery behavior. |
 | `Tests/RecorderAppTests/RecorderActionIDTests.swift` | Exact unique interaction ID set. |
 | `Tests/RecorderAppTests/RecorderWorkspaceRenderTests.swift` | Same-session generated-title projection and AVPlayer isolation regression. |
 | `contracts/recording-session.schema.json` | Accept compatible recording metadata v1 and v2. |
@@ -114,6 +135,7 @@ uncommitted plan.
 | One owner, immutable snapshots, cancellation, stale callbacks | Tasks 1 and 6 event, lease, coordinator, and AppModel integration tests |
 | Secure canonical transcript input and SHA-256 revision | Task 1 no-follow, hard-link, size, identity, and committed-revision tests |
 | Bounded `/chat/completions`, privacy, redirect, one-attempt budget | Task 4 client, sanitizer, Retry-After, transport, and delegate-path tests |
+| Saved HKT/generic presets and immutable credential routing | Task 4 redirect/auth tests; Task 6A profile/store/repository/settings tests |
 | Complete bounded long-transcript handling | Task 5 UTF-8, fan-in, depth, request-count, deadline, and cancellation tests |
 | Recoverable persistence and metadata/title provenance | Tasks 2 and 6 schema, safe-store, publication-barrier, and title-race tests |
 | Automatic/manual title behavior and transcript-edit staleness | Tasks 2, 6, and 7 metadata intent, coordinator, and UI action tests |
@@ -1283,6 +1305,130 @@ git add \
   Sources/RecorderApp/MeetingIntelligence/MeetingIntelligencePipeline.swift \
   Tests/RecorderAppTests/MeetingIntelligencePipelineTests.swift
 git commit -m "feat: summarize bounded long transcripts"
+```
+
+---
+
+### Task 5A: Saved HKT and Generic Provider Presets
+
+**Files:**
+- Create: `Sources/RecorderApp/Transcription/ProviderAuthentication.swift`
+- Modify: `Sources/RecorderApp/Transcription/OpenAICompatibleProviderProfile.swift`
+- Modify: `Sources/RecorderApp/Transcription/ProviderProfileStore.swift`
+- Modify: `Sources/RecorderApp/Transcription/OpenAICompatibleProviderRepository.swift`
+- Modify: `Sources/RecorderApp/Transcription/OpenAICompatibleProviderClient.swift`
+- Modify: `Sources/RecorderApp/Transcription/OpenAICompatibleTranscriptionClient.swift`
+- Modify: `Sources/RecorderApp/MeetingIntelligence/OpenAICompatibleMeetingIntelligenceClient.swift`
+- Modify: `Sources/RecorderApp/Transcription/AIProviderSettingsModel.swift`
+- Modify: `Tests/RecorderAppTests/OpenAICompatibleProviderProfileTests.swift`
+- Modify: `Tests/RecorderAppTests/ProviderProfileStoreTests.swift`
+- Modify: `Tests/RecorderAppTests/OpenAICompatibleProviderRepositoryTests.swift`
+- Modify: `Tests/RecorderAppTests/OpenAICompatibleProviderClientTests.swift`
+- Modify: `Tests/RecorderAppTests/OpenAICompatibleTranscriptionClientTests.swift`
+- Modify: `Tests/RecorderAppTests/OpenAICompatibleMeetingIntelligenceClientTests.swift`
+- Modify: `Tests/RecorderAppTests/AIProviderSettingsModelTests.swift`
+
+**Interfaces:**
+
+```swift
+enum AIProviderKind: String, Codable, CaseIterable, Sendable {
+    case hktGenAI
+    case openAICompatible
+}
+
+enum ProviderAuthentication: Codable, Equatable, Sendable {
+    case bearer
+    case hktAPIKey
+}
+
+struct OpenAICompatibleProviderSnapshot: Equatable, Sendable {
+    let providerKind: AIProviderKind
+    let authentication: ProviderAuthentication
+    let profile: OpenAICompatibleProviderProfile
+    let apiKey: String?
+}
+```
+
+The persisted envelope owns `activeProviderKind` and optional independent
+generic/HKT configurations. It never stores either API key. HKT Group ID is
+validated as 1–32 ASCII digits and is the only input used to build the fixed
+HKT endpoint. Generic URL normalization remains unchanged.
+
+- [ ] **Step 1: Write profile/store/repository RED tests**
+
+Add boundary cases for 1 and 32 ASCII digits and rejection of empty, 33-digit,
+signed, whitespace, full-width, Arabic-Indic, and arbitrary URL values. Add a
+legacy-v1-to-generic migration test, dual-profile round trip, active-kind
+round trip, future/tampered schema rejection, and distinct Keychain
+load/save/remove tests. Capture a snapshot, switch/save the other preset, and
+assert the captured value remains byte-for-byte unchanged.
+
+- [ ] **Step 2: Run persistence tests and verify RED**
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+swift test --filter 'OpenAICompatibleProviderProfileTests|ProviderProfileStoreTests|OpenAICompatibleProviderRepositoryTests'
+```
+
+Expected: RED because provider kind, HKT validation, settings envelope,
+credential routing, and auth-aware snapshots do not exist.
+
+- [ ] **Step 3: Implement envelope, fixed HKT endpoint, and separate Keychain**
+
+Preserve the existing generic credential service/account. Add a distinct HKT
+service/account. Validate provider kind and configuration before reading either
+credential. Saving one preset changes only that configuration and optional
+replacement key. Switching active kind does not copy fields, delete keys, or
+make a network request. Legacy profile data migrates in-process to the generic
+slot without moving its existing Keychain key.
+
+- [ ] **Step 4: Write credential-routing RED tests**
+
+For `/models`, `/audio/transcriptions`, and `/chat/completions`, assert:
+
+- HKT exact resolved URL and only `X-API-KEY`;
+- generic normalized URL and only `Authorization: Bearer`;
+- no credential header when the selected snapshot has no key;
+- an active immutable snapshot still uses its original kind/key after settings
+  are saved or switched;
+- accepted same-origin redirect restores only the source credential header;
+- rejected redirect exposes neither credential header.
+
+- [ ] **Step 5: Implement one shared authentication applicator**
+
+Every request client applies authentication from the snapshot, never by
+inspecting the URL. The redirect delegate strips both sensitive headers before
+validation and restores exactly the source header only for an accepted 307/308
+POST. Model-discovery GET continues to reject every redirect.
+
+- [ ] **Step 6: Write settings-model RED tests**
+
+Cover independent retained drafts and key status, persisted active kind,
+conditional Group ID/base URL projection, Save affecting only the selected
+preset, HKT validation causing zero writes, and a delayed connection-test
+callback from the old preset being ignored after picker switching. Preserve
+independent ASR/LLM and Cantonese/English/Mandarin behavior.
+
+- [ ] **Step 7: Implement settings-model provider switching**
+
+Expose typed provider options and selected-preset fields. Increment the
+connection generation before switching/reloading. Do not mirror the repository
+envelope as a second source of truth; drafts are UI edit state and only Save
+persists. Active ASR/LLM jobs keep their captured snapshots.
+
+- [ ] **Step 8: Run focused/full GREEN and commit**
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+swift test --filter 'OpenAICompatibleProviderProfileTests|ProviderProfileStoreTests|OpenAICompatibleProviderRepositoryTests|OpenAICompatibleProviderClientTests|OpenAICompatibleTranscriptionClientTests|OpenAICompatibleMeetingIntelligenceClientTests|AIProviderSettingsModelTests'
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
+git diff --check
+```
+
+Commit production and test files path-limited with:
+
+```bash
+git commit -m "feat: save HKT and generic provider presets"
 ```
 
 ---

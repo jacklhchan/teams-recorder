@@ -3,6 +3,8 @@
 **Date:** 2026-07-31  
 **Status:** Approved design; written spec independently reviewed  
 **Approved product decision:** 2026-07-31  
+**Approved provider-preset amendment:** 2026-07-31, from the user's explicit
+request after the original approval
 **Baseline:** `main` at `c7f1aeb6a0ca6833e6af6cd01febbc1cbfc2a5cf`  
 **Branch:** `codex/meeting-intelligence-summary-title`  
 **Platform:** macOS 26.0 and later
@@ -10,11 +12,14 @@
 ## 1. Context
 
 The recorder already stores one OpenAI-compatible provider profile with
-separate `asrModel` and `llmModel` values. The two model identifiers may be
-identical or different according to the provider. Only `asrModel` is currently
-used at runtime. `llmModel` is persisted and editable, but no LLM request,
-summary artifact, contextual title generation, or meeting-intelligence job
-lifecycle exists.
+separate `asrModel` and `llmModel` values. This feature replaces that
+single-overwrite settings experience with two saved provider presets:
+`HKT GenAI Platform` and `OpenAI-compatible API`. Each preset retains its own
+non-secret configuration and Keychain credential. The two model identifiers
+may be identical or different according to the provider. Only `asrModel` is
+currently used at runtime. `llmModel` is persisted and editable, but no LLM
+request, summary artifact, contextual title generation, or
+meeting-intelligence job lifecycle exists.
 
 The library displays `metadata.title` when present and otherwise falls back to
 the timestamp-shaped session folder name. A successful transcription publishes
@@ -55,6 +60,10 @@ single-owner and construction-handoff rules.
    redirect, credential, library-search, and unknown-metadata-field guarantees.
 10. Provide focused lifecycle, integration, UI render, contract, packaging, and
     real-provider acceptance evidence.
+11. Let users switch between saved `HKT GenAI Platform` and
+    `OpenAI-compatible API` configurations without erasing either preset, and
+    freeze the selected preset, endpoint, authentication scheme, models,
+    language, prompt, and credential in each future job snapshot.
 
 ## 3. Non-goals
 
@@ -71,6 +80,8 @@ This pull request does not add:
 - production notarization, Teams hardware acceptance, or AirPods acceptance;
 - transactional publication across the existing ASR artifact set and the new
   meeting-intelligence artifact set.
+- automatic rotation across multiple HKT groups, local rate-limit proxies, or
+  provider failover chains.
 
 ## 4. Confirmed Availability Contract
 
@@ -199,6 +210,16 @@ creating parallel instances.
 The existing `AIProviderSettingsModel`, provider repository,
 `TranscriptionJobCoordinator`, playback coordinator, recording engine, Teams
 coordinators, and workspace-folder source remain single instances.
+
+The provider repository owns one versioned settings envelope containing the
+active provider kind plus independent generic and HKT configurations. A legacy
+schema-v1 profile migrates as the generic preset. Switching the picker changes
+only the selected draft/active kind; it does not copy fields or credentials
+between presets. The generic credential retains its existing Keychain identity.
+HKT uses a distinct Keychain service/account. Repository snapshots resolve a
+complete immutable endpoint and authentication scheme before any ASR,
+availability, or LLM work starts. Saving or switching settings changes future
+snapshots only.
 
 `TranscriptPublished` is an immutable semantic commit event, not a generic
 filesystem notification. `TranscriptionJobCoordinator` emits it only after its
@@ -370,7 +391,26 @@ final result. Reaching the chunk, depth, total-request, response, or wall-clock
 limit fails the whole attempt with zero partial publication. Oversized model
 output is rejected rather than truncated into a misleading result.
 
-## 8. OpenAI-Compatible LLM Contract
+## 8. Provider Presets and OpenAI-Compatible LLM Contract
+
+Settings offers exactly these saved provider kinds:
+
+| Preset | User-configurable endpoint input | Resolved base URL | Authentication |
+|---|---|---|---|
+| `HKT GenAI Platform` | `Group ID`, 1–32 ASCII digits | `https://api.uat.bot-builder.pccw.com/v1/groups/{groupID}/openai` | `X-API-KEY: <key>` |
+| `OpenAI-compatible API` | validated HTTPS or loopback base URL | existing normalized URL ending in `/v1` | `Authorization: Bearer <key>` |
+
+The HKT host, scheme, version path, and `/openai` suffix are not editable.
+Whitespace, signs, non-ASCII digits, zero digits, or more than 32 digits in
+`Group ID` are rejected before any profile or credential write. HKT and generic
+settings retain independent ASR model, LLM model, meeting language, prompt, and
+credential values. Provider kind and schema are validated before a Keychain
+read. Status, logs, metadata, and defaults never contain either credential.
+
+Both presets expose the same OpenAI-compatible resource paths:
+`/models`, `/audio/transcriptions`, and `/chat/completions`. The active snapshot
+selects the required credential header; request clients do not infer the scheme
+from the URL.
 
 The first adapter uses:
 
@@ -378,8 +418,11 @@ The first adapter uses:
 POST <baseURL>/chat/completions
 Content-Type: application/json
 Accept: application/json
-Authorization: Bearer <api-key>  # only when a non-empty key exists
+Authorization: Bearer <api-key>  # generic preset, when non-empty
+X-API-KEY: <api-key>              # HKT preset, when non-empty
 ```
+
+Exactly one credential header is present for a request.
 
 It sends:
 
@@ -457,14 +500,16 @@ weakening transcription:
   normalization and parameter comparison;
 - multipart and JSON requests are validated against their own expected content
   type;
-- Authorization is removed from the proposed redirect and restored only after
-  every same-origin validation succeeds;
+- both `Authorization` and `X-API-KEY` are removed from the proposed redirect;
+  exactly the source preset's credential header is restored only after every
+  same-origin validation succeeds;
 - cross-origin, 301–303, method-changing, missing-body, changed-body, changed
   content-type, scheme-changing, and port-changing redirects are rejected;
-- rejected redirects send no Authorization header to the destination.
+- rejected redirects send neither credential header to the destination.
 
 Model-discovery GET requests reject every redirect. They do not reinterpret a
-redirect as reachability and never forward Authorization to its destination.
+redirect as reachability and never forward either credential header to its
+destination.
 
 Redirect tests exercise the actual URLSession delegate path with controlled
 URLProtocol/local HTTP fixtures, not only a pure policy function. The existing
@@ -493,7 +538,7 @@ automatic attempt ineligible and sends no paid generation request.
 
 Public errors and persisted state are typed and sanitized. They never contain:
 
-- API keys or Authorization values;
+- API keys, `Authorization`, or `X-API-KEY` values;
 - request or response bodies;
 - transcript or partial-summary content;
 - provider error bodies;
@@ -501,9 +546,9 @@ Public errors and persisted state are typed and sanitized. They never contain:
 - raw prompts;
 - complete local home or session paths.
 
-No API key, Authorization header, transcript, provider body, or prompt is
-stored in `recording-info.json`, `meeting-intelligence.json`, state files,
-diagnostic status, or logs.
+No API key, credential header, transcript, provider body, or prompt is stored
+in `recording-info.json`, `meeting-intelligence.json`, state files, diagnostic
+status, or logs.
 
 ## 10. Persistence and Schema Evolution
 
@@ -638,9 +683,15 @@ not trigger automatic generation.
 
 ## 12. UI Contract
 
-The Settings destination keeps the existing separate ASR Model and LLM Model
-fields. It adds stable accessibility identifiers to provider controls and
-clarifies that:
+The Settings destination begins with a provider picker containing
+`HKT GenAI Platform` and `OpenAI-compatible API`. HKT shows an editable
+`Group ID` plus the resolved fixed endpoint as read-only context; generic shows
+the editable base URL. Switching reloads that preset's retained draft and
+credential status, invalidates any stale connection-test callback, and does not
+save until the user chooses Save.
+
+Settings keeps the existing separate ASR Model and LLM Model fields. It adds
+stable accessibility identifiers to provider controls and clarifies that:
 
 - ASR Model is used for transcription;
 - LLM Model is used for summary and contextual title generation;
@@ -689,6 +740,9 @@ recorder.meeting-intelligence.suggested-title
 recorder.meeting-intelligence.apply-title
 recorder.meeting-intelligence.manual-title-protection
 recorder.provider.base-url
+recorder.provider.kind
+recorder.provider.hkt-group-id
+recorder.provider.hkt-resolved-url
 recorder.provider.api-key
 recorder.provider.asr-model
 recorder.provider.llm-model
@@ -863,13 +917,14 @@ count.
 
 Implementation commits remain independently reviewable:
 
-1. approved design and TDD implementation plan;
-2. provider availability and generic redirect contract;
+1. approved design, provider-preset amendment, and TDD implementation plan;
+2. provider availability and credential-aware redirect contract;
 3. success/state artifacts and metadata v2 ownership;
 4. bounded LLM client and multi-pass pipeline;
-5. coordinator lifecycle and transcription-publication integration;
-6. transcript-sheet UI, accessibility, and render coverage;
-7. documentation, contract fixtures, and complete validation evidence.
+5. saved HKT/generic profiles and immutable provider snapshots;
+6. coordinator lifecycle and transcription-publication integration;
+7. transcript-sheet/settings UI, accessibility, and render coverage;
+8. documentation, contract fixtures, and complete validation evidence.
 
 No commit modifies Windows implementation paths. No commit rebuilds or replaces
 the non-staging application.
@@ -901,24 +956,27 @@ inferred from UI alone.
 
 Before approval:
 
-1. configure a real provider with different ASR and LLM models;
-2. verify ASR requests use only the ASR model;
-3. verify an advertised LLM model triggers one automatic summary/title flow;
-4. verify an unadvertised or undiscoverable LLM triggers no automatic chat
+1. save independent HKT and generic configurations, switch between them, and
+   verify neither preset nor Keychain credential overwrites the other;
+2. configure a real provider with different ASR and LLM models;
+3. verify ASR requests use only the ASR model and the selected preset's single
+   credential header;
+4. verify an advertised LLM model triggers one automatic summary/title flow;
+5. verify an unadvertised or undiscoverable LLM triggers no automatic chat
    request;
-5. explicitly Generate with discovery unsupported;
-6. verify contextual title and complete summary quality against the transcript;
-7. manually rename and manually clear titles, then Regenerate and confirm
+6. explicitly Generate with discovery unsupported;
+7. verify contextual title and complete summary quality against the transcript;
+8. manually rename and manually clear titles, then Regenerate and confirm
    protection;
-8. edit the transcript during generation and confirm stale-result rejection;
-9. cancel during availability, request, reduction, decode, and response
+9. edit the transcript during generation and confirm stale-result rejection;
+10. cancel during availability, request, reduction, decode, and response
    processing where practical;
-10. relaunch after interruption and confirm the state is recoverable;
-11. exercise a long transcript and confirm no silent truncation;
-12. inspect 860×680 and wide UI in light/dark appearance;
-13. verify the rebuilt app is exactly
+11. relaunch after interruption and confirm the state is recoverable;
+12. exercise a long transcript and confirm no silent truncation;
+13. inspect 860×680 and wide UI in light/dark appearance;
+14. verify the rebuilt app is exactly
     `/Applications/Local Meeting Recorder Staging.app`;
-14. verify the non-staging application was not touched.
+15. verify the non-staging application was not touched.
 
 Real-provider behavior, signed/notarized production artifact acceptance, Teams
 meeting acceptance, and AirPods hardware acceptance remain manual gates. A

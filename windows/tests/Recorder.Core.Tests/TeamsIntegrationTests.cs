@@ -2,16 +2,14 @@ using TeamsRecorder.Windows.Application;
 
 internal static class TeamsIntegrationTests
 {
-    public static void ProtocolUsesLocalEndpointAndPairingAndStateQueryOnly()
+    public static void ProtocolUsesLocalEndpointAndPairingOnly()
     {
         var endpoint = TeamsThirdPartyApi.CreateEndpoint(TeamsThirdPartyApiIdentity.Recorder("1.2 test"), "token+/=");
         if (endpoint.Scheme != "ws" || endpoint.Host != "127.0.0.1" || endpoint.Port != 8124) throw new InvalidOperationException("Teams endpoint must remain local.");
         if (!endpoint.Query.Contains("token=token%2B%2F%3D", StringComparison.Ordinal)) throw new InvalidOperationException("Pairing token was not safely encoded.");
         var command = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.Pair, 7);
         if (command != "{\"action\":\"pair\",\"parameters\":{},\"requestId\":7}") throw new InvalidOperationException($"Unexpected Teams command: {command}");
-        var query = TeamsThirdPartyApi.CreateCommand(TeamsThirdPartyApiAction.QueryState, 8);
-        if (query != "{\"action\":\"query-state\",\"parameters\":{},\"requestId\":8}") throw new InvalidOperationException($"Unexpected Teams state query: {query}");
-        if (command.Contains("mute", StringComparison.OrdinalIgnoreCase) || query.Contains("mute", StringComparison.OrdinalIgnoreCase))
+        if (command.Contains("mute", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Teams integration must not issue a Teams mute command.");
     }
 
@@ -117,7 +115,7 @@ internal static class TeamsIntegrationTests
         Equal(false, waiting.Snapshot.IsPairingAuthenticated);
 
         waiting.RequestPairingAsync().GetAwaiter().GetResult();
-        waitingClient.Publish(new TeamsThirdPartyApiEvent.Error(waitingClient.LastPairingRequestId, "Device already paired"));
+        waitingClient.Publish(new TeamsThirdPartyApiEvent.Error(null, "Device already paired"));
         Equal(TeamsMuteSyncStatus.Failed, waiting.Snapshot.Status);
         Equal(false, waiting.Snapshot.IsPairingKnown);
         if (!waiting.Snapshot.Detail!.Contains("Manage API", StringComparison.Ordinal))
@@ -132,12 +130,10 @@ internal static class TeamsIntegrationTests
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public int PairingRequests { get; private set; }
-        public int LastPairingRequestId { get; private set; }
-        public Task<int> RequestPairingAsync(CancellationToken cancellationToken = default)
+        public Task RequestPairingAsync(CancellationToken cancellationToken = default)
         {
             PairingRequests++;
-            LastPairingRequestId++;
-            return Task.FromResult(LastPairingRequestId);
+            return Task.CompletedTask;
         }
         public void Publish(TeamsThirdPartyApiEvent value) => EventReceived?.Invoke(this, value);
         public void Disconnect(string detail) => ConnectionChanged?.Invoke(this, detail);

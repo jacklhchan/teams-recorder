@@ -20,7 +20,7 @@ public interface ITeamsThirdPartyApiClient
     event EventHandler<string?>? ConnectionChanged;
     Task StartAsync(CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
-    Task<int> RequestPairingAsync(CancellationToken cancellationToken = default);
+    Task RequestPairingAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>Local recorder/virtual-mic mute sink. The value is absolute, never a toggle.</summary>
@@ -38,7 +38,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
     private readonly ITeamsThirdPartyApiClient client;
     private readonly IRecorderMicrophoneMuteSink microphone;
     private TeamsMuteSyncSnapshot snapshot = TeamsMuteSyncSnapshot.Initial;
-    private int? pendingPairingRequestId;
+    private bool pairingRequestPending;
     private bool enabled;
     private bool microphoneRoutingEngaged;
     private bool disposed;
@@ -61,6 +61,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         lock (gate)
         {
             enabled = value;
+            if (!value) pairingRequestPending = false;
             if (!value && microphoneRoutingEngaged)
             {
                 microphone.SetMuted(false);
@@ -83,12 +84,12 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
 
         // Do not report an approval request until it was accepted by the active local
         // WebSocket.  This prevents a disconnected UI from implying that Teams saw it.
-        var pairingRequestId = await client.RequestPairingAsync(cancellationToken).ConfigureAwait(false);
+        await client.RequestPairingAsync(cancellationToken).ConfigureAwait(false);
         lock (gate)
         {
             if (enabled)
             {
-                pendingPairingRequestId = pairingRequestId;
+                pairingRequestPending = true;
                 SetSnapshotLocked(snapshot with { Status = TeamsMuteSyncStatus.WaitingForPairingApproval, Detail = null });
             }
         }
@@ -138,12 +139,11 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             true));
                     }
                     break;
-                case TeamsThirdPartyApiEvent.Error(var requestId, var message) when IsAlreadyPairedResponse(message):
-                    // A reply to query-state must never be presented as an authenticated pair.
+                case TeamsThirdPartyApiEvent.Error(_, var message) when IsAlreadyPairedResponse(message):
                     // Only the user's own pair command can enter the actionable reset state.
-                    if (requestId.HasValue && requestId == pendingPairingRequestId)
+                    if (pairingRequestPending)
                     {
-                        pendingPairingRequestId = null;
+                        pairingRequestPending = false;
                         FailClosedForLostTrustLocked();
                         SetSnapshotLocked(new TeamsMuteSyncSnapshot(
                             TeamsMuteSyncStatus.Failed,
@@ -154,7 +154,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                     }
                     break;
                 case TeamsThirdPartyApiEvent.Error(_, var message):
-                    pendingPairingRequestId = null;
+                    pairingRequestPending = false;
                     FailClosedForLostTrustLocked();
                     SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.Failed, null, message, false, microphoneRoutingEngaged));
                     break;
@@ -167,7 +167,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         lock (gate)
         {
             if (!enabled) return;
-            pendingPairingRequestId = null;
+            pairingRequestPending = false;
             FailClosedForLostTrustLocked();
             SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.WaitingForTeamsApi, null, error, false, microphoneRoutingEngaged));
         }

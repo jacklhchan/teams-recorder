@@ -77,13 +77,12 @@ public sealed record TeamsThirdPartyApiIdentity(string Manufacturer, string Devi
     public static TeamsThirdPartyApiIdentity Recorder(string appVersion) => new("Local Meeting Recorder", "Windows Audio Bridge", "Local Meeting Recorder", appVersion);
 }
 
-public enum TeamsThirdPartyApiAction { Pair, QueryState }
+public enum TeamsThirdPartyApiAction { Pair }
 public static class TeamsThirdPartyApiActionExtensions
 {
     public static string ToWireValue(this TeamsThirdPartyApiAction action) => action switch
     {
         TeamsThirdPartyApiAction.Pair => "pair",
-        TeamsThirdPartyApiAction.QueryState => "query-state",
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
     };
 }

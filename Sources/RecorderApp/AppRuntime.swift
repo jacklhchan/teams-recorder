@@ -21,5 +21,6 @@ final class AppRuntime {
 
     func shutdown() {
         recordingController.shutdown()
+        model.shutdown()
     }
 }

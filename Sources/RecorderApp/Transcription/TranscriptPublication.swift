@@ -13,6 +13,20 @@ struct TranscriptDocumentSnapshot: Equatable, Sendable {
     let revision: TranscriptDocumentRevision
 }
 
+struct WorkspacePublicationFence: Equatable, Sendable {
+    static let initial = WorkspacePublicationFence(revision: 0)
+
+    let revision: UInt64
+
+    func advanced() -> WorkspacePublicationFence {
+        precondition(
+            revision < UInt64.max,
+            "Workspace publication revision exhausted."
+        )
+        return .init(revision: revision + 1)
+    }
+}
+
 struct TranscriptPublicationIdentity: Equatable, Sendable {
     let coordinatorInstanceID: UUID
     let generation: UInt64
@@ -25,6 +39,23 @@ struct TranscriptPublished: Sendable {
     let revision: TranscriptDocumentRevision
     let normalizedSessionFolder: URL
     let identity: TranscriptPublicationIdentity
+    let workspaceFence: WorkspacePublicationFence
+
+    init(
+        session: RecordingSession,
+        canonicalURL: URL,
+        revision: TranscriptDocumentRevision,
+        normalizedSessionFolder: URL,
+        identity: TranscriptPublicationIdentity,
+        workspaceFence: WorkspacePublicationFence = .initial
+    ) {
+        self.session = session
+        self.canonicalURL = canonicalURL
+        self.revision = revision
+        self.normalizedSessionFolder = normalizedSessionFolder
+        self.identity = identity
+        self.workspaceFence = workspaceFence
+    }
 }
 
 protocol TranscriptDocumentReading: Sendable {

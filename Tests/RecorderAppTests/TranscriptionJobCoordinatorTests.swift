@@ -173,6 +173,45 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
         XCTAssertNotEqual(events[0].identity.attemptID, oldAttempt)
     }
 
+    func testPublicationSnapshotsWorkspaceFenceAtAttemptStart() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let service = DeferredCoordinatorService(result: .init(
+            transcriptURL: fixture.transcriptURL,
+            rawTranscriptURL: nil,
+            manifestURL: nil,
+            logURL: fixture.logURL,
+            committedTranscriptRevision: try fixture.revision()
+        ))
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: CoordinatorPreparer(result: .success(.init(
+                audioURL: fixture.audioURL,
+                cleanupURL: nil
+            ))),
+            service: service
+        )
+        var events: [TranscriptPublished] = []
+        coordinator.onSuccessfulPublication = { events.append($0) }
+
+        coordinator.start(session: fixture.session)
+        await service.waitForRequestCount(1)
+        coordinator.advanceWorkspacePublicationFence(
+            to: WorkspacePublicationFence(revision: 1)
+        )
+        _ = service.complete(at: 0)
+        await waitForIdle(coordinator)
+
+        coordinator.start(session: fixture.session)
+        await service.waitForRequestCount(2)
+        _ = service.complete(at: 1)
+        await waitForIdle(coordinator)
+
+        XCTAssertEqual(events.map(\.workspaceFence.revision), [0, 1])
+    }
+
     func testProviderSecretIsRedactedFromFailureAndPersistedState() async throws {
         let fixture = try CoordinatorFixture.make()
         defer { fixture.remove() }

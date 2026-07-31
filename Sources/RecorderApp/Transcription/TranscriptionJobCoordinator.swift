@@ -35,6 +35,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
     private var activeAttempt: UUID?
     private var activeSession: RecordingSession?
     private var cancellationRequested = false
+    private var workspacePublicationFence: WorkspacePublicationFence = .initial
 
     init(
         providerRepository: any OpenAICompatibleProviderManaging,
@@ -63,6 +64,16 @@ final class TranscriptionJobCoordinator: ObservableObject {
         task != nil || transcribingSessionID != nil
     }
 
+    func advanceWorkspacePublicationFence(
+        to fence: WorkspacePublicationFence
+    ) {
+        precondition(
+            fence.revision > workspacePublicationFence.revision,
+            "Workspace publication fence must advance monotonically."
+        )
+        workspacePublicationFence = fence
+    }
+
     func start(session: RecordingSession) {
         guard !isRunning else {
             publishGlobalStatus("A transcription is already running.")
@@ -83,6 +94,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
         generation &+= 1
         let attempt = attemptIDFactory()
         let attemptGeneration = generation
+        let attemptWorkspaceFence = workspacePublicationFence
         activeAttempt = attempt
         activeSession = session
         cancellationRequested = false
@@ -200,7 +212,8 @@ final class TranscriptionJobCoordinator: ObservableObject {
                             coordinatorInstanceID: self.coordinatorInstanceID,
                             generation: attemptGeneration,
                             attemptID: attempt
-                        )
+                        ),
+                        workspaceFence: attemptWorkspaceFence
                     )
                 }
                 self.onSuccessfulPublication?(event)

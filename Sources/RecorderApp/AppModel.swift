@@ -64,7 +64,7 @@ final class AppModel: ObservableObject {
     @Published var systemAudioPermission: CapturePermissionState = .notDetermined
     @Published var microphonePermission: CapturePermissionState = .notDetermined
     @Published private(set) var captureConnectionState: CaptureConnectionState = .connected
-    @Published var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
+    @Published private(set) var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published var statusMessage = "Ready"
     @Published var sessions: [RecordingSession] = []
     @Published var lastHealthReport: RecordingHealthReport?
@@ -179,6 +179,8 @@ final class AppModel: ObservableObject {
     private let recordingSearchDocumentLoader:
         @Sendable (RecordingSession) -> RecordingLibrarySearchDocument
     private let recordingSessionRecovery: @Sendable (URL) -> Void
+    private let recordingSessionTrashHandler:
+        @Sendable (URL) throws -> Bool
     private let permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)?
     private let volumeCapacityProvider: any VolumeCapacityProviding
     private let storagePolicy: RecordingStoragePolicy
@@ -247,6 +249,7 @@ final class AppModel: ObservableObject {
     private var teamsScreenRefreshGeneration: UInt64 = 0
     private var teamsScreenCaptureIntentGeneration: UInt64 = 0
     private var teamsMeetingActive = false
+    private var workspacePublicationFence: WorkspacePublicationFence = .initial
 
     private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
     private static let teamsAutoMeetingEnabledKey = "teamsAutoMeetingEnabled"
@@ -259,6 +262,7 @@ final class AppModel: ObservableObject {
         inputDevices: @escaping () -> [AudioDevice] = AudioDeviceManager.inputDevices,
         defaultInputDeviceID: @escaping () -> AudioDeviceID? = AudioDeviceManager.defaultInputDeviceID,
         performStartupWork: Bool = true,
+        initialOutputFolder: URL? = nil,
         inputMuteControllerFactory: (
             (@escaping (Bool) -> Void) -> InputMuteControlling
         )? = nil,
@@ -284,6 +288,11 @@ final class AppModel: ObservableObject {
         },
         recordingSessionRecovery: @escaping @Sendable (URL) -> Void = {
             IncompleteSessionRecovery().recover(in: $0)
+        },
+        recordingSessionTrashHandler: @escaping @Sendable (
+            URL
+        ) throws -> Bool = {
+            try RecordingSessionStore.moveToTrash(folder: $0)
         },
         permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)? = nil,
         volumeCapacityProvider: any VolumeCapacityProviding = SelectedVolumeCapacityProvider(),
@@ -319,6 +328,9 @@ final class AppModel: ObservableObject {
             Task { @MainActor in operation() }
         }
     ) {
+        if let initialOutputFolder {
+            outputFolder = initialOutputFolder
+        }
         let activeRecorder = recorder ?? RecordingEngine()
         let autoCoordinator = teamsAutoMeetingCoordinator
             ?? TeamsAutoMeetingCoordinator()
@@ -392,6 +404,7 @@ final class AppModel: ObservableObject {
         self.recordingSearchDocumentLoader =
             recordingSearchDocumentLoader
         self.recordingSessionRecovery = recordingSessionRecovery
+        self.recordingSessionTrashHandler = recordingSessionTrashHandler
         self.permissionRequestHandler = permissionRequestHandler
         self.volumeCapacityProvider = volumeCapacityProvider
         self.storagePolicy = storagePolicy
@@ -451,9 +464,14 @@ final class AppModel: ObservableObject {
         transcriptionCoordinator.onSuccessfulPublication = {
             [weak self] event in
             guard let self,
-                  self.isInCurrentWorkspace(event.session) else { return }
-            self.rebuildSearchDocument(for: event.session) { [weak self] in
-                self?.meetingIntelligenceCoordinator
+                  self.admitsTranscriptPublication(event) else { return }
+            self.rebuildSearchDocument(
+                for: event.session,
+                publicationFence: event.workspaceFence
+            ) { [weak self] in
+                guard let self,
+                      self.admitsTranscriptPublication(event) else { return }
+                self.meetingIntelligenceCoordinator
                     .handleTranscriptPublished(event)
             }
         }
@@ -1275,6 +1293,10 @@ final class AppModel: ObservableObject {
 
     func setOutputFolder(_ folder: URL) {
         outputFolder = folder
+        workspacePublicationFence = workspacePublicationFence.advanced()
+        transcriptionCoordinator.advanceWorkspacePublicationFence(
+            to: workspacePublicationFence
+        )
         sessions = []
         meetingIntelligenceCoordinator.resetForWorkspaceChange()
         transcriptionStatesBySessionID = [:]
@@ -1354,8 +1376,15 @@ final class AppModel: ObservableObject {
 
     private func rebuildSearchDocument(
         for session: RecordingSession,
+        publicationFence: WorkspacePublicationFence? = nil,
         completion: (@MainActor () -> Void)? = nil
     ) {
+        guard admitsSearchDocumentRebuild(
+            for: session,
+            publicationFence: publicationFence
+        ) else {
+            return
+        }
         let sessionID = session.id
         recordingSearchDocumentRefreshGeneration &+= 1
         let nextGeneration =
@@ -1370,13 +1399,21 @@ final class AppModel: ObservableObject {
                 guard let self,
                       self.recordingSearchDocumentRefreshGenerations[
                         sessionID
-                      ] == nextGeneration else {
+                      ] == nextGeneration,
+                      self.admitsSearchDocumentRebuild(
+                        for: session,
+                        publicationFence: publicationFence
+                      ) else {
                     return
                 }
                 if let index = self.sessions.firstIndex(where: { $0.id == sessionID }) {
                     let current = self.sessions[index]
                     guard current.metadata == session.metadata else {
-                        self.rebuildSearchDocument(for: current, completion: completion)
+                        self.rebuildSearchDocument(
+                            for: current,
+                            publicationFence: publicationFence,
+                            completion: completion
+                        )
                         return
                     }
                     self.sessions[index] = current.replacingSearchDocument(document)
@@ -1425,6 +1462,22 @@ final class AppModel: ObservableObject {
         let sessionFolder = session.folderURL.standardizedFileURL
         return sessionFolder.path == workspace.path ||
             sessionFolder.path.hasPrefix(workspace.path + "/")
+    }
+
+    private func admitsTranscriptPublication(
+        _ event: TranscriptPublished
+    ) -> Bool {
+        event.workspaceFence == workspacePublicationFence &&
+            isInCurrentWorkspace(event.session)
+    }
+
+    private func admitsSearchDocumentRebuild(
+        for session: RecordingSession,
+        publicationFence: WorkspacePublicationFence?
+    ) -> Bool {
+        guard let publicationFence else { return true }
+        return publicationFence == workspacePublicationFence &&
+            isInCurrentWorkspace(session)
     }
 
     private func projectTranscriptionStates(
@@ -1828,7 +1881,10 @@ final class AppModel: ObservableObject {
                 try TranscriptDocumentStore.save(text, in: session.folderURL)
             }
             transcriptURLsBySessionID[session.id] = TranscriptDocumentStore.editableURL(in: session.folderURL)
-            rebuildSearchDocument(for: session) { [weak self] in
+            rebuildSearchDocument(
+                for: session,
+                publicationFence: workspacePublicationFence
+            ) { [weak self] in
                 self?.meetingIntelligenceCoordinator.transcriptDidSave(session)
             }
             statusMessage = "Transcript saved"
@@ -1897,7 +1953,7 @@ final class AppModel: ObservableObject {
 
     func moveSessionToTrash(_ session: RecordingSession) {
         do {
-            _ = try RecordingSessionStore.moveToTrash(folder: session.folderURL)
+            _ = try recordingSessionTrashHandler(session.folderURL)
             meetingIntelligenceCoordinator.remove(sessionID: session.id)
             if playingSessionID == session.id { stopPlayback() }
             sessions.removeAll { $0.id == session.id }

@@ -281,7 +281,6 @@ final class AppModelTranscriptionTests: XCTestCase {
                 searchLoader.load(session)
             }
         )
-        model.outputFolder = fixture.root
         model.sessions = [fixture.session]
         let staleText = "stale transcript search term"
         let newestText = "newest transcript search term"
@@ -304,6 +303,54 @@ final class AppModelTranscriptionTests: XCTestCase {
             newestDocumentWon,
             "A search rebuild queued before refresh must not overwrite "
                 + "a newer edited transcript."
+        )
+    }
+
+    func testWorkspaceSwitchSuppressesQueuedManualTranscriptSearchRebuild() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let otherWorkspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: otherWorkspace,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: otherWorkspace) }
+        let firstLoadStarted = expectation(
+            description: "manual transcript search rebuild started"
+        )
+        let searchLoader = BlockingSearchDocumentLoader(
+            firstLoadStarted: firstLoadStarted
+        )
+        defer { searchLoader.releaseFirstLoad() }
+        let model = makeModel(
+            fixture: fixture,
+            preparer: ControlledPreparer(
+                .immediate(.failure(TestError.failed))
+            ),
+            launcher: ControlledLauncher(),
+            recordingSearchDocumentLoader: { session in
+                searchLoader.load(session)
+            }
+        )
+        model.sessions = [fixture.session]
+
+        model.saveTranscript(
+            "old workspace searchable transcript",
+            for: fixture.session
+        )
+        await fulfillment(of: [firstLoadStarted], timeout: 1)
+        model.setOutputFolder(otherWorkspace)
+        searchLoader.releaseFirstLoad()
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertFalse(
+            model.sessions.contains(where: { $0.id == fixture.session.id })
+        )
+        XCTAssertTrue(
+            RecordingLibraryQuery(text: "old workspace searchable transcript")
+                .filter(model.sessions)
+                .isEmpty
         )
     }
 
@@ -759,6 +806,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            initialOutputFolder: fixture.root,
             recordingSessionLoader: recordingSessionLoader,
             recordingSearchDocumentLoader:
                 recordingSearchDocumentLoader,

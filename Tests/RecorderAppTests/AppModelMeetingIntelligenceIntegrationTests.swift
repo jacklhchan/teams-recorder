@@ -75,6 +75,119 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
                        .modelNotAdvertised)
     }
 
+    func testWorkspaceRoundTripRejectsOldPublicationAndAcceptsFutureAttemptOnce() async throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+        let otherWorkspace = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: otherWorkspace) }
+        let service = DeferredIntegrationTranscriptionService()
+        let searchLoader = CountingIntegrationSearchLoader()
+        let availability = CountingIntegrationAvailability(
+            result: .confirmed
+        )
+        let generator = IntegrationGenerator()
+        var coordinator: MeetingIntelligenceJobCoordinator!
+        let model = fixture.transcribingModel(
+            coordinatorFactory: { sourceID in
+                let created = fixture.coordinator(
+                    expectedPublicationSourceID: sourceID,
+                    availability: .confirmed,
+                    generator: generator,
+                    availabilityChecker: availability
+                )
+                coordinator = created
+                return created
+            },
+            searchLoader: { [searchLoader] session in
+                searchLoader.load(session)
+            },
+            transcriptionService: service
+        )
+        model.setOutputFolder(fixture.folder)
+        model.sessions = [fixture.session()]
+
+        model.transcribe(session: fixture.session())
+        await service.waitForRequestCount(1)
+        model.setOutputFolder(otherWorkspace)
+        model.setOutputFolder(fixture.folder)
+        _ = service.complete(at: 0)
+        let oldAttemptFinished = await eventually {
+            model.transcribingSessionID == nil
+        }
+        XCTAssertTrue(oldAttemptFinished)
+        for _ in 0..<50 { await Task.yield() }
+
+        XCTAssertEqual(searchLoader.requests, 0)
+        XCTAssertEqual(availability.requests, 0)
+        XCTAssertEqual(generator.requests, 0)
+
+        model.transcribe(session: fixture.session())
+        await service.waitForRequestCount(2)
+        _ = service.complete(at: 1)
+        let futureAttemptAccepted = await eventually {
+            generator.requests == 1
+        }
+        XCTAssertTrue(futureAttemptAccepted)
+        await coordinator.waitUntilIdleForTesting(
+            sessionID: fixture.session().id
+        )
+
+        XCTAssertEqual(searchLoader.requests, 1)
+        XCTAssertEqual(availability.requests, 1)
+        XCTAssertEqual(generator.requests, 1)
+    }
+
+    func testWorkspaceSwitchWhileSearchCompletionIsQueuedCannotStartMeetingIntelligence() async throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+        let otherWorkspace = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: otherWorkspace) }
+        let rebuildStarted = expectation(description: "search rebuild started")
+        let rebuildFinished = expectation(description: "search rebuild finished")
+        let searchLoader = BlockingIntegrationSearchLoader(
+            started: rebuildStarted,
+            finished: rebuildFinished
+        )
+        defer { searchLoader.release() }
+        let availability = CountingIntegrationAvailability(
+            result: .confirmed
+        )
+        let generator = IntegrationGenerator()
+        let model = fixture.transcribingModel(
+            coordinatorFactory: { sourceID in
+                fixture.coordinator(
+                    expectedPublicationSourceID: sourceID,
+                    availability: .confirmed,
+                    generator: generator,
+                    availabilityChecker: availability
+                )
+            },
+            searchLoader: { [searchLoader] session in
+                searchLoader.load(session)
+            }
+        )
+        model.setOutputFolder(fixture.folder)
+        model.sessions = [fixture.session()]
+
+        model.transcribe(session: fixture.session())
+        await fulfillment(of: [rebuildStarted], timeout: 1)
+        model.setOutputFolder(otherWorkspace)
+        searchLoader.release()
+        await fulfillment(of: [rebuildFinished], timeout: 1)
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertFalse(
+            model.sessions.contains(where: { $0.id == fixture.session().id })
+        )
+        XCTAssertTrue(
+            RecordingLibraryQuery(text: "published transcript")
+                .filter(model.sessions)
+                .isEmpty
+        )
+        XCTAssertEqual(availability.requests, 0)
+        XCTAssertEqual(generator.requests, 0)
+    }
+
     func testSavingEditedTranscriptImmediatelyUpdatesSearchAndMarksArtifactStaleWithoutAutomaticGeneration() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
@@ -175,13 +288,23 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
     func testTrashSuccessRemovesSessionFromProjection() throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
-        let model = AppModel(performStartupWork: false)
+        let model = AppModel(
+            performStartupWork: false,
+            initialOutputFolder: fixture.folder.deletingLastPathComponent(),
+            recordingSessionTrashHandler: { folder in
+                try FileManager.default.removeItem(at: folder)
+                return true
+            }
+        )
         let session = fixture.session()
         model.sessions = [session]
 
         model.moveSessionToTrash(session)
 
-        XCTAssertFalse(model.sessions.contains(where: { $0.id == session.id }))
+        XCTAssertFalse(
+            model.sessions.contains(where: { $0.id == session.id }),
+            model.statusMessage
+        )
     }
 
     func testTrashFailureKeepsSessionProjected() throws {
@@ -276,12 +399,15 @@ private final class IntegrationFixture {
     func coordinator(
         expectedPublicationSourceID: UUID? = nil,
         availability: MeetingIntelligenceAvailability = .unconfirmed(.connectionFailed),
-        generator: IntegrationGenerator = .init()
+        generator: IntegrationGenerator = .init(),
+        availabilityChecker: (any MeetingIntelligenceAvailabilityChecking)? = nil
     ) -> MeetingIntelligenceJobCoordinator {
         let gate = RecordingSessionMutationGate()
+        let checker: any MeetingIntelligenceAvailabilityChecking =
+            availabilityChecker ?? IntegrationAvailability(result: availability)
         return MeetingIntelligenceJobCoordinator(
             providerRepository: IntegrationRepository(), expectedPublicationSourceID: expectedPublicationSourceID ?? publicationSourceID,
-            availabilityChecker: IntegrationAvailability(result: availability), generator: generator,
+            availabilityChecker: checker, generator: generator,
             publisher: MeetingIntelligencePublisher(mutationGate: gate, artifactStore: MeetingIntelligenceArtifactStore(mutationGate: gate)), artifactStore: MeetingIntelligenceArtifactStore(mutationGate: gate),
             stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
         )
@@ -308,14 +434,16 @@ private final class IntegrationFixture {
         coordinatorFactory: @escaping (UUID) -> MeetingIntelligenceJobCoordinator,
         searchLoader: @escaping @Sendable (RecordingSession) -> RecordingLibrarySearchDocument = { session in
             RecordingLibrarySearchDocument.load(folderURL: session.folderURL, displayName: session.displayName, createdAt: session.createdAt, metadata: session.metadata)
-        }
+        },
+        transcriptionService: any TranscriptionServicing =
+            IntegrationTranscriptionService()
     ) -> AppModel {
         let model = AppModel(
             providerRepository: IntegrationRepository(),
             inputDevices: { [] }, defaultInputDeviceID: { nil }, performStartupWork: false,
             recordingSearchDocumentLoader: searchLoader,
             transcriptionAudioPreparer: IntegrationAudioPreparer(),
-            transcriptionService: IntegrationTranscriptionService(),
+            transcriptionService: transcriptionService,
             meetingIntelligenceCoordinatorFactory: { _, sourceID, _ in
                 coordinatorFactory(sourceID)
             }
@@ -378,6 +506,26 @@ private struct IntegrationAvailability: MeetingIntelligenceAvailabilityChecking 
     let result: MeetingIntelligenceAvailability
     func availability(for _: OpenAICompatibleProviderSnapshot) async -> MeetingIntelligenceAvailability { result }
 }
+private final class CountingIntegrationAvailability:
+    MeetingIntelligenceAvailabilityChecking,
+    @unchecked Sendable
+{
+    private let result: MeetingIntelligenceAvailability
+    private let lock = NSLock()
+    private var count = 0
+    var requests: Int { lock.withLock { count } }
+
+    init(result: MeetingIntelligenceAvailability) {
+        self.result = result
+    }
+
+    func availability(
+        for _: OpenAICompatibleProviderSnapshot
+    ) async -> MeetingIntelligenceAvailability {
+        lock.withLock { count += 1 }
+        return result
+    }
+}
 private final class IntegrationGenerator: MeetingIntelligenceGenerating, @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -400,13 +548,118 @@ private struct IntegrationTranscriptionService: TranscriptionServicing {
                      logURL: nil, committedTranscriptRevision: revision)
     }
 }
+private final class DeferredIntegrationTranscriptionService:
+    TranscriptionServicing,
+    @unchecked Sendable
+{
+    private struct Pending {
+        let request: TranscriptionServiceRequest
+        var continuation:
+            CheckedContinuation<TranscriptionServiceResult, Error>?
+    }
+
+    private let lock = NSLock()
+    private var pending: [Pending] = []
+
+    func transcribe(
+        _ request: TranscriptionServiceRequest,
+        onProgress _: @escaping @Sendable (
+            TranscriptionServiceProgress
+        ) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                pending.append(.init(
+                    request: request,
+                    continuation: continuation
+                ))
+            }
+        }
+    }
+
+    func waitForRequestCount(_ count: Int) async {
+        while lock.withLock({ pending.count < count }) {
+            await Task.yield()
+        }
+    }
+
+    func complete(at index: Int) -> Bool {
+        let value: Pending? = lock.withLock {
+            guard pending.indices.contains(index),
+                  pending[index].continuation != nil else {
+                return nil
+            }
+            let value = pending[index]
+            pending[index].continuation = nil
+            return value
+        }
+        guard let value, let continuation = value.continuation else {
+            return false
+        }
+        do {
+            let transcriptURL = value.request.sessionFolder
+                .appendingPathComponent("transcript.txt")
+            try "published transcript \(index)".write(
+                to: transcriptURL,
+                atomically: true,
+                encoding: .utf8
+            )
+            let revision = try SecureTranscriptDocumentReader()
+                .readCanonical(
+                    in: value.request.sessionFolder,
+                    allowLegacy: false
+                ).revision
+            continuation.resume(returning: .init(
+                transcriptURL: transcriptURL,
+                rawTranscriptURL: nil,
+                manifestURL: nil,
+                logURL: nil,
+                committedTranscriptRevision: revision
+            ))
+        } catch {
+            continuation.resume(throwing: error)
+        }
+        return true
+    }
+}
+private final class CountingIntegrationSearchLoader: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var requests: Int { lock.withLock { count } }
+
+    func load(
+        _ session: RecordingSession
+    ) -> RecordingLibrarySearchDocument {
+        lock.withLock { count += 1 }
+        return RecordingLibrarySearchDocument.load(
+            folderURL: session.folderURL,
+            displayName: session.displayName,
+            createdAt: session.createdAt,
+            metadata: session.metadata
+        )
+    }
+}
 private final class BlockingIntegrationSearchLoader: @unchecked Sendable {
     private let started: XCTestExpectation
+    private let finished: XCTestExpectation?
     private let semaphore = DispatchSemaphore(value: 0)
-    init(started: XCTestExpectation) { self.started = started }
+    init(
+        started: XCTestExpectation,
+        finished: XCTestExpectation? = nil
+    ) {
+        self.started = started
+        self.finished = finished
+    }
     func load(_ session: RecordingSession) -> RecordingLibrarySearchDocument {
-        started.fulfill(); semaphore.wait()
-        return RecordingLibrarySearchDocument.load(folderURL: session.folderURL, displayName: session.displayName, createdAt: session.createdAt, metadata: session.metadata)
+        started.fulfill()
+        semaphore.wait()
+        defer { finished?.fulfill() }
+        return RecordingLibrarySearchDocument.load(
+            folderURL: session.folderURL,
+            displayName: session.displayName,
+            createdAt: session.createdAt,
+            metadata: session.metadata
+        )
     }
     func release() { semaphore.signal() }
 }

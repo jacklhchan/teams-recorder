@@ -3,9 +3,11 @@ import XCTest
 @testable import RecorderApp
 
 final class MeetingIntelligenceStoreTests: XCTestCase {
+    private let gate = RecordingSessionMutationGate()
+
     func testStagesAndPromotesValidV1Artifact() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
-        let store = MeetingIntelligenceArtifactStore()
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
         let artifact = fixture.artifact(summary: "Customer migration")
 
         let staged = try store.stage(artifact, in: fixture.folder)
@@ -24,7 +26,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         try data.write(to: fixture.artifactURL)
 
         XCTAssertEqual(
-            try MeetingIntelligenceArtifactStore().load(in: fixture.folder)?.summary,
+            try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)?.summary,
             "Summary"
         )
     }
@@ -35,7 +37,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         try future.write(to: fixture.artifactURL)
 
         XCTAssertThrowsError(
-            try MeetingIntelligenceArtifactStore().load(in: fixture.folder)
+            try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)
         ) {
             XCTAssertEqual(
                 $0 as? MeetingIntelligenceStoreError,
@@ -50,14 +52,14 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let original = try fixture.writeExistingArtifact()
         try Data("not json".utf8).write(to: fixture.artifactURL)
 
-        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().load(in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .malformed)
         }
 
         try original.write(to: fixture.artifactURL)
         let oversized = Data(repeating: 0x61, count: MeetingIntelligenceArtifactStore.maximumBytes + 1)
         try oversized.write(to: fixture.artifactURL)
-        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().load(in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .tooLarge)
         }
     }
@@ -71,13 +73,13 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
             withDestinationURL: outside
         )
 
-        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().load(in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsafeFile)
         }
 
         try FileManager.default.removeItem(at: fixture.artifactURL)
         try FileManager.default.createDirectory(at: fixture.artifactURL, withIntermediateDirectories: true)
-        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().load(in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsafeFile)
         }
     }
@@ -88,7 +90,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let missingStage = fixture.folder.appendingPathComponent(".meeting-intelligence-stage-missing")
 
         XCTAssertThrowsError(
-            try MeetingIntelligenceArtifactStore().promoteStaged(
+            try MeetingIntelligenceArtifactStore(mutationGate: gate).promoteStaged(
                 missingStage,
                 in: fixture.folder
             )
@@ -100,9 +102,9 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let fixture = try MeetingIntelligenceStoreFixture()
         let future = Data(#"{"schemaVersion":2,"summary":"future"}"#.utf8)
         try future.write(to: fixture.artifactURL)
-        let staged = try MeetingIntelligenceArtifactStore().stage(fixture.artifact(), in: fixture.folder)
+        let staged = try MeetingIntelligenceArtifactStore(mutationGate: gate).stage(fixture.artifact(), in: fixture.folder)
 
-        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().promoteStaged(staged, in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).promoteStaged(staged, in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
         }
         XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), future)
@@ -110,7 +112,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
 
     func testActiveStateLoadsAsInterruptedAndTerminalStateIsRetained() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
-        let store = MeetingIntelligenceStateStore()
+        let store = MeetingIntelligenceStateStore(mutationGate: gate)
         let started = Date(timeIntervalSince1970: 1_785_427_200)
         try store.save(
             .init(
@@ -159,11 +161,11 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
             finishedAt: nil
         )
 
-        XCTAssertThrowsError(try MeetingIntelligenceStateStore().save(state, in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceStateStore(mutationGate: gate).save(state, in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
         }
         XCTAssertEqual(try Data(contentsOf: url), future)
-        XCTAssertThrowsError(try MeetingIntelligenceStateStore().remove(in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceStateStore(mutationGate: gate).remove(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
         }
         XCTAssertEqual(try Data(contentsOf: url), future)
@@ -177,7 +179,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
             try FileManager.default.removeItem(at: url)
             try Data("replacement".utf8).write(to: url)
         }
-        let store = MeetingIntelligenceArtifactStore(fileAccess: access)
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate, fileAccess: access)
         let staged = try store.stage(fixture.artifact(summary: "replacement"), in: fixture.folder)
 
         XCTAssertThrowsError(try store.promoteStaged(staged, in: fixture.folder)) {
@@ -195,7 +197,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
             try FileManager.default.removeItem(at: url)
             try Data("replacement".utf8).write(to: url)
         }
-        let store = MeetingIntelligenceArtifactStore(fileAccess: access)
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate, fileAccess: access)
         let staged = try store.stage(fixture.artifact(summary: "replacement"), in: fixture.folder)
 
         XCTAssertThrowsError(try store.promoteStaged(staged, in: fixture.folder)) {
@@ -211,8 +213,8 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let stateURL = fixture.folder.appendingPathComponent(MeetingIntelligenceStateStore.fileName)
         let stateBytes = try fixture.stateData().writeAndReturn(to: stateURL)
         let access = ScriptedFileAccess(renameError: .unsafeFile)
-        let artifactStore = MeetingIntelligenceArtifactStore(fileAccess: access)
-        let stateStore = MeetingIntelligenceStateStore(fileAccess: access)
+        let artifactStore = MeetingIntelligenceArtifactStore(mutationGate: gate, fileAccess: access)
+        let stateStore = MeetingIntelligenceStateStore(mutationGate: gate, fileAccess: access)
         let staged = try artifactStore.stage(fixture.artifact(summary: "replacement"), in: fixture.folder)
 
         XCTAssertThrowsError(try artifactStore.promoteStaged(staged, in: fixture.folder))
@@ -230,7 +232,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
             try FileManager.default.removeItem(at: url)
             try Data("replacement".utf8).write(to: url)
         })
-        let store = MeetingIntelligenceStateStore(fileAccess: access)
+        let store = MeetingIntelligenceStateStore(mutationGate: gate, fileAccess: access)
 
         XCTAssertThrowsError(try store.remove(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
@@ -245,7 +247,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         try fixture.writeExistingArtifact().write(to: artifactSource)
         try FileManager.default.removeItem(at: fixture.artifactURL)
         try FileManager.default.linkItem(at: artifactSource, to: fixture.artifactURL)
-        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().load(in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsafeFile)
         }
 
@@ -253,7 +255,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let stateSource = fixture.root.appendingPathComponent("state-source")
         try fixture.stateData().write(to: stateSource)
         try FileManager.default.linkItem(at: stateSource, to: stateURL)
-        let store = MeetingIntelligenceStateStore()
+        let store = MeetingIntelligenceStateStore(mutationGate: gate)
         XCTAssertThrowsError(try store.save(fixture.state(), in: fixture.folder))
         XCTAssertThrowsError(try store.remove(in: fixture.folder))
     }
@@ -264,7 +266,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let outside = fixture.root.appendingPathComponent("outside-state")
         try fixture.stateData().write(to: outside)
         try FileManager.default.createSymbolicLink(at: stateURL, withDestinationURL: outside)
-        let store = MeetingIntelligenceStateStore()
+        let store = MeetingIntelligenceStateStore(mutationGate: gate)
         XCTAssertThrowsError(try store.save(fixture.state(), in: fixture.folder))
         XCTAssertThrowsError(try store.remove(in: fixture.folder))
 
@@ -278,18 +280,18 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let fixture = try MeetingIntelligenceStoreFixture()
         let artifactPrefix = Data(#"{"schemaVersion":1,"summary":"","suggestedTitle":"","sourceTranscriptSHA256":"","sourceTranscriptByteCount":0,"model":"","generatedAt":"2026-01-01T00:00:00Z","intent":"generate"}"#.utf8)
         try fixture.writePadded(artifactPrefix, to: fixture.artifactURL, count: MeetingIntelligenceArtifactStore.maximumBytes)
-        XCTAssertNotNil(try MeetingIntelligenceArtifactStore().load(in: fixture.folder))
+        XCTAssertNotNil(try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder))
         try fixture.writePadded(artifactPrefix, to: fixture.artifactURL, count: MeetingIntelligenceArtifactStore.maximumBytes + 1)
-        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().load(in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .tooLarge)
         }
 
         let stateURL = fixture.folder.appendingPathComponent(MeetingIntelligenceStateStore.fileName)
         let statePrefix = fixture.stateData()
         try fixture.writePadded(statePrefix, to: stateURL, count: MeetingIntelligenceStateStore.maximumBytes)
-        XCTAssertNotNil(try MeetingIntelligenceStateStore().load(in: fixture.folder))
+        XCTAssertNotNil(try MeetingIntelligenceStateStore(mutationGate: gate).load(in: fixture.folder))
         try fixture.writePadded(statePrefix, to: stateURL, count: MeetingIntelligenceStateStore.maximumBytes + 1)
-        XCTAssertThrowsError(try MeetingIntelligenceStateStore().load(in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceStateStore(mutationGate: gate).load(in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .tooLarge)
         }
     }
@@ -299,10 +301,61 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         let original = try fixture.writeExistingArtifact()
         let oversized = fixture.artifact(summary: String(repeating: "x", count: MeetingIntelligenceArtifactStore.maximumBytes))
 
-        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().stage(oversized, in: fixture.folder)) {
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).stage(oversized, in: fixture.folder)) {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .tooLarge)
         }
         XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), original)
+    }
+
+    func testActiveLoadCannotOverwriteConcurrentCompletedSaveUsingSharedGate() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let gate = RecordingSessionMutationGate()
+        let initialStore = MeetingIntelligenceStateStore(mutationGate: gate)
+        try initialStore.save(
+            .init(
+                schemaVersion: 1,
+                phase: .generating,
+                message: "Generating",
+                sourceTranscriptSHA256: nil,
+                startedAt: Date(timeIntervalSince1970: 1),
+                finishedAt: nil
+            ),
+            in: fixture.folder
+        )
+        let barrier = SnapshotBarrierFileAccess(blocking: MeetingIntelligenceStateStore.fileName)
+        let store = MeetingIntelligenceStateStore(mutationGate: gate, fileAccess: barrier)
+        let loadDone = DispatchSemaphore(value: 0)
+        let saveDone = DispatchSemaphore(value: 0)
+        var loadError: Error?
+        var saveError: Error?
+
+        DispatchQueue.global().async {
+            defer { loadDone.signal() }
+            do { _ = try store.load(in: fixture.folder) } catch { loadError = error }
+        }
+        XCTAssertEqual(barrier.snapshotTaken.wait(timeout: .now() + 1), .success)
+
+        DispatchQueue.global().async {
+            defer { saveDone.signal() }
+            do { try store.save(fixture.state(), in: fixture.folder) } catch { saveError = error }
+        }
+        XCTAssertEqual(barrier.createStarted.wait(timeout: .now() + 0.1), .timedOut)
+        barrier.releaseSnapshot.signal()
+        XCTAssertEqual(loadDone.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(saveDone.wait(timeout: .now() + 1), .success)
+        XCTAssertNil(loadError)
+        XCTAssertNil(saveError)
+        XCTAssertEqual(try store.load(in: fixture.folder)?.phase, .completed)
+    }
+
+    func testStateLoadUsesInjectedFileAccess() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let gate = RecordingSessionMutationGate()
+        let access = StaticSnapshotFileAccess(data: fixture.stateData())
+        let store = MeetingIntelligenceStateStore(mutationGate: gate, fileAccess: access)
+
+        XCTAssertEqual(try store.load(in: fixture.folder), fixture.state())
+        XCTAssertEqual(access.snapshotCalls, 1)
     }
 }
 
@@ -393,6 +446,74 @@ private final class ScriptedFileAccess: MeetingIntelligenceStoreFileAccess, @unc
         try removeHook?(folder, destination.name)
         try base.remove(destination, in: folder)
         removeCalls += 1
+    }
+}
+
+private final class SnapshotBarrierFileAccess: MeetingIntelligenceStoreFileAccess, @unchecked Sendable {
+    private let base = DarwinMeetingIntelligenceStoreFileAccess()
+    private let blockingName: String
+    private let lock = NSLock()
+    private var shouldBlock = true
+    let snapshotTaken = DispatchSemaphore(value: 0)
+    let releaseSnapshot = DispatchSemaphore(value: 0)
+    let createStarted = DispatchSemaphore(value: 0)
+
+    init(blocking name: String) {
+        blockingName = name
+    }
+
+    func snapshot(named name: String, in folder: URL, maximumBytes: Int) throws -> MeetingIntelligenceStoreFileSnapshot? {
+        let snapshot = try base.snapshot(named: name, in: folder, maximumBytes: maximumBytes)
+        lock.lock()
+        let block = name == blockingName && shouldBlock
+        if block { shouldBlock = false }
+        lock.unlock()
+        if block {
+            snapshotTaken.signal()
+            _ = releaseSnapshot.wait(timeout: .distantFuture)
+        }
+        return snapshot
+    }
+
+    func create(named name: String, data: Data, in folder: URL) throws -> MeetingIntelligenceStoreFileSnapshot {
+        createStarted.signal()
+        return try base.create(named: name, data: data, in: folder)
+    }
+
+    func promote(_ staged: MeetingIntelligenceStoreFileSnapshot, to destinationName: String, over destination: MeetingIntelligenceStoreFileSnapshot?, in folder: URL) throws {
+        try base.promote(staged, to: destinationName, over: destination, in: folder)
+    }
+
+    func remove(_ destination: MeetingIntelligenceStoreFileSnapshot, in folder: URL) throws {
+        try base.remove(destination, in: folder)
+    }
+}
+
+private final class StaticSnapshotFileAccess: MeetingIntelligenceStoreFileAccess, @unchecked Sendable {
+    private let base = DarwinMeetingIntelligenceStoreFileAccess()
+    private let data: Data
+    private(set) var snapshotCalls = 0
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    func snapshot(named name: String, in folder: URL, maximumBytes: Int) throws -> MeetingIntelligenceStoreFileSnapshot? {
+        snapshotCalls += 1
+        let staged = try base.create(named: ".static-snapshot-\(UUID().uuidString)", data: data, in: folder)
+        return .init(name: name, data: data, identity: staged.identity)
+    }
+
+    func create(named name: String, data: Data, in folder: URL) throws -> MeetingIntelligenceStoreFileSnapshot {
+        try base.create(named: name, data: data, in: folder)
+    }
+
+    func promote(_ staged: MeetingIntelligenceStoreFileSnapshot, to destinationName: String, over destination: MeetingIntelligenceStoreFileSnapshot?, in folder: URL) throws {
+        try base.promote(staged, to: destinationName, over: destination, in: folder)
+    }
+
+    func remove(_ destination: MeetingIntelligenceStoreFileSnapshot, in folder: URL) throws {
+        try base.remove(destination, in: folder)
     }
 }
 

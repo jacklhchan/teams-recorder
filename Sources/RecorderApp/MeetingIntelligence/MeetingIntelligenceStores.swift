@@ -10,10 +10,6 @@ enum MeetingIntelligenceStoreError: LocalizedError, Equatable, Sendable {
     case missing
 }
 
-private enum MeetingIntelligenceStoreMutationGate {
-    static let shared = RecordingSessionMutationGate()
-}
-
 struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sendable {
     static let fileName = "meeting-intelligence.json"
     static let maximumBytes = 256 * 1_024
@@ -21,7 +17,7 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
     private let fileAccess: any MeetingIntelligenceStoreFileAccess
 
     init(
-        mutationGate: RecordingSessionMutationGate = MeetingIntelligenceStoreMutationGate.shared,
+        mutationGate: RecordingSessionMutationGate,
         fileAccess: any MeetingIntelligenceStoreFileAccess = DarwinMeetingIntelligenceStoreFileAccess()
     ) {
         self.mutationGate = mutationGate
@@ -97,7 +93,7 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
     private let fileAccess: any MeetingIntelligenceStoreFileAccess
 
     init(
-        mutationGate: RecordingSessionMutationGate = MeetingIntelligenceStoreMutationGate.shared,
+        mutationGate: RecordingSessionMutationGate,
         fileAccess: any MeetingIntelligenceStoreFileAccess = DarwinMeetingIntelligenceStoreFileAccess()
     ) {
         self.mutationGate = mutationGate
@@ -105,39 +101,37 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
     }
 
     func load(in folder: URL) throws -> MeetingIntelligenceState? {
-        guard let data = try MeetingIntelligenceStoreFileIO.read(
-            named: Self.fileName,
-            in: folder,
-            maximumBytes: Self.maximumBytes
-        ) else {
-            return nil
-        }
-        let version = try schemaVersion(in: data)
-        guard version == MeetingIntelligenceState.currentSchemaVersion else {
-            throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
-        }
-        let state: MeetingIntelligenceState
-        do {
-            state = try JSONDecoder.meetingIntelligence.decode(
-                MeetingIntelligenceState.self,
-                from: data
+        try mutationGate.withMutation(for: folder) {
+            let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+            guard let snapshot = try fileAccess.snapshot(
+                named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes
+            ) else { return nil }
+            let version = try schemaVersion(in: snapshot.data)
+            guard version == MeetingIntelligenceState.currentSchemaVersion else {
+                throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
+            }
+            let state: MeetingIntelligenceState
+            do {
+                state = try JSONDecoder.meetingIntelligence.decode(
+                    MeetingIntelligenceState.self, from: snapshot.data
+                )
+            } catch {
+                throw MeetingIntelligenceStoreError.malformed
+            }
+            guard [.checkingAvailability, .generating].contains(state.phase) else {
+                return state
+            }
+            let interrupted = MeetingIntelligenceState(
+                schemaVersion: state.schemaVersion,
+                phase: .interrupted,
+                message: "Meeting intelligence interrupted. You can generate again.",
+                sourceTranscriptSHA256: state.sourceTranscriptSHA256,
+                startedAt: state.startedAt,
+                finishedAt: Date()
             )
-        } catch {
-            throw MeetingIntelligenceStoreError.malformed
+            try saveEncoded(interrupted, in: normalizedFolder)
+            return interrupted
         }
-        guard [.checkingAvailability, .generating].contains(state.phase) else {
-            return state
-        }
-        let interrupted = MeetingIntelligenceState(
-            schemaVersion: state.schemaVersion,
-            phase: .interrupted,
-            message: "Meeting intelligence interrupted. You can generate again.",
-            sourceTranscriptSHA256: state.sourceTranscriptSHA256,
-            startedAt: state.startedAt,
-            finishedAt: Date()
-        )
-        try save(interrupted, in: folder)
-        return interrupted
     }
 
     func save(_ state: MeetingIntelligenceState, in folder: URL) throws {
@@ -152,25 +146,8 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
             startedAt: state.startedAt,
             finishedAt: state.finishedAt
         )
-        let data = try JSONEncoder.meetingIntelligence.encode(sanitized)
-        guard data.count <= Self.maximumBytes else {
-            throw MeetingIntelligenceStoreError.tooLarge
-        }
         try mutationGate.withMutation(for: folder) {
-            let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
-            let destination = try fileAccess.snapshot(named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes)
-            if let destination {
-                try validateCurrentSchema(destination.data, expected: MeetingIntelligenceState.currentSchemaVersion)
-            }
-            let stage = try fileAccess.create(
-                named: ".meeting-intelligence-state-stage-\(UUID().uuidString)", data: data, in: normalizedFolder
-            )
-            do {
-                try fileAccess.promote(stage, to: Self.fileName, over: destination, in: normalizedFolder)
-            } catch {
-                try? MeetingIntelligenceStoreFileIO.removeIfPresent(named: stage.name, in: normalizedFolder)
-                throw error
-            }
+            try saveEncoded(sanitized, in: MeetingIntelligenceStoreFileIO.normalizedFolder(folder))
         }
     }
 
@@ -190,6 +167,26 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
             $0.properties.generalCategory != .control || $0 == "\n" || $0 == "\t"
         }
         return String(String.UnicodeScalarView(filtered)).prefix(1_024).description
+    }
+
+    private func saveEncoded(_ state: MeetingIntelligenceState, in folder: URL) throws {
+        let data = try JSONEncoder.meetingIntelligence.encode(state)
+        guard data.count <= Self.maximumBytes else {
+            throw MeetingIntelligenceStoreError.tooLarge
+        }
+        let destination = try fileAccess.snapshot(named: Self.fileName, in: folder, maximumBytes: Self.maximumBytes)
+        if let destination {
+            try validateCurrentSchema(destination.data, expected: MeetingIntelligenceState.currentSchemaVersion)
+        }
+        let stage = try fileAccess.create(
+            named: ".meeting-intelligence-state-stage-\(UUID().uuidString)", data: data, in: folder
+        )
+        do {
+            try fileAccess.promote(stage, to: Self.fileName, over: destination, in: folder)
+        } catch {
+            try? fileAccess.remove(stage, in: folder)
+            throw error
+        }
     }
 }
 
@@ -280,17 +277,6 @@ private enum MeetingIntelligenceStoreFileIO {
         return .init(name: name, data: data, identity: identity)
     }
 
-    static func requiredData(named name: String, in folder: URL, maximumBytes: Int) throws -> Data {
-        guard let data = try read(named: name, in: folder, maximumBytes: maximumBytes) else {
-            throw MeetingIntelligenceStoreError.missing
-        }
-        return data
-    }
-
-    static func create(named name: String, data: Data, in folder: URL) throws {
-        _ = try createSnapshot(named: name, data: data, in: folder)
-    }
-
     static func createSnapshot(named name: String, data: Data, in folder: URL) throws -> MeetingIntelligenceStoreFileSnapshot {
         let directory = try openFolder(try normalizedFolder(folder))
         defer { Darwin.close(directory) }
@@ -304,31 +290,6 @@ private enum MeetingIntelligenceStoreFileIO {
         defer { Darwin.close(descriptor) }
         try writeAll(data, to: descriptor)
         return .init(name: name, data: data, identity: try identity(of: descriptor))
-    }
-
-    static func replaceAtomically(named name: String, data: Data, in folder: URL) throws {
-        let normalizedFolder = try normalizedFolder(folder)
-        let stage = ".meeting-intelligence-state-stage-\(UUID().uuidString)"
-        try create(named: stage, data: data, in: normalizedFolder)
-        do {
-            try validateDestination(named: name, in: normalizedFolder)
-            try rename(named: stage, to: name, in: normalizedFolder)
-        } catch {
-            try? removeIfPresent(named: stage, in: normalizedFolder)
-            throw error
-        }
-    }
-
-    static func validateDestination(named name: String, in folder: URL) throws {
-        let directory = try openFolder(try normalizedFolder(folder))
-        defer { Darwin.close(directory) }
-        let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW)
-        if descriptor < 0 {
-            if errno == ENOENT { return }
-            throw MeetingIntelligenceStoreError.unsafeFile
-        }
-        defer { Darwin.close(descriptor) }
-        _ = try identity(of: descriptor)
     }
 
     static func revalidate(_ snapshot: MeetingIntelligenceStoreFileSnapshot, in folder: URL) throws {
@@ -374,10 +335,6 @@ private enum MeetingIntelligenceStoreFileIO {
         let descriptor = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         guard descriptor >= 0 else { throw MeetingIntelligenceStoreError.unsafeFile }
         return descriptor
-    }
-
-    private static func readValidated(_ descriptor: Int32, maximumBytes: Int) throws -> Data {
-        try readValidatedWithIdentity(descriptor, maximumBytes: maximumBytes).0
     }
 
     private static func readValidatedWithIdentity(_ descriptor: Int32, maximumBytes: Int) throws -> (Data, MeetingIntelligenceStoreFileIdentity) {

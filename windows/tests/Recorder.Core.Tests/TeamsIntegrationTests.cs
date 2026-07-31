@@ -99,10 +99,19 @@ internal static class TeamsIntegrationTests
 
         Equal(TeamsMuteSyncStatus.Ready, coordinator.Snapshot.Status);
         Equal(true, coordinator.Snapshot.IsPairingAuthenticated);
+        Equal(true, coordinator.Snapshot.IsPairingKnown);
         if (coordinator.Snapshot.LastMeetingState is null)
         {
             throw new InvalidOperationException("An already-paired response must not discard a trusted meeting snapshot.");
         }
+
+        var waitingClient = new FakeTeamsClient(); var waitingMicrophone = new RecordingMuteSink();
+        using var waiting = new TeamsMuteSyncCoordinator(waitingClient, waitingMicrophone);
+        waiting.SetEnabledAsync(true).GetAwaiter().GetResult();
+        waitingClient.Publish(new TeamsThirdPartyApiEvent.Error(null, "Device already paired"));
+        Equal(TeamsMuteSyncStatus.WaitingForMeeting, waiting.Snapshot.Status);
+        Equal(true, waiting.Snapshot.IsPairingKnown);
+        Equal(false, waiting.Snapshot.IsPairingAuthenticated);
     }
 
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }

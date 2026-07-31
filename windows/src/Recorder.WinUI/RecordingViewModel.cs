@@ -276,7 +276,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public bool CanRequestTeamsPairing =>
         CanManageTeamsMuteSync &&
         IsTeamsMuteSyncEnabled &&
-        !teamsMuteSnapshot.IsPairingAuthenticated;
+        !teamsMuteSnapshot.IsPairingKnown;
 
     /// <summary>
     /// Automatic recording is deliberately a separate opt-in.  A Teams connection alone is
@@ -286,7 +286,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     private bool HasTrustedTeamsMeetingState =>
         IsTeamsMuteSyncEnabled &&
-        teamsMuteSnapshot.IsPairingAuthenticated &&
+        teamsMuteSnapshot.IsPairingKnown &&
         teamsMuteSnapshot.Status is TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting &&
         teamsMuteSnapshot.LastMeetingState is not null;
 
@@ -354,7 +354,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         TeamsMuteSyncStatus.Disabled => "未啟用：不會連線至 Teams，也不會變更任何音訊輸入。",
         TeamsMuteSyncStatus.WaitingForTeamsApi => "正在等待本機 Teams Third-party API。請先啟動相容的 Teams 桌面用戶端。",
         TeamsMuteSyncStatus.WaitingForPairingApproval => "需要在 Teams 中核准配對；核准後才會收到會議狀態。",
-        TeamsMuteSyncStatus.WaitingForMeeting => "已連線，正在等待 Teams 會議狀態。",
+        TeamsMuteSyncStatus.WaitingForMeeting => teamsMuteSnapshot.IsPairingKnown
+            ? "Teams 已配對，正在等待 Teams 會議狀態。"
+            : "已連線，正在等待 Teams 會議狀態。",
         TeamsMuteSyncStatus.Ready => "已取得 Teams 狀態；目前不在會議中。",
         TeamsMuteSyncStatus.InMeeting => teamsMuteSnapshot.LastMeetingState?.IsMuted == true
             ? "Teams 會議中：Teams 最近回報已靜音（Preview 快照）。"

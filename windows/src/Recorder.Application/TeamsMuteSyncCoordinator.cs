@@ -7,7 +7,8 @@ public sealed record TeamsMuteSyncSnapshot(
     TeamsMeetingState? LastMeetingState,
     string? Detail,
     bool IsPairingAuthenticated = false,
-    bool IsMicrophoneRoutingEngaged = false)
+    bool IsMicrophoneRoutingEngaged = false,
+    bool IsPairingKnown = false)
 {
     public static TeamsMuteSyncSnapshot Initial { get; } = new(TeamsMuteSyncStatus.Disabled, null, null);
 }
@@ -117,6 +118,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             Detail = null,
                             IsPairingAuthenticated = true,
                             IsMicrophoneRoutingEngaged = microphoneRoutingEngaged,
+                            IsPairingKnown = true,
                         });
                         MeetingPresenceChanged?.Invoke(this, state.IsInMeeting);
                     }
@@ -128,7 +130,8 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             null,
                             null,
                             true,
-                            microphoneRoutingEngaged));
+                            microphoneRoutingEngaged,
+                            true));
                     }
                     break;
                 case TeamsThirdPartyApiEvent.Error(_, var message) when IsAlreadyPairedResponse(message):
@@ -151,6 +154,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                         {
                             Status = TeamsMuteSyncStatus.WaitingForMeeting,
                             Detail = null,
+                            IsPairingKnown = true,
                         });
                     }
                     break;

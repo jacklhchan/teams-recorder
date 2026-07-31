@@ -310,6 +310,7 @@ final class AIProviderSettingsModelTests: XCTestCase {
         model.baseURLText = "https://api.example.com/v1"
         model.asrModel = "asr"
         model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
 
         model.save()
 

@@ -70,7 +70,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
     private var body = Data()
     private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
     private var isFinished = false
-    private var currentRedirectRequest: URLRequest?
+    private var redirectDelegate: ProviderRedirectDelegate?
 
     init(
         configuration: URLSessionConfiguration,
@@ -89,7 +89,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 self.continuation = continuation
-                currentRedirectRequest = request
+                redirectDelegate = ProviderRedirectDelegate(source: request)
                 if Task.isCancelled {
                     lock.unlock()
                     finish(.failure(CancellationError()))
@@ -194,16 +194,10 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
         lock.lock()
-        let redirected = currentRedirectRequest.flatMap {
-            ProviderRedirectPolicy.redirectedRequest(
-                from: $0,
-                proposed: request,
-                statusCode: response.statusCode
-            )
-        }
-        if let redirected {
-            currentRedirectRequest = redirected
-        }
+        let redirected = redirectDelegate?.redirectedRequest(
+            proposed: request,
+            statusCode: response.statusCode
+        )
         lock.unlock()
 
         guard let redirected else {
@@ -238,11 +232,29 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         self.session = nil
         body.removeAll(keepingCapacity: false)
         response = nil
-        currentRedirectRequest = nil
+        redirectDelegate = nil
         lock.unlock()
         session?.finishTasksAndInvalidate()
         lifecycle.markReleased()
         continuation.resume(with: result)
+    }
+}
+
+final class ProviderRedirectDelegate: @unchecked Sendable {
+    private var source: URLRequest
+
+    init(source: URLRequest) {
+        self.source = source
+    }
+
+    func redirectedRequest(proposed: URLRequest, statusCode: Int) -> URLRequest? {
+        guard let redirected = ProviderRedirectPolicy.redirectedRequest(
+            from: source,
+            proposed: proposed,
+            statusCode: statusCode
+        ) else { return nil }
+        source = redirected
+        return redirected
     }
 }
 

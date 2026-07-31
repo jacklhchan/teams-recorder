@@ -197,6 +197,17 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: multipart, proposed: changedBoundary, statusCode: 307))
     }
 
+    func testRedirectPolicyRestoresAPIKeyOnlyAfterSameOriginValidation() throws {
+        var source = try uploadRequest(url: "https://api.example/v1/audio/transcriptions")
+        source.setValue("api-key", forHTTPHeaderField: "X-API-KEY")
+        var accepted = source
+        accepted.url = try XCTUnwrap(URL(string: "https://api.example/v1/audio/redirected"))
+        accepted.setValue("leaked", forHTTPHeaderField: "X-API-KEY")
+        XCTAssertEqual(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: accepted, statusCode: 307)?.value(forHTTPHeaderField: "X-API-KEY"), "api-key")
+        accepted.url = try XCTUnwrap(URL(string: "https://evil.example/redirected"))
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: accepted, statusCode: 307))
+    }
+
     func testMultipartBuilderCapsAudioAndIncludesTypedFields() throws {
         let builder = TranscriptionMultipartBuilder(
             maximumAudioBytes: 3,

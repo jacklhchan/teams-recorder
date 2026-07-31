@@ -11,7 +11,9 @@ enum ProviderRedirectPolicy {
 
     static func redirectedRequest(from source: URLRequest, proposed: URLRequest, statusCode: Int) -> URLRequest? {
         var proposed = proposed
-        proposed.setValue(nil, forHTTPHeaderField: "Authorization")
+        for header in credentialHeaders {
+            proposed.setValue(nil, forHTTPHeaderField: header)
+        }
         guard statusCode == 307 || statusCode == 308,
               source.httpMethod == "POST", proposed.httpMethod == "POST",
               let sourceBody = source.httpBody, proposed.httpBody == sourceBody,
@@ -19,11 +21,15 @@ enum ProviderRedirectPolicy {
               sourceType == normalizedContentType(proposed), isSupportedContentType(sourceType),
               let sourceURL = source.url, let destinationURL = proposed.url,
               allows(from: sourceURL, to: destinationURL) else { return nil }
-        if let authorization = source.value(forHTTPHeaderField: "Authorization") {
-            proposed.setValue(authorization, forHTTPHeaderField: "Authorization")
+        for header in credentialHeaders {
+            if let value = source.value(forHTTPHeaderField: header) {
+                proposed.setValue(value, forHTTPHeaderField: header)
+            }
         }
         return proposed
     }
+
+    private static let credentialHeaders = ["Authorization", "X-API-KEY"]
 
     private static func normalizedContentType(_ request: URLRequest) -> String? {
         guard let raw = request.value(forHTTPHeaderField: "Content-Type") else { return nil }

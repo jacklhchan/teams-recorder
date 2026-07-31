@@ -151,6 +151,36 @@ final class OpenAICompatibleMeetingIntelligenceClientTests: XCTestCase {
         }
     }
 
+    func testTitleAndSummarySanitizerMatrixTrimsNFCAndRejectsFormatCharacters() async throws {
+        let accepted = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer("{\"title\":\"  Cafe\u{301}  \",\"summary\":\"  line\\n\\ttext  \"}"))])
+        let result = try await OpenAICompatibleMeetingIntelligenceClient(transport: accepted).requestFinalResult(input: "x", snapshot: try snapshot())
+        XCTAssertEqual(result.title, "Café")
+        XCTAssertEqual(result.summary, "line\n\ttext")
+
+        for title in [".", "..", "meeting-2026-07-31-1200", "test-2026-07-31-1200", "manual-2026-07-31-1200", "12:30", "x\u{200B}title", "x\u{FEFF}title", "x\u{200E}title", "x\u{200F}title", "x\u{061C}title"] {
+            let transport = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer(#"{"title":"\#(title)","summary":"ok"}"#))])
+            await assertError(.unsafeOutput) { _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: transport).requestFinalResult(input: "x", snapshot: try self.snapshot()) }
+        }
+        for summary in ["x\u{200B}hidden", "x\u{FEFF}hidden", "x\u{200E}hidden", "x\u{200F}hidden", "x\u{061C}hidden", "bad\u{0085}"] {
+            let transport = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer(#"{"summary":"\#(summary)"}"#))])
+            do {
+                _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: transport).requestPartialSummary(input: "x", snapshot: try self.snapshot())
+                XCTFail("Expected unsafe summary \(summary.unicodeScalars.map { $0.value })")
+            } catch {
+                XCTAssertEqual(error as? MeetingIntelligenceClientError, .unsafeOutput)
+            }
+        }
+    }
+
+    func testStrictInnerParserRejectsPartialAndFinalMissingExtraFencedAndProse() async throws {
+        for content in [#"{}"#, #"{"title":"only"}"#, #"{"title":"ok","summary":"ok","extra":true}"#, "```json\n{\"title\":\"ok\",\"summary\":\"ok\"}\n```", "prose {\"title\":\"ok\",\"summary\":\"ok\"}"] {
+            let transport = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer(content))])
+            await assertError(.unsafeOutput) { _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: transport).requestFinalResult(input: "x", snapshot: try self.snapshot()) }
+        }
+        let transport = MeetingIntelligenceRecordingTransport(responses: [.response(status: 200, body: outer(#"{"title":"wrong"}"#))])
+        await assertError(.unsafeOutput) { _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: transport).requestPartialSummary(input: "x", snapshot: try self.snapshot()) }
+    }
+
     private func snapshot(apiKey: String? = nil) throws -> OpenAICompatibleProviderSnapshot {
         .init(profile: try .validated(baseURLText: "https://api.example/v1", asrModel: "asr-only", llmModel: "llm-only", language: "en", prompt: "ASR prompt"), apiKey: apiKey)
     }

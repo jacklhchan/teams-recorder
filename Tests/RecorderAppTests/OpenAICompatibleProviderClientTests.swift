@@ -155,6 +155,50 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         }
     }
 
+    func testRedirectDelegateAcceptsSameOriginJSONAndMultipart307And308WithExactCredentials() throws {
+        for (contentType, status) in [("application/json", 307), ("multipart/form-data; boundary=CaseSensitive", 308)] {
+            var source = URLRequest(url: try XCTUnwrap(URL(string: "https://provider.test/v1/original")))
+            source.httpMethod = "POST"
+            source.httpBody = Data("exact body".utf8)
+            source.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            source.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+            source.setValue("api-key", forHTTPHeaderField: "X-API-KEY")
+            var destination = source
+            destination.url = try XCTUnwrap(URL(string: "https://provider.test/v1/redirected"))
+            destination.setValue("leaked", forHTTPHeaderField: "Authorization")
+            destination.setValue("leaked", forHTTPHeaderField: "X-API-KEY")
+            let redirected = try XCTUnwrap(ProviderRedirectDelegate(source: source).redirectedRequest(proposed: destination, statusCode: status))
+            XCTAssertEqual(redirected.httpMethod, "POST")
+            XCTAssertEqual(redirected.httpBody, Data("exact body".utf8))
+            XCTAssertEqual(redirected.value(forHTTPHeaderField: "Content-Type"), contentType)
+            XCTAssertEqual(redirected.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+            XCTAssertEqual(redirected.value(forHTTPHeaderField: "X-API-KEY"), "api-key")
+        }
+    }
+
+    func testRedirectDelegateRejectsMutationsWithoutReturningCredentials() throws {
+        var source = URLRequest(url: try XCTUnwrap(URL(string: "https://provider.test/v1/original")))
+        source.httpMethod = "POST"
+        source.httpBody = Data("body".utf8)
+        source.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        source.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        for mutate in ["origin", "downgrade", "port", "status", "method", "body", "type"] {
+            var proposed = source
+            proposed.url = try XCTUnwrap(URL(string: "https://provider.test/v1/redirected"))
+            switch mutate {
+            case "origin": proposed.url = try XCTUnwrap(URL(string: "https://evil.test/v1/redirected"))
+            case "downgrade": proposed.url = try XCTUnwrap(URL(string: "http://provider.test/v1/redirected"))
+            case "port": proposed.url = try XCTUnwrap(URL(string: "https://provider.test:444/v1/redirected"))
+            case "method": proposed.httpMethod = "GET"
+            case "body": proposed.httpBody = Data("changed".utf8)
+            case "type": proposed.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+            default: break
+            }
+            let status = mutate == "status" ? 302 : 307
+            XCTAssertNil(ProviderRedirectDelegate(source: source).redirectedRequest(proposed: proposed, statusCode: status), mutate)
+        }
+    }
+
     func testListsModelsWithOptionalBearerHeader() async throws {
         let transport = RecordingProviderTransport(
             response: .success(.init(

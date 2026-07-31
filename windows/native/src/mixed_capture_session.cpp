@@ -7,6 +7,7 @@
 #include "selected_audio_session_facade.h"
 #include "wasapi_capture.h"
 #include "canonical_timeline.h"
+#include "session_duration_clock.h"
 
 #include <windows.h>
 
@@ -19,6 +20,7 @@
 #include <iomanip>
 #include <mutex>
 #include <sstream>
+#include <limits>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -30,6 +32,28 @@ constexpr std::uint32_t kFramesPerBlock = 960;  // 20 ms at 48 kHz.
 constexpr std::uint64_t kBlock100ns = 200'000;
 constexpr std::size_t kMaxQueuedFrames = 48'000U * 4U;
 constexpr auto kSourceSkewWait = std::chrono::milliseconds(60);
+constexpr std::uint64_t kLiveMixerLatencyFrames = 4'800;  // 100 ms.
+
+std::uint64_t CurrentQpc100ns() noexcept {
+    LARGE_INTEGER counter{};
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceCounter(&counter) ||
+        !QueryPerformanceFrequency(&frequency) ||
+        counter.QuadPart < 0 || frequency.QuadPart <= 0) {
+        return 0;
+    }
+
+    constexpr std::uint64_t units_per_second = 10'000'000;
+    const auto value = static_cast<std::uint64_t>(counter.QuadPart);
+    const auto units = static_cast<std::uint64_t>(frequency.QuadPart);
+    const auto seconds = value / units;
+    const auto remainder = value % units;
+    if (seconds > std::numeric_limits<std::uint64_t>::max() / units_per_second ||
+        remainder > std::numeric_limits<std::uint64_t>::max() / units_per_second) {
+        return 0;
+    }
+    return seconds * units_per_second + remainder * units_per_second / units;
+}
 
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) {
@@ -177,6 +201,7 @@ public:
                 ? recorder::timeline::Source::Render
                 : recorder::timeline::Source::Process;
             timeline_ = {};
+            duration_clock_.Reset();
             next_output_frame_ = 0;
             stats_ = {};
             stats_.struct_size = sizeof(stats_);
@@ -202,6 +227,13 @@ public:
                 mixer_.join();
                 return failure_;
             }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto qpc_origin = CurrentQpc100ns();
+            if (qpc_origin != 0) timeline_.SetOrigin(qpc_origin);
+            duration_clock_.Start();
         }
 
         const bool primary_started = selected_audio::PrimaryFor(config_.target_process_id) ==
@@ -255,6 +287,7 @@ public:
                     ? RECORDER_NATIVE_INVALID_STATE
                     : failure_;
             }
+            duration_clock_.Stop();
             stop_requested_ = true;
             cv_.notify_all();
         }
@@ -426,6 +459,7 @@ private:
             error_ = std::move(text);
             // Stop accepting ingress immediately.  The mixer is still allowed
             // to drain the bounded queues below before it closes the backup.
+            duration_clock_.Stop();
             stop_requested_ = true;
             cv_.notify_all();
         }
@@ -597,39 +631,15 @@ private:
         }
     }
 
-    bool HasBlockCoverageLocked(const Source& source) const {
-        if (!source.received_audio) {
-            return false;
+    std::uint64_t OutputFrameLimitLocked() const {
+        const bool final_limit = stop_requested_ || failure_ != RECORDER_NATIVE_OK;
+        std::uint64_t limit = duration_clock_.DueFrames(
+            recorder::timeline::SessionDurationClock::Clock::now(),
+            final_limit ? 0 : kLiveMixerLatencyFrames);
+        if (final_limit && limit % kFramesPerBlock != 0) {
+            limit += kFramesPerBlock - limit % kFramesPerBlock;
         }
-        const std::uint64_t block_end = next_output_frame_ + kFramesPerBlock;
-        return timeline_.end_frame(source.timeline_source) >= block_end;
-    }
-
-    bool CanEmitBlockLocked() const {
-        // Never let the primary callback commit a 20 ms output block when the
-        // optional microphone has supplied only its first 10 ms packet.  That
-        // made the mixer advance one block ahead and MixFrames then discarded
-        // every subsequently-arriving microphone chunk as already emitted.
-        if (!HasBlockCoverageLocked(render_)) {
-            return !render_.received_audio && HasBlockCoverageLocked(microphone_);
-        }
-        return config_.microphone_endpoint_id.empty() ||
-            HasBlockCoverageLocked(microphone_);
-    }
-
-    bool CanEmitAfterSourceSkewLocked() const {
-        // An endpoint may become silent and therefore stop delivering packets.
-        // After one bounded wait, progress using the source that has covered
-        // the block and represent the other source as silence.  This keeps
-        // capture live without reintroducing the normal one-block race above.
-        if (HasBlockCoverageLocked(render_)) {
-            return true;
-        }
-        return HasBlockCoverageLocked(microphone_);
-    }
-
-    std::size_t QueuedFramesLocked() const {
-        return render_.queued_frames + microphone_.queued_frames;
+        return limit;
     }
 
     void DetectUnexpectedDisconnectLocked(Source& source) {
@@ -680,9 +690,9 @@ private:
             std::vector<float> block(kFramesPerBlock * 2U, 0.0F);
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                const bool received_required_coverage = cv_.wait_for(lock, kSourceSkewWait, [this] {
+                cv_.wait_for(lock, kSourceSkewWait, [this] {
                     return stop_requested_ || failure_ != RECORDER_NATIVE_OK ||
-                        CanEmitBlockLocked();
+                        next_output_frame_ + kFramesPerBlock <= OutputFrameLimitLocked();
                 });
 
                 // WASAPI owns the worker thread, so a device invalidation can
@@ -691,13 +701,8 @@ private:
                 DetectUnexpectedDisconnectLocked(render_);
                 DetectUnexpectedDisconnectLocked(microphone_);
 
-                bool should_emit = CanEmitBlockLocked();
-                if (!should_emit && !received_required_coverage) {
-                    should_emit = CanEmitAfterSourceSkewLocked();
-                }
-                if (!should_emit && (stop_requested_ || failure_ != RECORDER_NATIVE_OK)) {
-                    should_emit = QueuedFramesLocked() > 0;
-                }
+                const bool should_emit =
+                    next_output_frame_ + kFramesPerBlock <= OutputFrameLimitLocked();
                 if (!should_emit) {
                     if (stop_requested_ || failure_ != RECORDER_NATIVE_OK) {
                         break;
@@ -800,6 +805,7 @@ private:
     Source microphone_;
     recorder::timeline::CanonicalTimeline timeline_;
     std::uint64_t session_generation_ = 0;
+    recorder::timeline::SessionDurationClock duration_clock_;
     std::uint64_t next_output_frame_ = 0;
     std::thread mixer_;
     RecorderNativeStats stats_{};

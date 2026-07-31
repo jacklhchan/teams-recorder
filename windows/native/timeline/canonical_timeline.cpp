@@ -34,6 +34,12 @@ const CanonicalTimeline::State& CanonicalTimeline::state(Source source) const no
     return render_;
 }
 
+void CanonicalTimeline::SetOrigin(std::uint64_t qpc_100ns) noexcept {
+    if (has_origin_) return;
+    has_origin_ = true;
+    origin_qpc_100ns_ = qpc_100ns;
+}
+
 Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
                                    std::uint64_t device_position_frames,
                                    std::uint32_t source_sample_rate,
@@ -42,8 +48,7 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
     Placement placement{};
     State& source_state = state(source);
     if (!has_origin_) {
-        has_origin_ = true;
-        origin_qpc_100ns_ = qpc_100ns;
+        SetOrigin(qpc_100ns);
     }
     if (!source_state.initialized) {
         source_state.initialized = true;

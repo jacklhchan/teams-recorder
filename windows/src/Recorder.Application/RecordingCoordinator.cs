@@ -230,7 +230,8 @@ public sealed class RecordingCoordinator
                 State = RecordingCoordinatorState.Stopping,
                 IsTestRecording = false,
                 NeedsNativeCleanup = false,
-                HasRecoverableFault = snapshot.State == RecordingCoordinatorState.Faulted || snapshot.HasRecoverableFault,
+                HasRecoverableFault = snapshot.State == RecordingCoordinatorState.Faulted ||
+                    snapshot.HasRecoverableFault,
             };
             snapshot = stopping;
             operation = Enqueue(() => StopCore(stopping.Generation));
@@ -420,7 +421,7 @@ public sealed class RecordingCoordinator
     /// <summary>
     /// Releases a terminal capture fault after the application layer has
     /// retained its evidence. The original diagnostic remains observable, but
-    /// generation is invalidated and the next start is permitted.
+    /// the generation is invalidated and the next start is permitted.
     /// </summary>
     public RecordingCoordinatorSnapshot CompleteFaultRecovery()
     {
@@ -429,7 +430,8 @@ public sealed class RecordingCoordinator
         {
             if (snapshot.NeedsNativeCleanup ||
                 (snapshot.State != RecordingCoordinatorState.Faulted &&
-                 (snapshot.State != RecordingCoordinatorState.Stopped || !snapshot.HasRecoverableFault)))
+                 (snapshot.State != RecordingCoordinatorState.Stopped ||
+                  !snapshot.HasRecoverableFault)))
             {
                 return snapshot;
             }

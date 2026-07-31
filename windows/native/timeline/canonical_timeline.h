@@ -46,6 +46,7 @@ public:
     static constexpr std::uint32_t kSampleRate = 48'000;
     static constexpr std::uint64_t kQpcUnitsPerSecond = 10'000'000;
 
+    void SetOrigin(std::uint64_t qpc_100ns) noexcept;
     Placement Place(Source source, std::uint64_t qpc_100ns,
                     std::uint64_t device_position_frames,
                     std::uint32_t source_sample_rate,

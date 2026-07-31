@@ -182,6 +182,7 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     # One deterministic in-process exercise. For teardown isolation, repeat
     # this CTest test from the command line so every repetition is a fresh EXE.
     add_test(NAME Recorder.M4aWriter.Stress COMMAND Recorder.M4aWriter.Tests stress --iterations 16 --frames 960)
+    add_test(NAME Recorder.M4aWriter.Duration COMMAND Recorder.M4aWriter.Tests duration)
     add_test(NAME Recorder.M4aWriter.Abort COMMAND Recorder.M4aWriter.Tests abort)
     add_test(NAME Recorder.M4aWriter.AbortAfterOneFrame
         COMMAND Recorder.M4aWriter.Tests abort-after-write --frames 1)
@@ -208,6 +209,7 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         Recorder.M4aWriter.Tail1024Frames
         Recorder.M4aWriter.AudibleSignalRoundTrip
         Recorder.M4aWriter.Stress
+        Recorder.M4aWriter.Duration
         Recorder.M4aWriter.Abort
         Recorder.M4aWriter.AbortAfterOneFrame
         Recorder.M4aWriter.AbortAfter960Frames

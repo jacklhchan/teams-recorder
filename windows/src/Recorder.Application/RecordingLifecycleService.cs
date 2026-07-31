@@ -282,7 +282,8 @@ public sealed class RecordingLifecycleService : IDisposable
     {
         ThrowIfDisposed();
         var stopped = await StopAsync().ConfigureAwait(false);
-        if (stopped.State == RecordingCoordinatorState.Stopped && !stopped.HasRecoverableFault)
+        if (stopped.State == RecordingCoordinatorState.Stopped &&
+            !stopped.HasRecoverableFault)
             return await PublishCompletedAsync().ConfigureAwait(false);
 
         RecordingSessionPlan? plan;

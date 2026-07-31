@@ -1,4 +1,5 @@
 #include "canonical_timeline.h"
+#include "session_duration_clock.h"
 
 #include <array>
 #include <deque>
@@ -27,6 +28,26 @@ void SilenceGapsArePreserved() {
     Expect(first.frame == 0, "first packet not at zero");
     Expect(after_silence.frame == 5'760, "loopback silence was compressed");
     Expect(after_silence.silence_before_frames == 4'800, "missing silence duration wrong");
+}
+
+void ExplicitSessionOriginPreservesInitialSilence() {
+    CanonicalTimeline timeline;
+    timeline.SetOrigin(1'000'000);
+    const auto first = timeline.Place(Source::Render, 2'000'000, 0, 48'000, 960, false);
+    Expect(first.frame == 4'800, "session origin did not preserve initial silence");
+    Expect(first.silence_before_frames == 4'800, "initial silence duration was compressed");
+}
+
+void SessionClockAdvancesAcrossPacketlessSilence() {
+    using DurationClock = recorder::timeline::SessionDurationClock;
+    const auto origin = DurationClock::Clock::time_point{};
+    DurationClock clock;
+    clock.Start(origin);
+    Expect(clock.DueFrames(origin + std::chrono::seconds(2), 4'800) == 91'200,
+           "live mixer latency was not bounded to 100 ms");
+    clock.Stop(origin + std::chrono::seconds(120));
+    Expect(clock.DueFrames(origin + std::chrono::hours(1), 4'800) == 5'760'000,
+           "stopped session compressed packetless elapsed time");
 }
 
 void MicrophoneMuteGapMapsToSilence() {
@@ -113,8 +134,10 @@ void SelectedProcessUsesCanonicalGapsAndCounters() {
 }  // namespace
 
 int main() {
-    const std::array<void (*)(), 8> tests = {LongDurationHasNoTimelineCompression, SilenceGapsArePreserved,
-        MicrophoneMuteGapMapsToSilence, LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
+    const std::array<void (*)(), 10> tests = {LongDurationHasNoTimelineCompression,
+        SilenceGapsArePreserved, ExplicitSessionOriginPreservesInitialSilence,
+        SessionClockAdvancesAcrossPacketlessSilence, MicrophoneMuteGapMapsToSilence,
+        LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
         SourceWatermarksRequireBothInputsBeforeMixCommit, DriftLateAndFaultCountersAreBounded,
         SelectedProcessUsesCanonicalGapsAndCounters};
     try { for (const auto test : tests) test(); }

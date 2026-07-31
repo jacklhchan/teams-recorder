@@ -49,6 +49,7 @@ var tests = new (string Name, Action Run)[]
     ,("mixed recording request validates its audio-only contract", AudioMvpTests.MixedRequestValidatesAudioOnlyContract)
     ,("mixed recording coordinator starts, stops, and retries", AudioMvpTests.MixedCoordinatorStartsStopsAndRetries)
     ,("mixed test recording stops after its scheduled delay", AudioMvpTests.MixedTestRecordingStopsAfterScheduledDelay)
+    ,("recoverable mixed fault retains evidence and permits restart", AudioMvpTests.RecoverableFaultRetainsEvidenceAndAllowsRestart)
     ,("selected-audio test cancellation does not fall back or double-stop", AudioMvpTests.SelectedAudioTestCancelsWithoutFallbackOrDoubleStop)
     ,("selected-audio request rejects fallback-shaped options", AudioMvpTests.SelectedAudioRequestRejectsFallbackShapedOptions)
     ,("selected-audio test auto-stop publishes exactly once", SelectedAudioLifecycleTests.TestAutoStopPublishesExactlyOnce)

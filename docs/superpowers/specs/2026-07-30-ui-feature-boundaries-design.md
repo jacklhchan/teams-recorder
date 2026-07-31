@@ -1,12 +1,14 @@
 # UI and Feature Boundary Refactor Design
 
 **Date:** 2026-07-30
-**Status:** Approved architecture baseline with approved macOS 26 PR A revision;
-PR B/C Meeting Intelligence amendment proposed for review
+**Status:** Approved architecture baseline with approved macOS 26 PR A revision
+and approved PR B/C Meeting Intelligence amendment
 **Approved baseline SHA:** `8f110466093c9a3fabc5f5d1fad3c69afa849c53`
 **Approval date:** 2026-07-30
 **macOS 26 PR A revision approval:** 2026-07-31
-**PR B/C amendment review:** Pending
+**PR B/C amendment review:** Approved 2026-08-01
+**Approved PR B/C amendment content SHA:**
+`cf7c83a120610eb62bd9b32de75b02db169d4767`
 **PR B stacked base:** Draft PR #7, `codex/meeting-intelligence-summary-title`
 at `ab9395598505f1272f2efa7d8918b8ac69e96fd2`
 **Revision dependency:** PR #5 merged at

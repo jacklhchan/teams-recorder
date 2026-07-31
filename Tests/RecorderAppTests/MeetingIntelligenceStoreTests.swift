@@ -96,6 +96,18 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), original)
     }
 
+    func testPromotionRejectsFutureDestinationWithoutChangingBytes() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let future = Data(#"{"schemaVersion":2,"summary":"future"}"#.utf8)
+        try future.write(to: fixture.artifactURL)
+        let staged = try MeetingIntelligenceArtifactStore().stage(fixture.artifact(), in: fixture.folder)
+
+        XCTAssertThrowsError(try MeetingIntelligenceArtifactStore().promoteStaged(staged, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), future)
+    }
+
     func testActiveStateLoadsAsInterruptedAndTerminalStateIsRetained() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
         let store = MeetingIntelligenceStateStore()
@@ -131,6 +143,30 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(in: fixture.folder)?.phase, .completed)
         try store.remove(in: fixture.folder)
         XCTAssertNil(try store.load(in: fixture.folder))
+    }
+
+    func testStateSaveAndRemoveRejectFutureDestinationWithoutChangingBytes() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let url = fixture.folder.appendingPathComponent(MeetingIntelligenceStateStore.fileName)
+        let future = Data(#"{"schemaVersion":2,"phase":"completed"}"#.utf8)
+        try future.write(to: url)
+        let state = MeetingIntelligenceState(
+            schemaVersion: 1,
+            phase: .completed,
+            message: "Completed",
+            sourceTranscriptSHA256: nil,
+            startedAt: Date(timeIntervalSince1970: 1),
+            finishedAt: nil
+        )
+
+        XCTAssertThrowsError(try MeetingIntelligenceStateStore().save(state, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
+        }
+        XCTAssertEqual(try Data(contentsOf: url), future)
+        XCTAssertThrowsError(try MeetingIntelligenceStateStore().remove(in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
+        }
+        XCTAssertEqual(try Data(contentsOf: url), future)
     }
 }
 

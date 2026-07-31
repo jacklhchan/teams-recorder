@@ -37,6 +37,21 @@ final class RecordingLibraryTests: XCTestCase {
         XCTAssertEqual(metadata.titleOrigin, .manual)
     }
 
+    func testFutureUnknownTitleOriginRejectsSaveWithoutChangingBytes() throws {
+        let root = try makeRoot()
+        let folder = try makeEmptySessionFolder(in: root, named: "future-title-origin")
+        let original = Data(#"{"schemaVersion":2,"title":"Future","titleOrigin":"vendorGenerated","tags":["one"]}"#.utf8)
+        try original.write(to: RecordingSessionMetadataStore.fileURL(in: folder))
+
+        var metadata = RecordingSessionMetadataStore.load(in: folder)
+        metadata.tags.append("two")
+        XCTAssertThrowsError(try RecordingSessionMetadataStore.save(metadata, in: folder))
+        XCTAssertEqual(
+            try Data(contentsOf: RecordingSessionMetadataStore.fileURL(in: folder)),
+            original
+        )
+    }
+
     func testLegacyMetadataDefaultsToCurrentSchemaVersionAndManualSource() throws {
         let metadata = try JSONDecoder().decode(
             RecordingSessionMetadata.self,

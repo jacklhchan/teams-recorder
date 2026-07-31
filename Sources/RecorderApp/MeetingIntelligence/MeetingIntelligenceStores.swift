@@ -6,12 +6,18 @@ enum MeetingIntelligenceStoreError: LocalizedError, Equatable, Sendable {
     case malformed
     case tooLarge
     case unsafeFile
+    case identityChanged
     case missing
 }
 
 struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sendable {
     static let fileName = "meeting-intelligence.json"
     static let maximumBytes = 256 * 1_024
+    private let mutationGate: RecordingSessionMutationGate
+
+    init(mutationGate: RecordingSessionMutationGate = .init()) {
+        self.mutationGate = mutationGate
+    }
 
     func load(in folder: URL) throws -> MeetingIntelligenceArtifact? {
         guard let data = try MeetingIntelligenceStoreFileIO.read(
@@ -53,32 +59,33 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, Sen
     }
 
     func promoteStaged(_ stagedURL: URL, in folder: URL) throws {
-        let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
-        let staged = stagedURL.standardizedFileURL
-        guard staged.deletingLastPathComponent() == normalizedFolder,
-              staged.lastPathComponent.hasPrefix(".meeting-intelligence-stage-") else {
-            throw MeetingIntelligenceStoreError.unsafeFile
+        try mutationGate.withMutation(for: folder) {
+            let normalizedFolder = try MeetingIntelligenceStoreFileIO.normalizedFolder(folder)
+            let staged = stagedURL.standardizedFileURL
+            guard staged.deletingLastPathComponent() == normalizedFolder,
+                  staged.lastPathComponent.hasPrefix(".meeting-intelligence-stage-") else {
+                throw MeetingIntelligenceStoreError.unsafeFile
+            }
+            let stagedData = try MeetingIntelligenceStoreFileIO.requiredData(
+                named: staged.lastPathComponent, in: normalizedFolder, maximumBytes: Self.maximumBytes
+            )
+            try validateCurrentSchema(stagedData, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
+            if let destination = try MeetingIntelligenceStoreFileIO.read(named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes) {
+                try validateCurrentSchema(destination, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
+            }
+            try MeetingIntelligenceStoreFileIO.rename(named: staged.lastPathComponent, to: Self.fileName, in: normalizedFolder)
         }
-        _ = try MeetingIntelligenceStoreFileIO.requiredData(
-            named: staged.lastPathComponent,
-            in: normalizedFolder,
-            maximumBytes: Self.maximumBytes
-        )
-        try MeetingIntelligenceStoreFileIO.validateDestination(
-            named: Self.fileName,
-            in: normalizedFolder
-        )
-        try MeetingIntelligenceStoreFileIO.rename(
-            named: staged.lastPathComponent,
-            to: Self.fileName,
-            in: normalizedFolder
-        )
     }
 }
 
 struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable {
     static let fileName = "meeting-intelligence-state.json"
     static let maximumBytes = 32 * 1_024
+    private let mutationGate: RecordingSessionMutationGate
+
+    init(mutationGate: RecordingSessionMutationGate = .init()) {
+        self.mutationGate = mutationGate
+    }
 
     func load(in folder: URL) throws -> MeetingIntelligenceState? {
         guard let data = try MeetingIntelligenceStoreFileIO.read(
@@ -132,15 +139,21 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
         guard data.count <= Self.maximumBytes else {
             throw MeetingIntelligenceStoreError.tooLarge
         }
-        try MeetingIntelligenceStoreFileIO.replaceAtomically(
-            named: Self.fileName,
-            data: data,
-            in: folder
-        )
+        try mutationGate.withMutation(for: folder) {
+            if let destination = try MeetingIntelligenceStoreFileIO.read(named: Self.fileName, in: folder, maximumBytes: Self.maximumBytes) {
+                try validateCurrentSchema(destination, expected: MeetingIntelligenceState.currentSchemaVersion)
+            }
+            try MeetingIntelligenceStoreFileIO.replaceAtomically(named: Self.fileName, data: data, in: folder)
+        }
     }
 
     func remove(in folder: URL) throws {
-        try MeetingIntelligenceStoreFileIO.removeIfPresent(named: Self.fileName, in: folder)
+        try mutationGate.withMutation(for: folder) {
+            if let destination = try MeetingIntelligenceStoreFileIO.read(named: Self.fileName, in: folder, maximumBytes: Self.maximumBytes) {
+                try validateCurrentSchema(destination, expected: MeetingIntelligenceState.currentSchemaVersion)
+            }
+            try MeetingIntelligenceStoreFileIO.removeIfPresent(named: Self.fileName, in: folder)
+        }
     }
 
     private func sanitize(_ message: String) -> String {
@@ -157,6 +170,13 @@ private func schemaVersion(in data: Data) throws -> Int {
         return try JSONDecoder().decode(Header.self, from: data).schemaVersion
     } catch {
         throw MeetingIntelligenceStoreError.malformed
+    }
+}
+
+private func validateCurrentSchema(_ data: Data, expected: Int) throws {
+    let version = try schemaVersion(in: data)
+    guard version == expected else {
+        throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
     }
 }
 
@@ -282,7 +302,7 @@ private enum MeetingIntelligenceStoreFileIO {
             throw MeetingIntelligenceStoreError.tooLarge
         }
         guard try identity(of: descriptor) == before else {
-            throw MeetingIntelligenceStoreError.unsafeFile
+            throw MeetingIntelligenceStoreError.identityChanged
         }
         return data
     }

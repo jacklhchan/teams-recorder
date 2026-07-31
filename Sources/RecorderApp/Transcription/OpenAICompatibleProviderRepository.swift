@@ -23,17 +23,57 @@ struct OpenAICompatibleProviderSnapshot: Codable, Equatable, Sendable {
     let profile: OpenAICompatibleProviderProfile
     let apiKey: String?
 
-    init(
-        providerKind: AIProviderKind? = nil,
-        authentication: ProviderAuthentication? = nil,
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
-    ) {
-        let kind = providerKind ?? profile.providerKind
-        self.providerKind = kind
-        self.authentication = authentication ?? .forProviderKind(kind)
+    private enum CodingKeys: String, CodingKey {
+        case providerKind, authentication, profile, apiKey
+    }
+
+    init(profile: OpenAICompatibleProviderProfile, apiKey: String?) {
+        self.providerKind = profile.providerKind
+        self.authentication = .forProviderKind(profile.providerKind)
         self.profile = profile
         self.apiKey = apiKey
+    }
+
+    static func validated(
+        profile: OpenAICompatibleProviderProfile,
+        apiKey: String?
+    ) throws -> Self {
+        Self(
+            profile: try OpenAICompatibleProviderProfile.validatedPersisted(profile),
+            apiKey: apiKey
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let profile = try OpenAICompatibleProviderProfile.validatedPersisted(
+            container.decode(OpenAICompatibleProviderProfile.self, forKey: .profile)
+        )
+        let decodedKind = try container.decode(AIProviderKind.self, forKey: .providerKind)
+        guard decodedKind == profile.providerKind else {
+            throw ProviderSnapshotValidationError.providerKindMismatch
+        }
+        let decodedAuthentication = try container.decode(ProviderAuthentication.self, forKey: .authentication)
+        let authentication = ProviderAuthentication.forProviderKind(profile.providerKind)
+        guard decodedAuthentication == authentication else {
+            throw ProviderSnapshotValidationError.authenticationMismatch
+        }
+        providerKind = profile.providerKind
+        self.authentication = authentication
+        self.profile = profile
+        apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey)
+    }
+}
+
+enum ProviderSnapshotValidationError: LocalizedError, Equatable {
+    case providerKindMismatch
+    case authenticationMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .providerKindMismatch: "The provider snapshot kind does not match its profile."
+        case .authenticationMismatch: "The provider snapshot authentication does not match its profile."
+        }
     }
 }
 
@@ -59,6 +99,7 @@ enum ProviderRepositoryError: LocalizedError, Equatable {
     case migrationVerificationFailed
     case migrationRollbackFailed
     case unsupportedProviderPreset
+    case credentialRollbackFailed
 
     var errorDescription: String? {
         switch self {
@@ -74,6 +115,8 @@ enum ProviderRepositoryError: LocalizedError, Equatable {
             "Provider credential migration could not be rolled back."
         case .unsupportedProviderPreset:
             "This provider preset is not supported by the current profile store."
+        case .credentialRollbackFailed:
+            "Provider credential update could not be rolled back."
         }
     }
 }
@@ -156,11 +199,37 @@ final class OpenAICompatibleProviderRepository: OpenAICompatibleProviderManaging
             let profile = try OpenAICompatibleProviderProfile.validatedPersisted(profile)
             if let replacementAPIKey, !replacementAPIKey.isEmpty {
                 let identity = OpenAICompatibleProviderCredential.identity(for: profile.providerKind)
+                let previousKey = try secureStore.load(
+                    service: identity.service,
+                    account: identity.account
+                )
                 try secureStore.save(
                     Data(replacementAPIKey.utf8),
                     service: identity.service,
                     account: identity.account
                 )
+                do {
+                    try profiles.save(profile)
+                } catch {
+                    do {
+                        if let previousKey {
+                            try secureStore.save(
+                                previousKey,
+                                service: identity.service,
+                                account: identity.account
+                            )
+                        } else {
+                            try secureStore.delete(
+                                service: identity.service,
+                                account: identity.account
+                            )
+                        }
+                    } catch {
+                        throw ProviderRepositoryError.credentialRollbackFailed
+                    }
+                    throw error
+                }
+                return
             }
             try profiles.save(profile)
         }
@@ -175,7 +244,7 @@ final class OpenAICompatibleProviderRepository: OpenAICompatibleProviderManaging
 
     func removeAPIKey() throws {
         try lock.withLock {
-            let kind = (try profiles.load())?.providerKind ?? .openAICompatible
+            let kind = try activeProviderKindUnlocked()
             let identity = OpenAICompatibleProviderCredential.identity(for: kind)
             try secureStore.delete(
                 service: identity.service,
@@ -287,14 +356,19 @@ final class OpenAICompatibleProviderRepository: OpenAICompatibleProviderManaging
         return try profiles.load() != nil
     }
 
+    private func activeProviderKindUnlocked() throws -> AIProviderKind {
+        if let presets = profiles as? any ProviderPresetProfileStoring {
+            return try presets.activeProviderKind()
+        }
+        return .openAICompatible
+    }
+
     private func makeSnapshot(
         profile: OpenAICompatibleProviderProfile
     ) throws -> OpenAICompatibleProviderSnapshot {
         let profile = try OpenAICompatibleProviderProfile.validatedPersisted(profile)
         // Configuration is validated before a credential lookup.
-        return OpenAICompatibleProviderSnapshot(
-            providerKind: profile.providerKind,
-            authentication: .forProviderKind(profile.providerKind),
+        return try OpenAICompatibleProviderSnapshot.validated(
             profile: profile,
             apiKey: try loadAPIKey(for: profile.providerKind)
         )

@@ -296,12 +296,7 @@ struct OpenAICompatibleTranscriptionClient: Sendable {
             "application/json",
             forHTTPHeaderField: "Accept"
         )
-        if let apiKey = snapshot.apiKey, !apiKey.isEmpty {
-            request.setValue(
-                "Bearer \(apiKey)",
-                forHTTPHeaderField: "Authorization"
-            )
-        }
+        ProviderRequestAuthentication.apply(snapshot: snapshot, to: &request)
 
         for attempt in 0..<retryPolicy.maximumAttempts {
             try Task.checkCancellation()

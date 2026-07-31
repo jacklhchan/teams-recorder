@@ -265,8 +265,7 @@ struct ProviderConnectionReport: Equatable, Sendable {
 
 protocol ProviderConnectionTesting: Sendable {
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport
 }
 
@@ -303,19 +302,21 @@ struct OpenAICompatibleProviderClient: ProviderConnectionTesting {
     }
 
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport {
         var request = URLRequest(
-            url: profile.baseURL.appendingPathComponent("models")
+            url: snapshot.profile.baseURL.appendingPathComponent("models")
         )
         request.httpMethod = "GET"
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let apiKey, !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
+        ProviderRequestAuthentication.apply(snapshot: snapshot, to: &request)
+        return try await send(request: request)
+    }
 
+    private func send(
+        request: URLRequest
+    ) async throws -> ProviderConnectionReport {
         let (data, response) = try await transport.response(
             for: request,
             maximumBodyBytes: Self.maximumModelDiscoveryResponseBytes

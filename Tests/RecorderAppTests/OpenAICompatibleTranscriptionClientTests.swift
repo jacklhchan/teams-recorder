@@ -3,6 +3,31 @@ import XCTest
 @testable import RecorderApp
 
 final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
+    func testUploadUsesOnlySnapshotSelectedHKTHeader() async throws {
+        let transport = RecordingTranscriptionTransport(responses: [
+            .http(status: 200, body: #"{"text":"done"}"#)
+        ])
+        let snapshot = OpenAICompatibleProviderSnapshot(
+            profile: try .hktValidated(
+                groupID: "89", asrModel: "hkt-asr", llmModel: "hkt-llm",
+                language: "yue", prompt: "prompt"
+            ),
+            apiKey: "hkt-secret"
+        )
+
+        _ = try await makeClient(transport: transport).transcribe(
+            audioData: Data("audio".utf8), fileName: "meeting.m4a",
+            snapshot: snapshot, prompt: "prompt"
+        )
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.uat.bot-builder.pccw.com/v1/groups/89/openai/audio/transcriptions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-API-KEY"), "hkt-secret")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertTrue(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains("hkt-asr"))
+        XCTAssertFalse(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains("hkt-llm"))
+    }
+
     func testRetryPolicyRetriesOnlyTransientStatuses() {
         let policy = TranscriptionRetryPolicy()
 

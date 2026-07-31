@@ -11,10 +11,10 @@ enum ProviderRedirectPolicy {
 
     static func redirectedRequest(from source: URLRequest, proposed: URLRequest, statusCode: Int) -> URLRequest? {
         var proposed = proposed
-        for header in credentialHeaders {
+        for header in ProviderRequestAuthentication.sensitiveHeaderFields {
             proposed.setValue(nil, forHTTPHeaderField: header)
         }
-        let sourceCredentials = credentialHeaders.compactMap { header in
+        let sourceCredentials = ProviderRequestAuthentication.sensitiveHeaderFields.compactMap { header in
             source.value(forHTTPHeaderField: header).map { (header, $0) }
         }
         guard statusCode == 307 || statusCode == 308,
@@ -30,8 +30,6 @@ enum ProviderRedirectPolicy {
         }
         return proposed
     }
-
-    private static let credentialHeaders = ["Authorization", "X-API-KEY"]
 
     private static func normalizedContentType(_ request: URLRequest) -> String? {
         guard let raw = request.value(forHTTPHeaderField: "Content-Type") else { return nil }

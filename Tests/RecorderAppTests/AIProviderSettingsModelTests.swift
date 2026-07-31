@@ -443,8 +443,7 @@ private struct StubProviderClient: ProviderConnectionTesting {
     }
 
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport {
         if let error { throw error }
         return .init(supportsModelDiscovery: true, models: [])
@@ -456,8 +455,7 @@ private actor DeferredProviderClient: ProviderConnectionTesting {
     private var requestsStarted = 0
 
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport {
         try await withCheckedThrowingContinuation { continuation in
             requestsStarted += 1

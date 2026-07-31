@@ -20,6 +20,28 @@ final class MeetingIntelligenceAvailabilityTests: XCTestCase {
         XCTAssertEqual(requestedAPIKeys, ["test-key"])
     }
 
+    func testExactLLMMatchForHKTUsesCapturedHKTSnapshot() async throws {
+        let snapshot = OpenAICompatibleProviderSnapshot(
+            profile: try .hktValidated(
+                groupID: "456", asrModel: "hkt-asr", llmModel: "hkt-llm",
+                language: "yue", prompt: "prompt"
+            ),
+            apiKey: "hkt-key"
+        )
+        let client = StubProviderConnectionClient(result: .success(
+            .init(supportsModelDiscovery: true, models: ["hkt-asr", "hkt-llm"])
+        ))
+
+        let result = await OpenAICompatibleMeetingIntelligenceAvailabilityChecker(client: client)
+            .availability(for: snapshot)
+
+        let requestedKind = await client.requestedProfiles.first?.providerKind
+        let requestedKeys = await client.requestedAPIKeys
+        XCTAssertEqual(result, .confirmed)
+        XCTAssertEqual(requestedKind, .hktGenAI)
+        XCTAssertEqual(requestedKeys, ["hkt-key"])
+    }
+
     func testExactLLMMatchConfirmsWhenASRAndLLMModelsAreTheSame() async throws {
         let snapshot = try providerSnapshot(asrModel: "shared-model", llmModel: "shared-model")
         let client = StubProviderConnectionClient(result: .success(
@@ -184,11 +206,10 @@ private actor StubProviderConnectionClient: ProviderConnectionTesting {
     }
 
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport {
-        requestedProfiles.append(profile)
-        requestedAPIKeys.append(apiKey)
+        requestedProfiles.append(snapshot.profile)
+        requestedAPIKeys.append(snapshot.apiKey)
         return try result.get()
     }
 }
@@ -200,8 +221,7 @@ private actor ControlledAvailabilityClient: ProviderConnectionTesting {
     private(set) var requestCount = 0
 
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport {
         requestCount += 1
         await requestStarted.open()

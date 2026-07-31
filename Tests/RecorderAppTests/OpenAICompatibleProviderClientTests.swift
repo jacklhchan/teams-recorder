@@ -218,7 +218,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         )
 
         let report = try await OpenAICompatibleProviderClient(transport: transport)
-            .testConnection(profile: try makeProfile(), apiKey: "secret")
+            .testConnection(for: try snapshot(apiKey: "secret"))
 
         XCTAssertEqual(report.models, ["asr-a", "llm-b"])
         XCTAssertEqual(
@@ -235,8 +235,49 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         )
 
         _ = try await OpenAICompatibleProviderClient(transport: transport)
-            .testConnection(profile: try makeProfile(), apiKey: nil)
+            .testConnection(for: try snapshot())
 
+        XCTAssertNil(transport.lastRequest?.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testAuthenticationApplicatorClearsBothHeadersBeforeApplyingSnapshotChoice() throws {
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "https://provider.test/v1/models")))
+        request.setValue("Bearer stale", forHTTPHeaderField: "Authorization")
+        request.setValue("stale-key", forHTTPHeaderField: "X-API-KEY")
+
+        ProviderRequestAuthentication.apply(
+            snapshot: try .validated(profile: makeProfile(), apiKey: nil),
+            to: &request
+        )
+
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-API-KEY"))
+    }
+
+    func testModelDiscoveryUsesOnlySnapshotSelectedHKTHeader() async throws {
+        let transport = RecordingProviderTransport(
+            response: .success(.init(status: 200, body: #"{"data":[{"id":"hkt-asr"},{"id":"hkt-llm"}]}"#))
+        )
+        let snapshot = try OpenAICompatibleProviderSnapshot(
+            profile: .hktValidated(
+                groupID: "12345",
+                asrModel: "hkt-asr",
+                llmModel: "hkt-llm",
+                language: "yue",
+                prompt: "prompt"
+            ),
+            apiKey: "hkt-secret"
+        )
+
+        let report = try await OpenAICompatibleProviderClient(transport: transport)
+            .testConnection(for: snapshot)
+
+        XCTAssertEqual(report.models, ["hkt-asr", "hkt-llm"])
+        XCTAssertEqual(
+            transport.lastRequest?.url?.absoluteString,
+            "https://api.uat.bot-builder.pccw.com/v1/groups/12345/openai/models"
+        )
+        XCTAssertEqual(transport.lastRequest?.value(forHTTPHeaderField: "X-API-KEY"), "hkt-secret")
         XCTAssertNil(transport.lastRequest?.value(forHTTPHeaderField: "Authorization"))
     }
 
@@ -246,7 +287,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         )
 
         let report = try await OpenAICompatibleProviderClient(transport: transport)
-            .testConnection(profile: try makeProfile(), apiKey: nil)
+            .testConnection(for: try snapshot())
 
         XCTAssertFalse(report.supportsModelDiscovery)
         XCTAssertTrue(report.models.isEmpty)
@@ -259,7 +300,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
 
         do {
             _ = try await OpenAICompatibleProviderClient(transport: transport)
-                .testConnection(profile: try makeProfile(), apiKey: "never-log")
+                .testConnection(for: try snapshot(apiKey: "never-log"))
             XCTFail("Expected failure")
         } catch {
             XCTAssertEqual(error as? ProviderConnectionError, .authenticationRejected)
@@ -277,7 +318,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
 
         do {
             _ = try await OpenAICompatibleProviderClient(transport: transport)
-                .testConnection(profile: try makeProfile(), apiKey: nil)
+                .testConnection(for: try snapshot())
             XCTFail("Expected capped transport failure")
         } catch {
             XCTAssertEqual(
@@ -304,7 +345,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
 
         do {
             _ = try await OpenAICompatibleProviderClient(transport: transport)
-                .testConnection(profile: try makeProfile(), apiKey: nil)
+                .testConnection(for: try snapshot())
             XCTFail("Expected excessive model item failure")
         } catch {
             XCTAssertEqual(
@@ -324,7 +365,7 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
         )
 
         let report = try await OpenAICompatibleProviderClient(transport: transport)
-            .testConnection(profile: try makeProfile(), apiKey: nil)
+            .testConnection(for: try snapshot())
 
         XCTAssertEqual(report.models, ["A", "a", "z"])
     }
@@ -337,6 +378,12 @@ final class OpenAICompatibleProviderClientTests: XCTestCase {
             language: "yue",
             prompt: ""
         )
+    }
+
+    private func snapshot(
+        apiKey: String? = nil
+    ) throws -> OpenAICompatibleProviderSnapshot {
+        .init(profile: try makeProfile(), apiKey: apiKey)
     }
 
     private func controlledSessionConfiguration() -> URLSessionConfiguration {

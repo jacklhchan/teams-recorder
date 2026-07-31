@@ -135,9 +135,7 @@ struct OpenAICompatibleMeetingIntelligenceClient: MeetingIntelligenceRequesting,
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let key = snapshot.apiKey, !key.isEmpty {
-            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        }
+        ProviderRequestAuthentication.apply(snapshot: snapshot, to: &request)
         let data: Data
         let response: HTTPURLResponse
         do {

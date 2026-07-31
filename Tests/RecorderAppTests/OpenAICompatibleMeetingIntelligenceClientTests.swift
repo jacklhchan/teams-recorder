@@ -17,6 +17,25 @@ final class OpenAICompatibleMeetingIntelligenceClientTests: XCTestCase {
         XCTAssertEqual(transport.maximums, [OpenAICompatibleMeetingIntelligenceClient.maximumResponseBytes])
     }
 
+    func testFinalRequestUsesOnlyHKTAPIKeyAndExactHKTEndpoint() async throws {
+        let transport = MeetingIntelligenceRecordingTransport(responses: [
+            .response(status: 200, body: outer(#"{"title":"HKT meeting","summary":"Done."}"#))
+        ])
+        let snapshot = OpenAICompatibleProviderSnapshot(
+            profile: try .hktValidated(groupID: "77", asrModel: "asr", llmModel: "hkt-llm", language: "en", prompt: "prompt"),
+            apiKey: "hkt-secret"
+        )
+
+        _ = try await OpenAICompatibleMeetingIntelligenceClient(transport: transport)
+            .requestFinalResult(input: "bounded transcript", snapshot: snapshot)
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.uat.bot-builder.pccw.com/v1/groups/77/openai/chat/completions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-API-KEY"), "hkt-secret")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertEqual(try body(request)["model"] as? String, "hkt-llm")
+    }
+
     func testTerminalFailuresMakeExactlyOneAttemptAndKeepPublicErrorRedacted() async throws {
         for response in [
             MeetingIntelligenceRecordingTransport.Stub.response(status: 429, body: "provider-body", headers: ["Retry-After": "9999"]),

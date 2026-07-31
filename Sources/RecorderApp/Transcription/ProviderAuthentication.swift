@@ -30,3 +30,24 @@ enum ProviderAuthentication: Codable, Equatable, Sendable {
         }
     }
 }
+
+enum ProviderRequestAuthentication {
+    static let sensitiveHeaderFields = ["Authorization", "X-API-KEY"]
+
+    static func apply(
+        snapshot: OpenAICompatibleProviderSnapshot,
+        to request: inout URLRequest
+    ) {
+        for field in sensitiveHeaderFields {
+            request.setValue(nil, forHTTPHeaderField: field)
+        }
+        guard let key = snapshot.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !key.isEmpty else {
+            return
+        }
+        request.setValue(
+            snapshot.authentication.headerValue(for: key),
+            forHTTPHeaderField: snapshot.authentication.headerField
+        )
+    }
+}

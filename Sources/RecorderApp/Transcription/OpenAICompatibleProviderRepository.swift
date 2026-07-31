@@ -2,6 +2,9 @@ import Foundation
 
 protocol OpenAICompatibleProviderManaging: AnyObject {
     func loadProfile() throws -> OpenAICompatibleProviderProfile?
+    func loadProfile(for kind: AIProviderKind) throws -> OpenAICompatibleProviderProfile?
+    func activeProviderKind() throws -> AIProviderKind
+    func setActiveProviderKind(_ kind: AIProviderKind) throws
     func save(
         profile: OpenAICompatibleProviderProfile,
         replacementAPIKey: String?
@@ -11,10 +14,39 @@ protocol OpenAICompatibleProviderManaging: AnyObject {
         overriding profile: OpenAICompatibleProviderProfile
     ) throws -> OpenAICompatibleProviderSnapshot
     func hasAPIKey() throws -> Bool
+    func hasAPIKey(for kind: AIProviderKind) throws -> Bool
     func removeAPIKey() throws
+    func removeAPIKey(for kind: AIProviderKind) throws
     func migrateLegacyIfNeeded(
         settingsURL: URL
     ) throws -> LegacyProviderMigrationOutcome
+}
+
+extension OpenAICompatibleProviderManaging {
+    func loadProfile(for kind: AIProviderKind) throws -> OpenAICompatibleProviderProfile? {
+        guard kind == .openAICompatible else { return nil }
+        return try loadProfile()
+    }
+
+    func activeProviderKind() throws -> AIProviderKind { .openAICompatible }
+
+    func setActiveProviderKind(_ kind: AIProviderKind) throws {
+        guard kind == .openAICompatible else {
+            throw ProviderRepositoryError.unsupportedProviderPreset
+        }
+    }
+
+    func hasAPIKey(for kind: AIProviderKind) throws -> Bool {
+        guard kind == .openAICompatible else { return false }
+        return try hasAPIKey()
+    }
+
+    func removeAPIKey(for kind: AIProviderKind) throws {
+        guard kind == .openAICompatible else {
+            throw ProviderRepositoryError.unsupportedProviderPreset
+        }
+        try removeAPIKey()
+    }
 }
 
 /// Runtime-only immutable credential snapshot. It must never be serialized.

@@ -43,10 +43,7 @@ struct OpenAICompatibleMeetingIntelligenceAvailabilityChecker:
         }
 
         do {
-            let report = try await client.testConnection(
-                profile: snapshot.profile,
-                apiKey: snapshot.apiKey
-            )
+            let report = try await client.testConnection(for: snapshot)
             guard !Task.isCancelled else {
                 return .unconfirmed(.connectionFailed)
             }

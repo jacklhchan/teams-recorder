@@ -100,10 +100,7 @@ final class AIProviderSettingsModel: ObservableObject {
         do {
             let profile = try draftProfile()
             let snapshot = try repository.snapshot(overriding: profile)
-            let report = try await client.testConnection(
-                profile: profile,
-                apiKey: snapshot.apiKey
-            )
+            let report = try await client.testConnection(for: snapshot)
             guard generation == connectionTestGeneration else { return }
             discoveredModels = report.models
             status = report.supportsModelDiscovery

@@ -59,6 +59,7 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
         host.renderWithoutWaitingForAnimationCompletion()
 
         XCTAssertTrue(host.contains("meeting-intelligence.feedback.completion"))
+        XCTAssertFalse(host.contains("meeting-intelligence.feedback.generated-title"))
     }
 
     func testDisappearingAfterFeedbackDoesNotReplayItOnReappearance() throws {

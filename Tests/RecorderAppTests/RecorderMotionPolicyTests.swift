@@ -27,8 +27,16 @@ final class RecorderMotionPolicyTests: XCTestCase {
     }
 
     func testVisibleReadyEdgeEmitsOnceButInitialReadyAndRerenderDoNot() {
-        let working = snapshot(revision: 1, phase: .working)
-        let ready = snapshot(revision: 2, phase: .ready)
+        let working = snapshot(
+            revision: 1,
+            phase: .working,
+            title: "Initial title"
+        )
+        let ready = snapshot(
+            revision: 2,
+            phase: .ready,
+            title: "Generated title"
+        )
         XCTAssertEqual(.none, RecorderObservedTransition.feedback(previous: nil, current: ready))
         XCTAssertEqual(.init(completed: true, generatedTitleChanged: false), RecorderObservedTransition.feedback(previous: working, current: ready))
         XCTAssertEqual(.none, RecorderObservedTransition.feedback(previous: ready, current: ready))
@@ -42,10 +50,10 @@ final class RecorderMotionPolicyTests: XCTestCase {
         XCTAssertEqual(.init(completed: true, generatedTitleChanged: false), RecorderObservedTransition.feedback(previous: previous, current: protected))
     }
 
-    func testGeneratedTitleFeedbackRequiresNewerReadySnapshotAndUnprotectedTitle() {
-        let previous = snapshot(revision: 11, phase: .working, title: "Old")
+    func testGeneratedTitleFeedbackRequiresNewerReadyToReadySnapshotAndUnprotectedTitle() {
+        let previous = snapshot(revision: 11, phase: .ready, title: "Old")
         let current = snapshot(revision: 12, phase: .ready, title: "Generated")
-        XCTAssertEqual(.init(completed: true, generatedTitleChanged: true), RecorderObservedTransition.feedback(previous: previous, current: current))
+        XCTAssertEqual(.init(completed: false, generatedTitleChanged: true), RecorderObservedTransition.feedback(previous: previous, current: current))
     }
 
     private func snapshot(

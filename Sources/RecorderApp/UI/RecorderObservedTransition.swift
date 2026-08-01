@@ -31,7 +31,8 @@ enum RecorderObservedTransition {
         }
 
         let completed = previous.phase != .ready && current.phase == .ready
-        let titleChanged = current.phase == .ready
+        let titleChanged = previous.phase == .ready
+            && current.phase == .ready
             && !current.titleIsProtected
             && previous.displayedTitle != current.displayedTitle
         return .init(completed: completed, generatedTitleChanged: titleChanged)

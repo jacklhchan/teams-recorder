@@ -39,32 +39,31 @@ struct RecorderPresentationDiagnosticMarker: NSViewRepresentable {
     let identifier: String
 
     func makeNSView(context _: Context) -> NSView {
-        let view = NSView(frame: .zero)
+        let view = RecorderPassiveMarkerView(frame: .zero)
         view.setAccessibilityIdentifier(identifier)
-        view.setAccessibilityElement(true)
-        view.setAccessibilityEnabled(false)
+        view.setAccessibilityElement(false)
         return view
     }
 
     func updateNSView(_: NSView, context _: Context) {}
 }
 
-struct RecorderPanelAccessibilityBridge: NSViewRepresentable {
-    let identifier: String
+struct RecorderPanelRenderLocationMarker: NSViewRepresentable {
+    let productionIdentifier: String
 
-    func makeNSView(context: Context) -> RecorderPanelAccessibilityBridgeView {
-        let view = RecorderPanelAccessibilityBridgeView(frame: .zero)
+    func makeNSView(context: Context) -> RecorderPassiveMarkerView {
+        let view = RecorderPassiveMarkerView(frame: .zero)
         updateNSView(view, context: context)
         return view
     }
 
-    func updateNSView(_ view: RecorderPanelAccessibilityBridgeView, context _: Context) {
-        view.setAccessibilityIdentifier(identifier)
-        view.setAccessibilityElement(true)
+    func updateNSView(_ view: RecorderPassiveMarkerView, context _: Context) {
+        view.setAccessibilityIdentifier("\(productionIdentifier).marker")
+        view.setAccessibilityElement(false)
     }
 }
 
-final class RecorderPanelAccessibilityBridgeView: NSView {
+final class RecorderPassiveMarkerView: NSView {
     override func hitTest(_: NSPoint) -> NSView? { nil }
 }
 

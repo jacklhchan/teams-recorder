@@ -278,7 +278,7 @@ struct TeamsAutoMeetingCountdownView: View {
                     .accessibilityIdentifier(
                         "teams-auto-countdown-seconds"
                     )
-                    .background(RecorderPanelAccessibilityBridge(identifier: "teams-auto-countdown-seconds"))
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: "teams-auto-countdown-seconds"))
             }
 
             Spacer(minLength: 8)
@@ -290,12 +290,12 @@ struct TeamsAutoMeetingCountdownView: View {
             .help("Cancel automatic recording")
             .accessibilityLabel("Cancel automatic recording")
             .accessibilityIdentifier("teams-auto-countdown-cancel")
-            .background(RecorderPanelAccessibilityBridge(identifier: "teams-auto-countdown-cancel"))
+            .background(RecorderPanelRenderLocationMarker(productionIdentifier: "teams-auto-countdown-cancel"))
         }
         .padding(.horizontal, 16)
         .frame(width: 360, height: 94)
         .recorderGlassSurface(.navigation)
         .accessibilityIdentifier("teams-auto-countdown-panel")
-        .background(RecorderPanelAccessibilityBridge(identifier: "teams-auto-countdown-panel"))
+        .background(RecorderPanelRenderLocationMarker(productionIdentifier: "teams-auto-countdown-panel"))
     }
 }

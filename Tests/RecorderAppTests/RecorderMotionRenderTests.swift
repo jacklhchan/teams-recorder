@@ -18,15 +18,14 @@ final class RecorderMotionRenderTests: XCTestCase {
             RecorderActionID.indeterminateProgress,
             "recorder.visual.indeterminate-progress"
         )
-        XCTAssertTrue(host.contains(RecorderActionID.primaryActionCluster))
-        XCTAssertTrue(host.contains(RecorderActionID.indeterminateProgress))
-        XCTAssertTrue(host.click(RecorderActionID.primaryActionCluster))
+        XCTAssertTrue(host.containsMarker(RecorderActionID.primaryActionCluster))
+        XCTAssertTrue(host.containsMarker(RecorderActionID.indeterminateProgress))
+        host.rawClick(RecorderActionID.primaryActionCluster)
         XCTAssertEqual(state.acceptedClicks, 1)
 
         state.isEnabled = false
         host.render()
 
-        XCTAssertFalse(host.isEnabled(RecorderActionID.primaryActionCluster))
         host.rawClick(RecorderActionID.primaryActionCluster)
         XCTAssertEqual(state.acceptedClicks, 1)
     }
@@ -51,8 +50,7 @@ private struct MotionRenderFixture: View {
             .accessibilityIdentifier(RecorderActionID.primaryActionCluster)
             .background(
                 MotionRenderMarker(
-                    identifier: RecorderActionID.primaryActionCluster,
-                    isEnabled: state.isEnabled
+                    productionIdentifier: RecorderActionID.primaryActionCluster
                 )
             )
             .disabled(!state.isEnabled)
@@ -65,8 +63,7 @@ private struct MotionRenderFixture: View {
                 .accessibilityIdentifier(RecorderActionID.indeterminateProgress)
                 .background(
                     MotionRenderMarker(
-                        identifier: RecorderActionID.indeterminateProgress,
-                        isEnabled: true
+                        productionIdentifier: RecorderActionID.indeterminateProgress
                     )
                 )
         }
@@ -75,22 +72,21 @@ private struct MotionRenderFixture: View {
 }
 
 private struct MotionRenderMarker: NSViewRepresentable {
-    let identifier: String
-    let isEnabled: Bool
+    let productionIdentifier: String
 
     func makeNSView(context _: Context) -> MotionRenderMarkerView {
         let view = MotionRenderMarkerView(frame: .zero)
-        view.setAccessibilityIdentifier(identifier)
-        view.setAccessibilityEnabled(isEnabled)
+        view.setAccessibilityIdentifier("\(productionIdentifier).marker")
+        view.setAccessibilityElement(false)
         return view
     }
 
-    func updateNSView(_ view: MotionRenderMarkerView, context _: Context) {
-        view.setAccessibilityEnabled(isEnabled)
-    }
+    func updateNSView(_: MotionRenderMarkerView, context _: Context) {}
 }
 
-private final class MotionRenderMarkerView: NSView {}
+private final class MotionRenderMarkerView: NSView {
+    override func hitTest(_: NSPoint) -> NSView? { nil }
+}
 
 @MainActor
 private final class MotionRenderHost {
@@ -112,45 +108,12 @@ private final class MotionRenderHost {
         render()
     }
 
-    func contains(_ identifier: String) -> Bool {
-        view(for: identifier) != nil
-    }
-
-    func isEnabled(_ identifier: String) -> Bool {
-        view(for: identifier)?.isAccessibilityEnabled() ?? false
-    }
-
-    @discardableResult
-    func click(_ identifier: String) -> Bool {
-        guard let view = view(for: identifier), view.isAccessibilityEnabled() else {
-            return false
-        }
-        let location = view.convert(
-            NSPoint(x: view.bounds.midX, y: view.bounds.midY),
-            to: nil
-        )
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(
-                with: type,
-                location: location,
-                modifierFlags: [],
-                timestamp: 0,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: 0,
-                clickCount: 1,
-                pressure: type == .leftMouseDown ? 1 : 0
-            ) else {
-                return false
-            }
-            window.sendEvent(event)
-        }
-        render()
-        return true
+    func containsMarker(_ productionIdentifier: String) -> Bool {
+        view(forMarker: productionIdentifier) != nil
     }
 
     func rawClick(_ identifier: String) {
-        guard let view = view(for: identifier) else { return }
+        guard let view = view(forMarker: identifier) else { return }
         let location = view.convert(
             NSPoint(x: view.bounds.midX, y: view.bounds.midY),
             to: nil
@@ -183,9 +146,9 @@ private final class MotionRenderHost {
         window.contentView = nil
     }
 
-    private func view(for identifier: String) -> NSView? {
+    private func view(forMarker identifier: String) -> NSView? {
         allViews(startingAt: hostingView).first {
-            $0.accessibilityIdentifier() == identifier
+            $0.accessibilityIdentifier() == "\(identifier).marker"
         }
     }
 

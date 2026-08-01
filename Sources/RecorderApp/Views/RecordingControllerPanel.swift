@@ -230,13 +230,13 @@ struct RecordingControllerPanelContent: View {
                 Text(presentation.title)
                     .font(.headline)
                     .accessibilityIdentifier("recording-controller-status")
-                    .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-status"))
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: "recording-controller-status"))
                 Spacer(minLength: 8)
                 Text(presentation.elapsedText)
                     .font(.system(.body, design: .monospaced))
                     .monospacedDigit()
                     .accessibilityIdentifier("recording-controller-elapsed")
-                    .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-elapsed"))
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: "recording-controller-elapsed"))
                 Button(action: stop) {
                     Label("Stop", systemImage: "stop.fill")
                 }
@@ -245,7 +245,7 @@ struct RecordingControllerPanelContent: View {
                 .help("Stop recording")
                 .accessibilityLabel(RecordingControllerAccessibility.stopLabel)
                 .accessibilityIdentifier("recording-controller-stop")
-                .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-stop"))
+                .background(RecorderPanelRenderLocationMarker(productionIdentifier: "recording-controller-stop"))
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -256,7 +256,7 @@ struct RecordingControllerPanelContent: View {
                     .foregroundStyle(screenColor(for: presentation.screenTone))
                     .lineLimit(1)
                     .accessibilityIdentifier("recording-controller-screen-status")
-                    .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-screen-status"))
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: "recording-controller-screen-status"))
                 Spacer(minLength: 8)
                 Toggle("", isOn: Binding(get: { presentation.screenRequested }, set: setScreenRequested))
                     .labelsHidden().toggleStyle(.switch)
@@ -265,7 +265,7 @@ struct RecordingControllerPanelContent: View {
                     .accessibilityLabel(RecordingControllerAccessibility.screenCaptureLabel)
                     .accessibilityValue(RecordingControllerAccessibility.screenCaptureValue(isOn: presentation.screenRequested))
                     .accessibilityIdentifier("recording-controller-screen-toggle")
-                    .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-screen-toggle"))
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: "recording-controller-screen-toggle"))
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))

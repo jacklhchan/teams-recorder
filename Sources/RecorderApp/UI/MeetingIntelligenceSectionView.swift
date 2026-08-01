@@ -1,5 +1,16 @@
 import SwiftUI
 
+private struct MeetingIntelligenceReduceMotionOverrideKey: EnvironmentKey {
+    static let defaultValue: Bool? = nil
+}
+
+extension EnvironmentValues {
+    var meetingIntelligenceReduceMotionOverride: Bool? {
+        get { self[MeetingIntelligenceReduceMotionOverrideKey.self] }
+        set { self[MeetingIntelligenceReduceMotionOverrideKey.self] = newValue }
+    }
+}
+
 enum MeetingIntelligenceActionGroup: Equatable, Sendable {
     case availability(checkAgain: Bool)
     case working
@@ -33,10 +44,7 @@ struct MeetingIntelligenceSectionPresentation: Equatable, Sendable {
     let manualTitleProtectionCopy: String
     let manualTitleProtectionAccessibilityLabel: String
 
-    static func make(
-        presentation: MeetingIntelligencePresentation,
-        observedSnapshot: RecorderObservedSnapshot? = nil
-    ) -> Self {
+    static func make(presentation: MeetingIntelligencePresentation) -> Self {
         let isUnconfirmed = presentation.unavailableReason != nil
         let actionGroup: MeetingIntelligenceActionGroup
         let statusTone: RecorderStatusTone
@@ -106,6 +114,7 @@ struct MeetingIntelligenceActions {
 
 struct MeetingIntelligenceSectionView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.meetingIntelligenceReduceMotionOverride) private var reduceMotionOverride
     let section: MeetingIntelligenceSectionPresentation
     let actions: MeetingIntelligenceActions
     private let observedSnapshot: RecorderObservedSnapshot?
@@ -113,13 +122,14 @@ struct MeetingIntelligenceSectionView: View {
     @State private var showsCompletionFeedback = false
     @State private var highlightsSuggestedTitle = false
     @State private var feedbackResetTask: Task<Void, Never>?
+    @State private var revealsContent = false
 
     init(
         presentation: MeetingIntelligencePresentation,
         observedSnapshot: RecorderObservedSnapshot? = nil,
         actions: MeetingIntelligenceActions = .init()
     ) {
-        self.section = .make(presentation: presentation, observedSnapshot: observedSnapshot)
+        self.section = .make(presentation: presentation)
         self.observedSnapshot = observedSnapshot
         self.actions = actions
     }
@@ -149,22 +159,33 @@ struct MeetingIntelligenceSectionView: View {
                     .textSelection(.enabled)
                     .accessibilityIdentifier(RecorderActionID.meetingIntelligenceSummary)
                     .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceSummary))
+                    .opacity(revealsContent ? 1 : 0)
+                    .offset(y: revealsContent ? 0 : motionPolicy.revealOffset)
+                    .transition(.opacity.combined(with: .offset(y: motionPolicy.revealOffset)))
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: motionPolicy.revealDuration), value: section.summary)
             }
             if let title = section.suggestedTitle, !title.isEmpty {
-                HStack(spacing: 4) {
-                    Text(title)
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(highlightsSuggestedTitle ? Color.accentColor : Color.primary)
-                        .accessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
-                        .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceSuggestedTitle))
+                ZStack {
                     if highlightsSuggestedTitle {
-                        Image(systemName: "sparkles")
-                            .foregroundStyle(.tint)
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color.accentColor.opacity(0.16))
                             .accessibilityIdentifier("meeting-intelligence.feedback.generated-title")
+                            .accessibilityValue("accent-overlay")
                             .background(RecorderDestinationAccessibilityMarker(identifier: "meeting-intelligence.feedback.generated-title"))
                             .transition(.opacity.combined(with: .offset(y: motionPolicy.revealOffset)))
                     }
+                    Text(title)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(Color.primary)
+                        .accessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
+                        .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceSuggestedTitle))
+                        .contentTransition(.opacity)
                 }
+                .opacity(revealsContent ? 1 : 0)
+                .offset(y: revealsContent ? 0 : motionPolicy.revealOffset)
+                .transition(.opacity.combined(with: .offset(y: motionPolicy.revealOffset)))
+                .animation(.easeInOut(duration: motionPolicy.revealDuration), value: section.suggestedTitle)
                 if section.showsManualTitleProtection {
                     Text(section.manualTitleProtectionCopy)
                         .font(.caption)
@@ -201,6 +222,7 @@ struct MeetingIntelligenceSectionView: View {
         .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceCard))
         .onAppear {
             previousObservedSnapshot = observedSnapshot
+            revealsContent = true
         }
         .onChange(of: observedSnapshot) { _, current in
             updateObservedFeedback(current)
@@ -210,6 +232,7 @@ struct MeetingIntelligenceSectionView: View {
         }
         .animation(.easeInOut(duration: motionPolicy.revealDuration), value: showsCompletionFeedback)
         .animation(.easeInOut(duration: motionPolicy.revealDuration), value: highlightsSuggestedTitle)
+        .animation(.easeInOut(duration: motionPolicy.revealDuration), value: revealsContent)
     }
 
     private var statusColor: Color {
@@ -222,7 +245,7 @@ struct MeetingIntelligenceSectionView: View {
     }
 
     private var motionPolicy: RecorderMotionPolicy {
-        RecorderMotionPolicy.make(reduceMotion: reduceMotion)
+        RecorderMotionPolicy.make(reduceMotion: reduceMotionOverride ?? reduceMotion)
     }
 
     @ViewBuilder
@@ -232,12 +255,16 @@ struct MeetingIntelligenceSectionView: View {
                 .foregroundStyle(.green)
                 .symbolEffect(.drawOn, isActive: showsCompletionFeedback)
                 .accessibilityIdentifier("meeting-intelligence.feedback.completion")
+                .accessibilityValue("draw-on")
                 .background(RecorderDestinationAccessibilityMarker(identifier: "meeting-intelligence.feedback.completion"))
+                .background(RecorderDestinationAccessibilityMarker(identifier: "meeting-intelligence.feedback.completion.draw-on"))
         } else {
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .accessibilityIdentifier("meeting-intelligence.feedback.completion")
+                .accessibilityValue("static")
                 .background(RecorderDestinationAccessibilityMarker(identifier: "meeting-intelligence.feedback.completion"))
+                .background(RecorderDestinationAccessibilityMarker(identifier: "meeting-intelligence.feedback.completion.static"))
         }
     }
 

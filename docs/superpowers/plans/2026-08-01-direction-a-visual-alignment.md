@@ -1831,11 +1831,11 @@ approves the staging visuals and explicitly requests integration.
 ## Execution evidence — 2026-08-02
 
 Status: automated Direction A code and repository validation is complete on
-implementation head `1afc00d01a162c4811aeed5a0de1a5630422cc8d`.
-Actual-runtime GUI acceptance remains pending because the Mac was locked during
-the bounded Computer Use attempt. This status does not claim production,
-provider, permission, media, Teams, AirPods, notarized-artifact, or hardware
-acceptance.
+implementation head `b481cd22c4ae773976ff350e1163217b30fa7656`.
+Actual-runtime GUI acceptance remains pending because the Mac was still locked
+during the final bounded Computer Use check. This status does not claim
+production, provider, permission, media, Teams, AirPods, notarized-artifact, or
+hardware acceptance.
 
 ### Implementation commits
 
@@ -1848,47 +1848,59 @@ acceptance.
 - `21d0a789` — `feat: align transcript intelligence detail`
 - `a778453` — `fix: apply branded sidebar gradient`
 - `1afc00d` — `fix: preserve native sidebar selection contrast`
+- `df2c03c` — `fix: preserve recordings dark appearance`
+- `8a6a335` — `test: lock recordings status surface opacity`
+- `b481cd2` — `fix: scope provider dark appearance locally`
 
-The final two commits resolve the independent review finding that the production
-sidebar did not use the approved fixed brand gradient. The final implementation
-uses exact sRGB stops `#132452 → #244F9E → #112B63`, exposes the gradient through
-the native List background, and retains system-owned selected-row, keyboard,
-VoiceOver, and increased-contrast foreground semantics.
+The final review repairs preserve three distinct appearance contracts: the
+sidebar uses exact fixed sRGB stops `#132452 → #244F9E → #112B63`; Recordings
+uses a locally scoped dark semantic environment with opaque status surfaces;
+and Transcript remains adaptive to the upstream system scheme. Provider now
+uses a local dark environment rather than a window-level preferred scheme, so
+its native controls remain dark without changing adjacent adaptive content.
 
 ### Automated validation
 
-- Focused final-head suites: `RecorderVisualStyleTests` 6/6,
-  `RecorderWorkspaceRenderTests` 24/24,
+- Focused implementation-head suites: `RecorderVisualStyleTests` 7/7,
+  `AIProviderSettingsRenderTests` 3/3,
+  `RecorderWorkspaceRenderTests` 25/25,
   `RECORDER_STABILITY=1 RecorderWorkspaceStabilityTests` 4/4,
   `AppModelPlaybackTests` 10/10, `RecordingControllerRenderTests` 3/3, and
-  `TeamsAutoMeetingCountdownRenderTests` 2/2; zero failures.
-- Complete Swift suite: 1,269 tests executed, 5 skipped, zero failures in
-  37.669 seconds. The prior transcription-cancellation hang did not reproduce.
+  `TeamsAutoMeetingCountdownRenderTests` 2/2; zero failures. These cover the
+  860×680 and wide layouts, repeated navigation, local dark-surface isolation,
+  adaptive Transcript restoration, external AVPlayer ownership, and both
+  existing floating-window render contracts.
+- Complete isolated Swift suite: 1,272 tests executed, 5 skipped, zero failures
+  in 37.818 seconds. No transcription-cancellation hang reproduced. One earlier
+  run executed concurrently with repository gates stalled in an MI integration
+  wait and was cancelled after a process sample; the named test then passed 1/1,
+  the Provider-to-MI same-process sequence passed 19/19, and the final isolated
+  complete suite passed without timeout or skip changes.
 - Python/script suites: 105/105 and policy/packaging-workflow 29/29; zero
-  failures. Localhost fixtures required the normal sandbox exception for loopback
-  binding.
-- Packaging tests, strict ad-hoc codesign, bundle verification, Mach-O inspection,
-  and bundle-content scans passed. The candidate is macOS 26.0 minimum, SDK 26.5,
-  system-dependency-only, and contains no Python, FFmpeg/FFprobe, oMLX/Qwen, or
-  provider runtime helper.
+  failures. Localhost fixtures required the normal sandbox exception for
+  loopback binding.
+- Packaging tests, strict ad-hoc codesign, bundle verification, Mach-O
+  inspection, dependency inspection, and bundle-content scans passed. The
+  candidate is macOS 26.0 minimum, SDK 26.5, system-dependency-only, and contains
+  no Python, FFmpeg/FFprobe, oMLX/Qwen, or provider runtime helper.
 - Virtual microphone gates: native contract, bundle contract, and install-script
-  contract passed. The native binary reproducibly failed only inside the workspace
-  sandbox because the fixed POSIX shared-memory namespace was denied; the identical
-  binary and complete native script passed outside that sandbox with no resource
-  holder. No product or driver source was changed for this environmental gate.
+  contract all passed in the exclusive host gate. The native test remains denied
+  only inside the workspace sandbox's fixed POSIX shared-memory namespace; the
+  host run passed with no lock/resource holder and no product or driver changes.
 - `git diff --check` passed. The corrected Step 4 command admitted exactly 18
   presentation-only paths and no AppModel, feature/bridge/repository, media,
-  capture, Teams, virtual-mic production, scripts, workflows, packaging, or Windows
-  path. The recording-controller and Teams-countdown render test files are
-  unchanged from the PR B base.
-- Independent review after the sidebar repair: 0 Critical, 0 Important, 0 Minor.
+  capture, Teams, virtual-mic production, scripts, workflows, packaging, or
+  Windows path. The recording-controller and Teams-countdown production/test
+  files are unchanged from the PR B base.
+- Independent whole-branch re-review after all appearance repairs: 0 Critical,
+  0 Important, 0 Minor.
 
 ### Staging candidate and remaining manual gate
 
-The verified, uninstalled candidate is:
+The final verified, uninstalled candidate for implementation head `b481cd2` is:
 
 ```text
-/private/var/folders/8v/mldvjq_j2mz2tqbt5kvxwgtr0000gp/T/lmr-direction-a-final.S8XlUF/Local Meeting Recorder Staging.app
+/private/var/folders/8v/mldvjq_j2mz2tqbt5kvxwgtr0000gp/T/lmr-direction-a-final.r4ReXX/Local Meeting Recorder Staging.app
 ```
 
 It is `local.meeting.recorder.staging` version `0.2.0 (3)`, ad-hoc signed, and

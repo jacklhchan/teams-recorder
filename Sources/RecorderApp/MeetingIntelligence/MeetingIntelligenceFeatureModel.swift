@@ -14,12 +14,20 @@ typealias MeetingIntelligenceFeatureFactory = (
 final class MeetingIntelligenceFeatureModel: ObservableObject {
     private let coordinator: MeetingIntelligenceJobCoordinator
     private var isShutdown = false
+    private var publicationToken: UUID?
+    private var publicationCallback: ((MeetingIntelligencePublished) -> Void)?
 
     var onPublished: ((MeetingIntelligencePublished) -> Void)? {
-        didSet { coordinator.onPublication = isShutdown ? nil : onPublished }
+        get { publicationCallback }
+        set { replacePublicationObserver(with: newValue) }
     }
 
     let publicationSourceID: UUID
+    /// Read-only composition diagnostic used to verify that this boundary
+    /// accepts only the retained transcription feature's publication stream.
+    var expectedTranscriptionPublicationSourceID: UUID {
+        coordinator.expectedTranscriptionPublicationSourceID
+    }
 
     init(coordinator: MeetingIntelligenceJobCoordinator) {
         self.coordinator = coordinator
@@ -92,14 +100,47 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
         coordinator.resetForWorkspaceChange()
     }
 
+    @discardableResult
+    func observePublication(
+        _ observer: @escaping (MeetingIntelligencePublished) -> Void
+    ) -> UUID {
+        guard !isShutdown else { return UUID() }
+        let token = UUID()
+        publicationToken = token
+        publicationCallback = observer
+        coordinator.onPublication = observer
+        return token
+    }
+
+    func removePublicationObserver(_ token: UUID) {
+        guard publicationToken == token else { return }
+        publicationToken = nil
+        publicationCallback = nil
+        coordinator.onPublication = nil
+    }
+
     func shutdown() {
         guard !isShutdown else { return }
         isShutdown = true
         // Release the UI consumer as well as detaching the coordinator.  This
         // keeps the feature boundary from retaining a closed presentation
         // surface through its compatibility callback.
-        onPublished = nil
+        publicationToken = nil
+        publicationCallback = nil
+        coordinator.onPublication = nil
         coordinator.onSnapshotDidChange = nil
         coordinator.shutdown()
+    }
+
+    private func replacePublicationObserver(
+        with observer: ((MeetingIntelligencePublished) -> Void)?
+    ) {
+        guard let observer, !isShutdown else {
+            publicationToken = nil
+            publicationCallback = nil
+            coordinator.onPublication = nil
+            return
+        }
+        _ = observePublication(observer)
     }
 }

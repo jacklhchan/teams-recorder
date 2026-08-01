@@ -39,6 +39,13 @@ final class AIProviderSettingsModel: ObservableObject {
     @Published private(set) var status = "Not configured"
     @Published private(set) var statusIsError = false
 
+    /// Delivers exactly once for each repository save that has committed. A
+    /// later API-key status lookup is presentation-only and cannot suppress it.
+    var onProviderSettingsSaved: ((ProviderSettingsSaved) -> Void)? {
+        get { providerSettingsSavedCallback }
+        set { replaceProviderSettingsSavedObserver(with: newValue) }
+    }
+
     var hasStoredAPIKey: Bool { apiKeyStatus == .present }
     var canRemoveAPIKey: Bool { apiKeyStatus != .absent }
     var providerKinds: [AIProviderKind] { [.hktGenAI, .openAICompatible] }
@@ -111,6 +118,8 @@ final class AIProviderSettingsModel: ObservableObject {
     private var savedKinds: Set<AIProviderKind> = []
     private var applyingDraft = false
     private var connectionTestGeneration: UInt64 = 0
+    private var providerSettingsSavedToken: UUID?
+    private var providerSettingsSavedCallback: ((ProviderSettingsSaved) -> Void)?
 
     init(
         repository: any OpenAICompatibleProviderManaging,
@@ -135,6 +144,7 @@ final class AIProviderSettingsModel: ObservableObject {
                 profile: profile,
                 replacementAPIKey: apiKeyReplacement.isEmpty ? nil : apiKeyReplacement
             )
+            onProviderSettingsSaved?(.init(profileRevision: UUID()))
             savedKinds.insert(selectedProviderKind)
             drafts[selectedProviderKind] = Draft(profile: profile)
             apply(draft: drafts[selectedProviderKind]!)
@@ -146,6 +156,22 @@ final class AIProviderSettingsModel: ObservableObject {
             hasSavedProfile = savedKinds.contains(selectedProviderKind)
             present(error)
         }
+    }
+
+    @discardableResult
+    func observeProviderSettingsSaved(
+        _ observer: @escaping (ProviderSettingsSaved) -> Void
+    ) -> UUID {
+        let token = UUID()
+        providerSettingsSavedToken = token
+        providerSettingsSavedCallback = observer
+        return token
+    }
+
+    func removeProviderSettingsSavedObserver(_ token: UUID) {
+        guard providerSettingsSavedToken == token else { return }
+        providerSettingsSavedToken = nil
+        providerSettingsSavedCallback = nil
     }
 
     func removeAPIKey() {
@@ -162,6 +188,17 @@ final class AIProviderSettingsModel: ObservableObject {
             status = "Could not remove API key."
             statusIsError = true
         }
+    }
+
+    private func replaceProviderSettingsSavedObserver(
+        with observer: ((ProviderSettingsSaved) -> Void)?
+    ) {
+        guard let observer else {
+            providerSettingsSavedToken = nil
+            providerSettingsSavedCallback = nil
+            return
+        }
+        _ = observeProviderSettingsSaved(observer)
     }
 
     func testConnection() async {

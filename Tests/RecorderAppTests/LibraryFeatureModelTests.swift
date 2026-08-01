@@ -4,6 +4,58 @@ import XCTest
 
 @MainActor
 final class LibraryFeatureModelTests: XCTestCase {
+    func testProducerObserverTokensOnlyRemoveTheirMatchingRegistrationAndShutdownClearsThem() {
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in [] }, sessionReloader: { $0 },
+            searchDocumentLoader: { $0.searchDocument }, recovery: { _ in },
+            trashHandler: { _ in true }
+        )
+        var oldSessionCalls = 0
+        var replacementSessionCalls = 0
+        let oldSessions = feature.observeSessionsLoaded { _ in oldSessionCalls += 1 }
+        let replacementSessions = feature.observeSessionsLoaded { _ in replacementSessionCalls += 1 }
+        feature.removeSessionsLoadedObserver(oldSessions)
+        XCTAssertNotNil(feature.onSessionsLoaded)
+        feature.onSessionsLoaded?(.init(sessions: [], transcriptionStates: [:]))
+        XCTAssertEqual(oldSessionCalls, 0)
+        XCTAssertEqual(replacementSessionCalls, 1)
+        feature.removeSessionsLoadedObserver(replacementSessions)
+        XCTAssertNil(feature.onSessionsLoaded)
+
+        let transcriptCommit = feature.observeTranscriptPublicationCommitted { _ in }
+        let transcriptEdit = feature.observeTranscriptEdited { _ in }
+        let metadata = feature.observeMetadataSaved { _ in }
+        let imported = feature.observeImportedAudioReady { _ in }
+        let removal = feature.observeSessionRemoved { _ in }
+        feature.removeTranscriptPublicationCommittedObserver(UUID())
+        feature.removeTranscriptEditedObserver(UUID())
+        feature.removeMetadataSavedObserver(UUID())
+        feature.removeImportedAudioReadyObserver(UUID())
+        feature.removeSessionRemovedObserver(UUID())
+        XCTAssertNotNil(feature.onTranscriptPublicationCommitted)
+        XCTAssertNotNil(feature.onTranscriptEdited)
+        XCTAssertNotNil(feature.onMetadataSaved)
+        XCTAssertNotNil(feature.onImportedAudioReady)
+        XCTAssertNotNil(feature.onSessionRemoved)
+
+        feature.removeTranscriptPublicationCommittedObserver(transcriptCommit)
+        feature.removeTranscriptEditedObserver(transcriptEdit)
+        feature.removeMetadataSavedObserver(metadata)
+        feature.removeImportedAudioReadyObserver(imported)
+        feature.removeSessionRemovedObserver(removal)
+        XCTAssertNil(feature.onTranscriptPublicationCommitted)
+        XCTAssertNil(feature.onTranscriptEdited)
+        XCTAssertNil(feature.onMetadataSaved)
+        XCTAssertNil(feature.onImportedAudioReady)
+        XCTAssertNil(feature.onSessionRemoved)
+
+        _ = feature.observeSessionsLoaded { _ in }
+        _ = feature.observeTranscriptPublicationCommitted { _ in }
+        feature.shutdown()
+        XCTAssertNil(feature.onSessionsLoaded)
+        XCTAssertNil(feature.onTranscriptPublicationCommitted)
+    }
+
     func testEditorSaveDispositionKeepsDraftOpenForFailureOrOtherArtifact() {
         let expectedSessionID = LibraryFeatureFixture.session(named: "editor").id
         let otherSessionID = LibraryFeatureFixture.session(named: "other-editor").id
@@ -1931,6 +1983,242 @@ final class LibraryFeatureModelTests: XCTestCase {
         XCTAssertEqual(feature.sessions.first?.displayName, "Persisted title")
         withExtendedLifetime(cancellable) {}
     }
+
+    func testRecordingFinalizationSavedRefreshesActiveCanonicalSessionExactlyOnce() async throws {
+        let folder = try LibraryFeatureFixture.makeDiskSession(named: "finalization-saved")
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let session = LibraryFeatureFixture.diskSession(folder: folder)
+        let workspace = folder.deletingLastPathComponent()
+        let loads = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in loads.increment(); return [session] },
+            sessionReloader: { $0 }, searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in }, trashHandler: { _ in true }
+        )
+        feature.seedCanonicalSessionsForTesting(
+            [session], workspace: workspace, fence: .initial
+        )
+
+        let refreshed = expectation(description: "one finalization refresh")
+        feature.onSessionsLoaded = { _ in refreshed.fulfill() }
+        feature.acceptRecordingFinalization(
+            LibraryFeatureFixture.finalization(for: session, metadataOutcome: .saved)
+        )
+
+        await fulfillment(of: [refreshed], timeout: 1)
+        XCTAssertEqual(loads.value, 1)
+    }
+
+    func testRecordingFinalizationMetadataWarningStillRefreshesExactlyOnce() async throws {
+        let folder = try LibraryFeatureFixture.makeDiskSession(named: "finalization-warning")
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let session = LibraryFeatureFixture.diskSession(folder: folder)
+        let workspace = folder.deletingLastPathComponent()
+        let loads = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in loads.increment(); return [session] },
+            sessionReloader: { $0 }, searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in }, trashHandler: { _ in true }
+        )
+        feature.seedCanonicalSessionsForTesting(
+            [session], workspace: workspace, fence: .initial
+        )
+
+        let refreshed = expectation(description: "warning finalization refresh")
+        feature.onSessionsLoaded = { _ in refreshed.fulfill() }
+        feature.acceptRecordingFinalization(
+            LibraryFeatureFixture.finalization(
+                for: session,
+                metadataOutcome: .warning("metadata sidecar was unavailable")
+            )
+        )
+
+        await fulfillment(of: [refreshed], timeout: 1)
+        XCTAssertEqual(loads.value, 1)
+    }
+
+    func testDuplicateRecordingFinalizationDoesNotScheduleSecondRefresh() async throws {
+        let folder = try LibraryFeatureFixture.makeDiskSession(named: "finalization-duplicate")
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let session = LibraryFeatureFixture.diskSession(folder: folder)
+        let workspace = folder.deletingLastPathComponent()
+        let loads = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in loads.increment(); return [session] },
+            sessionReloader: { $0 }, searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in }, trashHandler: { _ in true }
+        )
+        feature.seedCanonicalSessionsForTesting(
+            [session], workspace: workspace, fence: .initial
+        )
+        let event = LibraryFeatureFixture.finalization(for: session, metadataOutcome: .saved)
+        let firstRefresh = expectation(description: "first finalization refresh")
+        let secondRefresh = expectation(description: "duplicate finalization does not refresh")
+        secondRefresh.isInverted = true
+        var refreshes = 0
+        feature.onSessionsLoaded = { _ in
+            refreshes += 1
+            if refreshes == 1 { firstRefresh.fulfill() }
+            else { secondRefresh.fulfill() }
+        }
+
+        feature.acceptRecordingFinalization(event)
+        feature.acceptRecordingFinalization(event)
+
+        await fulfillment(of: [firstRefresh, secondRefresh], timeout: 1)
+        XCTAssertEqual(loads.value, 1)
+    }
+
+    func testObsoleteWorkspaceRecordingFinalizationDoesNotRefresh() async {
+        let session = LibraryFeatureFixture.session(named: "finalization-old-workspace")
+        let loads = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in loads.increment(); return [session] },
+            sessionReloader: { $0 }, searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in }, trashHandler: { _ in true }
+        )
+        feature.seedCanonicalSessionsForTesting(
+            [session], workspace: LibraryFeatureFixture.workspace, fence: .initial
+        )
+        let noRefresh = expectation(description: "old workspace finalization rejected")
+        noRefresh.isInverted = true
+        feature.onSessionsLoaded = { _ in noRefresh.fulfill() }
+
+        feature.acceptRecordingFinalization(
+            LibraryFeatureFixture.finalization(
+                for: session,
+                fence: .initial.advanced(),
+                metadataOutcome: .saved
+            )
+        )
+
+        await fulfillment(of: [noRefresh], timeout: 0.1)
+        XCTAssertEqual(loads.value, 0)
+    }
+
+    func testAliasAndMalformedRecordingFinalizationDoNotRefresh() async throws {
+        let root = try LibraryFeatureFixture.temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let physicalWorkspace = root.appendingPathComponent("workspace", isDirectory: true)
+        let physicalFolder = physicalWorkspace.appendingPathComponent("session", isDirectory: true)
+        try FileManager.default.createDirectory(at: physicalFolder, withIntermediateDirectories: true)
+        let linkedWorkspace = root.appendingPathComponent("workspace-alias", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: linkedWorkspace, withDestinationURL: physicalWorkspace)
+        let session = RecordingSession(
+            id: physicalFolder,
+            folderURL: physicalFolder,
+            recordingURL: physicalFolder.appendingPathComponent("recording.m4a"),
+            createdAt: .now, duration: 1, fileSize: 1, metadata: .init()
+        )
+        let loads = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in loads.increment(); return [session] },
+            sessionReloader: { $0 }, searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in }, trashHandler: { _ in true }
+        )
+        feature.seedCanonicalSessionsForTesting([session], workspace: physicalWorkspace, fence: .initial)
+        let noRefresh = expectation(description: "alias and malformed finalizations rejected")
+        noRefresh.isInverted = true
+        feature.onSessionsLoaded = { _ in noRefresh.fulfill() }
+
+        let aliasSession = RecordingSession(
+            id: linkedWorkspace.appendingPathComponent("session"),
+            folderURL: linkedWorkspace.appendingPathComponent("session"),
+            recordingURL: linkedWorkspace.appendingPathComponent("session/recording.m4a"),
+            createdAt: session.createdAt, duration: 1, fileSize: 1, metadata: .init()
+        )
+        feature.acceptRecordingFinalization(
+            LibraryFeatureFixture.finalization(for: aliasSession, metadataOutcome: .saved)
+        )
+        let dotDotFolder = physicalWorkspace.appendingPathComponent("not-a-real-folder/../session")
+        let dotDotRecording = physicalWorkspace.appendingPathComponent(
+            "not-a-real-folder/../session/recording.m4a"
+        )
+        XCTAssertTrue(dotDotFolder.path.contains("/../"))
+        feature.acceptRecordingFinalization(
+            LibraryFeatureFixture.finalization(
+                for: session,
+                folder: dotDotFolder,
+                recordingURL: dotDotRecording,
+                metadataOutcome: .saved
+            )
+        )
+        feature.acceptRecordingFinalization(
+            LibraryFeatureFixture.finalization(
+                for: session,
+                recordingURL: physicalWorkspace.appendingPathComponent("outside.m4a"),
+                metadataOutcome: .saved
+            )
+        )
+
+        await fulfillment(of: [noRefresh], timeout: 0.1)
+        XCTAssertEqual(loads.value, 0)
+    }
+
+    func testNestedRecordingURLFinalizationDoesNotRefresh() async throws {
+        let folder = try LibraryFeatureFixture.makeDiskSession(
+            named: "finalization-nested-recording"
+        )
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let session = LibraryFeatureFixture.diskSession(folder: folder)
+        let workspace = folder.deletingLastPathComponent()
+        let loads = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in
+                loads.increment()
+                return [session]
+            },
+            sessionReloader: { $0 },
+            searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in },
+            trashHandler: { _ in true }
+        )
+        feature.seedCanonicalSessionsForTesting(
+            [session], workspace: workspace, fence: .initial
+        )
+        let noRefresh = expectation(
+            description: "nested finalization recording is rejected"
+        )
+        noRefresh.isInverted = true
+        feature.onSessionsLoaded = { _ in noRefresh.fulfill() }
+
+        feature.acceptRecordingFinalization(
+            LibraryFeatureFixture.finalization(
+                for: session,
+                recordingURL: folder
+                    .appendingPathComponent("nested", isDirectory: true)
+                    .appendingPathComponent("recording.m4a"),
+                metadataOutcome: .saved
+            )
+        )
+
+        await fulfillment(of: [noRefresh], timeout: 0.1)
+        XCTAssertEqual(loads.value, 0)
+    }
+
+    func testShutdownRejectsRecordingFinalizationWithoutRefresh() async {
+        let session = LibraryFeatureFixture.session(named: "finalization-shutdown")
+        let loads = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in loads.increment(); return [session] },
+            sessionReloader: { $0 }, searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in }, trashHandler: { _ in true }
+        )
+        feature.seedCanonicalSessionsForTesting(
+            [session], workspace: LibraryFeatureFixture.workspace, fence: .initial
+        )
+        feature.shutdown()
+        let noRefresh = expectation(description: "shutdown finalization rejected")
+        noRefresh.isInverted = true
+        feature.onSessionsLoaded = { _ in noRefresh.fulfill() }
+
+        feature.acceptRecordingFinalization(
+            LibraryFeatureFixture.finalization(for: session, metadataOutcome: .saved)
+        )
+
+        await fulfillment(of: [noRefresh], timeout: 0.1)
+        XCTAssertEqual(loads.value, 0)
+    }
 }
 
 private final class LockedCounter: @unchecked Sendable {
@@ -2158,13 +2446,35 @@ enum LibraryFeatureFixture {
         for session: RecordingSession,
         fence: WorkspacePublicationFence
     ) -> TranscriptPublished {
-        .init(
+        return .init(
             session: session,
             canonicalURL: session.folderURL.appendingPathComponent("transcript.txt"),
             revision: .init(sha256: "test", byteCount: 1),
             normalizedSessionFolder: RecordingLibraryURLIdentity.normalized(session.folderURL),
             identity: .init(coordinatorInstanceID: UUID(), generation: 1, attemptID: UUID()),
             workspaceFence: fence
+        )
+    }
+
+    static func finalization(
+        for session: RecordingSession,
+        fence: WorkspacePublicationFence = .initial,
+        folder: URL? = nil,
+        recordingURL: URL? = nil,
+        metadataOutcome: RecordingSourceMetadataPublicationOutcome
+    ) -> RecordingFinalizationOutcome {
+        let canonicalFolder = folder
+            ?? RecordingLibraryURLIdentity.normalized(session.folderURL)
+        let canonicalRecordingURL = recordingURL
+            ?? RecordingLibraryURLIdentity.normalized(session.recordingURL)
+        return .init(
+            finalizationID: UUID(),
+            folder: canonicalFolder,
+            workspaceFence: fence,
+            recordingURL: canonicalRecordingURL,
+            health: .init(),
+            metadataOutcome: metadataOutcome,
+            source: .manual
         )
     }
 

@@ -21,15 +21,14 @@ final class TranscriptionFeatureModel: ObservableObject {
         didSet { coordinator.onStatusMessage = isShutdown ? nil : onStatusMessage }
     }
     var onSuccessfulPublication: ((TranscriptPublished) -> Void)? {
-        didSet {
-            coordinator.onSuccessfulPublication = isShutdown
-                ? nil
-                : onSuccessfulPublication
-        }
+        get { successfulPublicationCallback }
+        set { replaceSuccessfulPublicationObserver(with: newValue) }
     }
 
     private var cancellables: Set<AnyCancellable> = []
     private var isShutdown = false
+    private var successfulPublicationToken: UUID?
+    private var successfulPublicationCallback: ((TranscriptPublished) -> Void)?
 
     init(coordinator: TranscriptionJobCoordinator) {
         self.coordinator = coordinator
@@ -85,12 +84,45 @@ final class TranscriptionFeatureModel: ObservableObject {
         coordinator.removeProjection(for: sessionID)
     }
 
+    @discardableResult
+    func observeSuccessfulPublication(
+        _ observer: @escaping (TranscriptPublished) -> Void
+    ) -> UUID {
+        guard !isShutdown else { return UUID() }
+        let token = UUID()
+        successfulPublicationToken = token
+        successfulPublicationCallback = observer
+        coordinator.onSuccessfulPublication = observer
+        return token
+    }
+
+    func removeSuccessfulPublicationObserver(_ token: UUID) {
+        guard successfulPublicationToken == token else { return }
+        successfulPublicationToken = nil
+        successfulPublicationCallback = nil
+        coordinator.onSuccessfulPublication = nil
+    }
+
     func shutdown() {
         guard !isShutdown else { return }
         isShutdown = true
         coordinator.onStatusMessage = nil
+        successfulPublicationToken = nil
+        successfulPublicationCallback = nil
         coordinator.onSuccessfulPublication = nil
         cancellables.removeAll()
         coordinator.shutdown()
+    }
+
+    private func replaceSuccessfulPublicationObserver(
+        with observer: ((TranscriptPublished) -> Void)?
+    ) {
+        guard let observer, !isShutdown else {
+            successfulPublicationToken = nil
+            successfulPublicationCallback = nil
+            coordinator.onSuccessfulPublication = nil
+            return
+        }
+        _ = observeSuccessfulPublication(observer)
     }
 }

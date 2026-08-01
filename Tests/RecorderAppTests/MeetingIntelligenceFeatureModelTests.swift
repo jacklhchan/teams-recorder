@@ -5,6 +5,30 @@ import XCTest
 
 @MainActor
 final class MeetingIntelligenceFeatureModelTests: XCTestCase {
+    func testPublicationObserverTokenCannotRemoveReplacementAndShutdownClearsIt() async throws {
+        let fixture = try FeatureFixture()
+        let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
+        var oldCalls = 0
+        var replacementCalls = 0
+        let oldToken = feature.observePublication { _ in oldCalls += 1 }
+        let replacementToken = feature.observePublication { _ in replacementCalls += 1 }
+
+        feature.removePublicationObserver(oldToken)
+        XCTAssertNotNil(feature.onPublished)
+
+        feature.generate(for: fixture.session)
+        await fixture.waitForIdle()
+        XCTAssertEqual(oldCalls, 0)
+        XCTAssertEqual(replacementCalls, 1)
+
+        feature.removePublicationObserver(replacementToken)
+        XCTAssertNil(feature.onPublished)
+
+        _ = feature.observePublication { _ in replacementCalls += 1 }
+        feature.shutdown()
+        XCTAssertNil(feature.onPublished)
+    }
+
     func testFeatureForwardsManualCommandsAndTypedPublicationExactlyOnce() async throws {
         let fixture = try FeatureFixture()
         let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
@@ -166,6 +190,50 @@ final class MeetingIntelligenceFeatureModelTests: XCTestCase {
         XCTAssertEqual(fixture.counters.snapshot.publication, 0)
     }
 
+    func testProviderSaveDoesNotMutateActiveMeetingIntelligenceSnapshotAndLaterAttemptUsesSavedProfile() async throws {
+        let entered = expectation(description: "meeting intelligence generation entered")
+        let finished = expectation(description: "meeting intelligence generation finished")
+        let gate = FeatureGenerationGate()
+        let generator = BlockingFeatureGenerator(entered: entered, finished: finished, gate: gate)
+        let provider = FeatureProvider()
+        let fixture = try FeatureFixture(providerRepository: provider, generator: generator)
+        let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
+        let settings = AIProviderSettingsModel(
+            repository: provider,
+            loadImmediately: false
+        )
+        settings.baseURLText = "https://api.example/v1"
+        settings.asrModel = "saved-asr"
+        settings.llmModel = "saved-llm"
+        settings.selectedLanguage = .cantonese
+
+        feature.generate(for: fixture.session)
+        await fulfillment(of: [entered], timeout: 1)
+        if case .generating = feature.presentation(for: fixture.session).phase {
+            // The active job must remain in place while provider settings save.
+        } else {
+            XCTFail("Expected active meeting intelligence generation")
+        }
+
+        settings.save()
+
+        XCTAssertEqual(generator.requests, 1)
+        XCTAssertEqual(generator.capturedModels, ["llm"])
+        if case .generating = feature.presentation(for: fixture.session).phase {
+            // Saving settings must not cancel or replace the active job.
+        } else {
+            XCTFail("Expected active meeting intelligence generation after save")
+        }
+        await gate.release()
+        await fulfillment(of: [finished], timeout: 1)
+        await fixture.waitForIdle()
+
+        feature.generate(for: fixture.session)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(generator.capturedModels, ["llm", "saved-llm"])
+    }
+
     func testObservedFeatureRerendersOpenTranscriptDetailFromGeneratingToReady() async throws {
         let entered = expectation(description: "renderable generation entered")
         let finished = expectation(description: "renderable generation finished")
@@ -214,6 +282,7 @@ private final class FeatureFixture {
     private let reader: FeatureTranscriptReader
 
     init(
+        providerRepository: (any OpenAICompatibleProviderManaging)? = nil,
         generator: (any MeetingIntelligenceGenerating)? = nil,
         publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling = ImmediateMeetingIntelligencePublicationDeliveryScheduler()
     ) throws {
@@ -232,7 +301,7 @@ private final class FeatureFixture {
         ))
         publisher = .init(artifacts: artifacts, counters: counters)
         coordinator = .init(
-            providerRepository: FeatureProvider(), expectedPublicationSourceID: FeatureFixture.transcriptionSource,
+            providerRepository: providerRepository ?? FeatureProvider(), expectedPublicationSourceID: FeatureFixture.transcriptionSource,
             transcriptReader: reader, availabilityChecker: FeatureAvailability(counters: counters),
             generator: generator ?? FeatureGenerator(counters: counters), publisher: publisher,
             artifactStore: artifacts, stateStore: states,
@@ -269,13 +338,15 @@ private final class FeatureFixture {
 }
 
 private final class FeatureProvider: OpenAICompatibleProviderManaging, @unchecked Sendable {
-    private let value = try! OpenAICompatibleProviderSnapshot.validated(
+    private var value = try! OpenAICompatibleProviderSnapshot.validated(
         profile: .validated(baseURLText: "http://127.0.0.1:8080", asrModel: "asr", llmModel: "llm", language: "en", prompt: ""),
         apiKey: nil
     )
     func loadProfile() throws -> OpenAICompatibleProviderProfile? { value.profile }
     func setActiveProviderKind(_: AIProviderKind) throws {}
-    func save(profile _: OpenAICompatibleProviderProfile, replacementAPIKey _: String?) throws {}
+    func save(profile: OpenAICompatibleProviderProfile, replacementAPIKey _: String?) throws {
+        value = try .validated(profile: profile, apiKey: value.apiKey)
+    }
     func snapshot() throws -> OpenAICompatibleProviderSnapshot { value }
     func snapshot(overriding _: OpenAICompatibleProviderProfile) throws -> OpenAICompatibleProviderSnapshot { value }
     func hasAPIKey() throws -> Bool { false }
@@ -322,6 +393,7 @@ private final class BlockingFeatureGenerator: MeetingIntelligenceGenerating, @un
     let gate: FeatureGenerationGate
     private let lock = NSLock()
     private var requestCount = 0
+    private var models: [String] = []
 
     init(entered: XCTestExpectation, finished: XCTestExpectation, gate: FeatureGenerationGate) {
         self.entered = entered
@@ -330,14 +402,16 @@ private final class BlockingFeatureGenerator: MeetingIntelligenceGenerating, @un
     }
 
     var requests: Int { lock.withLock { requestCount } }
+    var capturedModels: [String] { lock.withLock { models } }
 
     func generate(
         transcript _: TranscriptDocumentSnapshot,
-        snapshot _: OpenAICompatibleProviderSnapshot,
+        snapshot: OpenAICompatibleProviderSnapshot,
         onProgress _: @escaping @Sendable (MeetingIntelligenceProgress) -> Void
     ) async throws -> MeetingIntelligenceGeneratedContent {
         let request = lock.withLock { () -> Int in
             requestCount += 1
+            models.append(snapshot.profile.llmModel)
             return requestCount
         }
         if request == 1 { entered.fulfill() }

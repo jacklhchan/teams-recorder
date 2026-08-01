@@ -61,6 +61,11 @@ final class AppModel: ObservableObject {
         any TranscriptionServicing,
         RecordingSessionMutationGate
     ) -> TranscriptionFeatureModel
+    typealias RecordingSourceMetadataUpdater = (
+        RecordingSource,
+        URL,
+        RecordingSessionMutationGate
+    ) throws -> Void
     @Published var devices: [AudioDevice] = []
     @Published var selectedMicDevice: AudioDevice?
     @Published private(set) var selectedMicrophoneUID: String?
@@ -104,6 +109,8 @@ final class AppModel: ObservableObject {
     /// PR B compatibility construction owner. AppModel retains precisely one
     /// feature boundary and deliberately mirrors none of its mutable state.
     let meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
+    private var prbFeatureBridge: PRBFeatureBridge?
+    private let recordingSourceMetadataUpdater: RecordingSourceMetadataUpdater
 
     var isCaptureLifecycleWorking: Bool {
         recordingSessionCoordinator.isWorking
@@ -304,6 +311,16 @@ final class AppModel: ObservableObject {
         meetingIntelligenceFeatureFactory: MeetingIntelligenceFeatureFactory? = nil,
         playbackCoordinator: (any PlaybackCoordinating)? = nil,
         playbackFeature: PlaybackFeatureModel? = nil,
+        featureBoundaries: PRBFeatureBoundaries? = nil,
+        defaultFeatureBoundariesFactory: PRBFeatureBoundariesFactory? = nil,
+        recordingSourceMetadataUpdater: @escaping RecordingSourceMetadataUpdater = {
+            source, folder, gate in
+            try gate.withMutation(for: folder) {
+                var metadata = RecordingSessionMetadataStore.load(in: folder)
+                metadata.source = source
+                try RecordingSessionMetadataStore.save(metadata, in: folder)
+            }
+        },
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
         teamsIntegrationScheduler: @escaping (
             @escaping @MainActor @Sendable () -> Void
@@ -326,6 +343,7 @@ final class AppModel: ObservableObject {
         self.inputDevices = inputDevices
         self.defaultInputDeviceID = defaultInputDeviceID
         self.defaults = defaults
+        self.recordingSourceMetadataUpdater = recordingSourceMetadataUpdater
         let activeProviderRepository = providerRepository
             ?? OpenAICompatibleProviderRepository(
                 profiles: OpenAICompatibleProviderProfileStore(defaults: defaults),
@@ -335,61 +353,110 @@ final class AppModel: ObservableObject {
             repository: activeProviderRepository,
             loadImmediately: false
         )
-        let transcriptMutationGate = libraryFeature?.mutationGate
+        let hasIndividualFeatureInjection = transcriptionFeatureFactory != nil
+            || libraryFeature != nil
+            || meetingIntelligenceFeature != nil
+            || meetingIntelligenceFeatureFactory != nil
+            || playbackCoordinator != nil
+            || playbackFeature != nil
+        precondition(
+            !hasIndividualFeatureInjection || (
+                featureBoundaries == nil
+                    && defaultFeatureBoundariesFactory == nil
+            ),
+            "Inject either PR B feature boundaries or individual feature seams, not both."
+        )
+        // The fallback is intentionally evaluated only when no aggregate was
+        // supplied.  This makes aggregate injection a strict construction
+        // boundary rather than a second set of parallel feature objects.
+        let selectedFeatureBoundaries = featureBoundaries
+            ?? defaultFeatureBoundariesFactory?()
+        let transcriptMutationGate = selectedFeatureBoundaries?.library.mutationGate
+            ?? libraryFeature?.mutationGate
             ?? RecordingSessionMutationGate()
         self.transcriptMutationGate = transcriptMutationGate
-        let activeTranscriptionService: any TranscriptionServicing
-        if let transcriptionService {
-            activeTranscriptionService = transcriptionService
-        } else if let transcriptionScriptURL {
-            activeTranscriptionService = LegacyProcessTranscriptionService(
-                launcher: transcriptionProcessLauncher,
-                scriptURL: transcriptionScriptURL
+        if let selectedFeatureBoundaries {
+            precondition(
+                selectedFeatureBoundaries.hasCompatiblePublicationSources,
+                "Meeting Intelligence must accept publications from the injected Transcription feature."
             )
+            self.libraryFeature = selectedFeatureBoundaries.library
+            self.transcriptionFeature = selectedFeatureBoundaries.transcription
+            self.meetingIntelligenceFeature = selectedFeatureBoundaries.meetingIntelligence
+            self.playbackFeature = selectedFeatureBoundaries.playback
         } else {
-            activeTranscriptionService = NativeOpenAICompatibleTranscriptionService(
-                publisher: TranscriptionArtifactPublisher(
-                    mutationGate: transcriptMutationGate
+            let activeTranscriptionService: any TranscriptionServicing
+            if let transcriptionService {
+                activeTranscriptionService = transcriptionService
+            } else if let transcriptionScriptURL {
+                activeTranscriptionService = LegacyProcessTranscriptionService(
+                    launcher: transcriptionProcessLauncher,
+                    scriptURL: transcriptionScriptURL
                 )
-            )
-        }
-        if let transcriptionFeatureFactory {
-            self.transcriptionFeature = transcriptionFeatureFactory(
-                activeProviderRepository,
-                transcriptionAudioPreparer,
-                activeTranscriptionService,
-                transcriptMutationGate
-            )
-        } else {
-            self.transcriptionFeature = TranscriptionFeatureModel(
-                coordinator: TranscriptionJobCoordinator(
-                    providerRepository: activeProviderRepository,
-                    audioPreparer: transcriptionAudioPreparer,
-                    service: activeTranscriptionService,
-                    mutationGate: transcriptMutationGate
+            } else {
+                activeTranscriptionService = NativeOpenAICompatibleTranscriptionService(
+                    publisher: TranscriptionArtifactPublisher(
+                        mutationGate: transcriptMutationGate
+                    )
                 )
-            )
-        }
-        precondition(
-            meetingIntelligenceFeature == nil || meetingIntelligenceFeatureFactory == nil,
-            "Inject either a meeting intelligence feature or feature factory, not both."
-        )
-        if let meetingIntelligenceFeature {
-            self.meetingIntelligenceFeature = meetingIntelligenceFeature
-        } else if let meetingIntelligenceFeatureFactory {
-            self.meetingIntelligenceFeature = meetingIntelligenceFeatureFactory(
-                activeProviderRepository,
-                self.transcriptionFeature.publicationSourceID,
-                transcriptMutationGate
-            )
-        } else {
-            self.meetingIntelligenceFeature = MeetingIntelligenceFeatureModel(
-                coordinator: Self.makeMeetingIntelligenceCoordinator(
-                    repository: activeProviderRepository,
-                    expectedPublicationSourceID: self.transcriptionFeature.publicationSourceID,
-                    mutationGate: transcriptMutationGate
+            }
+            if let transcriptionFeatureFactory {
+                self.transcriptionFeature = transcriptionFeatureFactory(
+                    activeProviderRepository,
+                    transcriptionAudioPreparer,
+                    activeTranscriptionService,
+                    transcriptMutationGate
                 )
+            } else {
+                self.transcriptionFeature = TranscriptionFeatureModel(
+                    coordinator: TranscriptionJobCoordinator(
+                        providerRepository: activeProviderRepository,
+                        audioPreparer: transcriptionAudioPreparer,
+                        service: activeTranscriptionService,
+                        mutationGate: transcriptMutationGate
+                    )
+                )
+            }
+            precondition(
+                meetingIntelligenceFeature == nil || meetingIntelligenceFeatureFactory == nil,
+                "Inject either a meeting intelligence feature or feature factory, not both."
             )
+            if let meetingIntelligenceFeature {
+                self.meetingIntelligenceFeature = meetingIntelligenceFeature
+            } else if let meetingIntelligenceFeatureFactory {
+                self.meetingIntelligenceFeature = meetingIntelligenceFeatureFactory(
+                    activeProviderRepository,
+                    self.transcriptionFeature.publicationSourceID,
+                    transcriptMutationGate
+                )
+            } else {
+                self.meetingIntelligenceFeature = MeetingIntelligenceFeatureModel(
+                    coordinator: Self.makeMeetingIntelligenceCoordinator(
+                        repository: activeProviderRepository,
+                        expectedPublicationSourceID: self.transcriptionFeature.publicationSourceID,
+                        mutationGate: transcriptMutationGate
+                    )
+                )
+            }
+            self.libraryFeature = libraryFeature ?? LibraryFeatureModel(
+                sessionLoader: recordingSessionLoader,
+                sessionReloader: recordingSessionReloader,
+                searchDocumentLoader: recordingSearchDocumentLoader,
+                recovery: recordingSessionRecovery,
+                trashHandler: recordingSessionTrashHandler,
+                mutationGate: transcriptMutationGate
+            )
+            precondition(
+                playbackCoordinator == nil || playbackFeature == nil,
+                "Inject either a playback coordinator or playback feature, not both."
+            )
+            if let playbackFeature {
+                self.playbackFeature = playbackFeature
+            } else {
+                self.playbackFeature = PlaybackFeatureModel(
+                    coordinator: playbackCoordinator ?? PlaybackCoordinator()
+                )
+            }
         }
         self.appPaths = appPaths
         teamsMuteSyncEnabled = defaults.object(
@@ -400,14 +467,6 @@ final class AppModel: ObservableObject {
         )
         teamsAutoMeetingState = autoCoordinator.state
         self.virtualMicStateProvider = virtualMicStateProvider
-        self.libraryFeature = libraryFeature ?? LibraryFeatureModel(
-            sessionLoader: recordingSessionLoader,
-            sessionReloader: recordingSessionReloader,
-            searchDocumentLoader: recordingSearchDocumentLoader,
-            recovery: recordingSessionRecovery,
-            trashHandler: recordingSessionTrashHandler,
-            mutationGate: transcriptMutationGate
-        )
         self.permissionRequestHandler = permissionRequestHandler
         self.volumeCapacityProvider = volumeCapacityProvider
         self.storagePolicy = storagePolicy
@@ -416,17 +475,6 @@ final class AppModel: ObservableObject {
         self.teamsScreenRefreshTick = teamsScreenRefreshTick
         self.teamsScreenDisconnectCleanupScheduler =
             teamsScreenDisconnectCleanupScheduler
-        precondition(
-            playbackCoordinator == nil || playbackFeature == nil,
-            "Inject either a playback coordinator or playback feature, not both."
-        )
-        if let playbackFeature {
-            self.playbackFeature = playbackFeature
-        } else {
-            self.playbackFeature = PlaybackFeatureModel(
-                coordinator: playbackCoordinator ?? PlaybackCoordinator()
-            )
-        }
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
@@ -464,93 +512,34 @@ final class AppModel: ObservableObject {
         self.transcriptionFeature.onStatusMessage = { [weak self] message in
             self?.statusMessage = message
         }
-        self.transcriptionFeature.onSuccessfulPublication = {
-            [weak self] event in
-            guard let self,
-                  self.admitsTranscriptPublication(event) else { return }
-            self.libraryFeature.acceptTranscriptPublication(event)
-        }
-        self.libraryFeature.onSessionsLoaded = { [weak self] snapshot in
-            guard let self else { return }
-            self.transcriptionFeature.replaceLoadedStates(snapshot.transcriptionStates)
-            self.meetingIntelligenceFeature.reload(sessions: snapshot.sessions)
-        }
-        self.libraryFeature.onTranscriptPublicationCommitted = { [weak self] event in
-            guard let self,
-                  self.admitsLibraryMutation(
-                    event.identity,
-                    canonical: event.canonicalSession
-                  ),
-                  event.identity.transcriptRevision == event.publication.revision,
-                  self.admitsTranscriptPublication(event.publication),
-                  event.publication.session.id == event.canonicalSession.id,
-                  RecordingLibraryURLIdentity.normalized(event.publication.session.folderURL)
-                    == RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL),
-                  RecordingLibraryURLIdentity.normalized(event.publication.session.recordingURL)
-                    == RecordingLibraryURLIdentity.normalized(event.canonicalSession.recordingURL),
-                  event.publication.normalizedSessionFolder
-                    == RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL)
-            else { return }
-            self.meetingIntelligenceFeature.handleTranscriptPublished(event.publication)
-        }
-        self.libraryFeature.onTranscriptEdited = { [weak self] event in
-            guard let self,
-                  self.admitsLibraryMutation(
-                    event.identity,
-                    canonical: event.canonicalSession
-                  ) else { return }
-            self.meetingIntelligenceFeature.transcriptDidSave(event.canonicalSession)
-        }
-        self.libraryFeature.onMetadataSaved = { [weak self] event in
-            guard let self,
-                  self.admitsLibraryMutation(
-                    event.identity,
-                    canonical: event.canonicalSession
-                  ) else { return }
-            // Targeted observational reload retains all other MI projections.
-            self.meetingIntelligenceFeature.reload(
-                sessions: [event.canonicalSession]
-            )
-        }
-        self.libraryFeature.onImportedAudioReady = { [weak self] event in
-            guard let self,
-                  self.admitsImportedAudioReady(event) else { return }
-            self.statusMessage = "Audio imported for transcription: \(event.canonicalSession.displayName)"
-            self.transcribe(session: event.canonicalSession)
-        }
-        self.libraryFeature.onSessionRemoved = { [weak self] event in
-            guard let self,
-                  event.identity.librarySourceID == self.libraryFeature.librarySourceID,
-                  event.identity.workspaceFence == self.workspacePublicationFence,
-                  self.libraryFeature.session(withID: event.identity.sessionID) == nil,
-                  event.identity.normalizedSessionFolder
-                    .deletingLastPathComponent()
-                    == RecordingLibraryURLIdentity.normalized(self.outputFolder)
-            else { return }
-            self.meetingIntelligenceFeature.remove(sessionID: event.identity.sessionID)
-            self.transcriptionFeature.removeProjection(for: event.identity.sessionID)
-        }
-        self.meetingIntelligenceFeature.onPublished = {
-            [weak self] event in
-            guard let self,
-                  event.identity.coordinatorInstanceID
-                    == self.meetingIntelligenceFeature.publicationSourceID,
-                  event.identity.workspaceFence == self.workspacePublicationFence,
-                  let canonicalSession = self.libraryFeature.session(withID: event.identity.sessionID),
-                  event.identity.sessionID == canonicalSession.id,
-                  event.canonicalSession.id == canonicalSession.id,
-                  event.identity.normalizedSessionFolder
-                    == RecordingLibraryURLIdentity.normalized(canonicalSession.folderURL),
-                  RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL)
-                    == RecordingLibraryURLIdentity.normalized(canonicalSession.folderURL),
-                  RecordingLibraryURLIdentity.normalized(event.canonicalSession.recordingURL)
-                    == RecordingLibraryURLIdentity.normalized(canonicalSession.recordingURL)
-            else { return }
-            self.libraryFeature.refreshAfterMeetingIntelligence(
-                canonicalSession,
-                fence: event.identity.workspaceFence
-            )
-        }
+        let retainedFeatureBoundaries = PRBFeatureBoundaries(
+            library: self.libraryFeature,
+            transcription: self.transcriptionFeature,
+            meetingIntelligence: self.meetingIntelligenceFeature,
+            playback: self.playbackFeature
+        )
+        let bridge = PRBFeatureBridge(
+            boundaries: retainedFeatureBoundaries,
+            providerSettings: aiProviderSettingsModel,
+            currentWorkspace: { [weak self] in
+                guard let self, !self.isShutDown else { return nil }
+                return .init(
+                    folder: RecordingLibraryURLIdentity.normalized(
+                        self.outputFolder
+                    ),
+                    fence: self.workspacePublicationFence
+                )
+            },
+            transcriptionProviderIsConfigured: {
+                [weak aiProviderSettingsModel] in
+                aiProviderSettingsModel?.hasSavedProfile ?? false
+            },
+            reportStatus: { [weak self] message in
+                self?.statusMessage = message
+            }
+        )
+        prbFeatureBridge = bridge
+        bridge.start()
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
         }
@@ -684,6 +673,7 @@ final class AppModel: ObservableObject {
     func shutdown() {
         guard !isShutDown else { return }
         isShutDown = true
+        prbFeatureBridge?.shutdown()
         playbackFeature.shutdown()
         transcriptionFeature.shutdown()
         meetingIntelligenceFeature.shutdown()
@@ -1381,13 +1371,12 @@ final class AppModel: ObservableObject {
     func setOutputFolder(_ folder: URL) {
         outputFolder = folder
         workspacePublicationFence = workspacePublicationFence.advanced()
-        transcriptionFeature.advanceWorkspacePublicationFence(
-            to: workspacePublicationFence
+        prbFeatureBridge?.workspaceDidChange(
+            .init(workspace: .init(
+                folder: RecordingLibraryURLIdentity.normalized(folder),
+                fence: workspacePublicationFence
+            ))
         )
-        libraryFeature.clearForWorkspaceChange()
-        meetingIntelligenceFeature.resetForWorkspaceChange()
-        transcriptionFeature.clearProjections()
-        refreshSessions()
     }
 
     func chooseAudioFileForTranscription() {
@@ -1923,17 +1912,17 @@ final class AppModel: ObservableObject {
         guard canPresentWorkspaceResult(for: fence) else { return }
         switch outcome {
         case .success:
-            if playingSessionID == session.id { stopPlayback() }
             statusMessage = "Moved \(session.displayName) to Trash"
         case .failure(let error): statusMessage = error.message
         }
     }
 
-    private func finishRecording(
+    func finishRecording(
         playAfterStop: Bool,
         automaticStopToken: CaptureLifecycleToken? = nil,
         recordingSource: RecordingSource = .manual
     ) async {
+        let finalizationFence = workspacePublicationFence
         let result = await recorder.stop()
         isRunningTestRecording = false
         if let result {
@@ -1942,20 +1931,29 @@ final class AppModel: ObservableObject {
                 result.recordingURL.lastPathComponent == "recording.m4a"
             var metadataSaveError: Error?
             do {
-                try transcriptMutationGate.withMutation(for: result.folderURL) {
-                    var metadata = RecordingSessionMetadataStore.load(
-                        in: result.folderURL
-                    )
-                    metadata.source = recordingSource
-                    try RecordingSessionMetadataStore.save(
-                        metadata,
-                        in: result.folderURL
-                    )
-                }
+                try recordingSourceMetadataUpdater(
+                    recordingSource,
+                    result.folderURL,
+                    transcriptMutationGate
+                )
             } catch {
                 metadataSaveError = error
             }
-            refreshSessions()
+            prbFeatureBridge?.recordingDidFinalize(.init(
+                finalizationID: UUID(),
+                folder: RecordingLibraryURLIdentity.normalized(
+                    result.folderURL
+                ),
+                workspaceFence: finalizationFence,
+                recordingURL: RecordingLibraryURLIdentity.normalized(
+                    result.recordingURL
+                ),
+                health: result.health,
+                metadataOutcome: metadataSaveError.map {
+                    .warning($0.localizedDescription)
+                } ?? .saved,
+                source: recordingSource
+            ))
             if let metadataSaveError {
                 statusMessage =
                     "Recording saved, but source metadata could not be written: "

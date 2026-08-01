@@ -293,6 +293,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             fixture: fixture,
             preparer: preparer,
             launcher: launcher,
+            initialOutputFolder: fixture.root.deletingLastPathComponent(),
             recordingSearchDocumentLoader: { session in
                 XCTAssertFalse(Thread.isMainThread)
                 offMainRebuilds.fulfill()
@@ -305,9 +306,10 @@ final class AppModelTranscriptionTests: XCTestCase {
             }
         )
         model.seedLibrarySessionsForTesting([librarySession])
+        let canonicalLibrarySession = try XCTUnwrap(model.sessions.first)
         let publishedText = "first newly searchable phrase"
         let editedText = "replacement edited searchable phrase"
-        let transcriptURL = fixture.session.folderURL
+        let transcriptURL = canonicalLibrarySession.folderURL
             .appendingPathComponent("transcript.txt")
         try publishedText.write(
             to: transcriptURL,
@@ -320,7 +322,7 @@ final class AppModelTranscriptionTests: XCTestCase {
                 .filter(model.sessions)
                 .isEmpty
         )
-        model.transcribe(session: librarySession)
+        model.transcribe(session: canonicalLibrarySession)
         let process = await launcher.nextProcess()
         process.complete(
             exitStatus: 0,
@@ -331,7 +333,7 @@ final class AppModelTranscriptionTests: XCTestCase {
         let publishedBecameSearchable = await eventually {
             RecordingLibraryQuery(text: publishedText)
                 .filter(model.sessions)
-                .map(\.id) == [librarySession.id]
+                .map(\.id) == [canonicalLibrarySession.id]
         }
         XCTAssertTrue(
             publishedBecameSearchable,
@@ -348,7 +350,7 @@ final class AppModelTranscriptionTests: XCTestCase {
                 text: "favorite-search-tag",
                 favoritesOnly: true
             ).filter(model.sessions).map(\.id),
-            [librarySession.id]
+            [canonicalLibrarySession.id]
         )
 
         _ = await model.saveTranscript(editedText, for: publishedSession)
@@ -371,7 +373,7 @@ final class AppModelTranscriptionTests: XCTestCase {
                 text: "Priority customer",
                 favoritesOnly: true
             ).filter(model.sessions).map(\.id),
-            [librarySession.id]
+            [canonicalLibrarySession.id]
         )
         await fulfillment(of: [offMainRebuilds], timeout: 1)
     }
@@ -935,6 +937,7 @@ final class AppModelTranscriptionTests: XCTestCase {
         launcher: ControlledLauncher,
         repository: any OpenAICompatibleProviderManaging = RecordingProviderRepository(),
         configureProvider: Bool = true,
+        initialOutputFolder: URL? = nil,
         recordingSessionLoader: @escaping @Sendable (
             URL
         ) -> [RecordingSession] = {
@@ -956,7 +959,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
-            initialOutputFolder: fixture.root,
+            initialOutputFolder: initialOutputFolder ?? fixture.root,
             recordingSessionLoader: recordingSessionLoader,
             recordingSearchDocumentLoader:
                 recordingSearchDocumentLoader,

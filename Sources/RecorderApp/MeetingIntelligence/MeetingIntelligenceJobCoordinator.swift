@@ -201,6 +201,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     var onSnapshotDidChange: ((MeetingIntelligenceFeatureSnapshot) -> Void)?
 
     private let expectedPublicationSourceID: UUID
+    var expectedTranscriptionPublicationSourceID: UUID {
+        expectedPublicationSourceID
+    }
     let publicationSourceID: UUID
     private let io: MeetingIntelligenceIO
     private let availabilityChecker: any MeetingIntelligenceAvailabilityChecking

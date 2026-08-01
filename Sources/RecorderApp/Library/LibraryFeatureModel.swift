@@ -18,12 +18,30 @@ final class LibraryFeatureModel: ObservableObject {
     /// `snapshot`, whose revision advances for every published mutation.
     var sessions: [RecordingSession] { snapshot.sessions }
     let librarySourceID = UUID()
-    var onSessionsLoaded: ((LibraryLoadedSnapshot) -> Void)?
-    var onTranscriptPublicationCommitted: ((LibraryTranscriptProjectionCommitted) -> Void)?
-    var onTranscriptEdited: ((TranscriptEdited) -> Void)?
-    var onMetadataSaved: ((MetadataSaved) -> Void)?
-    var onImportedAudioReady: ((ImportedAudioSessionReady) -> Void)?
-    var onSessionRemoved: ((SessionRemoved) -> Void)?
+    var onSessionsLoaded: ((LibraryLoadedSnapshot) -> Void)? {
+        get { sessionsLoadedObserver.callback }
+        set { replace(&sessionsLoadedObserver, with: newValue) }
+    }
+    var onTranscriptPublicationCommitted: ((LibraryTranscriptProjectionCommitted) -> Void)? {
+        get { transcriptPublicationCommittedObserver.callback }
+        set { replace(&transcriptPublicationCommittedObserver, with: newValue) }
+    }
+    var onTranscriptEdited: ((TranscriptEdited) -> Void)? {
+        get { transcriptEditedObserver.callback }
+        set { replace(&transcriptEditedObserver, with: newValue) }
+    }
+    var onMetadataSaved: ((MetadataSaved) -> Void)? {
+        get { metadataSavedObserver.callback }
+        set { replace(&metadataSavedObserver, with: newValue) }
+    }
+    var onImportedAudioReady: ((ImportedAudioSessionReady) -> Void)? {
+        get { importedAudioReadyObserver.callback }
+        set { replace(&importedAudioReadyObserver, with: newValue) }
+    }
+    var onSessionRemoved: ((SessionRemoved) -> Void)? {
+        get { sessionRemovedObserver.callback }
+        set { replace(&sessionRemovedObserver, with: newValue) }
+    }
 
     private let sessionLoader: SessionLoader
     private let sessionReloader: SessionReloader
@@ -35,6 +53,16 @@ final class LibraryFeatureModel: ObservableObject {
     /// Internal so AppModel can adopt it when a Library feature is injected.
     let mutationGate: RecordingSessionMutationGate
     private let importedSessionCleanup: ImportedSessionCleanup
+    private struct Observer<Event> {
+        var token: UUID?
+        var callback: ((Event) -> Void)?
+    }
+    private var sessionsLoadedObserver = Observer<LibraryLoadedSnapshot>()
+    private var transcriptPublicationCommittedObserver = Observer<LibraryTranscriptProjectionCommitted>()
+    private var transcriptEditedObserver = Observer<TranscriptEdited>()
+    private var metadataSavedObserver = Observer<MetadataSaved>()
+    private var importedAudioReadyObserver = Observer<ImportedAudioSessionReady>()
+    private var sessionRemovedObserver = Observer<SessionRemoved>()
     private let loadingQueue = DispatchQueue(
         label: "local.meeting.recorder.recording-library",
         qos: .userInitiated
@@ -89,6 +117,13 @@ final class LibraryFeatureModel: ObservableObject {
     /// captures this number before it loads, so an old file-system listing
     /// cannot replace a newer imported/edited/removed projection.
     private var canonicalMutationGeneration: UInt64 = 0
+    /// Finalization is a semantic one-shot event. Keep a small FIFO of
+    /// accepted identities so a delayed duplicate cannot schedule a second
+    /// filesystem scan, without allowing this UI feature to grow for the
+    /// lifetime of the application.
+    private var acceptedFinalizationIDs: Set<UUID> = []
+    private var acceptedFinalizationOrder: [UUID] = []
+    private static let finalizationRetentionLimit = 128
     private var isShutdown = false
 
     init(
@@ -204,6 +239,63 @@ final class LibraryFeatureModel: ObservableObject {
         publish([], semanticMutation: true)
     }
 
+    /// The product still has one observer per producer in PR B.  Tokens make
+    /// replacement ownership safe: cancelling an old registration cannot
+    /// clear the callback installed by a newer owner.
+    @discardableResult
+    func observeSessionsLoaded(
+        _ observer: @escaping (LibraryLoadedSnapshot) -> Void
+    ) -> UUID { install(&sessionsLoadedObserver, observer) }
+
+    func removeSessionsLoadedObserver(_ token: UUID) {
+        remove(&sessionsLoadedObserver, token: token)
+    }
+
+    @discardableResult
+    func observeTranscriptPublicationCommitted(
+        _ observer: @escaping (LibraryTranscriptProjectionCommitted) -> Void
+    ) -> UUID { install(&transcriptPublicationCommittedObserver, observer) }
+
+    func removeTranscriptPublicationCommittedObserver(_ token: UUID) {
+        remove(&transcriptPublicationCommittedObserver, token: token)
+    }
+
+    @discardableResult
+    func observeTranscriptEdited(
+        _ observer: @escaping (TranscriptEdited) -> Void
+    ) -> UUID { install(&transcriptEditedObserver, observer) }
+
+    func removeTranscriptEditedObserver(_ token: UUID) {
+        remove(&transcriptEditedObserver, token: token)
+    }
+
+    @discardableResult
+    func observeMetadataSaved(
+        _ observer: @escaping (MetadataSaved) -> Void
+    ) -> UUID { install(&metadataSavedObserver, observer) }
+
+    func removeMetadataSavedObserver(_ token: UUID) {
+        remove(&metadataSavedObserver, token: token)
+    }
+
+    @discardableResult
+    func observeImportedAudioReady(
+        _ observer: @escaping (ImportedAudioSessionReady) -> Void
+    ) -> UUID { install(&importedAudioReadyObserver, observer) }
+
+    func removeImportedAudioReadyObserver(_ token: UUID) {
+        remove(&importedAudioReadyObserver, token: token)
+    }
+
+    @discardableResult
+    func observeSessionRemoved(
+        _ observer: @escaping (SessionRemoved) -> Void
+    ) -> UUID { install(&sessionRemovedObserver, observer) }
+
+    func removeSessionRemovedObserver(_ token: UUID) {
+        remove(&sessionRemovedObserver, token: token)
+    }
+
     /// Cancels admission for all queued callbacks and releases UI callbacks
     /// before the owning AppModel/feature graph is torn down.
     func shutdown() {
@@ -216,6 +308,8 @@ final class LibraryFeatureModel: ObservableObject {
         pendingDurableTickets.removeAll()
         importedCleanupReservations.removeAll()
         importedCleanupSuppressions.removeAll()
+        acceptedFinalizationIDs.removeAll()
+        acceptedFinalizationOrder.removeAll()
         onSessionsLoaded = nil
         onTranscriptPublicationCommitted = nil
         onTranscriptEdited = nil
@@ -265,6 +359,17 @@ final class LibraryFeatureModel: ObservableObject {
             ))
             self.finishPendingDurableTicket(ticket, refreshing: true)
         }
+    }
+
+    /// Admits the one semantic recording-finalization outcome into the active
+    /// library workspace. The AppModel remains the only workspace/fence
+    /// authority; this boundary only compares the immutable event against the
+    /// workspace already installed by its owner, then schedules one existing
+    /// refresh for an admitted finalization.
+    func acceptRecordingFinalization(_ outcome: RecordingFinalizationOutcome) {
+        guard admits(finalization: outcome), acceptFinalizationID(outcome.finalizationID),
+              let workspace else { return }
+        refresh(workspace: workspace, fence: outcome.workspaceFence)
     }
 
     func transcriptText(for session: RecordingSession) throws -> String {
@@ -706,6 +811,65 @@ final class LibraryFeatureModel: ObservableObject {
         let current = RecordingLibraryURLIdentity.normalized(workspace)
         let candidate = RecordingLibraryURLIdentity.normalized(folder)
         return candidate.path == current.path || candidate.path.hasPrefix(current.path + "/")
+    }
+
+    private func admits(finalization outcome: RecordingFinalizationOutcome) -> Bool {
+        guard !isShutdown,
+              workspaceFence == outcome.workspaceFence,
+              let workspace else { return false }
+
+        // Finalization arrives from outside the Library boundary. Require its
+        // supplied paths to already be physical canonical paths; merely
+        // normalizing an alias would otherwise let a symlinked/forged event
+        // select the current workspace. A new recording session must be a
+        // direct child of the current physical workspace and its media must
+        // remain inside that session folder.
+        let folder = RecordingLibraryURLIdentity.normalized(outcome.folder)
+        guard outcome.folder.path == folder.path,
+              folder.deletingLastPathComponent() == RecordingLibraryURLIdentity.normalized(workspace) else {
+            return false
+        }
+        let recording = RecordingLibraryURLIdentity.normalized(outcome.recordingURL)
+        guard outcome.recordingURL.path == recording.path else { return false }
+        return recording.deletingLastPathComponent() == folder
+    }
+
+    private func acceptFinalizationID(_ id: UUID) -> Bool {
+        guard acceptedFinalizationIDs.insert(id).inserted else { return false }
+        acceptedFinalizationOrder.append(id)
+        if acceptedFinalizationOrder.count > Self.finalizationRetentionLimit {
+            let expired = acceptedFinalizationOrder.removeFirst()
+            acceptedFinalizationIDs.remove(expired)
+        }
+        return true
+    }
+
+    private func install<Event>(
+        _ registration: inout Observer<Event>,
+        _ observer: @escaping (Event) -> Void
+    ) -> UUID {
+        let token = UUID()
+        registration = .init(token: token, callback: observer)
+        return token
+    }
+
+    private func remove<Event>(
+        _ registration: inout Observer<Event>,
+        token: UUID
+    ) {
+        guard registration.token == token else { return }
+        registration = .init()
+    }
+
+    private func replace<Event>(
+        _ registration: inout Observer<Event>,
+        with observer: ((Event) -> Void)?
+    ) {
+        guard let observer, !isShutdown else {
+            registration = .init()
+            return
+        }
+        _ = install(&registration, observer)
     }
 
     private func cleanupImported(_ session: RecordingSession, workspace: URL) async {

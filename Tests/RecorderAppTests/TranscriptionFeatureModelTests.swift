@@ -3,6 +3,31 @@ import XCTest
 
 @MainActor
 final class TranscriptionFeatureModelTests: XCTestCase {
+    func testPublicationObserverTokenCannotRemoveReplacementAndShutdownClearsIt() async throws {
+        let fixture = try FeatureFixture.make()
+        defer { fixture.remove() }
+        let feature = fixture.makeFeature()
+        var oldCalls = 0
+        var replacementCalls = 0
+        let oldToken = feature.observeSuccessfulPublication { _ in oldCalls += 1 }
+        let replacementToken = feature.observeSuccessfulPublication { _ in replacementCalls += 1 }
+
+        feature.removeSuccessfulPublicationObserver(oldToken)
+        XCTAssertNotNil(feature.onSuccessfulPublication)
+
+        feature.start(session: fixture.session, providerIsConfigured: true)
+        await eventually { feature.presentation.transcribingSessionID == nil }
+        XCTAssertEqual(oldCalls, 0)
+        XCTAssertEqual(replacementCalls, 1)
+
+        feature.removeSuccessfulPublicationObserver(replacementToken)
+        XCTAssertNil(feature.onSuccessfulPublication)
+
+        _ = feature.observeSuccessfulPublication { _ in replacementCalls += 1 }
+        feature.shutdown()
+        XCTAssertNil(feature.onSuccessfulPublication)
+    }
+
     func testUnconfiguredProviderPublishesRecoveryWithoutStartingAJob() async throws {
         let fixture = try FeatureFixture.make()
         defer { fixture.remove() }
@@ -58,6 +83,56 @@ final class TranscriptionFeatureModelTests: XCTestCase {
 
         XCTAssertEqual(repository.snapshotCount, 1)
         feature.shutdown()
+    }
+
+    func testProviderSaveDoesNotMutateActiveASRSnapshotAndLaterAttemptUsesSavedProfile() async throws {
+        let fixture = try FeatureFixture.make()
+        defer { fixture.remove() }
+        let repository = FeatureRepository(snapshot: try fixture.snapshot())
+        let preparer = FeatureBlockingPreparer()
+        let service = FeatureCapturingService(result: .init(
+            transcriptURL: fixture.transcriptURL,
+            rawTranscriptURL: nil,
+            manifestURL: nil,
+            logURL: fixture.logURL,
+            committedTranscriptRevision: fixture.revision
+        ))
+        let feature = fixture.makeFeature(
+            repository: repository,
+            preparer: preparer,
+            service: service
+        )
+        let settings = AIProviderSettingsModel(
+            repository: repository,
+            loadImmediately: false
+        )
+        settings.baseURLText = "https://api.example/v1"
+        settings.asrModel = "saved-asr"
+        settings.llmModel = "saved-llm"
+        settings.selectedLanguage = .cantonese
+
+        feature.start(session: fixture.session, providerIsConfigured: true)
+        await preparer.waitUntilStarted()
+        XCTAssertEqual(feature.presentation.transcribingSessionID, fixture.session.id)
+
+        settings.save()
+
+        XCTAssertEqual(repository.snapshotCount, 1)
+        XCTAssertEqual(feature.presentation.transcribingSessionID, fixture.session.id)
+        preparer.release(with: fixture.audioURL)
+        await eventually { feature.presentation.transcribingSessionID == nil }
+        XCTAssertEqual(service.requests.map(\.snapshot.profile.asrModel), ["asr"])
+
+        feature.start(session: fixture.session, providerIsConfigured: true)
+        await preparer.waitForStartCount(2)
+        preparer.release(with: fixture.audioURL)
+        await eventually { feature.presentation.transcribingSessionID == nil }
+
+        XCTAssertEqual(repository.snapshotCount, 2)
+        XCTAssertEqual(
+            service.requests.map(\.snapshot.profile.asrModel),
+            ["asr", "saved-asr"]
+        )
     }
 
     func testWorkspaceFenceAndClearProjectionAreFeatureOwned() async throws {
@@ -213,10 +288,11 @@ private struct FeatureFixture {
 
     func makeFeature(
         repository: FeatureRepository? = nil,
-        preparer: (any TranscriptionAudioPreparing)? = nil
+        preparer: (any TranscriptionAudioPreparing)? = nil,
+        service: (any TranscriptionServicing)? = nil
     ) -> TranscriptionFeatureModel {
         let actualPreparer = preparer ?? FeaturePreparer(audioURL: audioURL)
-        let service = FeatureService(result: .init(
+        let actualService = service ?? FeatureService(result: .init(
             transcriptURL: transcriptURL,
             rawTranscriptURL: nil,
             manifestURL: nil,
@@ -226,7 +302,7 @@ private struct FeatureFixture {
         return .init(coordinator: .init(
             providerRepository: repository ?? FeatureRepository(snapshot: try! snapshot()),
             audioPreparer: actualPreparer,
-            service: service
+            service: actualService
         ))
     }
 
@@ -244,11 +320,13 @@ private struct FeatureFixture {
 }
 
 private final class FeatureRepository: OpenAICompatibleProviderManaging, @unchecked Sendable {
-    let value: OpenAICompatibleProviderSnapshot
+    private var value: OpenAICompatibleProviderSnapshot
     private(set) var snapshotCount = 0
     init(snapshot: OpenAICompatibleProviderSnapshot) { value = snapshot }
     func loadProfile() throws -> OpenAICompatibleProviderProfile? { value.profile }
-    func save(profile: OpenAICompatibleProviderProfile, replacementAPIKey: String?) throws {}
+    func save(profile: OpenAICompatibleProviderProfile, replacementAPIKey: String?) throws {
+        value = try .validated(profile: profile, apiKey: value.apiKey)
+    }
     func snapshot() throws -> OpenAICompatibleProviderSnapshot {
         snapshotCount += 1
         return value
@@ -273,6 +351,25 @@ private final class FeaturePreparer: TranscriptionAudioPreparing, @unchecked Sen
 private struct FeatureService: TranscriptionServicing {
     let result: TranscriptionServiceResult
     func transcribe(_ request: TranscriptionServiceRequest, onProgress: @escaping @Sendable (TranscriptionServiceProgress) -> Void) async throws -> TranscriptionServiceResult {
+        onProgress(.uploading(chunk: 1, total: 1))
+        return result
+    }
+}
+
+private final class FeatureCapturingService: TranscriptionServicing, @unchecked Sendable {
+    private let lock = NSLock()
+    private let result: TranscriptionServiceResult
+    private var capturedRequests: [TranscriptionServiceRequest] = []
+
+    init(result: TranscriptionServiceResult) { self.result = result }
+
+    var requests: [TranscriptionServiceRequest] { lock.withLock { capturedRequests } }
+
+    func transcribe(
+        _ request: TranscriptionServiceRequest,
+        onProgress: @escaping @Sendable (TranscriptionServiceProgress) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        lock.withLock { capturedRequests.append(request) }
         onProgress(.uploading(chunk: 1, total: 1))
         return result
     }
@@ -310,6 +407,15 @@ private final class FeatureBlockingPreparer: TranscriptionAudioPreparing, @unche
 
     func cleanup(_ prepared: PreparedTranscriptionAudio) {}
 
+    func release(with audioURL: URL) {
+        let continuation = lock.withLock { () -> CheckedContinuation<PreparedTranscriptionAudio, Error>? in
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+        continuation?.resume(returning: .init(audioURL: audioURL, cleanupURL: nil))
+    }
+
     func waitUntilStarted() async {
         await withCheckedContinuation { continuation in
             let resumeNow = lock.withLock {
@@ -318,6 +424,12 @@ private final class FeatureBlockingPreparer: TranscriptionAudioPreparing, @unche
                 return false
             }
             if resumeNow { continuation.resume() }
+        }
+    }
+
+    func waitForStartCount(_ expected: Int) async {
+        while lock.withLock({ startCount < expected }) {
+            await Task.yield()
         }
     }
 }

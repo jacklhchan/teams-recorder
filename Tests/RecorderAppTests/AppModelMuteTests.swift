@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class AppModelMuteTests: XCTestCase {
-    func testSaveMetadataPreservesMediaAndRecoveryFields() throws {
+    func testSaveMetadataPreservesMediaAndRecoveryFields() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let folder = root.appendingPathComponent("meeting-metadata", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -28,8 +28,10 @@ final class AppModelMuteTests: XCTestCase {
             metadata: original
         )
         let model = AppModel(inputDevices: { [] }, defaultInputDeviceID: { nil }, performStartupWork: false)
+        model.setOutputFolder(folder)
+        model.seedLibrarySessionsForTesting([session])
 
-        model.saveMetadata(title: "New", tags: "one, two", isFavorite: true, for: session)
+        _ = await model.saveMetadata(title: "New", tags: "one, two", isFavorite: true, for: session)
 
         let saved = RecordingSessionMetadataStore.load(in: folder)
         XCTAssertEqual(saved.title, "New")
@@ -204,7 +206,7 @@ final class AppModelMuteTests: XCTestCase {
                 return []
             }
         )
-        model.sessions = [oldSession]
+        model.seedLibrarySessionsForTesting([oldSession])
         model.transcriptionFeature.replaceLoadedStates([
             oldSession.id: .init(
                 phase: .completed,

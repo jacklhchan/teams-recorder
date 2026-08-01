@@ -24,8 +24,8 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             },
             searchLoader: { [searchLoader] session in searchLoader.load(session) }
         )
-        model.setOutputFolder(fixture.folder)
-        model.sessions = [fixture.session()]
+        model.setOutputFolder(fixture.workspace)
+        model.seedLibrarySessionsForTesting([fixture.session()])
 
         XCTAssertTrue(model.aiProviderSettingsModel.hasSavedProfile, model.aiProviderSettingsModel.status)
 
@@ -56,8 +56,8 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             coordinator = created
             return created
         })
-        model.setOutputFolder(fixture.folder)
-        model.sessions = [fixture.session()]
+        model.setOutputFolder(fixture.workspace)
+        model.seedLibrarySessionsForTesting([fixture.session()])
 
         XCTAssertTrue(model.aiProviderSettingsModel.hasSavedProfile, model.aiProviderSettingsModel.status)
 
@@ -103,13 +103,13 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             },
             transcriptionService: service
         )
-        model.setOutputFolder(fixture.folder)
-        model.sessions = [fixture.session()]
+        model.setOutputFolder(fixture.workspace)
+        model.seedLibrarySessionsForTesting([fixture.session()])
 
         model.transcribe(session: fixture.session())
         await service.waitForRequestCount(1)
         model.setOutputFolder(otherWorkspace)
-        model.setOutputFolder(fixture.folder)
+        model.setOutputFolder(fixture.workspace)
         _ = service.complete(at: 0)
         let oldAttemptFinished = await eventually {
             model.transcribingSessionID == nil
@@ -131,8 +131,15 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         await coordinator.waitUntilIdleForTesting(
             sessionID: fixture.session().id
         )
+        let meetingIntelligencePublicationIndexed = await eventually {
+            searchLoader.requests == 2
+        }
+        XCTAssertTrue(meetingIntelligencePublicationIndexed)
 
-        XCTAssertEqual(searchLoader.requests, 1)
+        // The accepted transcript is indexed once before automatic meeting
+        // intelligence starts, then its published title/summary triggers one
+        // targeted canonical-session reload and reindex.
+        XCTAssertEqual(searchLoader.requests, 2)
         XCTAssertEqual(availability.requests, 1)
         XCTAssertEqual(generator.requests, 1)
     }
@@ -166,8 +173,8 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
                 searchLoader.load(session)
             }
         )
-        model.setOutputFolder(fixture.folder)
-        model.sessions = [fixture.session()]
+        model.setOutputFolder(fixture.workspace)
+        model.seedLibrarySessionsForTesting([fixture.session()])
 
         model.transcribe(session: fixture.session())
         await fulfillment(of: [rebuildStarted], timeout: 1)
@@ -194,8 +201,7 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let generator = IntegrationGenerator()
         let coordinator = fixture.coordinator(availability: .confirmed, generator: generator)
         let model = fixture.model(coordinator: coordinator, reloader: { $0 })
-        model.setOutputFolder(fixture.folder)
-        model.sessions = [fixture.session()]
+        model.seedLibrarySessionsForTesting([fixture.session()])
         let original = "original searchable transcript"
         let edited = "edited searchable transcript"
         try original.write(to: fixture.folder.appendingPathComponent("transcript.txt"), atomically: true, encoding: .utf8)
@@ -207,7 +213,7 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         XCTAssertEqual(coordinator.presentation(for: fixture.session()).phase, .ready)
         XCTAssertEqual(generator.requests, 1)
 
-        model.saveTranscript(edited, for: fixture.session())
+        _ = await model.saveTranscript(edited, for: fixture.session())
         let editedBecameSearchable = await eventually {
             RecordingLibraryQuery(text: edited).filter(model.sessions).map(\.id) == [fixture.session().id]
         }
@@ -222,17 +228,17 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
         let reloaded = fixture.session(with: .init(title: "Suggested", titleOrigin: .meetingIntelligence))
+        let indexedReloaded = fixture.indexed(reloaded)
         let reloader = SessionReloader(result: reloaded)
         let coordinator = fixture.coordinator()
         let model = fixture.model(
             coordinator: coordinator,
             reloader: { [reloader] session in reloader.reload(session) }
         )
-        model.setOutputFolder(fixture.folder)
-        model.sessions = [fixture.session()]
+        model.seedLibrarySessionsForTesting([fixture.session()])
         let updated = expectation(description: "targeted session applied on main")
-        let cancellable = model.$sessions.dropFirst().sink { sessions in
-            if sessions == [reloaded] { updated.fulfill() }
+        let cancellable = model.libraryFeature.$snapshot.dropFirst().sink { snapshot in
+            if snapshot.sessions == [indexedReloaded] { updated.fulfill() }
         }
 
         coordinator.onSuccessfulPublication?(fixture.session())
@@ -240,7 +246,7 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         wait(for: [updated], timeout: 1)
 
         XCTAssertFalse(reloader.wasCalledOnMain)
-        XCTAssertEqual(model.sessions, [reloaded])
+        XCTAssertEqual(model.sessions, [indexedReloaded])
         withExtendedLifetime(cancellable) {}
     }
 
@@ -265,14 +271,14 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         defer { fixture.remove() }
         let first = fixture.session(with: .init(title: "First"))
         let latest = fixture.session(with: .init(title: "Latest"))
+        let indexedLatest = fixture.indexed(latest)
         let reloader = SequencedSessionReloader(first: first, latest: latest)
         let coordinator = fixture.coordinator()
         let model = fixture.model(coordinator: coordinator, reloader: { [reloader] session in reloader.reload(session) })
-        model.setOutputFolder(fixture.folder)
-        model.sessions = [fixture.session()]
+        model.seedLibrarySessionsForTesting([fixture.session()])
         let applied = expectation(description: "latest reload applied")
-        let cancellable = model.$sessions.dropFirst().sink { sessions in
-            if sessions == [latest] { applied.fulfill() }
+        let cancellable = model.libraryFeature.$snapshot.dropFirst().sink { snapshot in
+            if snapshot.sessions == [indexedLatest] { applied.fulfill() }
         }
 
         coordinator.onSuccessfulPublication?(fixture.session())
@@ -281,25 +287,25 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         reloader.releaseFirst()
         wait(for: [applied], timeout: 1)
 
-        XCTAssertEqual(model.sessions, [latest])
+        XCTAssertEqual(model.sessions, [indexedLatest])
         withExtendedLifetime(cancellable) {}
     }
 
-    func testTrashSuccessRemovesSessionFromProjection() throws {
+    func testTrashSuccessRemovesSessionFromProjection() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
         let model = AppModel(
             performStartupWork: false,
-            initialOutputFolder: fixture.folder.deletingLastPathComponent(),
+            initialOutputFolder: fixture.workspace,
             recordingSessionTrashHandler: { folder in
                 try FileManager.default.removeItem(at: folder)
                 return true
             }
         )
         let session = fixture.session()
-        model.sessions = [session]
+        model.seedLibrarySessionsForTesting([session])
 
-        model.moveSessionToTrash(session)
+        await model.moveSessionToTrash(session)
 
         XCTAssertFalse(
             model.sessions.contains(where: { $0.id == session.id }),
@@ -307,21 +313,27 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         )
     }
 
-    func testTrashFailureKeepsSessionProjected() throws {
+    func testTrashFailureKeepsSessionProjected() async throws {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let session = RecordingSession(id: missing, folderURL: missing,
                                        recordingURL: missing.appendingPathComponent("recording.m4a"),
                                        createdAt: .distantPast, duration: 0, fileSize: 0, metadata: .init())
-        let model = AppModel(performStartupWork: false)
-        model.sessions = [session]
+        let model = AppModel(
+            performStartupWork: false,
+            recordingSessionTrashHandler: { _ in
+                throw LibraryFeatureFailure(message: "failed")
+            }
+        )
+        model.setOutputFolder(missing.deletingLastPathComponent())
+        model.seedLibrarySessionsForTesting([session])
 
-        model.moveSessionToTrash(session)
+        await model.moveSessionToTrash(session)
 
         XCTAssertEqual(model.sessions, [session])
         XCTAssertTrue(model.statusMessage.hasPrefix("Cannot move recording to Trash:"))
     }
 
-    func testSavingTagsAndFavoritePreservesMeetingIntelligenceTitleOrigin() throws {
+    func testSavingTagsAndFavoritePreservesMeetingIntelligenceTitleOrigin() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let recordingURL = folder.appendingPathComponent("recording.m4a")
@@ -340,8 +352,10 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             metadata: RecordingSessionMetadataStore.load(in: folder)
         )
         let model = AppModel(performStartupWork: false)
+        model.setOutputFolder(folder)
+        model.seedLibrarySessionsForTesting([session])
 
-        model.saveMetadata(title: "Generated", tags: "customer", isFavorite: true, for: session)
+        _ = await model.saveMetadata(title: "Generated", tags: "customer", isFavorite: true, for: session)
 
         let saved = RecordingSessionMetadataStore.load(in: folder)
         XCTAssertEqual(saved.titleOrigin, .meetingIntelligence)
@@ -349,7 +363,7 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         XCTAssertTrue(saved.isFavorite)
     }
 
-    func testTypedManualMetadataEditMarksTitleManual() throws {
+    func testTypedManualMetadataEditMarksTitleManual() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let recordingURL = folder.appendingPathComponent("recording.m4a")
@@ -360,8 +374,10 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             fileSize: 0, metadata: .init(title: "Generated", titleOrigin: .meetingIntelligence)
         )
         let model = AppModel(performStartupWork: false)
+        model.setOutputFolder(folder)
+        model.seedLibrarySessionsForTesting([session])
 
-        model.saveMetadata(titleEdit: .manual("Customer review"), tags: "", isFavorite: false, for: session)
+        _ = await model.saveMetadata(titleEdit: .manual("Customer review"), tags: "", isFavorite: false, for: session)
 
         let saved = RecordingSessionMetadataStore.load(in: folder)
         XCTAssertEqual(saved.title, "Customer review")
@@ -378,22 +394,36 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
 
 @MainActor
 private final class IntegrationFixture {
+    let workspace: URL
     let folder: URL
     let recordingURL: URL
 
     init() throws {
-        folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        folder = workspace.appendingPathComponent("manual-session", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         recordingURL = folder.appendingPathComponent("recording.m4a")
         try Data().write(to: recordingURL)
         try "transcript".write(to: folder.appendingPathComponent("transcript.txt"), atomically: true, encoding: .utf8)
     }
 
-    func remove() { try? FileManager.default.removeItem(at: folder) }
+    func remove() { try? FileManager.default.removeItem(at: workspace) }
 
     func session(with metadata: RecordingSessionMetadata = .init()) -> RecordingSession {
         .init(id: folder.standardizedFileURL, folderURL: folder, recordingURL: recordingURL,
               createdAt: .distantPast, duration: 0, fileSize: 0, metadata: metadata)
+    }
+
+    func indexed(_ session: RecordingSession) -> RecordingSession {
+        session.replacingSearchDocument(
+            RecordingLibrarySearchDocument.load(
+                folderURL: session.folderURL,
+                displayName: session.displayName,
+                createdAt: session.createdAt,
+                metadata: session.metadata
+            )
+        )
     }
 
     func coordinator(
@@ -426,7 +456,8 @@ private final class IntegrationFixture {
 
     func model(coordinator: MeetingIntelligenceJobCoordinator,
                reloader: @escaping @Sendable (RecordingSession) -> RecordingSession) -> AppModel {
-        AppModel(performStartupWork: false, recordingSessionReloader: reloader,
+        AppModel(performStartupWork: false, initialOutputFolder: workspace,
+                 recordingSessionReloader: reloader,
                  meetingIntelligenceCoordinatorFactory: { _, _, _ in coordinator })
     }
 
@@ -643,6 +674,8 @@ private final class BlockingIntegrationSearchLoader: @unchecked Sendable {
     private let started: XCTestExpectation
     private let finished: XCTestExpectation?
     private let semaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var calls = 0
     init(
         started: XCTestExpectation,
         finished: XCTestExpectation? = nil
@@ -651,9 +684,12 @@ private final class BlockingIntegrationSearchLoader: @unchecked Sendable {
         self.finished = finished
     }
     func load(_ session: RecordingSession) -> RecordingLibrarySearchDocument {
-        started.fulfill()
-        semaphore.wait()
-        defer { finished?.fulfill() }
+        let isFirst = lock.withLock { calls += 1; return calls == 1 }
+        if isFirst {
+            started.fulfill()
+            semaphore.wait()
+        }
+        defer { if isFirst { finished?.fulfill() } }
         return RecordingLibrarySearchDocument.load(
             folderURL: session.folderURL,
             displayName: session.displayName,

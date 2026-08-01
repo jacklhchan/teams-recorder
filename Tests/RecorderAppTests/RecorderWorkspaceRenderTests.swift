@@ -192,7 +192,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityLabel("Play \(originalName)"))
         XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(originalName)"))
 
-        fixture.model.sessions = [
+        fixture.model.seedLibrarySessionsForTesting([
             RecordingSession(
                 id: fixture.session.id,
                 folderURL: fixture.session.folderURL,
@@ -203,7 +203,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
                 metadata: .init(title: renamedName),
                 searchDocument: fixture.session.searchDocument
             )
-        ]
+        ])
         host.render()
 
         XCTAssertTrue(host.containsAccessibilityLabel("Play \(renamedName)"))
@@ -384,7 +384,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             fileSize: 0,
             metadata: .init(title: "Workspace recording")
         )
-        fixture.model.sessions = [session]
+        fixture.model.seedLibrarySessionsForTesting([session])
         return .init(model: fixture.model, defaults: fixture.defaults, session: session)
     }
 

@@ -72,7 +72,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var captureConnectionState: CaptureConnectionState = .connected
     @Published private(set) var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published var statusMessage = "Ready"
-    @Published var sessions: [RecordingSession] = []
     @Published var lastHealthReport: RecordingHealthReport?
     @Published private(set) var lastRecordingSavedAsM4A = false
     @Published var isRunningTestRecording = false
@@ -98,7 +97,10 @@ final class AppModel: ObservableObject {
     private let recordingSessionCoordinator:
         RecordingSessionCoordinator
     let transcriptionFeature: TranscriptionFeatureModel
-    private let transcriptMutationGate: RecordingSessionMutationGate
+    let libraryFeature: LibraryFeatureModel
+    /// Compatibility bridge until PR C: all mutable recording artifacts use
+    /// the Library feature's one gate, including when that feature is injected.
+    let transcriptMutationGate: RecordingSessionMutationGate
     /// AppModel owns the sole meeting-intelligence coordinator.  It projects
     /// presentation and forwards commands; it deliberately owns no parallel
     /// attempt/task/generation state.
@@ -146,6 +148,18 @@ final class AppModel: ObservableObject {
         transcriptionFeature.presentation.transcriptionStatesBySessionID
     }
 
+    var sessions: [RecordingSession] { libraryFeature.sessions }
+
+    /// Test-only fixture bridge that preserves the same workspace/fence
+    /// admission contract as production refreshes.
+    func seedLibrarySessionsForTesting(_ sessions: [RecordingSession]) {
+        libraryFeature.seedCanonicalSessionsForTesting(
+            sessions,
+            workspace: outputFolder,
+            fence: workspacePublicationFence
+        )
+    }
+
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
@@ -161,13 +175,6 @@ final class AppModel: ObservableObject {
     private let teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator
     private let teamsIntegrationIngress: TeamsIntegrationIngress
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
-    private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
-    private let recordingSessionReloader: @Sendable (RecordingSession) -> RecordingSession
-    private let recordingSearchDocumentLoader:
-        @Sendable (RecordingSession) -> RecordingLibrarySearchDocument
-    private let recordingSessionRecovery: @Sendable (URL) -> Void
-    private let recordingSessionTrashHandler:
-        @Sendable (URL) throws -> Bool
     private let permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)?
     private let volumeCapacityProvider: any VolumeCapacityProviding
     private let storagePolicy: RecordingStoragePolicy
@@ -178,10 +185,6 @@ final class AppModel: ObservableObject {
         @escaping @MainActor @Sendable () async -> Void
     ) -> Void
     private let defaults: UserDefaults
-    private let recordingSessionLoadingQueue = DispatchQueue(
-        label: "local.meeting.recorder.recording-library",
-        qos: .userInitiated
-    )
     private var cancellables: Set<AnyCancellable> = []
     private var captureLifecycleTask: Task<Void, Never>? {
         get { recordingSessionCoordinator.task }
@@ -222,13 +225,6 @@ final class AppModel: ObservableObject {
     private var teamsMuteRelayGeneration: UInt64?
     private var pendingTeamsMeetingState: TeamsMeetingState?
     private var lastAuthorizedTeamsMeetingState: TeamsMeetingState?
-    private var recordingSessionRefreshGeneration: UInt = 0
-    private var recordingSearchDocumentRefreshGeneration: UInt64 = 0
-    private var recordingSearchDocumentRefreshGenerations:
-        [RecordingSession.ID: UInt64] = [:]
-    private var meetingIntelligenceSessionReloadGenerations:
-        [RecordingSession.ID: UInt64] = [:]
-    private var recoveredLibraryFolders: Set<URL> = []
     private var storageMonitorTask: Task<Void, Never>?
     private var storageMonitorGeneration: UInt64 = 0
     private var testRecordingStopTask: Task<Void, Never>?
@@ -237,6 +233,7 @@ final class AppModel: ObservableObject {
     private var teamsScreenCaptureIntentGeneration: UInt64 = 0
     private var teamsMeetingActive = false
     private var workspacePublicationFence: WorkspacePublicationFence = .initial
+    private var isShutDown = false
 
     private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
     private static let teamsAutoMeetingEnabledKey = "teamsAutoMeetingEnabled"
@@ -303,6 +300,7 @@ final class AppModel: ObservableObject {
         transcriptionScriptURL: URL? = nil,
         transcriptionService: (any TranscriptionServicing)? = nil,
         transcriptionFeatureFactory: TranscriptionFeatureFactory? = nil,
+        libraryFeature: LibraryFeatureModel? = nil,
         meetingIntelligenceCoordinatorFactory: ((
             any OpenAICompatibleProviderManaging,
             UUID,
@@ -341,7 +339,8 @@ final class AppModel: ObservableObject {
             repository: activeProviderRepository,
             loadImmediately: false
         )
-        let transcriptMutationGate = RecordingSessionMutationGate()
+        let transcriptMutationGate = libraryFeature?.mutationGate
+            ?? RecordingSessionMutationGate()
         self.transcriptMutationGate = transcriptMutationGate
         let activeTranscriptionService: any TranscriptionServicing
         if let transcriptionService {
@@ -397,12 +396,14 @@ final class AppModel: ObservableObject {
         )
         teamsAutoMeetingState = autoCoordinator.state
         self.virtualMicStateProvider = virtualMicStateProvider
-        self.recordingSessionLoader = recordingSessionLoader
-        self.recordingSessionReloader = recordingSessionReloader
-        self.recordingSearchDocumentLoader =
-            recordingSearchDocumentLoader
-        self.recordingSessionRecovery = recordingSessionRecovery
-        self.recordingSessionTrashHandler = recordingSessionTrashHandler
+        self.libraryFeature = libraryFeature ?? LibraryFeatureModel(
+            sessionLoader: recordingSessionLoader,
+            sessionReloader: recordingSessionReloader,
+            searchDocumentLoader: recordingSearchDocumentLoader,
+            recovery: recordingSessionRecovery,
+            trashHandler: recordingSessionTrashHandler,
+            mutationGate: transcriptMutationGate
+        )
         self.permissionRequestHandler = permissionRequestHandler
         self.volumeCapacityProvider = volumeCapacityProvider
         self.storagePolicy = storagePolicy
@@ -463,22 +464,78 @@ final class AppModel: ObservableObject {
             [weak self] event in
             guard let self,
                   self.admitsTranscriptPublication(event) else { return }
-            self.rebuildSearchDocument(
-                for: event.session,
-                publicationFence: event.workspaceFence
-            ) { [weak self] in
-                guard let self,
-                      self.admitsTranscriptPublication(event) else { return }
-                self.meetingIntelligenceCoordinator
-                    .handleTranscriptPublished(event)
-            }
+            self.libraryFeature.acceptTranscriptPublication(event)
+        }
+        self.libraryFeature.onSessionsLoaded = { [weak self] snapshot in
+            guard let self else { return }
+            self.transcriptionFeature.replaceLoadedStates(snapshot.transcriptionStates)
+            self.meetingIntelligenceCoordinator.reload(sessions: snapshot.sessions)
+        }
+        self.libraryFeature.onTranscriptPublicationCommitted = { [weak self] event in
+            guard let self,
+                  self.admitsLibraryMutation(
+                    event.identity,
+                    canonical: event.canonicalSession
+                  ),
+                  event.identity.transcriptRevision == event.publication.revision,
+                  self.admitsTranscriptPublication(event.publication),
+                  event.publication.session.id == event.canonicalSession.id,
+                  RecordingLibraryURLIdentity.normalized(event.publication.session.folderURL)
+                    == RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL),
+                  RecordingLibraryURLIdentity.normalized(event.publication.session.recordingURL)
+                    == RecordingLibraryURLIdentity.normalized(event.canonicalSession.recordingURL),
+                  event.publication.normalizedSessionFolder
+                    == RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL)
+            else { return }
+            self.meetingIntelligenceCoordinator.handleTranscriptPublished(event.publication)
+        }
+        self.libraryFeature.onTranscriptEdited = { [weak self] event in
+            guard let self,
+                  self.admitsLibraryMutation(
+                    event.identity,
+                    canonical: event.canonicalSession
+                  ) else { return }
+            self.meetingIntelligenceCoordinator.transcriptDidSave(event.canonicalSession)
+        }
+        self.libraryFeature.onMetadataSaved = { [weak self] event in
+            guard let self,
+                  self.admitsLibraryMutation(
+                    event.identity,
+                    canonical: event.canonicalSession
+                  ) else { return }
+            // Targeted observational reload retains all other MI projections.
+            self.meetingIntelligenceCoordinator.reload(
+                sessions: [event.canonicalSession]
+            )
+        }
+        self.libraryFeature.onImportedAudioReady = { [weak self] event in
+            guard let self,
+                  self.admitsImportedAudioReady(event) else { return }
+            self.statusMessage = "Audio imported for transcription: \(event.canonicalSession.displayName)"
+            self.transcribe(session: event.canonicalSession)
+        }
+        self.libraryFeature.onSessionRemoved = { [weak self] event in
+            guard let self,
+                  event.identity.librarySourceID == self.libraryFeature.librarySourceID,
+                  event.identity.workspaceFence == self.workspacePublicationFence,
+                  self.libraryFeature.session(withID: event.identity.sessionID) == nil,
+                  event.identity.normalizedSessionFolder
+                    .deletingLastPathComponent()
+                    == RecordingLibraryURLIdentity.normalized(self.outputFolder)
+            else { return }
+            self.meetingIntelligenceCoordinator.remove(sessionID: event.identity.sessionID)
+            self.transcriptionFeature.removeProjection(for: event.identity.sessionID)
         }
         meetingIntelligenceCoordinator.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
         meetingIntelligenceCoordinator.onSuccessfulPublication = {
             [weak self] session in
-            self?.reloadMeetingIntelligenceSession(session)
+            guard let self else { return }
+            self.libraryFeature.refreshAfterMeetingIntelligence(
+                session,
+                fence: self.workspacePublicationFence
+            )
         }
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
@@ -596,9 +653,12 @@ final class AppModel: ObservableObject {
     }
 
     func shutdown() {
+        guard !isShutDown else { return }
+        isShutDown = true
         playbackFeature.shutdown()
         transcriptionFeature.shutdown()
         meetingIntelligenceCoordinator.shutdown()
+        libraryFeature.shutdown()
     }
 
     func refreshDevices() {
@@ -1295,7 +1355,7 @@ final class AppModel: ObservableObject {
         transcriptionFeature.advanceWorkspacePublicationFence(
             to: workspacePublicationFence
         )
-        sessions = []
+        libraryFeature.clearForWorkspaceChange()
         meetingIntelligenceCoordinator.resetForWorkspaceChange()
         transcriptionFeature.clearProjections()
         refreshSessions()
@@ -1313,14 +1373,26 @@ final class AppModel: ObservableObject {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        do {
-            let importedSession = try ManualTranscriptionImporter.importAudioFile(url, into: outputFolder)
-            refreshSessions()
-            statusMessage = "Audio imported for transcription: \(url.lastPathComponent)"
-            transcribe(session: importedSession)
-        } catch {
-            statusMessage = "Audio import failed: \(error.localizedDescription)"
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await self.importAudioForTranscription(url)
         }
+    }
+
+    @discardableResult
+    func importAudioForTranscription(
+        _ url: URL
+    ) async -> Result<RecordingSession, LibraryFeatureFailure> {
+        let workspace = outputFolder
+        let fence = workspacePublicationFence
+        let outcome = await libraryFeature.importAudio(
+            url, workspace: workspace, fence: fence
+        )
+        guard canPresentWorkspaceResult(for: fence) else { return outcome }
+        if case .failure(let error) = outcome {
+            statusMessage = error.message
+        }
+        return outcome
     }
 
     func openRecordingFolder() {
@@ -1332,130 +1404,15 @@ final class AppModel: ObservableObject {
     }
 
     func refreshSessions() {
-        recordingSearchDocumentRefreshGeneration &+= 1
-        recordingSearchDocumentRefreshGenerations.removeAll()
-        recordingSessionRefreshGeneration &+= 1
-        let generation = recordingSessionRefreshGeneration
-        meetingIntelligenceSessionReloadGenerations.removeAll()
-        let folder = outputFolder
-        let loader = recordingSessionLoader
-        let recovery = recordingSessionRecovery
-        let shouldRecover = recoveredLibraryFolders.insert(folder.standardizedFileURL).inserted
-
-        recordingSessionLoadingQueue.async { [weak self] in
-            if shouldRecover { recovery(folder) }
-            let loadedSessions = loader(folder)
-            let transcriptionStates: [RecordingSession.ID: TranscriptionState] = Dictionary(
-                uniqueKeysWithValues: loadedSessions.compactMap { session in
-                    guard let state = try? TranscriptionStateStore.load(
-                        in: session.folderURL
-                    ) else {
-                        return nil
-                    }
-                    return (session.id, state)
-                }
-            )
-
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.recordingSessionRefreshGeneration == generation else {
-                    return
-                }
-                self.sessions = loadedSessions
-                self.transcriptionFeature.replaceLoadedStates(
-                    transcriptionStates
-                )
-                self.meetingIntelligenceCoordinator.reload(sessions: loadedSessions)
-            }
-        }
-    }
-
-    private func rebuildSearchDocument(
-        for session: RecordingSession,
-        publicationFence: WorkspacePublicationFence? = nil,
-        completion: (@MainActor () -> Void)? = nil
-    ) {
-        guard admitsSearchDocumentRebuild(
-            for: session,
-            publicationFence: publicationFence
-        ) else {
-            return
-        }
-        let sessionID = session.id
-        recordingSearchDocumentRefreshGeneration &+= 1
-        let nextGeneration =
-            recordingSearchDocumentRefreshGeneration
-        recordingSearchDocumentRefreshGenerations[sessionID] =
-            nextGeneration
-        let loader = recordingSearchDocumentLoader
-
-        recordingSessionLoadingQueue.async { [weak self] in
-            let document = loader(session)
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.recordingSearchDocumentRefreshGenerations[
-                        sessionID
-                      ] == nextGeneration,
-                      self.admitsSearchDocumentRebuild(
-                        for: session,
-                        publicationFence: publicationFence
-                      ) else {
-                    return
-                }
-                if let index = self.sessions.firstIndex(where: { $0.id == sessionID }) {
-                    let current = self.sessions[index]
-                    guard current.metadata == session.metadata else {
-                        self.rebuildSearchDocument(
-                            for: current,
-                            publicationFence: publicationFence,
-                            completion: completion
-                        )
-                        return
-                    }
-                    self.sessions[index] = current.replacingSearchDocument(document)
-                } else {
-                    self.sessions.append(session.replacingSearchDocument(document))
-                }
-                self.recordingSearchDocumentRefreshGenerations[
-                    sessionID
-                ] = nil
-                completion?()
-            }
-        }
-    }
-
-    private func reloadMeetingIntelligenceSession(_ session: RecordingSession) {
-        let workspaceGeneration = recordingSessionRefreshGeneration
-        let workspace = outputFolder.standardizedFileURL
-        guard isInCurrentWorkspace(session) else {
-            return
-        }
-        let sessionID = session.id
-        let sessionGeneration = (meetingIntelligenceSessionReloadGenerations[sessionID] ?? 0) &+ 1
-        meetingIntelligenceSessionReloadGenerations[sessionID] = sessionGeneration
-        let reloader = recordingSessionReloader
-        recordingSessionLoadingQueue.async { [weak self] in
-            let reloaded = reloader(session)
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.recordingSessionRefreshGeneration == workspaceGeneration,
-                      self.outputFolder.standardizedFileURL == workspace,
-                      self.meetingIntelligenceSessionReloadGenerations[sessionID] == sessionGeneration else {
-                    return
-                }
-                if let index = self.sessions.firstIndex(where: { $0.id == sessionID }) {
-                    self.sessions[index] = reloaded
-                } else {
-                    self.sessions.append(reloaded)
-                }
-                self.meetingIntelligenceCoordinator.reload(sessions: [reloaded])
-            }
-        }
+        libraryFeature.refresh(
+            workspace: outputFolder,
+            fence: workspacePublicationFence
+        )
     }
 
     private func isInCurrentWorkspace(_ session: RecordingSession) -> Bool {
-        let workspace = outputFolder.standardizedFileURL
-        let sessionFolder = session.folderURL.standardizedFileURL
+        let workspace = RecordingLibraryURLIdentity.normalized(outputFolder)
+        let sessionFolder = RecordingLibraryURLIdentity.normalized(session.folderURL)
         return sessionFolder.path == workspace.path ||
             sessionFolder.path.hasPrefix(workspace.path + "/")
     }
@@ -1467,14 +1424,43 @@ final class AppModel: ObservableObject {
             isInCurrentWorkspace(event.session)
     }
 
-    private func admitsSearchDocumentRebuild(
-        for session: RecordingSession,
-        publicationFence: WorkspacePublicationFence?
+    private func admitsImportedAudioReady(
+        _ event: ImportedAudioSessionReady
     ) -> Bool {
-        guard let publicationFence else { return true }
-        return publicationFence == workspacePublicationFence &&
-            isInCurrentWorkspace(session)
+        guard !isShutDown,
+              event.identity.librarySourceID == libraryFeature.librarySourceID,
+              event.identity.workspaceFence == workspacePublicationFence,
+              event.identity.sessionID == event.canonicalSession.id,
+              event.identity.normalizedSessionFolder
+                == RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL),
+              isInCurrentWorkspace(event.canonicalSession),
+              libraryFeature.session(withID: event.canonicalSession.id)
+                == event.canonicalSession else { return false }
+        return true
     }
+
+    private func admitsLibraryMutation(
+        _ identity: LibraryMutationIdentity,
+        canonical: RecordingSession
+    ) -> Bool {
+        guard !isShutDown,
+              identity.librarySourceID == libraryFeature.librarySourceID,
+              identity.workspaceFence == workspacePublicationFence,
+              identity.sessionID == canonical.id,
+              identity.normalizedSessionFolder
+                == RecordingLibraryURLIdentity.normalized(canonical.folderURL),
+              isInCurrentWorkspace(canonical),
+              libraryFeature.session(withID: canonical.id) == canonical
+        else { return false }
+        return true
+    }
+
+    private func canPresentWorkspaceResult(
+        for capturedFence: WorkspacePublicationFence
+    ) -> Bool {
+        !isShutDown && workspacePublicationFence == capturedFence
+    }
+
 
     var playingSessionID: RecordingSession.ID? { playbackFeature.activeSessionID }
     var playbackPresentation: PlaybackPresentationModel {
@@ -1827,32 +1813,24 @@ final class AppModel: ObservableObject {
 
     func transcriptText(for session: RecordingSession) -> String {
         do {
-            return try TranscriptDocumentStore.read(in: session.folderURL)
+            return try libraryFeature.transcriptText(for: session)
         } catch {
             statusMessage = "Cannot read transcript: \(error.localizedDescription)"
             return ""
         }
     }
 
-    func saveTranscript(_ text: String, for session: RecordingSession) {
-        do {
-            try transcriptMutationGate.withMutation(for: session.folderURL) {
-                try TranscriptDocumentStore.save(text, in: session.folderURL)
-            }
-            transcriptionFeature.setTranscriptURL(
-                TranscriptDocumentStore.editableURL(in: session.folderURL),
-                for: session.id
-            )
-            rebuildSearchDocument(
-                for: session,
-                publicationFence: workspacePublicationFence
-            ) { [weak self] in
-                self?.meetingIntelligenceCoordinator.transcriptDidSave(session)
-            }
+    func saveTranscript(_ text: String, for session: RecordingSession) async -> LibrarySaveOutcome {
+        let fence = workspacePublicationFence
+        let outcome = await libraryFeature.saveTranscript(text, for: session, fence: fence)
+        guard canPresentWorkspaceResult(for: fence) else { return outcome }
+        if outcome.savedArtifacts.contains(.transcript) {
+            transcriptionFeature.setTranscriptURL(TranscriptDocumentStore.editableURL(in: session.folderURL), for: session.id)
             statusMessage = "Transcript saved"
-        } catch {
-            statusMessage = "Cannot save transcript: \(error.localizedDescription)"
+        } else {
+            statusMessage = outcome.failures.first?.userMessage ?? "Cannot save transcript."
         }
+        return outcome
     }
 
     func exportTranscript(for session: RecordingSession) {
@@ -1879,33 +1857,30 @@ final class AppModel: ObservableObject {
         tags: String,
         isFavorite: Bool,
         for session: RecordingSession
-    ) {
-        do {
-            try transcriptMutationGate.withMutation(for: session.folderURL) {
-                var metadata = RecordingSessionMetadataStore.load(in: session.folderURL)
-                metadata.applyTitleEdit(titleEdit)
-                metadata.tags = tags.split(separator: ",").map(String.init)
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                metadata.isFavorite = isFavorite
-                try RecordingSessionMetadataStore.save(metadata, in: session.folderURL)
-            }
-            refreshSessions()
+    ) async -> LibrarySaveOutcome {
+        let fence = workspacePublicationFence
+        let outcome = await libraryFeature.saveMetadata(
+            titleEdit: titleEdit, tags: tags, isFavorite: isFavorite,
+            for: session, fence: fence
+        )
+        guard canPresentWorkspaceResult(for: fence) else { return outcome }
+        if outcome.savedArtifacts.contains(.metadata) {
             statusMessage = "Recording details saved"
-        } catch {
-            statusMessage = "Cannot save recording details: \(error.localizedDescription)"
+        } else {
+            statusMessage = outcome.failures.first?.userMessage ?? "Cannot save recording details."
         }
+        return outcome
     }
 
     /// Compatibility entry point for existing views.  Title identity controls
     /// origin; a tags/favourite-only edit keeps its existing origin intact.
-    func saveMetadata(title: String, tags: String, isFavorite: Bool, for session: RecordingSession) {
+    func saveMetadata(title: String, tags: String, isFavorite: Bool, for session: RecordingSession) async -> LibrarySaveOutcome {
         let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let requestedTitle = cleanedTitle.isEmpty ? nil : cleanedTitle
         let titleEdit: RecordingTitleEdit = requestedTitle == session.metadata.title
             ? .unchanged
             : .manual(requestedTitle)
-        saveMetadata(
+        return await saveMetadata(
             titleEdit: titleEdit,
             tags: tags,
             isFavorite: isFavorite,
@@ -1913,17 +1888,15 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func moveSessionToTrash(_ session: RecordingSession) {
-        do {
-            _ = try recordingSessionTrashHandler(session.folderURL)
-            meetingIntelligenceCoordinator.remove(sessionID: session.id)
+    func moveSessionToTrash(_ session: RecordingSession) async {
+        let fence = workspacePublicationFence
+        let outcome = await libraryFeature.moveToTrash(session, fence: fence)
+        guard canPresentWorkspaceResult(for: fence) else { return }
+        switch outcome {
+        case .success:
             if playingSessionID == session.id { stopPlayback() }
-            sessions.removeAll { $0.id == session.id }
-            transcriptionFeature.removeProjection(for: session.id)
-            refreshSessions()
             statusMessage = "Moved \(session.displayName) to Trash"
-        } catch {
-            statusMessage = "Cannot move recording to Trash: \(error.localizedDescription)"
+        case .failure(let error): statusMessage = error.message
         }
     }
 

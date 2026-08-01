@@ -458,6 +458,14 @@ projections directly.
 `AppModelLibraryFeatureIntegrationTests.swift`; modify `AppModel.swift`,
 `RecordingsLibraryView.swift`, and affected existing Library/UI tests.
 
+**Review-bounded implementation deviation:** moving audio import behind the
+asynchronous Library boundary exposed the existing second-granularity folder
+collision as an ownership hazard. Task 3 therefore also modifies
+`RecordingSession.swift` to create one UUID-owned, no-replace import folder and
+to roll back only that newly created folder after copy or metadata failure.
+This preserves the existing import product behavior; it does not add a new
+user-facing capability.
+
 **Rollback commit:** `refactor: move library state into feature model`
 
 - [ ] Cycle 3.1 RED — owner and canonical snapshot:
@@ -784,6 +792,7 @@ while IFS= read -r changed_path; do
     docs/superpowers/plans/2026-08-01-pr-b-feature-boundaries.md|\
     Sources/RecorderApp/AppModel.swift|\
     Sources/RecorderApp/ContentView.swift|\
+    Sources/RecorderApp/RecordingSession.swift|\
     Sources/RecorderApp/RecordingModels.swift|\
     Sources/RecorderApp/PRBFeatureEvents.swift|\
     Sources/RecorderApp/PRBFeatureBoundaries.swift|\

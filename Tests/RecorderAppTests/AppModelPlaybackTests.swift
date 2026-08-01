@@ -94,7 +94,7 @@ final class AppModelPlaybackTests: XCTestCase {
                 RecordedScreenInterval(startSeconds: 0, endSeconds: 10)
             ]
         )
-        model.sessions = [session]
+        model.seedLibrarySessionsForTesting([session])
         model.play(session: session)
         await Task.yield()
 
@@ -139,7 +139,7 @@ final class AppModelPlaybackTests: XCTestCase {
             extension: "mp4",
             screenIntervals: [.init(startSeconds: 0, endSeconds: 12)]
         )
-        model.sessions = [session]
+        model.seedLibrarySessionsForTesting([session])
         let countdownFactory = CountdownPresenterFactorySpy()
         let playbackFactory = PlaybackPresenterFactorySpy()
         let navigationDriver = ContentViewNavigationDriver()

@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-struct TranscriptDocumentRevision: Equatable, Sendable {
+struct TranscriptDocumentRevision: Equatable, Hashable, Sendable {
     let sha256: String
     let byteCount: Int
 }
@@ -13,7 +13,7 @@ struct TranscriptDocumentSnapshot: Equatable, Sendable {
     let revision: TranscriptDocumentRevision
 }
 
-struct WorkspacePublicationFence: Equatable, Sendable {
+struct WorkspacePublicationFence: Equatable, Hashable, Sendable {
     static let initial = WorkspacePublicationFence(revision: 0)
 
     let revision: UInt64

@@ -304,7 +304,7 @@ final class AppModelTranscriptionTests: XCTestCase {
                 )
             }
         )
-        model.sessions = [librarySession]
+        model.seedLibrarySessionsForTesting([librarySession])
         let publishedText = "first newly searchable phrase"
         let editedText = "replacement edited searchable phrase"
         let transcriptURL = fixture.session.folderURL
@@ -351,7 +351,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             [librarySession.id]
         )
 
-        model.saveTranscript(editedText, for: publishedSession)
+        _ = await model.saveTranscript(editedText, for: publishedSession)
 
         let editedBecameSearchable = await eventually {
             RecordingLibraryQuery(text: editedText)
@@ -392,20 +392,39 @@ final class AppModelTranscriptionTests: XCTestCase {
                 .immediate(.failure(TestError.failed))
             ),
             launcher: ControlledLauncher(),
-            recordingSessionLoader: { _ in [fixture.session] },
+            // A production refresh reads the transcript from disk. Returning
+            // the immutable fixture session here made every refresh carry an
+            // intentionally stale search document, which cannot happen with
+            // RecordingSessionStore after the transcript write below.
+            recordingSessionLoader: { _ in
+                [fixture.session.replacingSearchDocument(
+                    .load(
+                        folderURL: fixture.session.folderURL,
+                        displayName: fixture.session.displayName,
+                        createdAt: fixture.session.createdAt,
+                        metadata: fixture.session.metadata
+                    )
+                )]
+            },
             recordingSearchDocumentLoader: { session in
                 searchLoader.load(session)
             }
         )
-        model.sessions = [fixture.session]
+        model.seedLibrarySessionsForTesting([fixture.session])
         let staleText = "stale transcript search term"
         let newestText = "newest transcript search term"
 
-        model.saveTranscript(staleText, for: fixture.session)
+        let staleSave = Task {
+            await model.saveTranscript(staleText, for: fixture.session)
+        }
         await fulfillment(of: [firstLoadStarted], timeout: 1)
         model.refreshSessions()
-        model.saveTranscript(newestText, for: fixture.session)
+        let newestSave = Task {
+            await model.saveTranscript(newestText, for: fixture.session)
+        }
         searchLoader.releaseFirstLoad()
+        _ = await staleSave.value
+        _ = await newestSave.value
 
         let newestDocumentWon = await eventually {
             RecordingLibraryQuery(text: newestText)
@@ -449,15 +468,18 @@ final class AppModelTranscriptionTests: XCTestCase {
                 searchLoader.load(session)
             }
         )
-        model.sessions = [fixture.session]
+        model.seedLibrarySessionsForTesting([fixture.session])
 
-        model.saveTranscript(
-            "old workspace searchable transcript",
-            for: fixture.session
-        )
+        let save = Task {
+            await model.saveTranscript(
+                "old workspace searchable transcript",
+                for: fixture.session
+            )
+        }
         await fulfillment(of: [firstLoadStarted], timeout: 1)
         model.setOutputFolder(otherWorkspace)
         searchLoader.releaseFirstLoad()
+        _ = await save.value
         for _ in 0..<100 { await Task.yield() }
 
         XCTAssertFalse(

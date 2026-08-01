@@ -119,6 +119,78 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
         XCTAssertEqual(host.editorText, "Stored transcript")
     }
 
+    func testTranscriptEditorSheetKeepsDraftOpenForFailedOrMismatchedSaveOutcome() throws {
+        for makeOutcome in [
+            { (sessionID: RecordingSession.ID) in
+                LibrarySaveOutcome.failed(
+                    sessionID: sessionID,
+                    .transcript,
+                    "Disk write failed"
+                )
+            },
+            { (sessionID: RecordingSession.ID) in
+                LibrarySaveOutcome.saved(sessionID: sessionID, .metadata)
+            }
+        ] {
+            let state = TranscriptEditorSaveLifecycleState(makeOutcome: makeOutcome)
+            let host = try TranscriptEditorSaveLifecycleHost(state: state)
+            defer { host.close() }
+
+            host.replaceEditorText(with: "Unsaved transcript draft")
+            try host.click(RecorderActionID.saveTranscript)
+
+            try host.waitUntil { state.savedTexts == ["Unsaved transcript draft"] }
+            XCTAssertTrue(state.isPresented, "Only a successful transcript artifact may dismiss the editor.")
+            XCTAssertEqual(host.editorText, "Unsaved transcript draft")
+        }
+    }
+
+    func testTranscriptEditorSheetDismissesAfterMatchingTranscriptArtifactIsSaved() throws {
+        let state = TranscriptEditorSaveLifecycleState {
+            LibrarySaveOutcome.saved(sessionID: $0, .transcript)
+        }
+        let host = try TranscriptEditorSaveLifecycleHost(state: state)
+        defer { host.close() }
+
+        host.replaceEditorText(with: "Saved transcript")
+        try host.click(RecorderActionID.saveTranscript)
+
+        try host.waitUntil { state.savedTexts == ["Saved transcript"] && !state.isPresented }
+        XCTAssertFalse(host.hasPresentedSheet)
+    }
+
+    func testMetadataSaveDispositionKeepsEditorOpenUnlessMetadataArtifactMatches() {
+        let sessionID = editorLifecycleSession().id
+        XCTAssertEqual(
+            LibraryEditorSaveDisposition.disposition(
+                for: .metadata,
+                expectedSessionID: sessionID,
+                outcome: .failed(
+                    sessionID: sessionID,
+                    .metadata,
+                    "Metadata write failed"
+                )
+            ),
+            .keepOpen
+        )
+        XCTAssertEqual(
+            LibraryEditorSaveDisposition.disposition(
+                for: .metadata,
+                expectedSessionID: sessionID,
+                outcome: .saved(sessionID: sessionID, .transcript)
+            ),
+            .keepOpen
+        )
+        XCTAssertEqual(
+            LibraryEditorSaveDisposition.disposition(
+                for: .metadata,
+                expectedSessionID: sessionID,
+                outcome: .saved(sessionID: sessionID, .metadata)
+            ),
+            .dismiss
+        )
+    }
+
     func testOpenUnsetSessionRefreshesThroughGeneratedTitlesAndProtectsManualOwnership() async throws {
         let publication = try PublicationFixture(
             metadata: .init(title: nil, titleOrigin: .unset)
@@ -380,6 +452,57 @@ private final class TranscriptDetailLifecycleState: ObservableObject {
 }
 
 @MainActor
+private final class TranscriptEditorSaveLifecycleState: ObservableObject {
+    @Published var isPresented = true
+    let session = editorLifecycleSession()
+    let makeOutcome: (RecordingSession.ID) -> LibrarySaveOutcome
+    private(set) var savedTexts: [String] = []
+
+    init(makeOutcome: @escaping (RecordingSession.ID) -> LibrarySaveOutcome) {
+        self.makeOutcome = makeOutcome
+    }
+
+    func save(_ text: String) async -> LibrarySaveOutcome {
+        savedTexts.append(text)
+        return makeOutcome(session.id)
+    }
+}
+
+@MainActor
+private struct TranscriptEditorSaveLifecycleRoot: View {
+    @ObservedObject var state: TranscriptEditorSaveLifecycleState
+
+    var body: some View {
+        Color.clear
+            .frame(width: 420, height: 280)
+            .sheet(isPresented: $state.isPresented) {
+                TranscriptEditorView(
+                    session: state.session,
+                    load: { "Stored transcript" },
+                    save: state.save,
+                    export: {},
+                    copy: {},
+                    meetingIntelligencePresentation: { _ in .empty },
+                    meetingIntelligenceActions: { _ in .init() }
+                )
+            }
+    }
+}
+
+private func editorLifecycleSession() -> RecordingSession {
+    let folder = URL(fileURLWithPath: "/tmp/editor-save-lifecycle-\(UUID().uuidString)")
+    return RecordingSession(
+        id: folder,
+        folderURL: folder,
+        recordingURL: folder.appendingPathComponent("recording.m4a"),
+        createdAt: .now,
+        duration: 12,
+        fileSize: 1,
+        metadata: .init(title: "Editor lifecycle")
+    )
+}
+
+@MainActor
 private struct TranscriptDetailLifecycleRoot: View {
     @ObservedObject var state: TranscriptDetailLifecycleState
 
@@ -389,7 +512,7 @@ private struct TranscriptDetailLifecycleRoot: View {
                 openedSession: state.openedSession,
                 allSessions: [state.session],
                 load: { "Stored transcript" },
-                save: { _ in },
+                save: { _ in .saved(sessionID: state.openedSession.id, .transcript) },
                 openFolder: {},
                 play: {},
                 export: {},
@@ -525,6 +648,119 @@ private final class TranscriptDetailLifecycleHost {
     private func allViews(startingAt view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap(allViews)
     }
+}
+
+@MainActor
+private final class TranscriptEditorSaveLifecycleHost {
+    private let hostingView: NSHostingView<TranscriptEditorSaveLifecycleRoot>
+    private let window: NSWindow
+
+    init(state: TranscriptEditorSaveLifecycleState) throws {
+        hostingView = NSHostingView(rootView: .init(state: state))
+        let frame = NSRect(x: 0, y: 0, width: 500, height: 340)
+        hostingView.frame = frame
+        window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        try waitUntil { self.sheetWindow != nil }
+    }
+
+    var hasPresentedSheet: Bool { sheetWindow != nil }
+
+    var editorText: String {
+        guard let sheetWindow else { return "" }
+        return allViews(startingAt: sheetWindow.contentView).compactMap { $0 as? NSTextView }.first?.string ?? ""
+    }
+
+    func replaceEditorText(with text: String) {
+        guard let sheetWindow,
+              let editor = allViews(startingAt: sheetWindow.contentView).compactMap({ $0 as? NSTextView }).first
+        else {
+            XCTFail("Transcript editor was not rendered in the presented sheet")
+            return
+        }
+        editor.string = text
+        editor.didChangeText()
+        render()
+    }
+
+    func click(_ identifier: String) throws {
+        guard let sheetWindow else {
+            throw LifecycleHostError.sheetNotPresented
+        }
+        let marker = try XCTUnwrap(
+            allViews(startingAt: sheetWindow.contentView).first {
+                $0.accessibilityIdentifier() == identifier
+            },
+            "Missing rendered action marker: \(identifier)"
+        )
+        let location = marker.convert(
+            NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
+            to: nil
+        )
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(
+                NSEvent.mouseEvent(
+                    with: type,
+                    location: location,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: sheetWindow.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: type == .leftMouseDown ? 1 : 0
+                )
+            )
+            sheetWindow.sendEvent(event)
+        }
+        render()
+    }
+
+    func waitUntil(
+        _ condition: () -> Bool,
+        timeout: TimeInterval = 1
+    ) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            render()
+        }
+        XCTAssertTrue(condition(), "Timed out waiting for editor sheet lifecycle transition")
+    }
+
+    func close() {
+        if let sheet = window.sheets.first {
+            window.endSheet(sheet)
+        }
+        window.orderOut(nil)
+        window.contentView = nil
+    }
+
+    private var sheetWindow: NSWindow? {
+        window.sheets.first
+    }
+
+    private func render() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        sheetWindow?.layoutIfNeeded()
+        sheetWindow?.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    private func allViews(startingAt view: NSView?) -> [NSView] {
+        guard let view else { return [] }
+        return [view] + view.subviews.flatMap { allViews(startingAt: $0) }
+    }
+}
+
+private enum LifecycleHostError: Error {
+    case sheetNotPresented
 }
 
 @MainActor

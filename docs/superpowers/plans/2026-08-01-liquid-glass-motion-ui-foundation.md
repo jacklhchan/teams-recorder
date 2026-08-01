@@ -416,7 +416,7 @@ git commit -m "feat: refine meeting intelligence presentation"
 - Consumes: the one injected existing `AIProviderSettingsModel`, its real `isTesting`, `status`, `statusIsError`, provider draft fields, Save/Test/Remove Key methods, and Task 2 primitives.
 - Produces: the approved HKT/OpenAI-compatible layouts and status motion without a second provider model, repository, draft, credential, or outcome.
 
-- [ ] **Step 1: Write RED provider render tests**
+- [x] **Step 1: Write RED provider render tests**
 
 Use the existing test-target `RecordingProviderRepository` and direct `NSHostingView<AIProviderSettingsView>`. At 860×680 and 1,280×800 assert the existing IDs render and remain reachable through the scroll/form surface. Verify HKT shows Group ID/resolved URL and hides Base URL; generic shows Base URL and hides HKT-only fields. Use a real AppKit click on Save and assert `repository.saveCount == 1`; use a blocking `ProviderConnectionTesting` fixture to assert Test becomes disabled and native waiting/status output remains visible until the real task settles.
 
@@ -429,7 +429,7 @@ try host.click(RecorderActionID.providerSave)
 XCTAssertEqual(repository.saveCount, 1)
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter AIProviderSettingsRenderTests
@@ -437,13 +437,13 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter AIP
 
 Expected: layout/marker or frame assertions fail against the current flat provider card.
 
-- [ ] **Step 3: Implement the provider composition**
+- [x] **Step 3: Implement the provider composition**
 
 Keep all bindings and actions unchanged. Compose three stable surfaces—Connection, Models, and Transcription—inside the existing Settings section. Use the exact provider names `HKT GenAI Platform` and `OpenAI-compatible API`; HKT renders Group ID plus resolved fixed endpoint, while generic renders editable API Base URL. Preserve independent ASR/LLM fields and discovered-model menus.
 
 Wrap Save and Test in one `GlassEffectContainer(spacing: 8)` primary command cluster. Save invokes `model.save()` synchronously; Test remains `Task { await model.testConnection() }`; Remove Key remains visually subordinate/destructive. Drive progress and status solely from `model.isTesting`, `model.status`, and `model.statusIsError`. Do not infer or cache a separate success outcome.
 
-- [ ] **Step 4: Run GREEN and model regressions**
+- [x] **Step 4: Run GREEN and model regressions**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'AIProviderSettingsRenderTests|AIProviderSettingsModelTests|RecorderActionIDTests'
@@ -452,7 +452,7 @@ git diff --check
 
 Expected: provider render tests pass and all existing draft switching, model discovery, cancellation generation, stale result, save, key, and validation tests remain green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Stage only the two Task 4 paths and commit:
 
@@ -478,7 +478,7 @@ git commit -m "feat: refine AI provider settings UI"
 - Consumes: the existing immutable `RecordingControllerPresentation`, the current Stop/screen-request closures, countdown seconds/cancel closure, and Task 2 glass/motion primitives.
 - Produces: directly hostable presentation-only panel content and approved compact styling. It creates no panel episode, recorder/Teams state, timer, command owner, or AppKit window lifetime.
 
-- [ ] **Step 1: Write RED direct-render and real-event tests**
+- [x] **Step 1: Write RED direct-render and real-event tests**
 
 Extract only a direct-host seam, not a second model. At 390×112 assert the active controller exposes the exact existing status, elapsed, screen-status, switch, and Stop identifiers inside bounds. Send real AppKit events to enabled Stop and assert its injected closure runs exactly once. Render finalizing with the same host seam; capture the disabled Stop and switch frames, dispatch raw `NSEvent` mouse-down/up at those frames without consulting or pre-rejecting on accessibility-enabled state, and prove neither command closure runs.
 
@@ -486,7 +486,7 @@ At 360×94 assert the countdown panel, seconds, and Cancel identifiers stay insi
 
 Because the SDK exposes `accessibilityReduceMotion` and `accessibilityReduceTransparency` as read-only environment key paths, add deterministic internal override seams that default to nil and are consumed inside the actual shared button/glass modifiers. Render each panel under normal, Reduce Motion, and Reduce Transparency overrides. Assert production-attached branch markers prove normal versus no-scale motion selection and native glass versus material+separator fallback, while all panel IDs, controls, enabled states, and frames remain unchanged. Markers must be emitted by the modifiers whose branch they observe—not by a parallel test-only fixture boolean.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecordingControllerRenderTests|TeamsAutoMeetingCountdownRenderTests'
@@ -494,7 +494,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'Re
 
 Expected: compile failure for the missing directly hostable controller seam and/or render assertions that fail against the current unstyled content.
 
-- [ ] **Step 3: Implement presentation-only compact panel content**
+- [x] **Step 3: Implement presentation-only compact panel content**
 
 Add shared internal optional Reduce Motion/Transparency override environment values for deterministic rendering; default nil must continue to read the real system environments. `RecorderMotionButtonStyle` and `RecorderGlassSurface` consume the effective values and attach non-interactive diagnostic markers for their actual normal/reduced and native/fallback branches. This is presentation/test observability only and creates no product setting.
 
@@ -502,7 +502,7 @@ Keep `RecordingControllerCoordinator`, `RecordingControllerPanelEpisode`, `Recor
 
 Make the existing countdown content directly hostable without changing its controller, content-refresh behavior, or episode. Preserve the exact 360×94 hierarchy/copy and use native compact glass for the subordinate Cancel control. Apply Liquid Glass only to panel chrome/primary controls; Reduce Transparency falls back through the shared material/separator path. Countdown/timer ticks do not reorder, reposition, pulse, move, resize, or create product progress.
 
-- [ ] **Step 4: Run GREEN and exact lifecycle regressions**
+- [x] **Step 4: Run GREEN and exact lifecycle regressions**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecordingControllerRenderTests|RecordingControllerPresentationTests|RecordingControllerPanelTests|TeamsAutoMeetingCountdownRenderTests|TeamsAutoMeetingPresentationTests|TeamsAutoMeetingCoordinatorTests|RecorderMotionPolicyTests|RecorderMotionRenderTests'
@@ -511,7 +511,7 @@ git diff --check
 
 Expected: real panel-content events, fixed-size accessibility bounds, finalizing gates, one-shot countdown cancellation, episode ordering, coordinator shutdown, and Reduce Motion/Transparency contracts all pass. Existing panel lifecycle tests are run unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Stage only the eight Task 5 paths and commit:
 
@@ -531,7 +531,7 @@ git commit -m "feat: refine floating recorder panels"
 - Consumes: the five pre-rebase UI tasks.
 - Produces: reproducible automated evidence, a locally runnable foundation preview, and an independently reviewed set of commits ready to rebase later. It does not edit PR B overlap files, merge, or push.
 
-- [ ] **Step 1: Run source and scope audits**
+- [x] **Step 1: Run source and scope audits**
 
 ```bash
 git diff --check
@@ -542,7 +542,7 @@ rg -n 'fake percentage|token count|action items|calendar|chat' Sources/RecorderA
 
 Expected: production/test changes are inside this plan's allowlist; `docs/superpowers/` contains only the approved status and plan update; playback view names have no new workspace declaration; prohibited product additions have no matches.
 
-- [ ] **Step 2: Run the complete pre-rebase automated suite**
+- [x] **Step 2: Run the complete pre-rebase automated suite**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test

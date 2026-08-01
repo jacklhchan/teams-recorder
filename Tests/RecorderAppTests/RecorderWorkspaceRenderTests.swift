@@ -418,6 +418,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         try waitUntil(timeout: 1) {
             host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceSummary)
                 && host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
+                && !host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceCancel)
         }
 
         XCTAssertTrue(host.containsAccessibilityLabel("Generated title"))
@@ -655,12 +656,20 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
     let model: AppModel
     let coordinator: MeetingIntelligenceJobCoordinator
     let feature: MeetingIntelligenceFeatureModel
-    let generationGate = RenderMeetingIntelligenceGenerationGate()
-    let generatorEntered = XCTestExpectation(description: "recordings MI generation entered")
-    let generatorFinished = XCTestExpectation(description: "recordings MI generation finished")
-    let published = XCTestExpectation(description: "recordings MI typed publication")
+    let generationGate: RenderMeetingIntelligenceGenerationGate
+    let generatorEntered: XCTestExpectation
+    let generatorFinished: XCTestExpectation
+    let published: XCTestExpectation
 
     init() throws {
+        let generationGate = RenderMeetingIntelligenceGenerationGate()
+        let generatorEntered = XCTestExpectation(description: "recordings MI generation entered")
+        let generatorFinished = XCTestExpectation(description: "recordings MI generation finished")
+        let published = XCTestExpectation(description: "recordings MI typed publication")
+        self.generationGate = generationGate
+        self.generatorEntered = generatorEntered
+        self.generatorFinished = generatorFinished
+        self.published = published
         workspace = FileManager.default.temporaryDirectory.appendingPathComponent(
             "recordings-mi-render-\(UUID().uuidString)",
             isDirectory: true
@@ -696,28 +705,39 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
             finished: generatorFinished,
             gate: generationGate
         )
-        coordinator = .init(
-            providerRepository: RenderMeetingIntelligenceRepository(),
-            expectedPublicationSourceID: UUID(),
-            transcriptReader: RenderMeetingIntelligenceTranscriptReader(snapshot: transcript),
-            availabilityChecker: RenderMeetingIntelligenceAvailability(),
-            generator: generator,
-            publisher: RenderMeetingIntelligencePublisher(published: published),
-            artifactStore: RenderMeetingIntelligenceArtifactStore(),
-            stateStore: RenderMeetingIntelligenceStateStore()
-        )
-        feature = .init(coordinator: coordinator)
+        let providerRepository = RenderMeetingIntelligenceRepository()
+        var retainedCoordinator: MeetingIntelligenceJobCoordinator?
+        var retainedFeature: MeetingIntelligenceFeatureModel?
         let defaultsName = "RecorderWorkspaceRenderTests.mi.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
         defaults.removePersistentDomain(forName: defaultsName)
         model = AppModel(
             defaults: defaults,
+            providerRepository: providerRepository,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
             initialOutputFolder: workspace,
-            meetingIntelligenceFeature: feature
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+                let coordinator = MeetingIntelligenceJobCoordinator(
+                    providerRepository: repository,
+                    expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
+                    transcriptReader: RenderMeetingIntelligenceTranscriptReader(snapshot: transcript),
+                    availabilityChecker: RenderMeetingIntelligenceAvailability(),
+                    generator: generator,
+                    publisher: RenderMeetingIntelligencePublisher(published: published),
+                    artifactStore: RenderMeetingIntelligenceArtifactStore(),
+                    stateStore: RenderMeetingIntelligenceStateStore()
+                )
+                let feature = MeetingIntelligenceFeatureModel(coordinator: coordinator)
+                retainedCoordinator = coordinator
+                retainedFeature = feature
+                return feature
+            }
         )
+        coordinator = try XCTUnwrap(retainedCoordinator)
+        feature = try XCTUnwrap(retainedFeature)
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
         model.seedLibrarySessionsForTesting([session])

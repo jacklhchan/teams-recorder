@@ -94,7 +94,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
                 XCTAssertFalse(frame.isEmpty)
                 XCTAssertTrue(
                     host.windowContentRect.contains(frame),
-                    "\(identifier) must remain inside the 860×680 workspace."
+                    "\(identifier) must remain inside the 860×680 workspace: \(frame)."
                 )
                 XCTAssertEqual(host.navigationState.selection, destination)
                 XCTAssertNil(host.navigationState.pendingDestination)
@@ -501,10 +501,14 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         host.select(.settings)
 
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.settings"))
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.audio"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.capture-section"))
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.recording"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("capture-mode-picker"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("teams-auto-recording-toggle"))
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.audio"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.audio-integration-section"))
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.ai-provider"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.transcription-section"))
     }
 
@@ -521,6 +525,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(
             host.containsAccessibilityIdentifier("recorder.destination.settings")
         )
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.recording"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("capture-mode-picker"))
         XCTAssertTrue(
             host.containsAccessibilityIdentifier("teams-auto-recording-toggle")
@@ -536,6 +541,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         defer { host.close() }
 
         host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.recording"))
 
         let frame = try XCTUnwrap(
             host.frame(
@@ -562,11 +568,65 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
         host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.recording"))
 
         XCTAssertFalse(try host.isEnabled("capture-mode-picker"))
         XCTAssertFalse(try host.isEnabled("recorder.settings.capture-application-picker"))
         XCTAssertFalse(try host.isEnabled("recorder.settings.capture-refresh"))
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.audio"))
         XCTAssertFalse(try host.isEnabled("recorder.settings.microphone-picker"))
+    }
+
+    func testDirectionASettingsKeepsEveryExistingControlReachable() throws {
+        let fixture = makeStartupDisabledFixture(
+            systemPermission: .granted,
+            microphonePermission: .granted
+        )
+        fixture.model.captureSelection = .init(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: "com.example.capture"
+        )
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.settings)
+
+        let expectedControls: [(String, [String])] = [
+            ("audio", [
+                "recorder.settings.capture-section",
+                "recorder.settings.microphone-picker",
+                "recorder.settings.audio-integration-section"
+            ]),
+            ("recording", [
+                "capture-mode-picker",
+                "recorder.settings.capture-application-picker",
+                "recorder.settings.capture-refresh",
+                "teams-auto-recording-toggle",
+                "teams-auto-recording-status",
+                "teams-mute-sync-status"
+            ]),
+            ("transcription", [
+                "recorder.settings.transcription-profile-status"
+            ]),
+            ("ai-provider", [RecorderActionID.providerKind]),
+            ("storage-shortcuts", [RecorderActionID.chooseOutputFolder])
+        ]
+        for (section, identifiers) in expectedControls {
+            XCTAssertTrue(host.click(
+                atAccessibilityFrame: "recorder.settings.navigation.\(section)"
+            ))
+            XCTAssertTrue(host.revealSettingsControl(
+                "recorder.settings.section.\(section)"
+            ))
+            for identifier in identifiers {
+                XCTAssertTrue(
+                    host.revealSettingsControl(identifier),
+                    "Unreachable \(section) control: \(identifier)"
+                )
+            }
+        }
     }
 
     private func assertVisibleSettingsRecoveryDeepLink(
@@ -1000,6 +1060,16 @@ final class WorkspaceHost {
     func render() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         layout()
+    }
+
+    func revealSettingsControl(_ identifier: String) -> Bool {
+        guard let marker = view(forAccessibilityIdentifier: identifier)
+            ?? view(forAccessibilityIdentifier: identifier + ".marker") else {
+            return false
+        }
+        marker.scrollToVisible(marker.bounds)
+        render()
+        return windowContentRect.contains(marker.accessibilityFrame())
     }
 
     func setColumnVisibility(_ visibility: NavigationSplitViewVisibility) {

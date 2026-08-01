@@ -107,6 +107,11 @@ struct AIProviderSettingsView: View {
             }
         }
         .padding(14)
+        .background(RecorderVisualStyle.providerCanvas)
+        .providerAccessibility(
+            RecorderSurfaceAppearance.providerDark.accessibilityIdentifier
+        )
+        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder
@@ -123,8 +128,11 @@ struct AIProviderSettingsView: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .accessibilityIdentifier(identifier)
-        .background(.background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(.separator.opacity(0.55)))
+        .background(
+            RecorderVisualStyle.providerCanvas,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(.white.opacity(0.22)))
     }
 
     @ViewBuilder

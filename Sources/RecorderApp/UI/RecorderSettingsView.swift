@@ -3,9 +3,95 @@ import SwiftUI
 
 struct RecorderSettingsView: View {
     @ObservedObject var model: AppModel
+    @State private var selectedSection: RecorderSettingsSection = .audio
 
     var body: some View {
-        Form {
+        HStack(spacing: 0) {
+            settingsRail
+            Divider()
+            selectedSectionContent
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle("Settings")
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: "recorder.destination.settings.marker"
+            )
+        )
+        .overlay(alignment: .topLeading) {
+            RecorderSettingsAccessibilityMarker(
+                identifier: "recorder.destination.settings"
+            )
+            .frame(width: 1, height: 1)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private var settingsRail: some View {
+        List(RecorderSettingsSection.allCases) { section in
+            Button {
+                selectedSection = section
+            } label: {
+                Label(section.title, systemImage: section.systemImage)
+                .contentShape(Rectangle())
+                .accessibilityIdentifier(
+                    "recorder.settings.navigation.\(section.rawValue)"
+                )
+                .background(RecorderDestinationAccessibilityMarker(
+                    identifier: "recorder.settings.navigation.\(section.rawValue).marker"
+                ).allowsHitTesting(false))
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: "recorder.settings.navigation.\(section.rawValue)"
+                ).allowsHitTesting(false))
+            }
+            .buttonStyle(.plain)
+        }
+        .listStyle(.sidebar)
+        .frame(minWidth: 176, idealWidth: 210, maxWidth: 240)
+    }
+
+    @ViewBuilder
+    private var selectedSectionContent: some View {
+        switch selectedSection {
+        case .audio:
+            sectionSurface(.audio) { audioSectionContent }
+        case .recording:
+            sectionSurface(.recording) { recordingSectionContent }
+        case .transcription:
+            sectionSurface(.transcription) { transcriptionSectionContent }
+        case .aiProvider:
+            sectionSurface(.aiProvider) {
+                AIProviderSettingsView(model: model.aiProviderSettingsModel)
+                    .accessibilityIdentifier("recorder.settings.transcription-section")
+                    .background(RecorderSettingsAccessibilityMarker(
+                        identifier: "recorder.settings.transcription-section"
+                    ))
+            }
+        case .storageShortcuts:
+            sectionSurface(.storageShortcuts) { storageAndShortcutsSectionContent }
+        }
+    }
+
+    private func sectionSurface<Content: View>(
+        _ section: RecorderSettingsSection,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ScrollView {
+            content()
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(24)
+        }
+        .background(RecorderDestinationAccessibilityMarker(
+            identifier: "recorder.settings.section.\(section.rawValue)"
+        ))
+        .background(RecorderSettingsAccessibilityMarker(
+            identifier: "recorder.settings.section.\(section.rawValue)"
+        ))
+        .accessibilityIdentifier("recorder.settings.section.\(section.rawValue)")
+    }
+
+    private var audioSectionContent: some View {
+        VStack(alignment: .leading, spacing: 20) {
             Section("Capture") {
                 PermissionStatusView(
                     systemPermission: model.systemAudioPermission,
@@ -15,7 +101,7 @@ struct RecorderSettingsView: View {
                     openSystemSettings: model.openScreenCaptureSettings,
                     openMicrophoneSettings: model.openMicrophoneSettings
                 )
-                CaptureSourceControlsView(model: model)
+                CaptureSourceControlsView(model: model, content: .audio)
             }
             .accessibilityIdentifier("recorder.settings.capture-section")
             .background(
@@ -23,45 +109,6 @@ struct RecorderSettingsView: View {
                     identifier: "recorder.settings.capture-section"
                 )
             )
-
-            Section("Teams") {
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
-                    if model.showsTeamsScreenCaptureControls {
-                        TeamsScreenCaptureControlsView(model: model)
-                    }
-                    GridRow {
-                        Label("Teams Auto Recording", systemImage: "record.circle")
-                            .font(.headline)
-                        TeamsAutoMeetingDetailView(
-                            presentation: autoMeetingPresentation,
-                            isEnabled: Binding(
-                                get: { model.teamsAutoMeetingEnabled },
-                                set: { model.setTeamsAutoMeetingEnabled($0) }
-                            )
-                        )
-                        TeamsAutoMeetingStateView(
-                            presentation: autoMeetingPresentation,
-                            cancel: model.cancelTeamsAutoMeetingCountdown
-                        )
-                    }
-                    GridRow {
-                        Label("Teams Mute Sync", systemImage: "person.2.wave.2")
-                            .font(.headline)
-                        TeamsMuteSyncDetailView(
-                            status: model.teamsMuteSyncStatus,
-                            isEnabled: Binding(
-                                get: { model.teamsMuteSyncEnabled },
-                                set: { model.setTeamsMuteSyncEnabled($0) }
-                            )
-                        )
-                        TeamsMuteSyncStateView(
-                            status: model.teamsMuteSyncStatus,
-                            retry: model.retryTeamsMuteSync,
-                            requestPairing: model.requestTeamsPairing
-                        )
-                    }
-                }
-            }
 
             Section("Audio Integration") {
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
@@ -86,25 +133,89 @@ struct RecorderSettingsView: View {
                     identifier: "recorder.settings.audio-integration-section"
                 )
             )
-
-            Section("Transcription") {
-                AIProviderSettingsView(model: model.aiProviderSettingsModel)
-            }
-            .accessibilityIdentifier("recorder.settings.transcription-section")
-            .background(
-                RecorderSettingsAccessibilityMarker(
-                    identifier: "recorder.settings.transcription-section"
-                )
-            )
         }
-        .formStyle(.grouped)
-        .navigationTitle("Settings")
-        .background(
-            RecorderDestinationAccessibilityMarker(
-                identifier: "recorder.destination.settings"
-            )
-        )
-        .accessibilityIdentifier("recorder.destination.settings")
+    }
+
+    private var recordingSectionContent: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Section("Capture") {
+                CaptureSourceControlsView(model: model, content: .recording)
+            }
+
+            Section("Teams") {
+                VStack(alignment: .leading, spacing: 16) {
+                    if model.showsTeamsScreenCaptureControls {
+                        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
+                            TeamsScreenCaptureControlsView(model: model)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Teams Auto Recording", systemImage: "record.circle")
+                            .font(.headline)
+                        TeamsAutoMeetingDetailView(
+                            presentation: autoMeetingPresentation,
+                            isEnabled: Binding(
+                                get: { model.teamsAutoMeetingEnabled },
+                                set: { model.setTeamsAutoMeetingEnabled($0) }
+                            )
+                        )
+                        TeamsAutoMeetingStateView(
+                            presentation: autoMeetingPresentation,
+                            cancel: model.cancelTeamsAutoMeetingCountdown
+                        )
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Teams Mute Sync", systemImage: "person.2.wave.2")
+                            .font(.headline)
+                        TeamsMuteSyncDetailView(
+                            status: model.teamsMuteSyncStatus,
+                            isEnabled: Binding(
+                                get: { model.teamsMuteSyncEnabled },
+                                set: { model.setTeamsMuteSyncEnabled($0) }
+                            )
+                        )
+                        TeamsMuteSyncStateView(
+                            status: model.teamsMuteSyncStatus,
+                            retry: model.retryTeamsMuteSync,
+                            requestPairing: model.requestTeamsPairing
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var transcriptionSectionContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Transcription Profile", systemImage: "text.bubble")
+                .font(.headline)
+            Text("Transcription uses the provider selected in AI Provider.")
+                .foregroundStyle(.secondary)
+            Text(model.aiProviderSettingsModel.selectedProviderKind == .hktGenAI
+                 ? "HKT GenAI Platform is selected."
+                 : "OpenAI-compatible API is selected.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityIdentifier("recorder.settings.transcription-profile-status")
+        .background(RecorderSettingsAccessibilityMarker(
+            identifier: "recorder.settings.transcription-profile-status"
+        ))
+    }
+
+    private var storageAndShortcutsSectionContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Recording Storage", systemImage: "internaldrive")
+                .font(.headline)
+            Text(model.outputFolder.path)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+            Button("Choose Output Folder", action: model.chooseOutputFolder)
+                .accessibilityIdentifier(RecorderActionID.chooseOutputFolder)
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: RecorderActionID.chooseOutputFolder
+                ))
+        }
     }
 
     private var autoMeetingPresentation: TeamsAutoMeetingPresentation {
@@ -163,12 +274,30 @@ private struct PermissionStatusView: View {
 }
 
 private struct CaptureSourceControlsView: View {
+    enum Content: Equatable {
+        case audio
+        case recording
+    }
+
     @ObservedObject var model: AppModel
+    let content: Content
     @State private var applicationSearch = ""
 
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
-            GridRow {
+            if content == .recording {
+                captureModeControls
+            }
+
+            if content == .audio {
+                microphoneControls
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var captureModeControls: some View {
+        GridRow {
                 Label("Capture", systemImage: "waveform")
                     .font(.headline)
                 Picker("Capture", selection: Binding(
@@ -187,10 +316,10 @@ private struct CaptureSourceControlsView: View {
                     )
                 )
                 .disabled(!model.sourceControlsEnabled)
-            }
+        }
 
-            if model.captureSelection.mode == .selectedApplication {
-                GridRow {
+        if model.captureSelection.mode == .selectedApplication {
+            GridRow {
                     Label("Application", systemImage: "app")
                         .font(.headline)
                     Menu {
@@ -231,28 +360,30 @@ private struct CaptureSourceControlsView: View {
                             .accessibilityLabel("Reconnect selected application audio")
                             .accessibilityIdentifier("reconnect-selected-application")
                     }
-                }
             }
+        }
+    }
 
-            GridRow {
-                Label("Microphone", systemImage: "mic").font(.headline)
-                Picker("Microphone", selection: Binding(
-                    get: { model.selectedMicDevice },
-                    set: { model.selectMicrophone($0) }
-                )) {
-                    Text("Choose microphone").tag(Optional<AudioDevice>.none)
-                    ForEach(model.devices) { device in Text(device.displayName).tag(Optional(device)) }
-                }
-                .labelsHidden().frame(minWidth: 380)
-                .accessibilityIdentifier("recorder.settings.microphone-picker")
-                .background(
-                    RecorderSettingsAccessibilityMarker(
-                        identifier: "recorder.settings.microphone-picker"
-                    )
-                )
-                .disabled(!model.sourceControlsEnabled)
-                Text(model.selectedMicDevice?.channelText ?? "Unavailable").foregroundStyle(.secondary)
+    @ViewBuilder
+    private var microphoneControls: some View {
+        GridRow {
+            Label("Microphone", systemImage: "mic").font(.headline)
+            Picker("Microphone", selection: Binding(
+                get: { model.selectedMicDevice },
+                set: { model.selectMicrophone($0) }
+            )) {
+                Text("Choose microphone").tag(Optional<AudioDevice>.none)
+                ForEach(model.devices) { device in Text(device.displayName).tag(Optional(device)) }
             }
+            .labelsHidden().frame(minWidth: 380)
+            .accessibilityIdentifier("recorder.settings.microphone-picker")
+            .background(
+                RecorderSettingsAccessibilityMarker(
+                    identifier: "recorder.settings.microphone-picker"
+                )
+            )
+            .disabled(!model.sourceControlsEnabled)
+            Text(model.selectedMicDevice?.channelText ?? "Unavailable").foregroundStyle(.secondary)
         }
     }
 
@@ -305,6 +436,11 @@ private struct TeamsAutoMeetingStateView: View {
                 .foregroundStyle(statusColor)
                 .lineLimit(1)
                 .accessibilityIdentifier("teams-auto-recording-status")
+                .background(
+                    RecorderSettingsAccessibilityMarker(
+                        identifier: "teams-auto-recording-status"
+                    )
+                )
             if presentation.showsCancel {
                 Button(action: cancel) { Image(systemName: "xmark") }
                     .buttonStyle(.bordered)
@@ -443,7 +579,7 @@ private struct VirtualMicIdentityView: View {
             Text("Local Recorder Virtual Mic").lineLimit(1)
             Text(presentation.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }
-        .frame(minWidth: 380, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

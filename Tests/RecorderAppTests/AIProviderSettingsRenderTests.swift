@@ -30,12 +30,25 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         for size in supportedSizes {
             model.selectedProviderKind = .openAICompatible
             let host = ProviderSettingsProductionHost(model: appModel, size: size)
+            host.selectSettingsSection("ai-provider")
+            XCTAssertTrue(host.reveal(RecorderActionID.providerKind))
+            XCTAssertTrue(host.reveal(
+                RecorderSurfaceAppearance.providerDark.accessibilityIdentifier
+            ))
             assertGenericProviderLocationsAreReachable(in: host)
+            XCTAssertFalse(host.reveal(RecorderActionID.providerHKTGroupID))
+            XCTAssertFalse(host.reveal(RecorderActionID.providerHKTResolvedURL))
 
             model.selectedProviderKind = .hktGenAI
             host.render()
+            host.selectSettingsSection("ai-provider")
+            XCTAssertTrue(host.reveal(RecorderActionID.providerKind))
+            XCTAssertTrue(host.reveal(
+                RecorderSurfaceAppearance.providerDark.accessibilityIdentifier
+            ))
             XCTAssertTrue(host.reveal(RecorderActionID.providerHKTGroupID))
             XCTAssertTrue(host.reveal(RecorderActionID.providerHKTResolvedURL))
+            XCTAssertFalse(host.reveal(RecorderActionID.providerBaseURL))
             assertSharedProviderLocationsAreReachable(in: host)
             host.close()
         }
@@ -144,6 +157,36 @@ private final class ProviderSettingsProductionHost {
         RunLoop.main.run(until: Date().addingTimeInterval(0.08))
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
+    }
+
+    func selectSettingsSection(_ section: String) {
+        let identifier = "recorder.settings.navigation.\(section)"
+        guard let marker = marker(for: identifier) else {
+            XCTFail("Missing settings navigation marker: \(identifier)")
+            return
+        }
+        let location = marker.convert(
+            NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
+            to: nil
+        )
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: location,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: type == .leftMouseDown ? 1 : 0
+            ) else {
+                XCTFail("Could not create settings navigation event")
+                return
+            }
+            window.sendEvent(event)
+        }
+        render()
     }
 
     func close() {

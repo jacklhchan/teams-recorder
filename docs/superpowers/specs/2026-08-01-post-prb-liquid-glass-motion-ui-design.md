@@ -1,7 +1,7 @@
 # Post-PR-B Liquid Glass and Motion UI Design
 
 **Date:** 2026-08-01
-**Status:** Draft for written review; visual direction approved in the interactive companion
+**Status:** Approved for implementation on 2026-08-01
 **Design branch:** `codex/pr7-liquid-glass-motion-ui`
 **Design base:** `6fafacf` (`refactor: add transcription feature boundary`)
 **Later integration target:** final head of `codex/refactor-library-transcription-mi-playback`

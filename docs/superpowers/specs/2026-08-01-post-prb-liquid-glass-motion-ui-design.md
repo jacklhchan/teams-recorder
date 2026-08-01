@@ -13,7 +13,8 @@
 This design brings the approved Liquid Glass workspace direction and restrained
 Apple-native motion to the current recorder product represented by Draft PR #7.
 It covers the existing Record, Recordings, transcript detail, Settings, AI
-provider, transcription, Meeting Intelligence, playback, and error states.
+provider, transcription, Meeting Intelligence, floating recording/countdown
+panels, playback, and error states.
 
 This document does not rename or replace Draft PR #7. The work starts in an
 isolated parallel branch while PR B continues to move
@@ -31,7 +32,7 @@ worktrees. No UI commit may be written into the active PR B worktree.
 
 The user approved:
 
-- the content hierarchy, controls, copy, and states shown in the six Image Gen
+- the content hierarchy, controls, copy, and states shown in the seven Image Gen
   reference frames in this spec;
 - Liquid Glass limited to navigation and primary chrome;
 - stable, opaque content surfaces for forms, transcript text, status, and
@@ -81,6 +82,16 @@ keeping both `Check Again` and the explicit `Generate` action available.
 ### Meeting Intelligence — manually protected title
 
 ![Manual title protection](assets/2026-08-01-pr7-liquid-glass-motion-ui/meeting-intelligence-manual-title.png)
+
+### Floating recording and automatic-start panels
+
+![Floating recording and Teams countdown panels](assets/2026-08-01-pr7-liquid-glass-motion-ui/floating-panels.png)
+
+The two panel sizes, control hierarchy, active/finalizing/countdown states, and
+exact visible copy are normative. The detached pressed-state callout and the
+two accessibility annotations are explanatory design-board labels, not extra
+application windows or product controls. Production retains SF Symbols and
+native macOS controls rather than reproducing any rasterized icon treatment.
 
 ## 4. Scope
 
@@ -151,6 +162,27 @@ inferred timestamp is added.
 - View motion reflects the existing settings model only. Saving a provider
   affects future jobs and does not animate or mutate an active immutable job
   snapshot.
+
+### 4.6 Floating recording and automatic-start panels
+
+- Preserve the recording controller's existing 390×112 content size and its
+  two-row hierarchy: live status/title, monospaced timer, Stop, Teams screen
+  status, and the native capture switch.
+- Preserve the automatic-start countdown's existing 360×94 content size:
+  record symbol, `Teams meeting detected`, `Recording starts in Ns`, and one
+  subordinate Cancel control.
+- Keep the current AppKit panel levels, non-activating behavior, cross-Space
+  behavior, near-pointer positioning, drag behavior, presentation episodes,
+  and close/cancel semantics. Styling never calls `orderFront`, dismisses a
+  panel, consumes cancellation, or steals focus.
+- A recording controller appears only after recording is truly active. During
+  finalization it remains visible, renders `Finalizing`, and leaves Stop and
+  screen capture disabled exactly as the existing presentation specifies.
+- Apply Liquid Glass only to the panel chrome and primary control cluster;
+  status and timer remain on stable, high-contrast system/material surfaces.
+  Reduce Transparency uses material plus separator without changing controls.
+- The external playback window remains separate and is not restyled in this
+  pre-rebase slice.
 
 ## 5. Motion Principles
 
@@ -233,6 +265,20 @@ accessibility behavior.
   cross-fades to its real success or error text.
 - A failed save or test never plays success feedback.
 
+### 6.6 Floating panels
+
+- Stop uses the same restrained press/release feedback as the main recording
+  control; it stays immediately routable while enabled and accepts no click
+  while finalizing.
+- Countdown Cancel uses a native compact glass treatment and remains
+  immediately routable. Countdown ticks may refresh the existing hosted
+  content exactly as they do today, but must not call `orderFront`, reposition,
+  move, pulse, or resize the panel.
+- Recording → Finalizing uses a short local opacity replacement. Timer and
+  screen-state updates do not animate the whole panel.
+- Reduce Motion removes press scale, movement, and draw-on effects while
+  preserving all text, SF Symbols, focus rings, and enabled states.
+
 ## 7. Motion Architecture
 
 ### 7.1 Shared presentation primitives
@@ -302,6 +348,7 @@ API changes in favor of PR B's single-owner boundaries.
 | Transcript | layout styling, draft-safe presentation, MI card and motion | transcript persistence, playback ownership, title policy |
 | Meeting Intelligence | immutable snapshot rendering and command buttons | job identity, availability, retry, cancellation, publication |
 | Provider Settings | styling and motion over the injected existing settings model | provider draft/key ownership, transport, model discovery behavior |
+| Floating panels | panel chrome, compact control styling, immutable presentation rendering, render/accessibility tests | panel lifetime, AppRuntime ownership, recording/Teams commands, placement, focus behavior, playback window |
 | Tests | pure motion tests, render tests, real-duration interaction harness | altering PR B tests to weaken ownership or lifecycle contracts |
 
 Expected overlap after the PR B rebase is limited to presentation-facing
@@ -370,6 +417,13 @@ allowlist after rebasing; production commits are path-limited to that list.
 - prove transcript drafts and external playback presentation remain stable
   through title and summary updates;
 - verify keyboard and accessibility identifiers are unchanged.
+- render the 390×112 recording controller and 360×94 countdown directly;
+  prove every existing panel identifier stays inside bounds, enabled Stop and
+  Cancel route exactly once through real AppKit events, and finalizing controls
+  admit no click;
+- prove the existing countdown episode does not reorder the panel on a tick
+  and a recording timer tick does not steal focus or recreate presentation
+  lifetime.
 
 ### 10.3 Manual staging acceptance
 
@@ -379,6 +433,8 @@ allowlist after rebasing; production commits are path-limited to that list.
 - test light and dark appearance, Reduce Transparency, and increased contrast;
 - inspect button press, provider test, ASR waiting, Meeting Intelligence
   generating, ready, failure, cancel, and retry flows;
+- inspect active recording, finalizing, and Teams automatic-start floating
+  panels on multiple Spaces without focus stealing;
 - confirm no animation delays Stop, Mute, Cancel, Save, or navigation;
 - record a non-gating Instruments observation during a 10-minute simulated
   wait to catch an obviously runaway decorative animation. Hardware-dependent

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship the low-conflict macOS 26 Liquid Glass and restrained Apple-native motion foundation, then apply it to Record, Meeting Intelligence, and provider Settings without changing feature ownership while PR B is active.
+**Goal:** Ship the low-conflict macOS 26 Liquid Glass and restrained Apple-native motion foundation, then apply it to Record, Meeting Intelligence, provider Settings, and the existing floating recording/countdown panels without changing feature ownership while PR B is active.
 
-**Architecture:** Add a small UI-only motion layer made of pure policies and immutable observed-transition comparisons, then compose it into native SwiftUI views that do not overlap PR B's active Library cutover. Recordings/transcript integration is deliberately excluded from this phase; after PR B is clean, a second implementation plan will name its final exact feature APIs and rebase allowlist before those files are edited.
+**Architecture:** Add a small UI-only motion layer made of pure policies and immutable observed-transition comparisons, then compose it into native SwiftUI views and presentation-only floating-panel content that do not overlap PR B's active Library cutover. Recordings/transcript integration is deliberately excluded from this phase; after PR B is clean, a second implementation plan will name its final exact feature APIs and rebase allowlist before those files are edited.
 
 **Tech Stack:** Swift 5.9, SwiftUI, AppKit, Combine, XCTest, macOS 26.0, native `NavigationSplitView`, `glassEffect`, `GlassEffectContainer`, and `NSHostingView` interaction tests.
 
@@ -22,6 +22,7 @@
 - Normal motion uses approximately 0.975 press scale over 80 ms, 180 ms release, 180 ms status cross-fade, and a 260 ms reveal with at most 6 points vertical travel.
 - Reduce Motion removes scale, translation, pulse, shimmer, stroke drawing, and custom continuous progress travel. It permits a 160 ms opacity cross-fade or immediate replacement.
 - Reduce Transparency replaces custom glass surfaces with system material plus a separator; it does not change hierarchy or controls.
+- Preserve the recording controller's 390×112 size and the Teams automatic-start countdown's 360×94 size, panel flags, level, positioning, cross-Space behavior, presentation episodes, drag/close behavior, and focus semantics. Floating-panel styling must not call `orderFront`, dismiss, consume cancellation, or change recording/Teams ownership.
 - The UI branch creates no `AppModel` state, coordinator, repository, provider draft, credential state, feature job identity, canonical session list, persistence path, or event bridge.
 - Do not edit `ContentView.swift`, `RecorderSettingsView.swift`, `RecordingsLibraryView.swift`, `RecorderWorkspaceRenderTests.swift`, or `MeetingIntelligenceSheetRenderTests.swift` in this phase; they are the active PR B overlap set.
 - Every production behavior change follows RED → observed expected failure → minimal GREEN → focused regression tests → path-limited commit.
@@ -41,11 +42,15 @@ This pre-rebase phase may touch only:
 - `Sources/RecorderApp/UI/RecordDashboardView.swift`
 - `Sources/RecorderApp/UI/MeetingIntelligenceSectionView.swift`
 - `Sources/RecorderApp/Views/AIProviderSettingsView.swift`
+- `Sources/RecorderApp/Views/RecordingControllerPanel.swift`
+- `Sources/RecorderApp/Views/TeamsAutoMeetingCountdownPanel.swift`
 - `Tests/RecorderAppTests/RecorderMotionPolicyTests.swift`
 - `Tests/RecorderAppTests/RecorderMotionRenderTests.swift`
 - `Tests/RecorderAppTests/MeetingIntelligencePresentationTests.swift`
 - `Tests/RecorderAppTests/MeetingIntelligenceSectionRenderTests.swift`
 - `Tests/RecorderAppTests/AIProviderSettingsRenderTests.swift`
+- `Tests/RecorderAppTests/RecordingControllerRenderTests.swift`
+- `Tests/RecorderAppTests/TeamsAutoMeetingCountdownRenderTests.swift`
 - `Tests/RecorderAppTests/RecorderActionIDTests.swift`
 
 The design status and this implementation plan may be updated under `docs/superpowers/`; `.superpowers/sdd/` contains ignored execution bookkeeping only. `Sources/RecorderApp/AppModel.swift`, feature models, coordinators, transports, repositories, persistence, capture, Teams, media, audio, and playback sources are outside the allowlist.
@@ -457,14 +462,73 @@ git commit -m "feat: refine AI provider settings UI"
 
 ---
 
-### Task 5: Foundation Verification, Visual Preview, and Review
+### Task 5: Floating Recording and Teams Countdown Panels
+
+**Files:**
+- Modify: `Sources/RecorderApp/UI/RecorderMotionPolicy.swift`
+- Modify: `Sources/RecorderApp/UI/RecorderGlass.swift`
+- Modify: `Sources/RecorderApp/UI/RecorderMotionButtonStyle.swift`
+- Modify: `Sources/RecorderApp/Views/RecordingControllerPanel.swift`
+- Modify: `Sources/RecorderApp/Views/TeamsAutoMeetingCountdownPanel.swift`
+- Modify: `Tests/RecorderAppTests/RecorderMotionRenderTests.swift`
+- Create: `Tests/RecorderAppTests/RecordingControllerRenderTests.swift`
+- Create: `Tests/RecorderAppTests/TeamsAutoMeetingCountdownRenderTests.swift`
+
+**Interfaces:**
+- Consumes: the existing immutable `RecordingControllerPresentation`, the current Stop/screen-request closures, countdown seconds/cancel closure, and Task 2 glass/motion primitives.
+- Produces: directly hostable presentation-only panel content and approved compact styling. It creates no panel episode, recorder/Teams state, timer, command owner, or AppKit window lifetime.
+
+- [ ] **Step 1: Write RED direct-render and real-event tests**
+
+Extract only a direct-host seam, not a second model. At 390×112 assert the active controller exposes the exact existing status, elapsed, screen-status, switch, and Stop identifiers inside bounds. Send real AppKit events to enabled Stop and assert its injected closure runs exactly once. Render finalizing with the same host seam; capture the disabled Stop and switch frames, dispatch raw `NSEvent` mouse-down/up at those frames without consulting or pre-rejecting on accessibility-enabled state, and prove neither command closure runs.
+
+At 360×94 assert the countdown panel, seconds, and Cancel identifiers stay inside bounds for both 8-second and 7-second fixtures. Real-click Cancel and assert exactly one invocation. Keep the existing episode test as the source of truth that a tick refresh does not call `orderFront` again; the direct render harness must not claim that production retains one `NSHostingView`, because the current controller intentionally replaces hosted content on each tick.
+
+Because the SDK exposes `accessibilityReduceMotion` and `accessibilityReduceTransparency` as read-only environment key paths, add deterministic internal override seams that default to nil and are consumed inside the actual shared button/glass modifiers. Render each panel under normal, Reduce Motion, and Reduce Transparency overrides. Assert production-attached branch markers prove normal versus no-scale motion selection and native glass versus material+separator fallback, while all panel IDs, controls, enabled states, and frames remain unchanged. Markers must be emitted by the modifiers whose branch they observe—not by a parallel test-only fixture boolean.
+
+- [ ] **Step 2: Run RED**
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecordingControllerRenderTests|TeamsAutoMeetingCountdownRenderTests'
+```
+
+Expected: compile failure for the missing directly hostable controller seam and/or render assertions that fail against the current unstyled content.
+
+- [ ] **Step 3: Implement presentation-only compact panel content**
+
+Add shared internal optional Reduce Motion/Transparency override environment values for deterministic rendering; default nil must continue to read the real system environments. `RecorderMotionButtonStyle` and `RecorderGlassSurface` consume the effective values and attach non-interactive diagnostic markers for their actual normal/reduced and native/fallback branches. This is presentation/test observability only and creates no product setting.
+
+Keep `RecordingControllerCoordinator`, `RecordingControllerPanelEpisode`, `RecordingControllerPanelPresenter`, both `NSPanel` configurations, and all AppModel calls semantically unchanged. Let the existing `TimelineView` wrapper project `RecordingControllerPresentation` and delegate rendering to an internal content view with injected Stop and screen-request closures. Use stable high-contrast row surfaces, the exact 390×112 frame, monospaced timer, existing screen tones/labels/values, and a text+symbol Stop control with the shared restrained red motion style. `Recording → Finalizing` may cross-fade the local title/control state only; it must immediately preserve the existing disabled gates.
+
+Make the existing countdown content directly hostable without changing its controller, content-refresh behavior, or episode. Preserve the exact 360×94 hierarchy/copy and use native compact glass for the subordinate Cancel control. Apply Liquid Glass only to panel chrome/primary controls; Reduce Transparency falls back through the shared material/separator path. Countdown/timer ticks do not reorder, reposition, pulse, move, resize, or create product progress.
+
+- [ ] **Step 4: Run GREEN and exact lifecycle regressions**
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecordingControllerRenderTests|RecordingControllerPresentationTests|RecordingControllerPanelTests|TeamsAutoMeetingCountdownRenderTests|TeamsAutoMeetingPresentationTests|TeamsAutoMeetingCoordinatorTests|RecorderMotionPolicyTests|RecorderMotionRenderTests'
+git diff --check
+```
+
+Expected: real panel-content events, fixed-size accessibility bounds, finalizing gates, one-shot countdown cancellation, episode ordering, coordinator shutdown, and Reduce Motion/Transparency contracts all pass. Existing panel lifecycle tests are run unchanged.
+
+- [ ] **Step 5: Commit**
+
+Stage only the eight Task 5 paths and commit:
+
+```bash
+git commit -m "feat: refine floating recorder panels"
+```
+
+---
+
+### Task 6: Foundation Verification, Visual Preview, and Review
 
 **Files:**
 - Modify only when verification reveals an in-scope defect: files in this plan's Exact File Allowlist.
 - Update: `docs/superpowers/plans/2026-08-01-liquid-glass-motion-ui-foundation.md` checkboxes after each verified task.
 
 **Interfaces:**
-- Consumes: the four pre-rebase UI tasks.
+- Consumes: the five pre-rebase UI tasks.
 - Produces: reproducible automated evidence, a locally runnable foundation preview, and an independently reviewed set of commits ready to rebase later. It does not edit PR B overlap files, merge, or push.
 
 - [ ] **Step 1: Run source and scope audits**
@@ -473,7 +537,7 @@ git commit -m "feat: refine AI provider settings UI"
 git diff --check
 git diff --name-only 1df4187...HEAD
 rg -n 'AVPlayerView|RecordingPlaybackView' Sources/RecorderApp/ContentView.swift Sources/RecorderApp/UI
-rg -n 'fake percentage|token count|action items|calendar|chat' Sources/RecorderApp/UI Sources/RecorderApp/Views/AIProviderSettingsView.swift
+rg -n 'fake percentage|token count|action items|calendar|chat' Sources/RecorderApp/UI Sources/RecorderApp/Views/AIProviderSettingsView.swift Sources/RecorderApp/Views/RecordingControllerPanel.swift Sources/RecorderApp/Views/TeamsAutoMeetingCountdownPanel.swift
 ```
 
 Expected: production/test changes are inside this plan's allowlist; `docs/superpowers/` contains only the approved status and plan update; playback view names have no new workspace declaration; prohibited product additions have no matches.
@@ -488,7 +552,7 @@ Expected: zero failures. Existing SDK deprecation warnings are recorded separate
 
 - [ ] **Step 3: Build the app and inspect the implemented foundation**
 
-Use the repository's existing build script without overwriting a non-staging installed app. Inspect Start/Stop press behavior, MI unavailable/working/ready/failure/manual-title states, HKT and generic provider settings, light/dark, Reduce Motion, Reduce Transparency, and increased contrast. Confirm Stop, Cancel, Save, Retry, provider Test, and navigation remain immediate. Treat this as pre-rebase visual evidence, not full Recordings/transcript acceptance.
+Use the repository's existing build script without overwriting a non-staging installed app. Inspect Start/Stop press behavior, MI unavailable/working/ready/failure/manual-title states, HKT and generic provider settings, active/finalizing recording controller, Teams automatic-start countdown, light/dark, Reduce Motion, Reduce Transparency, and increased contrast. Confirm floating Stop/Cancel, main Stop, Cancel, Save, Retry, provider Test, and navigation remain immediate and the panels do not steal focus. Treat this as pre-rebase visual evidence, not full Recordings/transcript acceptance.
 
 - [ ] **Step 4: Request independent whole-phase review**
 

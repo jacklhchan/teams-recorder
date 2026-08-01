@@ -553,18 +553,41 @@ Expected: zero failures. Existing SDK deprecation warnings are recorded separate
 Final pre-rebase run on 2026-08-01: 1061 tests executed, 5 skipped,
 0 failures in 25.501 seconds.
 
-- [ ] **Step 3: Build the app and inspect the implemented foundation**
+A later fresh verification rerun while the Mac was locked executed the same
+1061 tests with 5 skipped but reported 9 timeout assertions across 4 existing
+`AppModelMuteTests`. An isolated repeat reproduced the timeouts before their
+injected session loaders were reached. Those tests first run the default
+`IncompleteSessionRecovery` scan of `~/Downloads`; a bounded direct directory
+enumeration also did not return while locked and was terminated. This is
+recorded as a non-green environment/TCC-consistent rerun, not as a replacement
+for the earlier green run and not as evidence of a UI regression. No AppModel
+or overlapping PR B test file was changed in response.
+
+- [x] **Step 3: Build the app and inspect the implemented foundation**
 
 Use the repository's existing build script without overwriting a non-staging installed app. Inspect Start/Stop press behavior, MI unavailable/working/ready/failure/manual-title states, HKT and generic provider settings, active/finalizing recording controller, Teams automatic-start countdown, light/dark, Reduce Motion, Reduce Transparency, and increased contrast. Confirm floating Stop/Cancel, main Stop, Cancel, Save, Retry, provider Test, and navigation remain immediate and the panels do not steal focus. Treat this as pre-rebase visual evidence, not full Recordings/transcript acceptance.
 
-2026-08-01 progress: `scripts/build-app.sh` and
+2026-08-01 evidence: `scripts/build-app.sh` and
 `scripts/verify-app-bundle.sh` passed for the worktree-local
 `build/Local Meeting Recorder Staging.app` (`local.meeting.recorder.staging`);
-the `/Applications` installer was deliberately not used. ScreenCaptureKit
-captured production-view compositing for active recording, finalizing, and
-Teams countdown without starting a recording. The temporary export test was
-removed. The remaining desktop click-through matrix is pending because the
-Mac was locked during the staging-app inspection attempt.
+the `/Applications` installer and its running app were deliberately left
+untouched. Actual dark-mode runtime click-through used a uniquely identified,
+worktree-local UI Preview bundle whose compiled artifact disabled startup work;
+the preview-only source seam was immediately restored. Record, Recordings,
+Settings, and both generic and HKT provider destinations were inspected, with
+navigation and visible primary controls remaining reachable. No recording,
+permission grant, credential entry, or user session was created.
+
+ScreenCaptureKit production-view evidence covered active recording,
+finalizing, Teams countdown, and the MI unavailable, generating, ready,
+manual-title-protected, and failure states. A separate production
+`RecorderWorkspaceContent` render covered light appearance plus
+`accessibilityHighContrastAqua` without changing global macOS settings (1 test,
+0 failures in 1.426 seconds). Focused render tests cover the Reduce Motion and
+Reduce Transparency policy branches and the immediate Stop/Cancel/Save/Retry/
+Test action contracts. All temporary visual-export tests were removed and the
+product source was restored before recording this gate. This remains
+pre-rebase visual evidence, not full recording/transcript acceptance.
 
 - [x] **Step 4: Request independent whole-phase review**
 
@@ -582,4 +605,5 @@ Report exact branch, worktree, commits, focused/full test results, visual eviden
 
 2026-08-01 gate snapshot: PR B task
 `019fae39-ebd1-7611-8a23-de5aee74293d` remains active in its separate
-worktree. No rebase, merge, push, or PR B overlap-file edit has been attempted.
+worktree; its latest visible update is Task 4.2 TDD RED. No rebase, merge,
+push, or PR B overlap-file edit has been attempted.

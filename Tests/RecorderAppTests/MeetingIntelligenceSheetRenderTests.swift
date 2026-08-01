@@ -390,6 +390,52 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
         }
     }
 
+    func testOpenSheetDerivesSuggestedTitleProtectionFromReloadedCanonicalSession() throws {
+        let opened = session(title: "Manual title", titleOrigin: .manual)
+        let state = TranscriptDetailLifecycleState(session: opened)
+        state.meetingIntelligencePresentation = .init(
+            phase: .ready,
+            summary: "Summary",
+            suggestedTitle: "Generated title",
+            statusMessage: "Ready.",
+            model: "test-model",
+            titleIsProtected: true,
+            unavailableReason: nil
+        )
+        let host = try TranscriptDetailLifecycleHost(state: state)
+        defer { host.close() }
+
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceManualTitleProtection))
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceApplyTitle))
+        try host.click(RecorderActionID.meetingIntelligenceApplyTitle)
+        XCTAssertEqual(state.invokedActions, ["applySuggestedTitle"])
+        XCTAssertEqual(state.durableSuggestedTitleWrites, 1)
+        XCTAssertEqual(state.durableSuggestedTitlePublications, 1)
+        XCTAssertEqual(state.capturedSuggestedTitleSession?.metadata.titleOrigin, .manual)
+
+        // This is the canonical Library reload delivered by the durable title
+        // publication. The MI projection remains deliberately stale so the
+        // sheet proves it does not retain a second metadata owner.
+        state.reloadCanonicalSession(session(
+            basedOn: opened,
+            title: "Generated title",
+            titleOrigin: .meetingIntelligence
+        ))
+        host.renderWaitingForStatusTransition()
+
+        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceManualTitleProtection))
+        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceApplyTitle))
+        XCTAssertEqual(state.invokedActions, ["applySuggestedTitle"])
+
+        // This is the callback captured by the first, still-open sheet before
+        // Library publication. This render probe replays that old session and
+        // models durable-effect admission only; the production coordinator and
+        // applier no-op route is covered by the integration test.
+        state.replayCapturedSuggestedTitleApply()
+        XCTAssertEqual(state.durableSuggestedTitleWrites, 1)
+        XCTAssertEqual(state.durableSuggestedTitlePublications, 1)
+    }
+
     private func session(
         basedOn existing: RecordingSession? = nil,
         title: String? = "Transcript detail",
@@ -420,10 +466,17 @@ private final class TranscriptDetailLifecycleState: ObservableObject {
     private(set) var actionsLookupSession: RecordingSession?
     private(set) var invokedActions: [String] = []
     private(set) var invokedSessions: [RecordingSession] = []
+    private let suggestedTitleAdmission: SuggestedTitleApplyAdmission
+    private var capturedSuggestedTitleApply: (() -> Void)?
+
+    var durableSuggestedTitleWrites: Int { suggestedTitleAdmission.durableWrites }
+    var durableSuggestedTitlePublications: Int { suggestedTitleAdmission.durablePublications }
+    var capturedSuggestedTitleSession: RecordingSession? { suggestedTitleAdmission.capturedSession }
 
     init(session: RecordingSession) {
         openedSession = session
         self.session = session
+        suggestedTitleAdmission = .init(canonicalSession: session)
     }
 
     func publishUnrelatedUpdate() {
@@ -447,8 +500,49 @@ private final class TranscriptDetailLifecycleState: ObservableObject {
         actionsLookupSession = session
         invokedActions.append(action)
         invokedSessions.append(session)
+        guard action == "applySuggestedTitle" else { return }
+        let admission: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.suggestedTitleAdmission.admit(session)
+        }
+        if capturedSuggestedTitleApply == nil {
+            capturedSuggestedTitleApply = admission
+            suggestedTitleAdmission.capturedSession = session
+        }
+        admission()
     }
 
+    func reloadCanonicalSession(_ session: RecordingSession) {
+        self.session = session
+        suggestedTitleAdmission.canonicalSession = session
+    }
+
+    func replayCapturedSuggestedTitleApply() {
+        capturedSuggestedTitleApply?()
+    }
+
+}
+
+@MainActor
+/// Test-only durable-effect admission counter for the session captured by the
+/// first rendered Apply callback. Production stale-session handling is proved
+/// by `MeetingIntelligenceJobCoordinatorTests`.
+private final class SuggestedTitleApplyAdmission {
+    var canonicalSession: RecordingSession
+    var capturedSession: RecordingSession?
+    private(set) var durableWrites = 0
+    private(set) var durablePublications = 0
+
+    init(canonicalSession: RecordingSession) {
+        self.canonicalSession = canonicalSession
+    }
+
+    func admit(_ incoming: RecordingSession) {
+        guard incoming.id == canonicalSession.id else { return }
+        guard canonicalSession.metadata.titleOrigin != .meetingIntelligence else { return }
+        durableWrites += 1
+        durablePublications += 1
+    }
 }
 
 @MainActor
@@ -601,6 +695,14 @@ private final class TranscriptDetailLifecycleHost {
 
     func render() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    func renderWaitingForStatusTransition() {
+        render()
+        let duration = RecorderMotionPolicy.make(reduceMotion: false).statusDuration
+        RunLoop.main.run(until: Date().addingTimeInterval(duration + 0.05))
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
     }

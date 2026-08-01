@@ -357,13 +357,38 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         var publications: [MeetingIntelligencePublished] = []
         fixture.coordinator.onPublication = { publications.append($0) }
         let fence = WorkspacePublicationFence(revision: 18)
+        let manualSession = RecordingSession(
+            id: fixture.session.id,
+            folderURL: fixture.session.folderURL,
+            recordingURL: fixture.session.recordingURL,
+            createdAt: fixture.session.createdAt,
+            duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize,
+            metadata: .init(title: "Manual title", titleOrigin: .manual)
+        )
+        fixture.titleMetadataStore?.metadata = manualSession.metadata
+        fixture.coordinator.reload(sessions: [manualSession])
 
-        fixture.coordinator.applySuggestedTitle(for: fixture.session, workspaceFence: fence)
+        fixture.coordinator.applySuggestedTitle(for: manualSession, workspaceFence: fence)
         await fixture.waitForIdle()
-        fixture.coordinator.applySuggestedTitle(for: fixture.session, workspaceFence: .initial)
+        let reloaded = RecordingSession(
+            id: fixture.session.id,
+            folderURL: fixture.session.folderURL,
+            recordingURL: fixture.session.recordingURL,
+            createdAt: fixture.session.createdAt,
+            duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize,
+            metadata: try XCTUnwrap(fixture.titleMetadataStore?.metadata)
+        )
+        fixture.coordinator.reload(sessions: [reloaded])
+        // Replay the pre-publication callback value. The coordinator validates
+        // its identity; the applier reloads metadata under the mutation gate
+        // and rejects this stale manual capture without another write/event.
+        fixture.coordinator.applySuggestedTitle(for: manualSession, workspaceFence: .initial)
         await fixture.waitForIdle()
 
         XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(fixture.titleMetadataStore?.saveCount, 1)
         XCTAssertEqual(publications.first?.identity.kind, .explicitSuggestedTitle)
         XCTAssertEqual(publications.first?.artifact, nil)
         XCTAssertEqual(publications.first?.titleOutcome, .explicitApplied)

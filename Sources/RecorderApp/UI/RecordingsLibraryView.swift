@@ -66,7 +66,7 @@ struct RecordingsLibraryView: View {
                     featureRevision: meetingIntelligenceSnapshot.revision,
                     sessionPresentation: sessionPresentation,
                     canonicalSession: session,
-                    titleIsProtected: sessionPresentation.presentation.titleIsProtected
+                    titleIsProtected: session.metadata.titleOrigin == .manual
                 )
             },
             checkMeetingIntelligenceAvailability: model.checkMeetingIntelligenceAvailability,
@@ -403,6 +403,10 @@ struct TranscriptDetailSheetView: View {
             cancel: cancelMeetingIntelligence,
             applySuggestedTitle: applyMeetingIntelligenceSuggestedTitle
         )
+        let effectivePresentation = TranscriptDetailActionProjection.effectiveMeetingIntelligencePresentation(
+            meetingIntelligencePresentation(currentSession),
+            canonicalSession: currentSession
+        )
 
         return TranscriptEditorView(
             session: openedSession,
@@ -414,7 +418,7 @@ struct TranscriptDetailSheetView: View {
             export: export,
             copy: copy,
             editDetails: editDetails,
-            meetingIntelligencePresentation: meetingIntelligencePresentation,
+            meetingIntelligencePresentation: { _ in effectivePresentation },
             meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
             meetingIntelligenceActions: { _ in actions }
         )
@@ -430,6 +434,21 @@ enum TranscriptEditorDraft {
 }
 
 enum TranscriptDetailActionProjection {
+    static func effectiveMeetingIntelligencePresentation(
+        _ presentation: MeetingIntelligencePresentation,
+        canonicalSession: RecordingSession
+    ) -> MeetingIntelligencePresentation {
+        .init(
+            phase: presentation.phase,
+            summary: presentation.summary,
+            suggestedTitle: presentation.suggestedTitle,
+            statusMessage: presentation.statusMessage,
+            model: presentation.model,
+            titleIsProtected: canonicalSession.metadata.titleOrigin == .manual,
+            unavailableReason: presentation.unavailableReason
+        )
+    }
+
     static func current(
         opened: RecordingSession,
         allSessions: [RecordingSession]

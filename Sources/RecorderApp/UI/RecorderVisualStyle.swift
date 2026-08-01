@@ -1,5 +1,25 @@
 import SwiftUI
 
+struct RecorderSRGBColor: Equatable, Sendable {
+    let red: Int
+    let green: Int
+    let blue: Int
+
+    var hexToken: String {
+        String(format: "#%02X%02X%02X", red, green, blue)
+    }
+
+    var color: Color {
+        Color(
+            .sRGB,
+            red: Double(red) / 255,
+            green: Double(green) / 255,
+            blue: Double(blue) / 255,
+            opacity: 1
+        )
+    }
+}
+
 enum RecorderSurfaceAppearance: String, Equatable, Sendable {
     case recordingsDark = "recordings.dark"
     case providerDark = "provider.dark"
@@ -14,6 +34,28 @@ enum RecorderSurfaceAppearance: String, Equatable, Sendable {
 }
 
 enum RecorderVisualStyle {
+    // This is deliberately opaque: the branded navigation surface remains
+    // legible when Reduce Transparency substitutes system materials in cards.
+    static let sidebarGradientStops: [RecorderSRGBColor] = [
+        .init(red: 0x13, green: 0x24, blue: 0x52),
+        .init(red: 0x24, green: 0x4F, blue: 0x9E),
+        .init(red: 0x11, green: 0x2B, blue: 0x63)
+    ]
+    static let sidebarPrimaryText = RecorderSRGBColor(
+        red: 0xF5,
+        green: 0xF7,
+        blue: 0xFF
+    )
+    static let sidebarSecondaryText = RecorderSRGBColor(
+        red: 0xDD,
+        green: 0xE6,
+        blue: 0xFF
+    )
+    static let sidebarWarningText = RecorderSRGBColor(
+        red: 0xFF,
+        green: 0xD2,
+        blue: 0xB0
+    )
     static let systemAudio = Color.cyan
     static let microphone = Color.green
     static let recording = Color.red

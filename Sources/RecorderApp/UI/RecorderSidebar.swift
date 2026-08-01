@@ -44,6 +44,8 @@ struct RecorderSidebar: View {
                     )
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .foregroundStyle(RecorderVisualStyle.sidebarPrimaryText.color)
             storageCard
                 .background(
                     RecorderDestinationAccessibilityMarker(
@@ -71,10 +73,11 @@ struct RecorderSidebar: View {
         VStack(alignment: .leading, spacing: 3) {
             Label("Local Meeting Recorder", systemImage: "waveform.circle.fill")
                 .font(.headline.weight(.semibold))
+                .foregroundStyle(RecorderVisualStyle.sidebarPrimaryText.color)
             if let version {
                 Text("Version \(version)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(RecorderVisualStyle.sidebarSecondaryText.color)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -86,13 +89,18 @@ struct RecorderSidebar: View {
         VStack(alignment: .leading, spacing: 5) {
             Label("Recording location", systemImage: "folder")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(RecorderVisualStyle.sidebarSecondaryText.color)
             Text(outputFolder.lastPathComponent)
                 .font(.subheadline.weight(.medium))
                 .lineLimit(1)
+                .foregroundStyle(RecorderVisualStyle.sidebarPrimaryText.color)
             Text(storageWarning ?? "Ready to save recordings here")
                 .font(.caption)
-                .foregroundStyle(storageWarning == nil ? .secondary : RecorderVisualStyle.warning)
+                .foregroundStyle(
+                    storageWarning == nil
+                        ? RecorderVisualStyle.sidebarSecondaryText.color
+                        : RecorderVisualStyle.sidebarWarningText.color
+                )
                 .lineLimit(2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -107,9 +115,10 @@ struct RecorderSidebar: View {
 
     private var sidebarGradient: some ShapeStyle {
         LinearGradient(
-            colors: [
-                Color.accentColor.opacity(0.08),
-                Color.clear
+            stops: [
+                .init(color: RecorderVisualStyle.sidebarGradientStops[0].color, location: 0),
+                .init(color: RecorderVisualStyle.sidebarGradientStops[1].color, location: 0.5),
+                .init(color: RecorderVisualStyle.sidebarGradientStops[2].color, location: 1)
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing

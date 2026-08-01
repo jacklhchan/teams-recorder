@@ -73,6 +73,14 @@ final class LibraryFeatureModel: ObservableObject {
     /// completion has either published or failed; it never compares a large
     /// search document to infer which callback is newer.
     private var pendingDurableTickets: [RecordingSession.ID: [UUID: PendingDurableTicket]] = [:]
+    /// Cleanup runs outside the main actor. Reserve the physical artifact
+    /// before crossing that boundary so a refresh cannot adopt an import in
+    /// the check-to-cleanup interval.
+    private var importedCleanupReservations: Set<String> = []
+    /// A loader can read an artifact while cleanup is in flight, then return
+    /// after the reservation is released. Keep that stale result suppressed
+    /// until a later scan of the same workspace confirms the artifact absent.
+    private var importedCleanupSuppressions: [String: String] = [:]
     /// A second request must not race the first handler invocation. The
     /// membership check below also prevents a completed tombstone from being
     /// emitted twice.
@@ -161,8 +169,20 @@ final class LibraryFeatureModel: ObservableObject {
                     return
                 }
                 var visibleLoaded = self.canonicalizedSessions(loaded)
-                    .filter { !self.tombstones.contains($0.id) }
+                self.clearImportedCleanupSuppressionsObservedAbsent(
+                    from: visibleLoaded,
+                    workspace: folder
+                )
+                visibleLoaded = visibleLoaded.filter {
+                    !self.tombstones.contains($0.id)
+                        && !self.importedCleanupReservations.contains(self.cleanupArtifactKey($0))
+                        && self.importedCleanupSuppressions[self.cleanupArtifactKey($0)] == nil
+                }
                 self.reconcilePendingDurableTickets(into: &visibleLoaded)
+                visibleLoaded.removeAll {
+                    self.importedCleanupReservations.contains(self.cleanupArtifactKey($0))
+                        || self.importedCleanupSuppressions[self.cleanupArtifactKey($0)] != nil
+                }
                 let visibleIDs = Set(visibleLoaded.map(\.id))
                 let visibleStates = states.filter { visibleIDs.contains($0.key) }
                 if self.publish(visibleLoaded, semanticMutation: false)
@@ -194,6 +214,8 @@ final class LibraryFeatureModel: ObservableObject {
         workspace = nil
         workspaceFence = nil
         pendingDurableTickets.removeAll()
+        importedCleanupReservations.removeAll()
+        importedCleanupSuppressions.removeAll()
         onSessionsLoaded = nil
         onTranscriptPublicationCommitted = nil
         onTranscriptEdited = nil
@@ -218,8 +240,13 @@ final class LibraryFeatureModel: ObservableObject {
         guard hasCanonicalPhysicalPaths(event.session) else { return }
         let session = canonicalized(event.session)
         guard admits(session: session, fence: event.workspaceFence),
-              isCanonicalMember(session) else { return }
-        let ticket = beginPendingDurableTicket(for: session, kind: .transcriptPublication)
+              isCanonicalMember(session),
+              let workspaceSnapshot = activeWorkspaceSnapshot(),
+              let ticket = beginPendingDurableTicket(
+                for: session,
+                kind: .transcriptPublication,
+                workspaceSnapshot: workspaceSnapshot
+              ) else { return }
         Task { [weak self] in
             guard let self,
                   await self.rebuildSearchDocument(
@@ -253,6 +280,9 @@ final class LibraryFeatureModel: ObservableObject {
         guard admits(session: session, fence: fence), isCanonicalMember(session) else {
             return .failed(sessionID: session.id, .transcript, "The recording workspace changed before the transcript could be saved.")
         }
+        guard let initiatingWorkspaceSnapshot = activeWorkspaceSnapshot() else {
+            return .failed(sessionID: session.id, .transcript, "The recording workspace changed before the transcript could be saved.")
+        }
         do {
             let gate = mutationGate
             let folder = session.folderURL
@@ -264,7 +294,16 @@ final class LibraryFeatureModel: ObservableObject {
         } catch {
             return .failed(sessionID: session.id, .transcript, "Cannot save transcript: \(error.localizedDescription)")
         }
-        let ticket = beginPendingDurableTicket(for: session, kind: .transcript)
+        guard isWorkspaceSnapshotActive(initiatingWorkspaceSnapshot),
+              admits(session: session, fence: fence),
+              isCanonicalMember(session),
+              let ticket = beginPendingDurableTicket(
+                for: session,
+                kind: .transcript,
+                workspaceSnapshot: initiatingWorkspaceSnapshot
+              ) else {
+            return .failed(sessionID: session.id, .transcript, "The recording workspace changed before the transcript could be indexed.")
+        }
         guard await rebuildSearchDocument(
             for: session,
             fence: fence,
@@ -296,6 +335,9 @@ final class LibraryFeatureModel: ObservableObject {
         guard admits(session: session, fence: fence), isCanonicalMember(session) else {
             return .failed(sessionID: session.id, .metadata, "The recording workspace changed before details could be saved.")
         }
+        guard let initiatingWorkspaceSnapshot = activeWorkspaceSnapshot() else {
+            return .failed(sessionID: session.id, .metadata, "The recording workspace changed before details could be saved.")
+        }
         do {
             let gate = mutationGate
             let folder = session.folderURL
@@ -313,7 +355,16 @@ final class LibraryFeatureModel: ObservableObject {
         } catch {
             return .failed(sessionID: session.id, .metadata, "Cannot save recording details: \(error.localizedDescription)")
         }
-        let ticket = beginPendingDurableTicket(for: session, kind: .metadata)
+        guard isWorkspaceSnapshotActive(initiatingWorkspaceSnapshot),
+              admits(session: session, fence: fence),
+              isCanonicalMember(session),
+              let ticket = beginPendingDurableTicket(
+                for: session,
+                kind: .metadata,
+                workspaceSnapshot: initiatingWorkspaceSnapshot
+              ) else {
+            return .failed(sessionID: session.id, .metadata, "The recording workspace changed before details could be indexed.")
+        }
         guard await reload(
             session,
             fence: fence,
@@ -338,8 +389,14 @@ final class LibraryFeatureModel: ObservableObject {
         fence: WorkspacePublicationFence
     ) {
         let session = canonicalized(inputSession)
-        guard admits(session: session, fence: fence), isCanonicalMember(session) else { return }
-        let ticket = beginPendingDurableTicket(for: session, kind: .metadata)
+        guard admits(session: session, fence: fence),
+              isCanonicalMember(session),
+              let workspaceSnapshot = activeWorkspaceSnapshot(),
+              let ticket = beginPendingDurableTicket(
+                for: session,
+                kind: .metadata,
+                workspaceSnapshot: workspaceSnapshot
+              ) else { return }
         Task { [weak self] in
             guard let self else { return }
             _ = await self.reload(
@@ -360,6 +417,7 @@ final class LibraryFeatureModel: ObservableObject {
         guard admits(folder: workspace, fence: fence) else {
             return .failure(.init(message: "The recording workspace changed before audio could be imported."))
         }
+        let initiatingWorkspaceSnapshot = LibraryWorkspaceSnapshot(folder: workspace, fence: fence)
         do {
             let importer = audioImporter
             let imported = try await Task.detached {
@@ -368,10 +426,17 @@ final class LibraryFeatureModel: ObservableObject {
             let session = canonicalized(imported)
             guard admits(session: session, fence: fence),
                   self.session(withID: session.id) == nil || isCanonicalMember(session) else {
-                await cleanupImported(session, workspace: workspace)
+                await cleanupImportedIfStillOwned(session, workspace: workspace, ticket: nil)
                 return .failure(.init(message: "The recording workspace changed before audio could be imported."))
             }
-            let ticket = beginPendingDurableTicket(for: session, kind: .importedAudio)
+            guard let ticket = beginPendingDurableTicket(
+                for: session,
+                kind: .importedAudio,
+                workspaceSnapshot: initiatingWorkspaceSnapshot
+            ) else {
+                await cleanupImportedIfStillOwned(session, workspace: workspace, ticket: nil)
+                return .failure(.init(message: "The recording workspace changed before audio could be imported."))
+            }
             guard let indexed = await loadedSearchDocument(
                 for: session,
                 fence: fence,
@@ -413,7 +478,14 @@ final class LibraryFeatureModel: ObservableObject {
         }
         trashInFlight.insert(session.id)
         defer { trashInFlight.remove(session.id) }
-        let ticket = beginPendingDurableTicket(for: session, kind: .trash)
+        guard let workspaceSnapshot = activeWorkspaceSnapshot(),
+              let ticket = beginPendingDurableTicket(
+                for: session,
+                kind: .trash,
+                workspaceSnapshot: workspaceSnapshot
+              ) else {
+            return .failure(.init(message: "The recording workspace changed before it could be moved to Trash."))
+        }
         do {
             let handler = trashHandler
             let didMove = try await Task.detached {
@@ -637,35 +709,47 @@ final class LibraryFeatureModel: ObservableObject {
     }
 
     private func cleanupImported(_ session: RecordingSession, workspace: URL) async {
+        let session = canonicalized(session)
+        let artifactKey = cleanupArtifactKey(session)
+        guard importedCleanupReservations.insert(artifactKey).inserted else { return }
         let cleanup = importedSessionCleanup
         await Task.detached { cleanup(session, workspace) }.value
+        importedCleanupReservations.remove(artifactKey)
+        importedCleanupSuppressions[artifactKey] = RecordingLibraryURLIdentity.normalized(workspace).path
+        // A refresh that was already queued before the reservation was
+        // installed must not leave a deleted artifact in the snapshot.
+        if !isShutdown, snapshot.sessions.contains(where: { $0.id == session.id }) {
+            publish(snapshot.sessions.filter { $0.id != session.id }, semanticMutation: true)
+        }
     }
 
     private func cleanupImportedIfStillOwned(
         _ session: RecordingSession,
         workspace: URL,
-        ticket: PendingDurableTicket
+        ticket: PendingDurableTicket?
     ) async {
-        guard containsPendingDurableTicket(ticket) else { return }
-        guard !isTicketActive(ticket) || matchingCanonicalArtifact(for: session) == nil else {
-            return
-        }
+        guard !isShutdown else { return }
+        // A refresh for a newer fence may have already adopted this exact
+        // physical artifact. The old importer must then never remove it,
+        // regardless of whether its own ticket is still active.
+        guard matchingCanonicalArtifact(for: session) == nil else { return }
+        if let ticket, !containsPendingDurableTicket(ticket) { return }
         await cleanupImported(session, workspace: workspace)
     }
 
     private func beginPendingDurableTicket(
         for input: RecordingSession,
-        kind: PendingDurableKind
-    ) -> PendingDurableTicket {
+        kind: PendingDurableKind,
+        workspaceSnapshot: LibraryWorkspaceSnapshot
+    ) -> PendingDurableTicket? {
         let session = canonicalized(input)
-        guard let workspace, let workspaceFence else {
-            preconditionFailure("A durable ticket requires an active workspace.")
-        }
+        guard isWorkspaceSnapshotActive(workspaceSnapshot),
+              admits(session: session, fence: workspaceSnapshot.fence) else { return nil }
         let ticket = PendingDurableTicket(
             id: UUID(),
             session: session,
             kind: kind,
-            workspaceSnapshot: .init(folder: workspace, fence: workspaceFence)
+            workspaceSnapshot: workspaceSnapshot
         )
         pendingDurableTickets[session.id, default: [:]][ticket.id] = ticket
         return ticket
@@ -700,6 +784,9 @@ final class LibraryFeatureModel: ObservableObject {
     private func reconcilePendingDurableTickets(into loaded: inout [RecordingSession]) {
         let tickets = pendingDurableTickets.values.flatMap(\.values)
         for ticket in tickets where isTicketActive(ticket) {
+            let artifactKey = cleanupArtifactKey(ticket.session)
+            guard !importedCleanupReservations.contains(artifactKey),
+                  importedCleanupSuppressions[artifactKey] == nil else { continue }
             var observed = ticket
             observed.wasObservedByRefresh = true
             pendingDurableTickets[observed.session.id]?[observed.id] = observed
@@ -716,8 +803,31 @@ final class LibraryFeatureModel: ObservableObject {
     }
 
     private func isTicketActive(_ ticket: PendingDurableTicket) -> Bool {
-        guard let workspace, let workspaceFence else { return false }
-        return ticket.workspaceSnapshot == .init(folder: workspace, fence: workspaceFence)
+        isWorkspaceSnapshotActive(ticket.workspaceSnapshot)
+    }
+
+    private func clearImportedCleanupSuppressionsObservedAbsent(
+        from loaded: [RecordingSession],
+        workspace: URL
+    ) {
+        let workspacePath = RecordingLibraryURLIdentity.normalized(workspace).path
+        let loadedKeys = Set(loaded.map(cleanupArtifactKey))
+        importedCleanupSuppressions = importedCleanupSuppressions.filter { artifactKey, cleanupWorkspacePath in
+            cleanupWorkspacePath != workspacePath || loadedKeys.contains(artifactKey)
+        }
+    }
+
+    private func cleanupArtifactKey(_ session: RecordingSession) -> String {
+        RecordingLibraryURLIdentity.normalized(session.folderURL).path
+    }
+
+    private func activeWorkspaceSnapshot() -> LibraryWorkspaceSnapshot? {
+        guard !isShutdown, let workspace, let workspaceFence else { return nil }
+        return .init(folder: workspace, fence: workspaceFence)
+    }
+
+    private func isWorkspaceSnapshotActive(_ workspaceSnapshot: LibraryWorkspaceSnapshot) -> Bool {
+        activeWorkspaceSnapshot() == workspaceSnapshot
     }
 
     private func hasCanonicalPhysicalPaths(_ session: RecordingSession) -> Bool {

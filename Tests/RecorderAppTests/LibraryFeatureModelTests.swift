@@ -827,6 +827,70 @@ final class LibraryFeatureModelTests: XCTestCase {
         XCTAssertTrue(offMain.value)
     }
 
+    func testTranscriptSaveReturnsWorkspaceFailureWhenShutdownDuringDurableWrite() async throws {
+        let folder = try LibraryFeatureFixture.makeDiskSession(named: "transcript-shutdown-write")
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let session = LibraryFeatureFixture.diskSession(folder: folder)
+        let blocker = ImportBlocker()
+        defer { blocker.release() }
+        let gate = RecordingSessionMutationGate { blocker.wait() }
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in [session] }, sessionReloader: { $0 },
+            searchDocumentLoader: { $0.searchDocument }, recovery: { _ in }, trashHandler: { _ in true },
+            mutationGate: gate
+        )
+        feature.seedCanonicalSessionsForTesting(
+            [session], workspace: folder.deletingLastPathComponent(), fence: .initial
+        )
+        let writeStarted = expectation(description: "transcript durable write started")
+        blocker.onBlocked = { writeStarted.fulfill() }
+
+        let save = Task { await feature.saveTranscript("persisted", for: session, fence: .initial) }
+        await fulfillment(of: [writeStarted], timeout: 1)
+        feature.shutdown()
+        blocker.release()
+
+        let outcome = await save.value
+        XCTAssertEqual(
+            outcome,
+            .failed(sessionID: session.id, .transcript, "The recording workspace changed before the transcript could be indexed.")
+        )
+    }
+
+    func testMetadataSaveReturnsWorkspaceFailureWhenWorkspaceAdvancesDuringDurableWrite() async throws {
+        let folder = try LibraryFeatureFixture.makeDiskSession(named: "metadata-workspace-write")
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let session = LibraryFeatureFixture.diskSession(folder: folder)
+        let blocker = ImportBlocker()
+        defer { blocker.release() }
+        let gate = RecordingSessionMutationGate { blocker.wait() }
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in [session] }, sessionReloader: { $0 },
+            searchDocumentLoader: { $0.searchDocument }, recovery: { _ in }, trashHandler: { _ in true },
+            mutationGate: gate
+        )
+        let workspace = folder.deletingLastPathComponent()
+        feature.seedCanonicalSessionsForTesting([session], workspace: workspace, fence: .initial)
+        let writeStarted = expectation(description: "metadata durable write started")
+        blocker.onBlocked = { writeStarted.fulfill() }
+
+        let save = Task {
+            await feature.saveMetadata(
+                titleEdit: .manual("Updated"), tags: "tag", isFavorite: true,
+                for: session, fence: .initial
+            )
+        }
+        await fulfillment(of: [writeStarted], timeout: 1)
+        feature.refresh(workspace: workspace, fence: .initial.advanced())
+        blocker.release()
+
+        let outcome = await save.value
+        XCTAssertEqual(
+            outcome,
+            .failed(sessionID: session.id, .metadata, "The recording workspace changed before details could be indexed.")
+        )
+    }
+
     func testSameWorkspaceRefreshDoesNotCancelPersistedTranscriptIndexing() async throws {
         let folder = try LibraryFeatureFixture.makeDiskSession(named: "transcript-refresh-race")
         defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
@@ -1243,6 +1307,57 @@ final class LibraryFeatureModelTests: XCTestCase {
         XCTAssertTrue(feature.sessions.isEmpty)
     }
 
+    func testAdvancedFenceRefreshAdoptsImportedArtifactWithoutCleaningItAfterOldTicketCompletes() async throws {
+        let root = try LibraryFeatureFixture.temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let importedFolder = root.appendingPathComponent("adopted-import", isDirectory: true)
+        try FileManager.default.createDirectory(at: importedFolder, withIntermediateDirectories: true)
+        let imported = RecordingSession(
+            id: importedFolder,
+            folderURL: importedFolder,
+            recordingURL: importedFolder.appendingPathComponent("recording.m4a"),
+            createdAt: .now,
+            duration: 1,
+            fileSize: 1,
+            metadata: .init(title: "Imported")
+        )
+        let blocker = SearchLoadBlocker()
+        defer { blocker.releaseFirst() }
+        let cleanupCalls = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in [imported] },
+            sessionReloader: { $0 },
+            searchDocumentLoader: { blocker.load($0) },
+            recovery: { _ in },
+            trashHandler: { _ in true },
+            audioImporter: { _, _ in imported },
+            importedSessionCleanup: { _, _ in cleanupCalls.increment() }
+        )
+        feature.seedCanonicalSessionsForTesting([], workspace: root, fence: .initial)
+        let indexingStarted = expectation(description: "old import ticket begins indexing")
+        blocker.onFirstBlocked = { indexingStarted.fulfill() }
+        let adopted = expectation(description: "advanced fence refresh adopts imported canonical session")
+        feature.onSessionsLoaded = { snapshot in
+            if snapshot.sessions.map(\.id) == [RecordingLibraryURLIdentity.normalized(imported.id)] {
+                adopted.fulfill()
+            }
+        }
+
+        let importing = Task {
+            await feature.importAudio(root.appendingPathComponent("source.m4a"), workspace: root, fence: .initial)
+        }
+        await fulfillment(of: [indexingStarted], timeout: 1)
+        feature.refresh(workspace: root, fence: .initial.advanced())
+        await fulfillment(of: [adopted], timeout: 1)
+        blocker.releaseFirst()
+
+        guard case .failure = await importing.value else {
+            return XCTFail("the old fence import must report stale after the fence advances")
+        }
+        XCTAssertEqual(cleanupCalls.value, 0)
+        XCTAssertEqual(feature.sessions.map(\.id), [RecordingLibraryURLIdentity.normalized(imported.id)])
+    }
+
     func testAliasTranscriptPublicationIsRejectedBeforeCanonicalAdmission() async throws {
         let root = try LibraryFeatureFixture.temporaryFolder()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1492,6 +1607,178 @@ final class LibraryFeatureModelTests: XCTestCase {
         guard case .failure = await task.value else { return XCTFail("stale import must fail") }
         await fulfillment(of: [cleaned], timeout: 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: importedFolder.path))
+        XCTAssertTrue(feature.sessions.isEmpty)
+    }
+
+    func testAdvancedFenceRefreshAdoptsArtifactWhileImporterIsBlockedWithoutOldFlowCleaningIt() async throws {
+        let root = try LibraryFeatureFixture.temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.m4a")
+        try Data([1]).write(to: source)
+        let importedFolder = root.appendingPathComponent("import-visible-before-return", isDirectory: true)
+        let imported = RecordingSession(
+            id: importedFolder, folderURL: importedFolder,
+            recordingURL: importedFolder.appendingPathComponent("recording.m4a"),
+            createdAt: .now, duration: 1, fileSize: 1, metadata: .init(title: "Imported")
+        )
+        let importer = ImportBlocker()
+        defer { importer.release() }
+        let cleanupCalls = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in
+                FileManager.default.fileExists(atPath: importedFolder.path) ? [imported] : []
+            },
+            sessionReloader: { $0 }, searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in }, trashHandler: { _ in true },
+            audioImporter: { _, _ in
+                try FileManager.default.createDirectory(at: importedFolder, withIntermediateDirectories: true)
+                importer.wait()
+                return imported
+            },
+            importedSessionCleanup: { _, _ in cleanupCalls.increment() }
+        )
+        feature.seedCanonicalSessionsForTesting([], workspace: root, fence: .initial)
+        let importerStarted = expectation(description: "importer creates its artifact then blocks")
+        importer.onBlocked = { importerStarted.fulfill() }
+        let adopted = expectation(description: "advanced fence refresh adopts artifact")
+        feature.onSessionsLoaded = { snapshot in
+            if snapshot.sessions.map(\.id) == [RecordingLibraryURLIdentity.normalized(imported.id)] {
+                adopted.fulfill()
+            }
+        }
+
+        let importing = Task { await feature.importAudio(source, workspace: root, fence: .initial) }
+        await fulfillment(of: [importerStarted], timeout: 1)
+        feature.refresh(workspace: root, fence: .initial.advanced())
+        await fulfillment(of: [adopted], timeout: 1)
+        importer.release()
+
+        guard case .failure = await importing.value else {
+            return XCTFail("the old-fence importer must fail after the fence advances")
+        }
+        XCTAssertEqual(cleanupCalls.value, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: importedFolder.path))
+        XCTAssertEqual(feature.sessions.map(\.id), [RecordingLibraryURLIdentity.normalized(imported.id)])
+    }
+
+    func testShutdownWhileImporterIsBlockedLeavesUnpublishedArtifactForNextScanWithoutCleanupOrEvents() async throws {
+        let root = try LibraryFeatureFixture.temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.m4a")
+        try Data([1]).write(to: source)
+        let importedFolder = root.appendingPathComponent("orphan-after-shutdown", isDirectory: true)
+        let imported = RecordingSession(
+            id: importedFolder, folderURL: importedFolder,
+            recordingURL: importedFolder.appendingPathComponent("recording.m4a"),
+            createdAt: .now, duration: 1, fileSize: 1, metadata: .init()
+        )
+        let importer = ImportBlocker()
+        defer { importer.release() }
+        let cleanupCalls = LockedCounter()
+        let importedEvents = LockedCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in [] }, sessionReloader: { $0 },
+            searchDocumentLoader: { $0.searchDocument }, recovery: { _ in }, trashHandler: { _ in true },
+            audioImporter: { _, _ in
+                try FileManager.default.createDirectory(at: importedFolder, withIntermediateDirectories: true)
+                importer.wait()
+                return imported
+            },
+            importedSessionCleanup: { _, _ in cleanupCalls.increment() }
+        )
+        feature.seedCanonicalSessionsForTesting([], workspace: root, fence: .initial)
+        feature.onImportedAudioReady = { _ in importedEvents.increment() }
+        let importerStarted = expectation(description: "importer blocks before publication")
+        importer.onBlocked = { importerStarted.fulfill() }
+
+        let importing = Task { await feature.importAudio(source, workspace: root, fence: .initial) }
+        await fulfillment(of: [importerStarted], timeout: 1)
+        feature.shutdown()
+        importer.release()
+
+        guard case .failure = await importing.value else {
+            return XCTFail("shutdown must reject the late import")
+        }
+        XCTAssertEqual(cleanupCalls.value, 0)
+        XCTAssertEqual(importedEvents.value, 0)
+        XCTAssertTrue(feature.snapshot.sessions.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: importedFolder.path))
+    }
+
+    func testRefreshCannotAdoptAnArtifactWhileItsStaleImportCleanupIsInFlight() async throws {
+        let root = try LibraryFeatureFixture.temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let otherWorkspace = root.appendingPathComponent("other", isDirectory: true)
+        try FileManager.default.createDirectory(at: otherWorkspace, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("source.m4a")
+        try Data([1]).write(to: source)
+        let importedFolder = root.appendingPathComponent("cleanup-reserved", isDirectory: true)
+        let imported = RecordingSession(
+            id: importedFolder, folderURL: importedFolder,
+            recordingURL: importedFolder.appendingPathComponent("recording.m4a"),
+            createdAt: .now, duration: 1, fileSize: 1, metadata: .init(title: "Reserved")
+        )
+        let indexer = SearchLoadBlocker()
+        let cleanup = ImportBlocker()
+        let staleRefreshLoader = RefreshLoadSequencer(results: [[imported], []], blockOnCall: 1)
+        defer { indexer.releaseFirst(); cleanup.release(); staleRefreshLoader.release() }
+        let normalizedRoot = RecordingLibraryURLIdentity.normalized(root)
+        let feature = LibraryFeatureModel(
+            sessionLoader: { workspace in
+                RecordingLibraryURLIdentity.normalized(workspace) == normalizedRoot
+                    ? staleRefreshLoader.load()
+                    : []
+            },
+            sessionReloader: { $0 }, searchDocumentLoader: { indexer.load($0) },
+            recovery: { _ in }, trashHandler: { _ in true },
+            audioImporter: { _, _ in
+                try FileManager.default.createDirectory(at: importedFolder, withIntermediateDirectories: true)
+                return imported
+            },
+            importedSessionCleanup: { session, _ in
+                cleanup.wait()
+                try? FileManager.default.removeItem(at: session.folderURL)
+            }
+        )
+        feature.seedCanonicalSessionsForTesting([], workspace: root, fence: .initial)
+        let indexingStarted = expectation(description: "import indexing is blocked")
+        indexer.onFirstBlocked = { indexingStarted.fulfill() }
+        let cleanupStarted = expectation(description: "stale cleanup reservation is active")
+        cleanup.onBlocked = { cleanupStarted.fulfill() }
+        let importing = Task { await feature.importAudio(source, workspace: root, fence: .initial) }
+        await fulfillment(of: [indexingStarted], timeout: 1)
+
+        feature.clearForWorkspaceChange()
+        feature.refresh(workspace: otherWorkspace, fence: .initial.advanced())
+        indexer.releaseFirst()
+        await fulfillment(of: [cleanupStarted], timeout: 1)
+
+        let reservationRefresh = expectation(description: "refresh cannot publish cleanup-reserved artifact")
+        feature.onSessionsLoaded = { snapshot in
+            if snapshot.sessions.isEmpty { reservationRefresh.fulfill() }
+        }
+        let returnedFence = WorkspacePublicationFence.initial.advanced().advanced()
+        feature.refresh(workspace: root, fence: returnedFence)
+        XCTAssertTrue(
+            staleRefreshLoader.waitUntilBlocked(),
+            "the loader must read the artifact before stale cleanup finishes"
+        )
+
+        cleanup.release()
+        guard case .failure = await importing.value else {
+            return XCTFail("the stale import must fail after cleanup")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: importedFolder.path))
+        staleRefreshLoader.release()
+        await fulfillment(of: [reservationRefresh], timeout: 1)
+        XCTAssertTrue(feature.sessions.isEmpty)
+
+        let afterCleanupRefresh = expectation(description: "cleanup completion leaves no ghost projection")
+        feature.onSessionsLoaded = { snapshot in
+            if snapshot.sessions.isEmpty { afterCleanupRefresh.fulfill() }
+        }
+        feature.refresh(workspace: root, fence: returnedFence)
+        await fulfillment(of: [afterCleanupRefresh], timeout: 1)
         XCTAssertTrue(feature.sessions.isEmpty)
     }
 

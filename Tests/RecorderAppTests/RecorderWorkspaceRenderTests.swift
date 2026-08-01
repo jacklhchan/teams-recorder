@@ -48,6 +48,29 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertFalse(host.containsView(named: "RecordingPlaybackView"))
     }
 
+    func testRecordingsKeepsNativeControlsDarkInsideALightSystemAndRestoresTranscriptLight() throws {
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+        defer { fixture.remove() }
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800),
+            systemColorScheme: .light
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        XCTAssertEqual(host.colorSchemeAppearance(for: "recorder.destination.recordings"), .darkAqua)
+        XCTAssertEqual(host.nativeButtonColorSchemeAppearance(for: "recorder.row.card.\(rowID)"), .darkAqua)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
+        XCTAssertEqual(host.nativeButtonColorSchemeAppearance(for: "recorder.row.open.\(rowID)"), .darkAqua)
+
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(
+            RecorderSurfaceAppearance.transcriptLight.accessibilityIdentifier
+        ))
+    }
+
     func testDirectionARecordingsCardsAllowExactlyOneExpandedSession() throws {
         let fixture = try RecordingsMeetingIntelligenceRenderFixture()
         defer { fixture.remove() }
@@ -595,6 +618,9 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             host.containsAccessibilityIdentifier(statusIdentifier)
                 && host.containsAccessibilityLabel(message)
         }
+        XCTAssertTrue(host.containsAccessibilityIdentifier(
+            "recorder.surface.recordings.status.dark"
+        ))
         XCTAssertEqual(
             appModelChanges,
             0,
@@ -987,8 +1013,16 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(satisfied, "Timed out waiting for \(message)")
     }
 
-    private func makeWorkspaceHost(model: AppModel, size: CGSize) throws -> WorkspaceHost {
-        try WorkspaceHost(model: model, size: size)
+    private func makeWorkspaceHost(
+        model: AppModel,
+        size: CGSize,
+        systemColorScheme: ColorScheme? = nil
+    ) throws -> WorkspaceHost {
+        try WorkspaceHost(
+            model: model,
+            size: size,
+            systemColorScheme: systemColorScheme
+        )
     }
 }
 
@@ -1150,8 +1184,17 @@ private struct WorkspaceHostRoot: View {
     let model: AppModel
     let reduceTransparencyOverride: Bool?
     let contrast: ColorSchemeContrast
+    let systemColorScheme: ColorScheme?
 
     var body: some View {
+        if let systemColorScheme {
+            workspace.environment(\.colorScheme, systemColorScheme)
+        } else {
+            workspace
+        }
+    }
+
+    private var workspace: some View {
         RecorderWorkspaceContent(
             model: model,
             navigation: Binding(
@@ -1184,14 +1227,16 @@ final class WorkspaceHost {
         model: AppModel,
         size: CGSize,
         reduceTransparencyOverride: Bool? = nil,
-        contrast: ColorSchemeContrast = .standard
+        contrast: ColorSchemeContrast = .standard,
+        systemColorScheme: ColorScheme? = nil
     ) throws {
         hostingView = NSHostingView(
             rootView: WorkspaceHostRoot(
                 navigationDriver: navigationDriver,
                 model: model,
                 reduceTransparencyOverride: reduceTransparencyOverride,
-                contrast: contrast
+                contrast: contrast,
+                systemColorScheme: systemColorScheme
             )
         )
         let frame = NSRect(origin: .zero, size: size)
@@ -1402,6 +1447,23 @@ final class WorkspaceHost {
 
     func accessibilityValue(for identifier: String) -> Any? {
         view(forAccessibilityIdentifier: identifier)?.accessibilityValue()
+    }
+
+    func colorSchemeAppearance(for identifier: String) -> NSAppearance.Name? {
+        (view(forAccessibilityIdentifier: identifier)
+            ?? view(forAccessibilityIdentifier: identifier + ".marker"))?
+            .effectiveAppearance
+            .bestMatch(from: [.darkAqua, .aqua])
+    }
+
+    func nativeButtonColorSchemeAppearance(
+        for identifier: String
+    ) -> NSAppearance.Name? {
+        let button = renderedRoots
+            .flatMap({ allViews(startingAt: $0) })
+            .compactMap({ $0 as? NSButton })
+            .first { $0.accessibilityIdentifier() == identifier }
+        return button?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
     }
 
     func revealSettingsControl(_ identifier: String) -> Bool {

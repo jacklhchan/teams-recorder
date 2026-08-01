@@ -3,6 +3,7 @@ import SwiftUI
 
 struct RecordingsLibraryView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.colorScheme) private var systemColorScheme
     @ObservedObject private var libraryFeature: LibraryFeatureModel
     @ObservedObject private var transcriptionFeature: TranscriptionFeatureModel
     @ObservedObject private var meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
@@ -88,7 +89,8 @@ struct RecordingsLibraryView: View {
             expandedSessionID: $expandedSessionID,
             metadataSession: $metadataSession,
             sessionPendingTrash: $sessionPendingTrash,
-            canonicalSessions: { libraryFeature.snapshot.sessions }
+            canonicalSessions: { libraryFeature.snapshot.sessions },
+            systemColorScheme: systemColorScheme
         )
         .navigationTitle("Recordings")
         .searchable(
@@ -137,6 +139,7 @@ struct RecordingsLibraryView: View {
             )
         )
         .accessibilityIdentifier("recorder.destination.recordings")
+        .environment(\.colorScheme, .dark)
     }
 }
 
@@ -177,6 +180,7 @@ private struct SessionListView: View {
     @Binding var metadataSession: RecordingSession?
     @Binding var sessionPendingTrash: RecordingSession?
     let canonicalSessions: () -> [RecordingSession]
+    let systemColorScheme: ColorScheme
 
     private var admission: RecordingsCanonicalActionAdmission {
         .init(currentSessions: canonicalSessions)
@@ -335,6 +339,7 @@ private struct SessionListView: View {
                     _ = admission.perform(sessionID: requested.id, action: applyMeetingIntelligenceSuggestedTitle)
                 }
             )
+            .environment(\.colorScheme, systemColorScheme)
         } else {
         Group {
             if sessions.isEmpty {
@@ -392,11 +397,16 @@ private struct SessionListView: View {
                                     .accessibilityLabel("Open ASR log for \(session.displayName)")
                             }
                             .padding(10)
-                            .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 6))
+                            .background(RecorderVisualStyle.recordingsStatusSurface, in: RoundedRectangle(cornerRadius: 6))
                             .background(
                                 RecorderDestinationAccessibilityMarker(
                                     identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)",
                                     label: statusText(for: session)
+                                )
+                            )
+                            .background(
+                                RecorderDestinationAccessibilityMarker(
+                                    identifier: RecorderSurfaceAppearance.recordingsStatusDark.accessibilityIdentifier
                                 )
                             )
                         }

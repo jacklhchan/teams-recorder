@@ -59,6 +59,10 @@ final class RecorderVisualStyleTests: XCTestCase {
             "recorder.surface.recordings.dark"
         )
         XCTAssertEqual(
+            RecorderSurfaceAppearance.recordingsStatusDark.accessibilityIdentifier,
+            "recorder.surface.recordings.status.dark"
+        )
+        XCTAssertEqual(
             RecorderSurfaceAppearance.providerDark.accessibilityIdentifier,
             "recorder.surface.provider.dark"
         )

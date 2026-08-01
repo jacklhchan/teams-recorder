@@ -57,10 +57,9 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         host.render()
 
         XCTAssertTrue(model.isTesting)
-        let blockedClickError = Result { try host.clickRenderedControl(RecorderActionID.providerTest) }
+        try host.clickRenderedControl(RecorderActionID.providerTest)
         let requestCountWhileDisabled = await client.requestCount()
         await client.completeAll(with: .init(supportsModelDiscovery: true, models: ["discovered-model"]))
-        XCTAssertNoThrow(try blockedClickError.get())
         XCTAssertEqual(requestCountWhileDisabled, 1, "Disabled Test must not start a second real request")
         let settled = await waitUntil { !model.isTesting }
         XCTAssertTrue(settled)
@@ -169,24 +168,38 @@ private final class ProviderSettingsRenderHost {
         window = NSWindow(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.contentView = hostingView
         window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         render()
     }
 
     func clickRenderedControl(_ identifier: String) throws {
-        let marker = try XCTUnwrap(view(for: identifier + ".marker"), "Missing control location marker: \(identifier)")
-        let location = marker.convert(NSPoint(x: marker.bounds.midX, y: marker.bounds.midY), to: nil)
+        render()
+        let marker = try XCTUnwrap(
+            view(for: identifier + ".marker"),
+            "Missing control location marker: \(identifier)"
+        )
+        XCTAssertTrue(marker.window === window)
+        XCTAssertFalse(marker.bounds.isEmpty)
+        window.makeKey()
+        let location = marker.convert(
+            NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
+            to: nil
+        )
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             let event = try XCTUnwrap(NSEvent.mouseEvent(
-                with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
-                pressure: type == .leftMouseDown ? 1 : 0
+                with: type, location: location, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0
             ))
-            window.sendEvent(event)
+            NSApp.sendEvent(event)
         }
         render()
     }
 
     func render() {
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.03))
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()

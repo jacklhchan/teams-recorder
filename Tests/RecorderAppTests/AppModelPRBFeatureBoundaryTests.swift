@@ -1,3 +1,4 @@
+@preconcurrency import AVFoundation
 import XCTest
 @testable import RecorderApp
 
@@ -6,6 +7,64 @@ import XCTest
 /// `AppModel(featureBoundaries:)` composition API exist.
 @MainActor
 final class AppModelPRBFeatureBoundaryTests: XCTestCase {
+    func testShutdownIsIdempotentAndCapturedBridgeCallbackCannotMutateFeaturesAfterward() throws {
+        let baseline = AppModel(performStartupWork: false)
+        let playbackCoordinator = ShutdownPlaybackCoordinator()
+        let playback = PlaybackFeatureModel(coordinator: playbackCoordinator)
+        let boundaries = PRBFeatureBoundaries(
+            library: baseline.libraryFeature,
+            transcription: baseline.transcriptionFeature,
+            meetingIntelligence: baseline.meetingIntelligenceFeature,
+            playback: playback
+        )
+        let model = AppModel(
+            performStartupWork: false,
+            featureBoundaries: boundaries
+        )
+        let capturedCallback = try XCTUnwrap(
+            model.libraryFeature.onSessionsLoaded,
+            "The production bridge must register the Library load callback."
+        )
+        let lateSessionID = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shutdown-late-session", isDirectory: true)
+        let lateStates: [RecordingSession.ID: TranscriptionState] = [
+            lateSessionID: .init(
+                phase: .completed,
+                message: "Must not cross teardown",
+                startedAt: .distantPast,
+                finishedAt: .distantPast
+            )
+        ]
+        let librarySnapshot = model.libraryFeature.snapshot
+        let meetingSnapshot = model.meetingIntelligenceFeature.snapshot
+        playbackCoordinator.onStop = {
+            capturedCallback(.init(
+                sessions: [],
+                transcriptionStates: lateStates
+            ))
+        }
+
+        model.shutdown()
+        model.shutdown()
+
+        XCTAssertEqual(playbackCoordinator.stopCount, 1)
+        XCTAssertNil(model.transcriptionFeature.onSuccessfulPublication)
+        XCTAssertNil(model.libraryFeature.onSessionsLoaded)
+        XCTAssertNil(model.libraryFeature.onTranscriptPublicationCommitted)
+        XCTAssertNil(model.libraryFeature.onTranscriptEdited)
+        XCTAssertNil(model.libraryFeature.onMetadataSaved)
+        XCTAssertNil(model.libraryFeature.onImportedAudioReady)
+        XCTAssertNil(model.libraryFeature.onSessionRemoved)
+        XCTAssertNil(model.meetingIntelligenceFeature.onPublished)
+        XCTAssertNil(model.aiProviderSettingsModel.onProviderSettingsSaved)
+        XCTAssertNil(
+            model.transcriptionFeature.presentation
+                .transcriptionStatesBySessionID[lateSessionID]
+        )
+        XCTAssertEqual(model.libraryFeature.snapshot, librarySnapshot)
+        XCTAssertEqual(model.meetingIntelligenceFeature.snapshot, meetingSnapshot)
+    }
+
     func testAggregateInjectionRetainsExactlyTheFourProvidedFeatureInstances() {
         let supplied = defaultFeatureBoundaries()
 
@@ -87,5 +146,23 @@ final class AppModelPRBFeatureBoundaryTests: XCTestCase {
             meetingIntelligence: baseline.meetingIntelligenceFeature,
             playback: baseline.playbackFeature
         )
+    }
+
+}
+
+@MainActor
+private final class ShutdownPlaybackCoordinator: PlaybackCoordinating {
+    let player = AVPlayer()
+    var onSnapshot: ((PlaybackSnapshot) -> Void)?
+    var onStop: (() -> Void)?
+    private(set) var stopCount = 0
+
+    func load(_: RecordingSession) async throws {}
+    func play() {}
+    func pause() {}
+    func seek(to _: TimeInterval) async {}
+    func stop() {
+        stopCount += 1
+        onStop?()
     }
 }

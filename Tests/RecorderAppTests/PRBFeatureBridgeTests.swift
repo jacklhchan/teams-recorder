@@ -169,6 +169,30 @@ final class PRBFeatureBridgeTests: XCTestCase {
         XCTAssertTrue(route.allConsumerCommandsAreEmpty)
     }
 
+    func testCapturedCallbackAfterShutdownHasNoConsumerVisibleEffect() {
+        let (bridge, route) = makeSUT(); bridge.start()
+        let callback = route.captureTranscriptCallback()
+        bridge.shutdown()
+        callback(publication("captured-late"))
+        XCTAssertTrue(route.allConsumerCommandsAreEmpty)
+    }
+
+    func testDurableTranscriptPublicationAdmittedBeforeReentrantShutdownSettlesAtMostOnce() {
+        let (bridge, route) = makeSUT(); bridge.start()
+        let callback = route.captureTranscriptCallback()
+        let event = publication("durable-before-shutdown")
+        route.onTranscriptAccepted = { bridge.shutdown() }
+
+        callback(event)
+        callback(event)
+
+        XCTAssertEqual(
+            route.acceptedTranscriptAttemptIDs,
+            [event.identity.attemptID]
+        )
+        XCTAssertTrue(route.miTranscriptAttemptIDs.isEmpty)
+    }
+
     func testBridgeShutdownBeforeStartIsTerminal() {
         let (bridge, route) = makeSUT()
 
@@ -300,7 +324,10 @@ private final class PRBFeatureBridgeRouteRecorder {
     private(set) var currentWorkspaceReadCount = 0
     private(set) var registrationCount = 0
     private(set) var unregistrationCount = 0
-    private(set) var acceptedTranscriptAttemptIDs: [UUID] = []
+    var onTranscriptAccepted: (() -> Void)?
+    private(set) var acceptedTranscriptAttemptIDs: [UUID] = [] {
+        didSet { onTranscriptAccepted?() }
+    }
     private(set) var miTranscriptAttemptIDs: [UUID] = []
     private(set) var miStaleSessions: [RecordingSession.ID] = []
     private(set) var indexedTranscriptRevisions: [TranscriptDocumentRevision?] = []
@@ -328,6 +355,7 @@ private final class PRBFeatureBridgeRouteRecorder {
         .init(currentWorkspace: { [weak self] in guard let self else { return nil }; self.currentWorkspaceReadCount += 1; return self.currentWorkspace }, canonicalSession: { [weak self] id in guard let self, !self.tombstonedCanonicalIDs.contains(id), !self.hiddenCanonicalIDs.contains(id) else { return nil }; return [session, otherSession].first { $0.id == id } }, expectedTranscriptionPublicationSourceID: transcriptionSourceID, expectedLibrarySourceID: librarySourceID, expectedMeetingIntelligencePublicationSourceID: miSourceID, transcriptionProviderIsConfigured: { [weak self] in self?.transcriptionProviderConfigured ?? false }, registerTranscriptPublication: { [weak self] h in self?.register(\.transcript, h) ?? {} }, registerLibrarySessionsLoaded: { [weak self] h in self?.register(\.loaded, h) ?? {} }, registerLibraryTranscriptCommit: { [weak self] h in self?.register(\.commit, h) ?? {} }, registerTranscriptEdit: { [weak self] h in self?.register(\.edit, h) ?? {} }, registerMetadataSaved: { [weak self] h in self?.register(\.metadata, h) ?? {} }, registerImportedAudio: { [weak self] h in self?.register(\.imported, h) ?? {} }, registerSessionRemoval: { [weak self] h in self?.register(\.removed, h) ?? {} }, registerMeetingIntelligencePublication: { [weak self] h in self?.register(\.mi, h) ?? {} }, registerProviderSave: { [weak self] h in self?.register(\.provider, h) ?? {} }, acceptTranscriptPublication: { [weak self] in self?.acceptedTranscriptAttemptIDs.append($0.identity.attemptID) }, handleCommittedTranscriptPublication: { [weak self] in self?.miTranscriptAttemptIDs.append($0.identity.attemptID) }, markTranscriptStale: { [weak self] in self?.miStaleSessions.append($0.id) }, refreshAfterMeetingIntelligence: { [weak self] s, f in self?.miRefreshes.append((s.id, f)) }, startTranscription: { [weak self] s, configured in guard let self else { return }; self.retainedImports.append(s.id); configured ? self.transcriptionStarts.append(s.id) : self.providerRecoverySessions.append(s.id) }, reportStatus: { [weak self] in self?.importStatuses.append($0) }, stopPlaybackIfActive: { [weak self] in self?.playbackStops.append($0) }, removeTranscriptionProjection: { [weak self] in self?.transcriptionRemovals.append($0) }, cancelAndRemoveMeetingIntelligence: { [weak self] in self?.miRemovals.append($0) }, replaceLoadedTranscriptionStates: { [weak self] in self?.loadedStates.append($0) }, reloadMeetingIntelligenceSessions: { [weak self] in self?.miReloads.append($0.map(\.id)) }, clearLibraryForWorkspaceChange: { [weak self] in self?.workspaceCalls.append(.clearLibrary) }, refreshLibrary: { [weak self] u, f in self?.workspaceCalls.append(.refreshLibrary(u, f)) }, advanceTranscriptionFence: { [weak self] in self?.workspaceCalls.append(.advanceASR($0)) }, resetMeetingIntelligenceForWorkspaceChange: { [weak self] in self?.workspaceCalls.append(.resetMI) }, clearTranscriptionProjections: { [weak self] in self?.workspaceCalls.append(.clearASR) }, providerSettingsSaved: { [weak self] e in self?.providerSaveEvents.append(e); self?.nextProviderRevision = e.profileRevision }, acceptRecordingFinalization: { [weak self] in self?.finalizationIDs.append($0.finalizationID) })
     }
     func emitTranscript(_ e: TranscriptPublished) { transcript?(e) }; func emitLibraryCommit(_ e: LibraryTranscriptProjectionCommitted) { commit?(e) }; func emitTranscriptEdit(_ e: TranscriptEdited) { indexedTranscriptRevisions.append(e.identity.transcriptRevision); edit?(e) }; func emitMetadataSaved(_ e: MetadataSaved) { metadataEvents.append(e.canonicalSession.id); metadata?(e) }; func emitSessionsLoaded(_ e: LibraryLoadedSnapshot) { loaded?(e) }; func emitMeetingIntelligence(_ e: MeetingIntelligencePublished) { mi?(e) }; func emitImport(_ e: ImportedAudioSessionReady) { imported?(e) }; func emitRemoval(_ e: SessionRemoved) { tombstonedCanonicalIDs.insert(e.identity.sessionID); tombstonedSessions.append(e.identity.sessionID); removed?(e) }; func emitProviderSave(_ e: ProviderSettingsSaved) { provider?(e) }
+    func captureTranscriptCallback() -> (TranscriptPublished) -> Void { transcript! }
     func hideCanonicalSession(_ id: RecordingSession.ID) { hiddenCanonicalIDs.insert(id) }
     private func register<Event>(_ keyPath: ReferenceWritableKeyPath<PRBFeatureBridgeRouteRecorder, ((Event) -> Void)?>, _ handler: @escaping (Event) -> Void) -> () -> Void { registrationCount += 1; self[keyPath: keyPath] = handler; return { [weak self] in guard let self else { return }; self[keyPath: keyPath] = nil; self.unregistrationCount += 1 } }
 }

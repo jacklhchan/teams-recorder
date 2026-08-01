@@ -270,6 +270,12 @@ private struct SessionListView: View {
                             }
                             .padding(10)
                             .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 6))
+                            .background(
+                                RecorderDestinationAccessibilityMarker(
+                                    identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)",
+                                    label: statusText(for: session)
+                                )
+                            )
                         }
                     }
                     .padding(.vertical, 6)

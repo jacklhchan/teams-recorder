@@ -1428,51 +1428,6 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func isInCurrentWorkspace(_ session: RecordingSession) -> Bool {
-        let workspace = RecordingLibraryURLIdentity.normalized(outputFolder)
-        let sessionFolder = RecordingLibraryURLIdentity.normalized(session.folderURL)
-        return sessionFolder.path == workspace.path ||
-            sessionFolder.path.hasPrefix(workspace.path + "/")
-    }
-
-    private func admitsTranscriptPublication(
-        _ event: TranscriptPublished
-    ) -> Bool {
-        event.workspaceFence == workspacePublicationFence &&
-            isInCurrentWorkspace(event.session)
-    }
-
-    private func admitsImportedAudioReady(
-        _ event: ImportedAudioSessionReady
-    ) -> Bool {
-        guard !isShutDown,
-              event.identity.librarySourceID == libraryFeature.librarySourceID,
-              event.identity.workspaceFence == workspacePublicationFence,
-              event.identity.sessionID == event.canonicalSession.id,
-              event.identity.normalizedSessionFolder
-                == RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL),
-              isInCurrentWorkspace(event.canonicalSession),
-              libraryFeature.session(withID: event.canonicalSession.id)
-                == event.canonicalSession else { return false }
-        return true
-    }
-
-    private func admitsLibraryMutation(
-        _ identity: LibraryMutationIdentity,
-        canonical: RecordingSession
-    ) -> Bool {
-        guard !isShutDown,
-              identity.librarySourceID == libraryFeature.librarySourceID,
-              identity.workspaceFence == workspacePublicationFence,
-              identity.sessionID == canonical.id,
-              identity.normalizedSessionFolder
-                == RecordingLibraryURLIdentity.normalized(canonical.folderURL),
-              isInCurrentWorkspace(canonical),
-              libraryFeature.session(withID: canonical.id) == canonical
-        else { return false }
-        return true
-    }
-
     private func canPresentWorkspaceResult(
         for capturedFence: WorkspacePublicationFence
     ) -> Bool {

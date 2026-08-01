@@ -21,6 +21,39 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.settings"))
     }
 
+    func testMinimumWorkspaceRepeatsEveryDestinationWithoutPendingRoute() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        for _ in 0 ..< 3 {
+            for destination in RecorderDestination.allCases {
+                host.select(destination)
+                let identifier = "recorder.destination.\(destination.rawValue)"
+                try waitUntil(timeout: 1) {
+                    guard let frame = host.frame(
+                        forAccessibilityIdentifier: identifier
+                    ) else { return false }
+                    return !frame.isEmpty
+                }
+                let frame = try XCTUnwrap(
+                    host.frame(forAccessibilityIdentifier: identifier),
+                    "Missing destination marker after repeat navigation: \(identifier)"
+                )
+                XCTAssertFalse(frame.isEmpty)
+                XCTAssertTrue(
+                    host.windowContentRect.contains(frame),
+                    "\(identifier) must remain inside the 860×680 workspace."
+                )
+                XCTAssertEqual(host.navigationState.selection, destination)
+                XCTAssertNil(host.navigationState.pendingDestination)
+            }
+        }
+    }
+
     func testSidebarVisibilityChangesPreserveRecordingsSelection() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
@@ -108,10 +141,21 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 
         for destination in RecorderDestination.allCases {
             host.select(destination)
+            let identifier = "recorder.destination.\(destination.rawValue)"
+            try waitUntil(timeout: 1) {
+                guard let frame = host.frame(
+                    forAccessibilityIdentifier: identifier
+                ) else { return false }
+                return !frame.isEmpty
+            }
+            let frame = try XCTUnwrap(
+                host.frame(forAccessibilityIdentifier: identifier),
+                "Missing wide destination marker: \(identifier)"
+            )
+            XCTAssertFalse(frame.isEmpty)
             XCTAssertTrue(
-                host.containsAccessibilityIdentifier(
-                    "recorder.destination.\(destination.rawValue)"
-                )
+                host.windowContentRect.contains(frame),
+                "\(identifier) must remain inside the wide workspace."
             )
         }
     }
@@ -211,6 +255,88 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(renamedName)"))
         XCTAssertFalse(host.containsAccessibilityLabel("Play \(originalName)"))
         XCTAssertFalse(host.containsAccessibilityLabel("Edit details for \(originalName)"))
+    }
+
+    func testRecordingsRendersDirectLibraryFeatureSnapshotWithoutAppModelRelay() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+        host.select(.recordings)
+
+        var appModelChanges = 0
+        let appModelChange = fixture.model.objectWillChange.sink { _ in
+            appModelChanges += 1
+        }
+        defer { appModelChange.cancel() }
+
+        let renamed = RecordingSession(
+            id: fixture.session.id,
+            folderURL: fixture.session.folderURL,
+            recordingURL: fixture.session.recordingURL,
+            createdAt: fixture.session.createdAt,
+            duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize,
+            metadata: .init(title: "Library feature publication"),
+            searchDocument: fixture.session.searchDocument
+        )
+        fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
+            [renamed],
+            workspace: fixture.model.outputFolder,
+            fence: .initial
+        )
+
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityLabel("Play Library feature publication")
+        }
+        XCTAssertFalse(host.containsAccessibilityLabel("Play \(fixture.session.displayName)"))
+        XCTAssertEqual(
+            appModelChanges,
+            0,
+            "Recordings must observe LibraryFeatureModel, not AppModel.objectWillChange."
+        )
+    }
+
+    func testRecordingsRendersDirectTranscriptionFeatureProjectionWithoutAppModelRelay() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+        host.select(.recordings)
+
+        var appModelChanges = 0
+        let appModelChange = fixture.model.objectWillChange.sink { _ in
+            appModelChanges += 1
+        }
+        defer { appModelChange.cancel() }
+
+        let message = "Feature projection ready"
+        fixture.model.transcriptionFeature.replaceLoadedStates([
+            fixture.session.id: .init(
+                phase: .completed,
+                message: message,
+                startedAt: .now,
+                finishedAt: .now
+            )
+        ])
+
+        let statusIdentifier =
+            "recorder.row.transcription-status.\(fixture.session.id.lastPathComponent)"
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(statusIdentifier)
+                && host.containsAccessibilityLabel(message)
+        }
+        XCTAssertEqual(
+            appModelChanges,
+            0,
+            "Recordings must observe TranscriptionFeatureModel, not AppModel.objectWillChange."
+        )
+        XCTAssertFalse(host.containsView(named: "AVPlayerView"))
+        XCTAssertFalse(host.containsView(named: "RecordingPlaybackView"))
     }
 
     func testTranscriptDetailActionProjectionUsesResolvedSessionForOpenDetail() {

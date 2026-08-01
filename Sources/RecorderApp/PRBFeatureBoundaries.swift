@@ -1,7 +1,7 @@
 import Foundation
 
-/// The PR B compatibility aggregate.  Until PR C moves construction to
-/// `AppCoordinator`, `AppModel` retains exactly this one set of feature
+/// The PR B compatibility aggregate. Until the next composition phase moves
+/// construction out of `AppModel`, it retains exactly this one set of feature
 /// boundaries without copying their mutable state.
 @MainActor
 struct PRBFeatureBoundaries {

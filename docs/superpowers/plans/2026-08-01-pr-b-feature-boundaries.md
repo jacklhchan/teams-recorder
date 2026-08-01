@@ -817,14 +817,17 @@ while IFS= read -r changed_path; do
     Tests/RecorderAppTests/AppModelMuteTests.swift|\
     Tests/RecorderAppTests/AppModelPlaybackTests.swift|\
     Tests/RecorderAppTests/AppModelPRBFeatureBoundaryTests.swift|\
+    Tests/RecorderAppTests/AppModelRecordingFinalizationTests.swift|\
     Tests/RecorderAppTests/AppModelTranscriptionTests.swift|\
     Tests/RecorderAppTests/LibraryFeatureModelTests.swift|\
     Tests/RecorderAppTests/ManualTranscriptionImporterTests.swift|\
     Tests/RecorderAppTests/MeetingIntelligenceFeatureModelTests.swift|\
+    Tests/RecorderAppTests/MeetingIntelligenceFeatureSnapshotTests.swift|\
     Tests/RecorderAppTests/MeetingIntelligenceJobCoordinatorTests.swift|\
     Tests/RecorderAppTests/MeetingIntelligenceSheetRenderTests.swift|\
     Tests/RecorderAppTests/PlaybackFeatureModelTests.swift|\
     Tests/RecorderAppTests/PRBFeatureBridgeTests.swift|\
+    Tests/RecorderAppTests/PRBWorkspaceTransitionIntegrationTests.swift|\
     Tests/RecorderAppTests/RecorderWorkspaceRenderTests.swift|\
     Tests/RecorderAppTests/RecordingLibraryQueryTests.swift|\
     Tests/RecorderAppTests/RecordingLibraryTests.swift|\

@@ -60,7 +60,11 @@ enum RecorderVisualStyle {
     static let destructive = Color(red: 0.984, green: 0.376, blue: 0.353)
     static let recordingsCanvas = Color(red: 0.039, green: 0.078, blue: 0.173)
     static let recordingsCard = Color(red: 0.071, green: 0.114, blue: 0.235)
-    static let recordingsStatusSurface = Color(red: 0.055, green: 0.098, blue: 0.200)
+    static let recordingsStatusSurface = RecorderSRGBColor(
+        red: 0x0E,
+        green: 0x19,
+        blue: 0x33
+    )
     static let providerCanvas = Color(red: 0.051, green: 0.086, blue: 0.125)
     static let transcriptLightCanvas = Color(red: 0.984, green: 0.984, blue: 0.992)
     static let transcriptLightCard = Color.white

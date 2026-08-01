@@ -68,6 +68,15 @@ final class RecorderVisualStyleTests: XCTestCase {
         )
     }
 
+    func testRecordingsStatusSurfaceIsAnOpaqueFixedDarkSRGBToken() {
+        let surface = RecorderVisualStyle.recordingsStatusSurface
+
+        XCTAssertEqual(surface.hexToken, "#0E1933")
+        XCTAssertEqual(surface.red, 0x0E)
+        XCTAssertEqual(surface.green, 0x19)
+        XCTAssertEqual(surface.blue, 0x33)
+    }
+
     func testContrastAppearanceAndHairlineStrengthAreSemantic() {
         XCTAssertEqual(
             RecorderVisualStyle.contrastAppearance(for: .standard),

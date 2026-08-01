@@ -397,7 +397,7 @@ private struct SessionListView: View {
                                     .accessibilityLabel("Open ASR log for \(session.displayName)")
                             }
                             .padding(10)
-                            .background(RecorderVisualStyle.recordingsStatusSurface, in: RoundedRectangle(cornerRadius: 6))
+                            .background(RecorderVisualStyle.recordingsStatusSurface.color, in: RoundedRectangle(cornerRadius: 6))
                             .background(
                                 RecorderDestinationAccessibilityMarker(
                                     identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)",

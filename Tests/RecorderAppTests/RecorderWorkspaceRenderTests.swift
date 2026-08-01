@@ -6,6 +6,62 @@ import XCTest
 
 @MainActor
 final class RecorderWorkspaceRenderTests: XCTestCase {
+    func testDirectionARecordingsOpensCanonicalDetailAndFailsClosedWhenRemoved() throws {
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+        defer { fixture.remove() }
+        let host = try makeWorkspaceHost(model: fixture.model, size: .init(width: 860, height: 680))
+        defer { host.close() }
+        host.select(.recordings)
+
+        XCTAssertTrue(host.containsAccessibilityIdentifier(
+            RecorderSurfaceAppearance.recordingsDark.accessibilityIdentifier
+        ))
+        let rowID = fixture.session.id.lastPathComponent
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.transcript.detail.root"))
+        XCTAssertFalse(host.containsView(named: "AVPlayerView"))
+        XCTAssertTrue(host.replaceTranscriptEditorText(with: "Unsaved route draft"))
+        XCTAssertEqual(host.transcriptEditorText, "Unsaved route draft")
+        fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
+            [], workspace: fixture.workspace, fence: .initial
+        )
+        host.render()
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.recordings.list"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.saveTranscript))
+        XCTAssertFalse(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
+        fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
+            [fixture.session], workspace: fixture.workspace, fence: .initial
+        )
+        host.render()
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
+        try waitUntil(timeout: 1) {
+            host.transcriptEditorText == "Production recordings transcript"
+        }
+    }
+
+    func testDirectionARecordingsCardsAllowExactlyOneExpandedSession() throws {
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+        defer { fixture.remove() }
+        let secondFolder = fixture.workspace.appendingPathComponent("second", isDirectory: true)
+        let second = RecordingSession(
+            id: secondFolder, folderURL: secondFolder,
+            recordingURL: secondFolder.appendingPathComponent("recording.m4a"),
+            createdAt: .now, duration: 20, fileSize: 1,
+            metadata: .init(title: "Second recording")
+        )
+        fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
+            [fixture.session, second], workspace: fixture.workspace, fence: .initial
+        )
+        let host = try makeWorkspaceHost(model: fixture.model, size: .init(width: 860, height: 680))
+        defer { host.close() }
+        host.select(.recordings)
+        let firstID = fixture.session.id.lastPathComponent
+        let secondID = second.id.lastPathComponent
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.card.\(firstID).marker"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.card.\(secondID).marker"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(firstID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(secondID)"))
+    }
     func testDirectionASidebarRendersAtSupportedSizes() throws {
         for size in [
             CGSize(width: 860, height: 680),
@@ -1035,7 +1091,13 @@ final class WorkspaceHost {
         )), identifier.hasPrefix("recorder.settings.navigation.") {
             return clickSettingsRailRow(for: section)
         }
-        guard let frame = frame(forAccessibilityIdentifier: identifier) else {
+        let cardButtonFrame: CGRect? = identifier.hasPrefix("recorder.row.card.")
+            ? allViews(startingAt: hostingView)
+                .compactMap { $0 as? NSButton }
+                .first { $0.accessibilityIdentifier() == identifier }?
+                .accessibilityFrame()
+            : nil
+        guard let frame = cardButtonFrame ?? frame(forAccessibilityIdentifier: identifier) else {
             return false
         }
         let location = window.convertPoint(fromScreen: .init(
@@ -1080,6 +1142,22 @@ final class WorkspaceHost {
     func render() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         layout()
+    }
+
+    @discardableResult
+    func replaceTranscriptEditorText(with text: String) -> Bool {
+        guard let editor = allViews(startingAt: hostingView)
+            .compactMap({ $0 as? NSTextView }).first else {
+            return false
+        }
+        editor.string = text
+        editor.didChangeText()
+        render()
+        return true
+    }
+
+    var transcriptEditorText: String? {
+        allViews(startingAt: hostingView).compactMap { $0 as? NSTextView }.first?.string
     }
 
     func revealSettingsControl(_ identifier: String) -> Bool {

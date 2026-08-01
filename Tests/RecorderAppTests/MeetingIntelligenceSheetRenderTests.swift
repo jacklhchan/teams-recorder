@@ -915,9 +915,10 @@ private struct TranscriptDetailLifecycleRoot: View {
 
     var body: some View {
         if state.isDetailOpen {
-            TranscriptDetailSheetView(
+            TranscriptDetailView(
                 openedSession: state.openedSession,
                 allSessions: [state.session],
+                close: { state.closeDetail() },
                 load: { "Stored transcript" },
                 save: { _ in .saved(sessionID: state.openedSession.id, .transcript) },
                 openFolder: {},

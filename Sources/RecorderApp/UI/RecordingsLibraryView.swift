@@ -7,6 +7,10 @@ struct RecordingsLibraryView: View {
     @ObservedObject private var meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
     @State private var searchText = ""
     @State private var favoritesOnly = false
+    @State private var route: RecordingsPresentationRoute = .list
+    @State private var expandedSessionID: RecordingSession.ID?
+    @State private var metadataSession: RecordingSession?
+    @State private var sessionPendingTrash: RecordingSession?
 
     init(model: AppModel) {
         self.model = model
@@ -25,7 +29,8 @@ struct RecordingsLibraryView: View {
             text: searchText,
             favoritesOnly: favoritesOnly
         )
-        let librarySessions = libraryFeature.sessions
+        let librarySnapshot = libraryFeature.snapshot
+        let librarySessions = librarySnapshot.sessions
         let visibleSessions = query.filter(librarySessions)
         // Capture exactly one immutable projection for this body evaluation.
         // The UI never reconstructs meeting-intelligence state in AppModel.
@@ -37,6 +42,7 @@ struct RecordingsLibraryView: View {
         SessionListView(
             sessions: visibleSessions,
             allSessions: librarySessions,
+            libraryRevision: librarySnapshot.revision,
             query: query,
             transcribingSessionID: transcription.transcribingSessionID,
             transcriptionStatus: transcription.transcriptionStatus,
@@ -76,7 +82,12 @@ struct RecordingsLibraryView: View {
             cancelMeetingIntelligence: model.cancelMeetingIntelligence,
             applyMeetingIntelligenceSuggestedTitle: model.applyMeetingIntelligenceSuggestedTitle,
             saveMetadata: model.saveMetadata,
-            moveToTrash: model.moveSessionToTrash
+            moveToTrash: model.moveSessionToTrash,
+            route: $route,
+            expandedSessionID: $expandedSessionID,
+            metadataSession: $metadataSession,
+            sessionPendingTrash: $sessionPendingTrash,
+            canonicalSessions: { libraryFeature.snapshot.sessions }
         )
         .navigationTitle("Recordings")
         .searchable(
@@ -118,6 +129,12 @@ struct RecordingsLibraryView: View {
                 identifier: "recorder.destination.recordings"
             )
         )
+        .background(RecorderVisualStyle.recordingsCanvas)
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: RecorderSurfaceAppearance.recordingsDark.accessibilityIdentifier
+            )
+        )
         .accessibilityIdentifier("recorder.destination.recordings")
     }
 }
@@ -125,6 +142,7 @@ struct RecordingsLibraryView: View {
 private struct SessionListView: View {
     let sessions: [RecordingSession]
     let allSessions: [RecordingSession]
+    let libraryRevision: UInt64
     let query: RecordingLibraryQuery
     let transcribingSessionID: RecordingSession.ID?
     let transcriptionStatus: String
@@ -153,12 +171,64 @@ private struct SessionListView: View {
     let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
     let saveMetadata: (String, String, Bool, RecordingSession) async -> LibrarySaveOutcome
     let moveToTrash: (RecordingSession) async -> Void
+    @Binding var route: RecordingsPresentationRoute
+    @Binding var expandedSessionID: RecordingSession.ID?
+    @Binding var metadataSession: RecordingSession?
+    @Binding var sessionPendingTrash: RecordingSession?
+    let canonicalSessions: () -> [RecordingSession]
 
-    @State private var transcriptSession: RecordingSession?
-    @State private var metadataSession: RecordingSession?
-    @State private var sessionPendingTrash: RecordingSession?
+    private var admission: RecordingsCanonicalActionAdmission {
+        .init(currentSessions: canonicalSessions)
+    }
+
+    private func expansionBinding(for sessionID: RecordingSession.ID) -> Binding<Bool> {
+        Binding(
+            get: { expandedSessionID == sessionID },
+            set: { expandedSessionID = $0 ? sessionID : nil }
+        )
+    }
 
     var body: some View {
+        Group {
+        if let session = route.resolvedSession(in: allSessions) {
+            TranscriptDetailView(
+                openedSession: session, allSessions: allSessions,
+                close: { route = .list },
+                load: { transcriptText(session) },
+                save: { text in
+                    await admission.save(sessionID: session.id, artifact: .transcript) {
+                        await saveTranscript(text, $0)
+                    }
+                },
+                openFolder: { _ = admission.perform(sessionID: session.id, action: open) },
+                play: { _ = admission.perform(sessionID: session.id, action: play) },
+                export: { _ = admission.perform(sessionID: session.id, action: exportTranscript) },
+                copy: { _ = admission.perform(sessionID: session.id, action: copyTranscript) },
+                editDetails: { requested in
+                    _ = admission.perform(sessionID: requested.id) { metadataSession = $0 }
+                },
+                meetingIntelligencePresentation: meetingIntelligencePresentation,
+                meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
+                checkMeetingIntelligenceAvailability: { requested in
+                    _ = admission.perform(sessionID: requested.id, action: checkMeetingIntelligenceAvailability)
+                },
+                generateMeetingIntelligence: { requested in
+                    _ = admission.perform(sessionID: requested.id, action: generateMeetingIntelligence)
+                },
+                regenerateMeetingIntelligence: { requested in
+                    _ = admission.perform(sessionID: requested.id, action: regenerateMeetingIntelligence)
+                },
+                retryMeetingIntelligenceGeneration: { requested in
+                    _ = admission.perform(sessionID: requested.id, action: retryMeetingIntelligenceGeneration)
+                },
+                cancelMeetingIntelligence: { requested in
+                    _ = admission.perform(sessionID: requested.id, action: cancelMeetingIntelligence)
+                },
+                applyMeetingIntelligenceSuggestedTitle: { requested in
+                    _ = admission.perform(sessionID: requested.id, action: applyMeetingIntelligenceSuggestedTitle)
+                }
+            )
+        } else {
         Group {
             if sessions.isEmpty {
                 ContentUnavailableView(
@@ -169,8 +239,12 @@ private struct SessionListView: View {
                     )
                 )
             } else {
-                List(sessions) { session in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(sessions) { session in
+                    RecordingSessionCardView(session: session, isExpanded: expansionBinding(for: session.id)) {
                     VStack(spacing: 8) {
+                        ViewThatFits(in: .horizontal) {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(session.displayName).font(.callout.weight(.medium))
@@ -185,7 +259,7 @@ private struct SessionListView: View {
                                 }
                             }
                             Spacer()
-                            Button { play(session) } label: { Image(systemName: "play.fill") }
+                            Button { _ = admission.perform(sessionID: session.id, action: play) } label: { Image(systemName: "play.fill") }
                                 .buttonStyle(.bordered)
                                 .help("Play recording in a separate window")
                                 .accessibilityLabel("Play \(session.displayName)")
@@ -195,7 +269,7 @@ private struct SessionListView: View {
                                         label: "Play \(session.displayName)"
                                     )
                                 )
-                            Button { open(session) } label: { Image(systemName: "folder") }
+                            Button { _ = admission.perform(sessionID: session.id, action: open) } label: { Image(systemName: "folder") }
                                 .buttonStyle(.bordered)
                                 .accessibilityLabel("Open \(session.displayName)")
                                 .background(
@@ -204,7 +278,7 @@ private struct SessionListView: View {
                                         label: "Open \(session.displayName)"
                                     )
                                 )
-                            Button { metadataSession = session } label: {
+                            Button { _ = admission.perform(sessionID: session.id) { metadataSession = $0 } } label: {
                                 Image(systemName: session.isFavorite ? "star.fill" : "slider.horizontal.3")
                             }
                             .buttonStyle(.bordered)
@@ -216,7 +290,7 @@ private struct SessionListView: View {
                                     label: "Edit details for \(session.displayName)"
                                 )
                             )
-                            Button { transcribe(session) } label: {
+                            Button { _ = admission.perform(sessionID: session.id, action: transcribe) } label: {
                                 Image(systemName: transcribingSessionID == session.id ? "waveform" : "text.badge.plus")
                             }
                             .buttonStyle(.bordered)
@@ -229,7 +303,7 @@ private struct SessionListView: View {
                                     label: "Transcribe \(session.displayName)"
                                 )
                             )
-                            Button { transcriptSession = session } label: { Image(systemName: "doc.text.fill") }
+                            Button { _ = admission.perform(sessionID: session.id) { route = .transcript($0.id) } } label: { Image(systemName: "doc.text.fill") }
                                 .buttonStyle(.bordered)
                                 .disabled(!hasTranscript(for: session))
                                 .help("View and edit transcript")
@@ -241,7 +315,7 @@ private struct SessionListView: View {
                                         label: "Open Transcript for \(session.displayName)"
                                     )
                                 )
-                            Button(role: .destructive) { sessionPendingTrash = session } label: { Image(systemName: "trash") }
+                            Button(role: .destructive) { _ = admission.perform(sessionID: session.id) { sessionPendingTrash = $0 } } label: { Image(systemName: "trash") }
                                 .buttonStyle(.bordered)
                                 .help("Move recording to Trash")
                                 .accessibilityLabel("Move \(session.displayName) to Trash")
@@ -251,7 +325,7 @@ private struct SessionListView: View {
                                         label: "Move \(session.displayName) to Trash"
                                     )
                                 )
-                            Button { openTranscriptLog(session) } label: { Image(systemName: "terminal") }
+                            Button { _ = admission.perform(sessionID: session.id, action: openTranscriptLog) } label: { Image(systemName: "terminal") }
                                 .buttonStyle(.bordered)
                                 .disabled(!hasTranscriptLog(for: session))
                                 .help("Open ASR log")
@@ -262,6 +336,7 @@ private struct SessionListView: View {
                                         label: "Open ASR log for \(session.displayName)"
                                     )
                                 )
+                        }
                         }
 
                         if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id || transcriptionStatesBySessionID[session.id] != nil {
@@ -276,7 +351,7 @@ private struct SessionListView: View {
                                 if transcribingSessionID == session.id {
                                     Button("Cancel", action: cancelTranscription).buttonStyle(.bordered)
                                 }
-                                Button { openTranscriptLog(session) } label: { Image(systemName: "terminal") }
+                                Button { _ = admission.perform(sessionID: session.id, action: openTranscriptLog) } label: { Image(systemName: "terminal") }
                                     .buttonStyle(.bordered).help("Open ASR log")
                                     .accessibilityLabel("Open ASR log for \(session.displayName)")
                             }
@@ -290,35 +365,42 @@ private struct SessionListView: View {
                             )
                         }
                     }
-                    .padding(.vertical, 6)
+                    }
+                    }
+                    }
                 }
-                .listStyle(.inset)
             }
         }
-        .sheet(item: $transcriptSession) { session in
-            TranscriptDetailSheetView(
-                openedSession: session,
-                allSessions: allSessions,
-                load: { transcriptText(session) },
-                save: { await saveTranscript($0, session) },
-                openFolder: { open(session) },
-                play: { play(session) },
-                export: { exportTranscript(session) },
-                copy: { copyTranscript(session) },
-                editDetails: { metadataSession = $0 },
-                meetingIntelligencePresentation: meetingIntelligencePresentation,
-                meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
-                checkMeetingIntelligenceAvailability: checkMeetingIntelligenceAvailability,
-                generateMeetingIntelligence: generateMeetingIntelligence,
-                regenerateMeetingIntelligence: regenerateMeetingIntelligence,
-                retryMeetingIntelligenceGeneration: retryMeetingIntelligenceGeneration,
-                cancelMeetingIntelligence: cancelMeetingIntelligence,
-                applyMeetingIntelligenceSuggestedTitle: applyMeetingIntelligenceSuggestedTitle
-            )
+        }
+        }
+        .background(
+            RecorderDestinationAccessibilityMarker(identifier: "recorder.recordings.list")
+        )
+        .onChange(of: libraryRevision) { _, _ in
+            route.invalidateIfMissing(from: allSessions)
+            if let expandedSessionID, !allSessions.contains(where: { $0.id == expandedSessionID }) {
+                self.expandedSessionID = nil
+            }
+            if allSessions.count == 1, expandedSessionID == nil {
+                expandedSessionID = allSessions[0].id
+            }
+            if let metadataSession, !allSessions.contains(where: { $0.id == metadataSession.id }) {
+                self.metadataSession = nil
+            }
+            if let sessionPendingTrash, !allSessions.contains(where: { $0.id == sessionPendingTrash.id }) {
+                self.sessionPendingTrash = nil
+            }
+        }
+        .onAppear {
+            if sessions.count == 1, expandedSessionID == nil {
+                expandedSessionID = sessions[0].id
+            }
         }
         .sheet(item: $metadataSession) { session in
             RecordingMetadataEditorView(session: session) { title, tags, favorite in
-                await saveMetadata(title, tags, favorite, session)
+                await admission.save(sessionID: session.id, artifact: .metadata) {
+                    await saveMetadata(title, tags, favorite, $0)
+                }
             }
             .id(session.id)
         }
@@ -328,7 +410,7 @@ private struct SessionListView: View {
             presenting: sessionPendingTrash
         ) { session in
             Button("Move to Trash", role: .destructive) {
-                Task { await moveToTrash(session) }
+                Task { _ = await admission.performAsync(sessionID: session.id, action: moveToTrash) }
                 sessionPendingTrash = nil
             }
         } message: { session in
@@ -371,9 +453,10 @@ private struct SessionListView: View {
 /// Stateless content for the transcript sheet. The sheet item remains the
 /// stable opened session, while every render resolves presentation and command
 /// routing from the latest library projection for that recording ID.
-struct TranscriptDetailSheetView: View {
+struct TranscriptDetailView: View {
     let openedSession: RecordingSession
     let allSessions: [RecordingSession]
+    let close: () -> Void
     let load: () -> String
     let save: (String) async -> LibrarySaveOutcome
     let openFolder: () -> Void
@@ -412,6 +495,7 @@ struct TranscriptDetailSheetView: View {
         return TranscriptEditorView(
             session: openedSession,
             resolvedSession: currentSession,
+            close: close,
             load: load,
             save: save,
             openFolder: openFolder,
@@ -503,6 +587,7 @@ struct TranscriptEditorView: View {
     let export: () -> Void
     let copy: () -> Void
     let editDetails: (RecordingSession) -> Void
+    private let close: (() -> Void)?
     private let meetingIntelligencePresentationForSession: (RecordingSession) -> MeetingIntelligencePresentation
     private let meetingIntelligenceObservedSnapshotForSession: (RecordingSession) -> RecorderObservedSnapshot?
     private let meetingIntelligenceActionsForSession: (RecordingSession) -> MeetingIntelligenceActions
@@ -514,6 +599,7 @@ struct TranscriptEditorView: View {
     init(
         session: RecordingSession,
         resolvedSession: RecordingSession? = nil,
+        close: (() -> Void)? = nil,
         load: @escaping () -> String,
         save: @escaping (String) -> Void,
         openFolder: @escaping () -> Void = {},
@@ -527,6 +613,7 @@ struct TranscriptEditorView: View {
     ) {
         self.session = session
         self.resolvedSession = resolvedSession
+        self.close = close
         self.load = load
         self.save = { text in
             save(text)
@@ -545,6 +632,7 @@ struct TranscriptEditorView: View {
     init(
         session: RecordingSession,
         resolvedSession: RecordingSession? = nil,
+        close: (() -> Void)? = nil,
         load: @escaping () -> String,
         save: @escaping (String) async -> LibrarySaveOutcome,
         openFolder: @escaping () -> Void = {},
@@ -558,6 +646,7 @@ struct TranscriptEditorView: View {
     ) {
         self.session = session
         self.resolvedSession = resolvedSession
+        self.close = close
         self.load = load
         self.save = save
         self.openFolder = openFolder
@@ -616,7 +705,7 @@ struct TranscriptEditorView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Button(action: dismiss.callAsFunction) {
+            Button(action: closeDetail) {
                 Image(systemName: "chevron.left")
             }
             .buttonStyle(.borderless)
@@ -713,7 +802,7 @@ struct TranscriptEditorView: View {
                 errorIdentifier: RecorderActionID.transcriptSaveError
             )
             Spacer()
-            Button("Cancel") { dismiss() }
+            Button("Cancel", action: closeDetail)
                 .disabled(isSaving)
                 .accessibilityIdentifier(RecorderActionID.transcriptCancel)
             LibraryEditorSaveButton(
@@ -726,7 +815,7 @@ struct TranscriptEditorView: View {
                 let draft = text
                 Task {
                     let outcome = await save(draft)
-                    if saveState.complete(attempt, outcome: outcome) == .dismiss { dismiss() }
+                    if saveState.complete(attempt, outcome: outcome) == .dismiss { closeDetail() }
                 }
             }
         }
@@ -736,6 +825,10 @@ struct TranscriptEditorView: View {
 
     private var isSaving: Bool {
         saveState.state == .saving
+    }
+
+    private func closeDetail() {
+        if let close { close() } else { dismiss() }
     }
 }
 

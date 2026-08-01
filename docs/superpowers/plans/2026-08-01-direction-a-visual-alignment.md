@@ -1731,7 +1731,7 @@ awk '
 /^Sources\/RecorderApp\/ContentView\.swift$/ { next }
 /^Sources\/RecorderApp\/UI\// { next }
 /^Sources\/RecorderApp\/Views\/AIProviderSettingsView\.swift$/ { next }
-/^Tests\/RecorderAppTests\/[^/]*RenderTests\.swift$/ { next }
+/^Tests\/RecorderAppTests\/[^\/]*RenderTests\.swift$/ { next }
 /^Tests\/RecorderAppTests\/(RecorderVisualStyleTests|RecordingsPresentationRouteTests|AppModelPlaybackTests)\.swift$/ { next }
 /^docs\/superpowers\/specs\/2026-08-01-direction-a-visual-alignment-design\.md$/ { next }
 /^docs\/superpowers\/plans\/2026-08-01-direction-a-visual-alignment\.md$/ { next }
@@ -1827,3 +1827,75 @@ git commit -m "test: complete direction a visual regression gate"
 The `git diff --quiet` command must exit 0; these two suites are verification
 inputs, not evidence-commit content. Keep the branch unmerged until the user
 approves the staging visuals and explicitly requests integration.
+
+## Execution evidence — 2026-08-02
+
+Status: automated Direction A code and repository validation is complete on
+implementation head `1afc00d01a162c4811aeed5a0de1a5630422cc8d`.
+Actual-runtime GUI acceptance remains pending because the Mac was locked during
+the bounded Computer Use attempt. This status does not claim production,
+provider, permission, media, Teams, AirPods, notarized-artifact, or hardware
+acceptance.
+
+### Implementation commits
+
+- `3139cf0` — `feat: define direction a surface tokens`
+- `57acdc6` — `feat: add direction a workspace shell`
+- `6a6b361` — `feat: compose direction a settings`
+- `8248f27` — `fix: preserve native settings selection`
+- `fad7a98` — `feat: align recordings library cards`
+- `14eb0a5` — `fix: complete recordings route lifecycle`
+- `21d0a789` — `feat: align transcript intelligence detail`
+- `a778453` — `fix: apply branded sidebar gradient`
+- `1afc00d` — `fix: preserve native sidebar selection contrast`
+
+The final two commits resolve the independent review finding that the production
+sidebar did not use the approved fixed brand gradient. The final implementation
+uses exact sRGB stops `#132452 → #244F9E → #112B63`, exposes the gradient through
+the native List background, and retains system-owned selected-row, keyboard,
+VoiceOver, and increased-contrast foreground semantics.
+
+### Automated validation
+
+- Focused final-head suites: `RecorderVisualStyleTests` 6/6,
+  `RecorderWorkspaceRenderTests` 24/24,
+  `RECORDER_STABILITY=1 RecorderWorkspaceStabilityTests` 4/4,
+  `AppModelPlaybackTests` 10/10, `RecordingControllerRenderTests` 3/3, and
+  `TeamsAutoMeetingCountdownRenderTests` 2/2; zero failures.
+- Complete Swift suite: 1,269 tests executed, 5 skipped, zero failures in
+  37.669 seconds. The prior transcription-cancellation hang did not reproduce.
+- Python/script suites: 105/105 and policy/packaging-workflow 29/29; zero
+  failures. Localhost fixtures required the normal sandbox exception for loopback
+  binding.
+- Packaging tests, strict ad-hoc codesign, bundle verification, Mach-O inspection,
+  and bundle-content scans passed. The candidate is macOS 26.0 minimum, SDK 26.5,
+  system-dependency-only, and contains no Python, FFmpeg/FFprobe, oMLX/Qwen, or
+  provider runtime helper.
+- Virtual microphone gates: native contract, bundle contract, and install-script
+  contract passed. The native binary reproducibly failed only inside the workspace
+  sandbox because the fixed POSIX shared-memory namespace was denied; the identical
+  binary and complete native script passed outside that sandbox with no resource
+  holder. No product or driver source was changed for this environmental gate.
+- `git diff --check` passed. The corrected Step 4 command admitted exactly 18
+  presentation-only paths and no AppModel, feature/bridge/repository, media,
+  capture, Teams, virtual-mic production, scripts, workflows, packaging, or Windows
+  path. The recording-controller and Teams-countdown render test files are
+  unchanged from the PR B base.
+- Independent review after the sidebar repair: 0 Critical, 0 Important, 0 Minor.
+
+### Staging candidate and remaining manual gate
+
+The verified, uninstalled candidate is:
+
+```text
+/private/var/folders/8v/mldvjq_j2mz2tqbt5kvxwgtr0000gp/T/lmr-direction-a-final.S8XlUF/Local Meeting Recorder Staging.app
+```
+
+It is `local.meeting.recorder.staging` version `0.2.0 (3)`, ad-hoc signed, and
+was neither launched nor copied over `/Applications/Local Meeting Recorder
+Staging.app`. After the Mac is unlocked, manual acceptance must still inspect
+860×680 and 1280×800, Recordings, HKT/OpenAI Provider, all MI states, adaptive
+Transcript light/dark, Reduce Motion/Transparency, increased contrast, repeated
+navigation, editor success/failure, keyboard/VoiceOver, external playback, and
+both floating windows across Spaces. Keep the branch unmerged and unpushed until
+that visual acceptance and an explicit integration request.

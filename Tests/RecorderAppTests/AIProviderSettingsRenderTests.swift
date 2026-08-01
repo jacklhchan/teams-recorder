@@ -48,16 +48,16 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         let host = ProviderSettingsRenderHost(model: model, size: .init(width: 860, height: 680))
         defer { host.close() }
 
-        try host.clickRenderedControl(RecorderActionID.providerSave)
+        try host.performRenderedControlAction(RecorderActionID.providerSave)
         XCTAssertEqual(repository.saveCount, 1, "Save must invoke the injected repository exactly once")
 
-        try host.clickRenderedControl(RecorderActionID.providerTest)
+        try host.performRenderedControlAction(RecorderActionID.providerTest)
         let requestStarted = await client.waitForRequest()
         XCTAssertTrue(requestStarted)
         host.render()
 
         XCTAssertTrue(model.isTesting)
-        try host.clickRenderedControl(RecorderActionID.providerTest)
+        try host.assertRenderedControlIsDisabled(RecorderActionID.providerTest)
         let requestCountWhileDisabled = await client.requestCount()
         await client.completeAll(with: .init(supportsModelDiscovery: true, models: ["discovered-model"]))
         XCTAssertEqual(requestCountWhileDisabled, 1, "Disabled Test must not start a second real request")
@@ -158,21 +158,40 @@ private final class ProviderSettingsProductionHost {
 
 @MainActor
 private final class ProviderSettingsRenderHost {
-    private let hostingView: NSHostingView<AIProviderSettingsView>
+    private let actionRegistry = ProviderSettingsRenderedActionRegistry()
+    private let hostingView: NSHostingView<ProviderSettingsActionCaptureRoot>
     private let window: NSWindow
 
     init(model: AIProviderSettingsModel, size: CGSize) {
-        hostingView = NSHostingView(rootView: AIProviderSettingsView(model: model))
+        hostingView = NSHostingView(rootView: ProviderSettingsActionCaptureRoot(
+            model: model,
+            actionRegistry: actionRegistry
+        ))
         let frame = NSRect(origin: .zero, size: size)
         hostingView.frame = frame
         window = NSWindow(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.contentView = hostingView
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
         render()
     }
 
-    func clickRenderedControl(_ identifier: String) throws {
+    func performRenderedControlAction(_ identifier: String) throws {
+        let action = try renderedAction(for: identifier)
+        XCTAssertTrue(action.isEnabled, "Rendered control must be enabled: \(identifier)")
+        action.trigger()
+        render()
+    }
+
+    func assertRenderedControlIsDisabled(_ identifier: String) throws {
+        let action = try renderedAction(for: identifier)
+        XCTAssertFalse(action.isEnabled, "Rendered control must be disabled: \(identifier)")
+        action.trigger()
+        render()
+    }
+
+    private func renderedAction(
+        for identifier: String
+    ) throws -> ProviderSettingsRenderedActionRegistry.Action {
         render()
         let marker = try XCTUnwrap(
             view(for: identifier + ".marker"),
@@ -180,21 +199,7 @@ private final class ProviderSettingsRenderHost {
         )
         XCTAssertTrue(marker.window === window)
         XCTAssertFalse(marker.bounds.isEmpty)
-        window.makeKey()
-        let location = marker.convert(
-            NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
-            to: nil
-        )
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            let event = try XCTUnwrap(NSEvent.mouseEvent(
-                with: type, location: location, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber, context: nil, eventNumber: 0,
-                clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0
-            ))
-            NSApp.sendEvent(event)
-        }
-        render()
+        return try actionRegistry.action(overlapping: marker, in: hostingView)
     }
 
     func render() {
@@ -217,6 +222,122 @@ private final class ProviderSettingsRenderHost {
     private func allViews(startingAt view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap(allViews)
     }
+}
+
+@MainActor
+private struct ProviderSettingsActionCaptureRoot: View {
+    @ObservedObject var model: AIProviderSettingsModel
+    let actionRegistry: ProviderSettingsRenderedActionRegistry
+
+    var body: some View {
+        AIProviderSettingsView(model: model)
+            .buttonStyle(ProviderSettingsActionCaptureStyle(registry: actionRegistry))
+    }
+}
+
+@MainActor
+private struct ProviderSettingsActionCaptureStyle: PrimitiveButtonStyle {
+    let registry: ProviderSettingsRenderedActionRegistry
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(ProviderSettingsRenderedActionMarker(
+                registry: registry,
+                trigger: { configuration.trigger() }
+            ))
+    }
+}
+
+@MainActor
+private struct ProviderSettingsRenderedActionMarker: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
+    let registry: ProviderSettingsRenderedActionRegistry
+    let trigger: () -> Void
+
+    func makeNSView(context _: Context) -> ProviderSettingsRenderedActionMarkerView {
+        let view = ProviderSettingsRenderedActionMarkerView(frame: .zero)
+        registry.update(view, isEnabled: isEnabled, trigger: trigger)
+        return view
+    }
+
+    func updateNSView(_ view: ProviderSettingsRenderedActionMarkerView, context _: Context) {
+        registry.update(view, isEnabled: isEnabled, trigger: trigger)
+    }
+
+    static func dismantleNSView(
+        _ view: ProviderSettingsRenderedActionMarkerView,
+        coordinator _: Void
+    ) {
+        view.registry?.remove(view)
+    }
+}
+
+@MainActor
+private final class ProviderSettingsRenderedActionMarkerView: NSView {
+    weak var registry: ProviderSettingsRenderedActionRegistry?
+    override func hitTest(_: NSPoint) -> NSView? { nil }
+}
+
+@MainActor
+private final class ProviderSettingsRenderedActionRegistry {
+    struct Action {
+        let isEnabled: Bool
+        let trigger: () -> Void
+    }
+
+    private final class Entry {
+        weak var view: NSView?
+        var isEnabled: Bool
+        var trigger: () -> Void
+
+        init(view: NSView, isEnabled: Bool, trigger: @escaping () -> Void) {
+            self.view = view
+            self.isEnabled = isEnabled
+            self.trigger = trigger
+        }
+    }
+
+    private var entries: [ObjectIdentifier: Entry] = [:]
+
+    func update(
+        _ view: ProviderSettingsRenderedActionMarkerView,
+        isEnabled: Bool,
+        trigger: @escaping () -> Void
+    ) {
+        view.registry = self
+        let key = ObjectIdentifier(view)
+        if let entry = entries[key] {
+            entry.isEnabled = isEnabled
+            entry.trigger = trigger
+        } else {
+            entries[key] = Entry(view: view, isEnabled: isEnabled, trigger: trigger)
+        }
+    }
+
+    func remove(_ view: NSView) {
+        entries.removeValue(forKey: ObjectIdentifier(view))
+    }
+
+    func action(overlapping marker: NSView, in host: NSView) throws -> Action {
+        entries = entries.filter { $0.value.view != nil }
+        let targetFrame = host.convert(marker.bounds, from: marker)
+        let candidates = entries.values.compactMap { entry -> (Entry, CGFloat)? in
+            guard let view = entry.view else { return nil }
+            let frame = host.convert(view.bounds, from: view)
+            guard frame.intersects(targetFrame), !frame.isEmpty else { return nil }
+            let dx = frame.midX - targetFrame.midX
+            let dy = frame.midY - targetFrame.midY
+            return (entry, hypot(dx, dy))
+        }
+        XCTAssertEqual(candidates.count, 1, "Rendered control must overlap exactly one primitive action")
+        guard let entry = candidates.min(by: { $0.1 < $1.1 })?.0 else {
+            XCTFail("Rendered control has no captured primitive action")
+            throw RenderedActionError.missingAction
+        }
+        return Action(isEnabled: entry.isEnabled, trigger: entry.trigger)
+    }
+
+    private enum RenderedActionError: Error { case missingAction }
 }
 
 private struct ImmediateProviderClient: ProviderConnectionTesting {

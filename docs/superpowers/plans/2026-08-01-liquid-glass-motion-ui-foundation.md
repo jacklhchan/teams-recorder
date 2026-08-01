@@ -225,7 +225,7 @@ git commit -m "feat: add recorder motion policy"
 - Consumes: Task 1 `RecorderMotionPolicy` plus SwiftUI environment values `accessibilityReduceMotion`, `accessibilityReduceTransparency`, and `isEnabled`.
 - Produces: `recorderGlassSurface(_:)`, `RecorderMotionButtonStyle`, `RecorderStatusTransition`, and `RecorderIndeterminateProgress` without importing any feature/coordinator type.
 
-- [ ] **Step 1: Write RED render and accessibility-contract tests**
+- [x] **Step 1: Write RED render and accessibility-contract tests**
 
 Create an AppKit `NSHostingView` harness that renders one enabled and one disabled motion button, `RecorderStatusTransition(value:)`, and `RecorderIndeterminateProgress`. Assert:
 
@@ -243,7 +243,7 @@ XCTAssertFalse(host.click(RecorderActionID.primaryActionCluster))
 XCTAssertEqual(state.acceptedClicks, 1)
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecorderMotionRenderTests|RecorderActionIDTests'
@@ -251,7 +251,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'Re
 
 Expected: compile failure for the new primitives/IDs.
 
-- [ ] **Step 3: Implement native macOS 26 primitives**
+- [x] **Step 3: Implement native macOS 26 primitives**
 
 Use the SDK-verified signatures below; do not add an OS availability fallback:
 
@@ -294,7 +294,7 @@ Apply the new primary style and stable marker only to Start/Stop in `RecordDashb
 .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.primaryActionCluster))
 ```
 
-- [ ] **Step 4: Run GREEN and focused dashboard regressions**
+- [x] **Step 4: Run GREEN and focused dashboard regressions**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecorderMotionPolicyTests|RecorderMotionRenderTests|RecorderActionIDTests|RecordDashboardPresentationTests|RecorderToolbarPresentationTests|RecorderWorkspaceRenderTests.testMinimumWindowRendersRecordStatusAndPrimaryAction'
@@ -302,7 +302,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'Re
 
 Expected: all selected tests pass; disabled Start/Stop remains disabled and produces no accepted click.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run `git diff --check`, stage only Task 2 paths, and commit:
 

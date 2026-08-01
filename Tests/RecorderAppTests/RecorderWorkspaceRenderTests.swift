@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import XCTest
 @testable import RecorderApp
@@ -246,6 +247,64 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(current.isFavorite)
     }
 
+    func testRecordingsSheetObservesMeetingIntelligenceFeatureSnapshotWithoutAppModelRelay() async throws {
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+        defer { fixture.remove() }
+        fixture.feature.reload(sessions: [fixture.session])
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: fixture.session.id)
+
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+        host.select(.recordings)
+
+        XCTAssertTrue(
+            host.click(
+                atAccessibilityFrame: "recorder.row.transcript.\(fixture.session.id.lastPathComponent)"
+            ),
+            "The actual RecordingsLibraryView transcript route must open its detail sheet."
+        )
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier("recorder.transcript.detail.root")
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceGenerate))
+        XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle))
+        XCTAssertFalse(host.containsView(named: "AVPlayerView"))
+
+        var appModelChanges = 0
+        let appModelChange = fixture.model.objectWillChange.sink { _ in
+            appModelChanges += 1
+        }
+        defer { appModelChange.cancel() }
+
+        fixture.feature.generate(for: fixture.session)
+        await fulfillment(of: [fixture.generatorEntered], timeout: 1)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceCancel)
+                && host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceStatus)
+        }
+
+        await fixture.generationGate.release()
+        await fulfillment(of: [fixture.generatorFinished, fixture.published], timeout: 1)
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: fixture.session.id)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceSummary)
+                && host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
+        }
+
+        XCTAssertTrue(host.containsAccessibilityLabel("Generated title"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceCancel))
+        XCTAssertEqual(
+            appModelChanges,
+            0,
+            "The open production sheet must refresh from MeetingIntelligenceFeatureModel, not AppModel.objectWillChange."
+        )
+        XCTAssertFalse(host.containsView(named: "AVPlayerView"))
+        XCTAssertFalse(host.containsView(named: "RecordingPlaybackView"))
+    }
+
     func testSettingsRendersExistingCaptureTeamsVirtualMicAndProviderSections() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
@@ -460,6 +519,95 @@ private struct SessionFixture {
     let session: RecordingSession
 }
 
+/// This fixture deliberately mounts the production workspace and opens the
+/// production `RecordingsLibraryView` sheet. The local feature fakes only
+/// control asynchronous MI work; they do not replace the view under test.
+@MainActor
+private final class RecordingsMeetingIntelligenceRenderFixture {
+    let workspace: URL
+    let session: RecordingSession
+    let model: AppModel
+    let coordinator: MeetingIntelligenceJobCoordinator
+    let feature: MeetingIntelligenceFeatureModel
+    let generationGate = RenderMeetingIntelligenceGenerationGate()
+    let generatorEntered = XCTestExpectation(description: "recordings MI generation entered")
+    let generatorFinished = XCTestExpectation(description: "recordings MI generation finished")
+    let published = XCTestExpectation(description: "recordings MI typed publication")
+
+    init() throws {
+        workspace = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "recordings-mi-render-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let folder = workspace.appendingPathComponent("recordings-mi-session", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let recordingURL = folder.appendingPathComponent("recording.m4a")
+        try Data().write(to: recordingURL)
+        let transcriptURL = TranscriptDocumentStore.editableURL(in: folder)
+        let transcriptData = Data("Production recordings transcript".utf8)
+        try transcriptData.write(to: transcriptURL)
+        session = .init(
+            id: RecordingLibraryURLIdentity.normalized(folder),
+            folderURL: folder,
+            recordingURL: recordingURL,
+            createdAt: .distantPast,
+            duration: 12,
+            fileSize: 0,
+            metadata: .init(title: "Production recordings session")
+        )
+
+        let transcript = TranscriptDocumentSnapshot(
+            url: transcriptURL,
+            data: transcriptData,
+            revision: .init(
+                sha256: "sha256:" + String(repeating: "c", count: 64),
+                byteCount: transcriptData.count
+            )
+        )
+        let generator = RenderMeetingIntelligenceGenerator(
+            entered: generatorEntered,
+            finished: generatorFinished,
+            gate: generationGate
+        )
+        coordinator = .init(
+            providerRepository: RenderMeetingIntelligenceRepository(),
+            expectedPublicationSourceID: UUID(),
+            transcriptReader: RenderMeetingIntelligenceTranscriptReader(snapshot: transcript),
+            availabilityChecker: RenderMeetingIntelligenceAvailability(),
+            generator: generator,
+            publisher: RenderMeetingIntelligencePublisher(published: published),
+            artifactStore: RenderMeetingIntelligenceArtifactStore(),
+            stateStore: RenderMeetingIntelligenceStateStore()
+        )
+        feature = .init(coordinator: coordinator)
+        let defaultsName = "RecorderWorkspaceRenderTests.mi.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defaults.removePersistentDomain(forName: defaultsName)
+        model = AppModel(
+            defaults: defaults,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            initialOutputFolder: workspace,
+            meetingIntelligenceFeature: feature
+        )
+        model.systemAudioPermission = .granted
+        model.microphonePermission = .granted
+        model.seedLibrarySessionsForTesting([session])
+        // Deliberately detach AppModel's compatibility callback. The durable
+        // publisher expectation below still proves publication occurred, while
+        // the open production sheet can only update through its observed
+        // MeetingIntelligenceFeatureModel snapshot.
+        feature.onPublished = { _ in }
+    }
+
+    func remove() {
+        feature.shutdown()
+        try? FileManager.default.removeItem(at: workspace)
+    }
+}
+
 @MainActor
 private struct LifecycleWorkingFixture {
     let model: AppModel
@@ -532,6 +680,12 @@ final class WorkspaceHost {
 
     func containsAccessibilityLabel(_ label: String) -> Bool {
         view(withAccessibilityLabel: label) != nil
+    }
+
+    func containsView(named className: String) -> Bool {
+        renderedRoots.flatMap { allViews(startingAt: $0) }.contains {
+            String(describing: type(of: $0)).contains(className)
+        }
     }
 
     func isEnabled(_ identifier: String) throws -> Bool {
@@ -632,11 +786,30 @@ final class WorkspaceHost {
         hostingView.layoutSubtreeIfNeeded()
     }
 
-    private func view(forAccessibilityIdentifier identifier: String, in root: NSView? = nil) -> NSView? {
-        let candidate = root ?? hostingView
+    private var renderedRoots: [NSView] {
+        // The transcript detail is an AppKit sheet owned by this host window.
+        // Do not search every application window: playback lifecycle tests can
+        // leave unrelated `AVPlayerView` windows alive in the same process.
+        let windows = [window] + window.sheets
+        var seen = Set<ObjectIdentifier>()
+        return windows.compactMap(\.contentView).filter {
+            seen.insert(ObjectIdentifier($0)).inserted
+        }
+    }
+
+    private func view(forAccessibilityIdentifier identifier: String) -> NSView? {
+        renderedRoots.lazy.compactMap {
+            self.findView(forAccessibilityIdentifier: identifier, in: $0)
+        }.first
+    }
+
+    private func findView(
+        forAccessibilityIdentifier identifier: String,
+        in candidate: NSView
+    ) -> NSView? {
         if candidate.accessibilityIdentifier() == identifier { return candidate }
         for subview in candidate.subviews {
-            if let found = self.view(forAccessibilityIdentifier: identifier, in: subview) {
+            if let found = findView(forAccessibilityIdentifier: identifier, in: subview) {
                 return found
             }
         }
@@ -658,10 +831,15 @@ final class WorkspaceHost {
             }
             return nil
         }
-        if hostingView.accessibilityIdentifier() == identifier {
-            return hostingView
+        for root in renderedRoots {
+            if root.accessibilityIdentifier() == identifier {
+                return root
+            }
+            if let found = find(in: root.accessibilityChildren() ?? []) {
+                return found
+            }
         }
-        return find(in: hostingView.accessibilityChildren() ?? [])
+        return nil
     }
 
     private func accessibilityChildren(of element: Any) -> [Any] {
@@ -677,18 +855,27 @@ final class WorkspaceHost {
         return []
     }
 
-    private func view(
+    private func view(withAccessibilityLabel label: String) -> NSView? {
+        renderedRoots.lazy.compactMap {
+            self.findView(withAccessibilityLabel: label, in: $0)
+        }.first
+    }
+
+    private func findView(
         withAccessibilityLabel label: String,
-        in root: NSView? = nil
+        in candidate: NSView
     ) -> NSView? {
-        let candidate = root ?? hostingView
         if candidate.accessibilityLabel() == label { return candidate }
         for subview in candidate.subviews {
-            if let found = view(withAccessibilityLabel: label, in: subview) {
+            if let found = findView(withAccessibilityLabel: label, in: subview) {
                 return found
             }
         }
         return nil
+    }
+
+    private func allViews(startingAt view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { allViews(startingAt: $0) }
     }
 
 }
@@ -747,4 +934,124 @@ private final class PausedRefreshCaptureSource: CaptureSourceProtocol {
         refreshContinuation?.resume()
         refreshContinuation = nil
     }
+}
+
+private final class RenderMeetingIntelligenceRepository: OpenAICompatibleProviderManaging, @unchecked Sendable {
+    private let value = try! OpenAICompatibleProviderSnapshot.validated(
+        profile: .validated(
+            baseURLText: "http://127.0.0.1:8080",
+            asrModel: "asr",
+            llmModel: "llm",
+            language: "en",
+            prompt: ""
+        ),
+        apiKey: nil
+    )
+
+    func loadProfile() throws -> OpenAICompatibleProviderProfile? { value.profile }
+    func setActiveProviderKind(_: AIProviderKind) throws {}
+    func save(profile _: OpenAICompatibleProviderProfile, replacementAPIKey _: String?) throws {}
+    func snapshot() throws -> OpenAICompatibleProviderSnapshot { value }
+    func snapshot(overriding _: OpenAICompatibleProviderProfile) throws -> OpenAICompatibleProviderSnapshot { value }
+    func hasAPIKey() throws -> Bool { false }
+    func removeAPIKey() throws {}
+    func migrateLegacyIfNeeded(settingsURL _: URL) throws -> LegacyProviderMigrationOutcome { .notFound }
+}
+
+private struct RenderMeetingIntelligenceAvailability: MeetingIntelligenceAvailabilityChecking {
+    func availability(for _: OpenAICompatibleProviderSnapshot) async -> MeetingIntelligenceAvailability { .confirmed }
+}
+
+private actor RenderMeetingIntelligenceGenerationGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var isReleased = false
+
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        isReleased = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private final class RenderMeetingIntelligenceGenerator: MeetingIntelligenceGenerating, @unchecked Sendable {
+    private let entered: XCTestExpectation
+    private let finished: XCTestExpectation
+    private let gate: RenderMeetingIntelligenceGenerationGate
+
+    init(
+        entered: XCTestExpectation,
+        finished: XCTestExpectation,
+        gate: RenderMeetingIntelligenceGenerationGate
+    ) {
+        self.entered = entered
+        self.finished = finished
+        self.gate = gate
+    }
+
+    func generate(
+        transcript _: TranscriptDocumentSnapshot,
+        snapshot _: OpenAICompatibleProviderSnapshot,
+        onProgress _: @escaping @Sendable (MeetingIntelligenceProgress) -> Void
+    ) async throws -> MeetingIntelligenceGeneratedContent {
+        entered.fulfill()
+        await gate.wait()
+        finished.fulfill()
+        return .init(title: "Generated title", summary: "Generated summary")
+    }
+}
+
+private final class RenderMeetingIntelligenceTranscriptReader: TranscriptDocumentReading, @unchecked Sendable {
+    let snapshot: TranscriptDocumentSnapshot
+
+    init(snapshot: TranscriptDocumentSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func readCanonical(
+        in _: URL,
+        allowLegacy _: Bool
+    ) throws -> TranscriptDocumentSnapshot {
+        snapshot
+    }
+}
+
+private struct RenderMeetingIntelligencePublisher: MeetingIntelligencePublishing {
+    let published: XCTestExpectation
+
+    func publish(
+        _ request: MeetingIntelligencePublicationRequest
+    ) async throws -> MeetingIntelligencePublicationOutcome {
+        published.fulfill()
+        return .init(
+            artifact: .init(
+                schemaVersion: 1,
+                summary: "Generated summary",
+                suggestedTitle: "Generated title",
+                sourceTranscriptSHA256: request.sourceRevision.sha256,
+                sourceTranscriptByteCount: request.sourceRevision.byteCount,
+                model: request.snapshot.profile.llmModel,
+                generatedAt: .distantPast,
+                intent: request.intent
+            ),
+            titleOutcome: .applied
+        )
+    }
+}
+
+private final class RenderMeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactStoring, @unchecked Sendable {
+    func load(in _: URL) throws -> MeetingIntelligenceArtifact? { nil }
+    func stage(_: MeetingIntelligenceArtifact, in _: URL) throws -> URL { URL(fileURLWithPath: "/tmp/render-mi-stage") }
+    func promoteStaged(_: URL, in _: URL) throws {}
+    func removeStaged(_: URL, in _: URL) throws {}
+}
+
+private final class RenderMeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, @unchecked Sendable {
+    func load(in _: URL) throws -> MeetingIntelligenceState? { nil }
+    func save(_: MeetingIntelligenceState, in _: URL) throws {}
+    func remove(in _: URL) throws {}
 }

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -15,6 +16,77 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.generator.requests, 1)
         XCTAssertEqual(fixture.publisher.requests, 1)
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .ready)
+    }
+
+    func testSnapshotUsesCanonicalPhysicalIdentityAndRejectsAliasLookup() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        fixture.coordinator.checkAvailability(for: fixture.session)
+        await fixture.waitForIdle()
+
+        XCTAssertNotNil(fixture.coordinator.snapshot.presentation(for: fixture.session))
+        let alias = fixture.session.folderURL
+            .appendingPathComponent("..")
+            .appendingPathComponent(fixture.session.folderURL.lastPathComponent)
+        let aliasedSession = RecordingSession(
+            id: alias,
+            folderURL: alias,
+            recordingURL: alias.appendingPathComponent("recording.m4a"),
+            createdAt: fixture.session.createdAt,
+            duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize,
+            metadata: fixture.session.metadata
+        )
+        XCTAssertNil(fixture.coordinator.snapshot.presentation(for: aliasedSession))
+        fixture.coordinator.remove(sessionID: aliasedSession.id)
+        XCTAssertNotNil(fixture.coordinator.snapshot.presentation(for: fixture.session))
+        fixture.coordinator.remove(sessionID: fixture.session.id)
+        XCTAssertNil(fixture.coordinator.snapshot.presentation(for: fixture.session))
+    }
+
+    func testSnapshotRevisionAdvancesOnlyForVisibleChangesAndWorkspaceReset() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        XCTAssertEqual(fixture.coordinator.snapshot.revision, 0)
+
+        fixture.artifactStore.loaded = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+        let afterAvailability = fixture.coordinator.snapshot.revision
+        XCTAssertGreaterThan(afterAvailability, 0)
+
+        // Repeating the same final visible value does not replace snapshot.
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+        XCTAssertEqual(fixture.coordinator.snapshot.revision, afterAvailability)
+
+        fixture.coordinator.remove(sessionID: fixture.session.id)
+        let afterRemove = fixture.coordinator.snapshot.revision
+        XCTAssertEqual(afterRemove, afterAvailability + 1)
+        fixture.coordinator.remove(sessionID: fixture.session.id)
+        XCTAssertEqual(fixture.coordinator.snapshot.revision, afterRemove)
+
+        fixture.coordinator.resetForWorkspaceChange()
+        XCTAssertEqual(fixture.coordinator.snapshot.revision, afterRemove + 1)
+        fixture.coordinator.resetForWorkspaceChange()
+        XCTAssertEqual(fixture.coordinator.snapshot.revision, afterRemove + 2)
+    }
+
+    func testFeatureObserverSeesCommittedSnapshotAfterCoordinatorMutation() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
+        var observed: MeetingIntelligenceFeatureSnapshot?
+        let cancellation = feature.objectWillChange.sink {
+            observed = feature.snapshot
+        }
+        defer { cancellation.cancel() }
+
+        feature.checkAvailability(for: fixture.session)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(observed?.revision, feature.snapshot.revision)
+        XCTAssertEqual(
+            observed?.presentation(for: fixture.session)?.presentation.phase,
+            .notGenerated
+        )
     }
 
     func testUnconfirmedAutomaticPublicationNeverGenerates() async throws {

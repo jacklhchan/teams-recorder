@@ -108,7 +108,13 @@ struct MeetingIntelligenceSectionView: View {
                 Text(title)
                     .font(.callout.weight(.medium))
                     .accessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
-                    .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceSuggestedTitle))
+                    .accessibilityLabel(title)
+                    .background(
+                        RecorderDestinationAccessibilityMarker(
+                            identifier: RecorderActionID.meetingIntelligenceSuggestedTitle,
+                            label: title
+                        )
+                    )
                 if section.showsManualTitleProtection {
                     Text("The current title was edited manually. Apply the suggestion only if you want to replace it.")
                         .font(.caption)

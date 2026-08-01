@@ -218,7 +218,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         let model = AppModel(
             performStartupWork: false, initialOutputFolder: root,
             libraryFeature: feature,
-            meetingIntelligenceCoordinatorFactory: { _, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { _, sourceID, gate in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 coordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: ImportTestProvider(),
@@ -232,7 +232,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
                     artifactStore: artifacts,
                     stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
                 )
-                return coordinator
+                return MeetingIntelligenceFeatureModel(coordinator: coordinator)
             }
         )
         model.seedLibrarySessionsForTesting([session])
@@ -462,7 +462,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         let model = AppModel(
             performStartupWork: false, initialOutputFolder: linkedWorkspace,
             libraryFeature: feature,
-            meetingIntelligenceCoordinatorFactory: { _, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { _, sourceID, gate in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 coordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: ImportTestProvider(),
@@ -476,7 +476,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
                     artifactStore: artifacts,
                     stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
                 )
-                return coordinator
+                return MeetingIntelligenceFeatureModel(coordinator: coordinator)
             }
         )
         model.seedLibrarySessionsForTesting([session])

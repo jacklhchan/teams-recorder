@@ -32,6 +32,80 @@ struct MeetingIntelligencePresentation: Equatable, Sendable {
     )
 }
 
+/// The physical identity used by the UI projection.  It intentionally carries
+/// no metadata or search document: the Library remains the owner of those
+/// mutable projections.
+struct MeetingIntelligenceSessionPresentationIdentity: Hashable, Sendable {
+    let sessionID: RecordingSession.ID
+    let normalizedSessionFolder: URL
+
+    init?(session: RecordingSession) {
+        let folder = RecordingLibraryURLIdentity.normalized(session.folderURL)
+        let recording = RecordingLibraryURLIdentity.normalized(session.recordingURL)
+        guard session.id.path == folder.path,
+              session.folderURL.path == folder.path,
+              session.recordingURL.path == recording.path
+        else { return nil }
+        // Keep one physical URL representation so directory-hint differences
+        // cannot split one recording into two UI projection keys.
+        sessionID = folder
+        normalizedSessionFolder = folder
+    }
+}
+
+struct MeetingIntelligenceSessionPresentation: Equatable, Sendable {
+    let identity: MeetingIntelligenceSessionPresentationIdentity
+    let presentation: MeetingIntelligencePresentation
+}
+
+/// Immutable, read-only projection for UI consumers.  A lookup rejects an
+/// alias/malformed session rather than accidentally presenting another
+/// recording's state.
+struct MeetingIntelligenceFeatureSnapshot: Equatable, Sendable {
+    let revision: UInt64
+    private let presentations: [MeetingIntelligenceSessionPresentationIdentity: MeetingIntelligenceSessionPresentation]
+
+    static let empty = Self(revision: 0, presentations: [:])
+
+    func presentation(for session: RecordingSession) -> MeetingIntelligenceSessionPresentation? {
+        guard let identity = MeetingIntelligenceSessionPresentationIdentity(session: session) else { return nil }
+        return presentations[identity]
+    }
+
+    fileprivate func replacing(
+        _ presentation: MeetingIntelligencePresentation,
+        for session: RecordingSession
+    ) -> Self? {
+        guard let identity = MeetingIntelligenceSessionPresentationIdentity(session: session) else { return nil }
+        let value = MeetingIntelligenceSessionPresentation(identity: identity, presentation: presentation)
+        guard presentations[identity] != value else { return nil }
+        var next = presentations
+        next[identity] = value
+        return .init(revision: advancedRevision, presentations: next)
+    }
+
+    fileprivate func removing(_ identity: MeetingIntelligenceSessionPresentationIdentity) -> Self? {
+        guard presentations[identity] != nil else { return nil }
+        var next = presentations
+        next.removeValue(forKey: identity)
+        return .init(revision: advancedRevision, presentations: next)
+    }
+
+    fileprivate func resettingWorkspace() -> Self {
+        .init(revision: advancedRevision, presentations: [:])
+    }
+
+    private var advancedRevision: UInt64 {
+        // This is an in-process snapshot equality token, not a stale-work
+        // admission fence.  Tickets, leases, and typed publication identities
+        // own stale-work rejection.  Failing at the practically unreachable
+        // UInt64 limit preserves uniqueness; wrapping or saturating would make
+        // distinct visible snapshots share a revision.
+        precondition(revision < .max, "Meeting intelligence snapshot revision exhausted")
+        return revision + 1
+    }
+}
+
 struct MeetingIntelligenceSuggestedTitleRequest: Sendable {
     let session: RecordingSession
     let artifact: MeetingIntelligenceArtifact
@@ -122,6 +196,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     typealias DateNow = @Sendable () -> Date
 
     var onPublication: ((MeetingIntelligencePublished) -> Void)?
+    /// Called only after `snapshot` has been replaced.  Feature models use
+    /// this post-commit signal instead of Combine's pre-mutation publishing.
+    var onSnapshotDidChange: ((MeetingIntelligenceFeatureSnapshot) -> Void)?
 
     private let expectedPublicationSourceID: UUID
     let publicationSourceID: UUID
@@ -143,7 +220,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private var sessionsByID: [RecordingSession.ID: RecordingSession] = [:]
     private var removedSessionIDs = Set<RecordingSession.ID>()
     private var isShutDown = false
-    @Published private var presentationsBySessionID: [RecordingSession.ID: MeetingIntelligencePresentation] = [:]
+    @Published private(set) var snapshot = MeetingIntelligenceFeatureSnapshot.empty
 
     init(
         providerRepository: any OpenAICompatibleProviderManaging,
@@ -179,7 +256,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     func presentation(for session: RecordingSession) -> MeetingIntelligencePresentation {
-        presentationsBySessionID[session.id] ?? .empty
+        snapshot.presentation(for: session)?.presentation ?? .empty
     }
 
     /// Test-only synchronization that awaits concrete task completion instead
@@ -267,39 +344,45 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     func transcriptDidSave(_ session: RecordingSession) {
-        guard !isShutDown else { return }
-        sessionsByID[session.id] = session
-        invalidateWork(for: session.id)
-        let ticket = replaceWork(for: session)
-        tasksBySessionID[session.id] = Task { @MainActor [weak self] in
+        guard !isShutDown, let canonicalSession = canonicalSession(for: session) else { return }
+        sessionsByID[canonicalSession.id] = canonicalSession
+        invalidateWork(for: canonicalSession.id)
+        let ticket = replaceWork(for: canonicalSession)
+        tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.clearTaskIfOwned(ticket, for: session) }
+            defer { self.clearTaskIfOwned(ticket, for: canonicalSession) }
             do {
-                async let transcript = self.io.transcript(in: session.folderURL)
-                async let artifact = self.io.artifact(in: session.folderURL)
+                async let transcript = self.io.transcript(in: canonicalSession.folderURL)
+                async let artifact = self.io.artifact(in: canonicalSession.folderURL)
                 let (current, existing) = try await (transcript, artifact)
-                guard self.owns(ticket, for: session) else { return }
+                guard self.owns(ticket, for: canonicalSession) else { return }
                 if let existing, existing.sourceTranscriptSHA256 == current.revision.sha256,
                    existing.sourceTranscriptByteCount == current.revision.byteCount {
-                    self.setPresentation(from: existing, phase: .ready, message: "Ready.", session: session)
+                    self.setPresentation(from: existing, phase: .ready, message: "Ready.", session: canonicalSession)
                 } else if let existing {
-                    self.setPresentation(from: existing, phase: .stale, message: "Transcript changed. Regenerate to update.", session: session)
-                } else { self.setPresentation(.empty, for: session) }
-                self.clearTaskIfOwned(ticket, for: session)
+                    self.setPresentation(from: existing, phase: .stale, message: "Transcript changed. Regenerate to update.", session: canonicalSession)
+                } else { self.setPresentation(.empty, for: canonicalSession) }
+                self.clearTaskIfOwned(ticket, for: canonicalSession)
             } catch {
-                guard self.owns(ticket, for: session) else { return }
-                self.setFailed("Transcript needs attention.", for: session)
-                self.clearTaskIfOwned(ticket, for: session)
+                guard self.owns(ticket, for: canonicalSession) else { return }
+                self.setFailed("Transcript needs attention.", for: canonicalSession)
+                self.clearTaskIfOwned(ticket, for: canonicalSession)
             }
         }
     }
 
     func remove(sessionID: RecordingSession.ID) {
+        // Do not normalize an arbitrary caller-provided URL into a deletion.
+        // Only the exact canonical session retained by this coordinator may
+        // clear an existing projection.
+        guard let stored = sessionsByID[sessionID],
+              let identity = MeetingIntelligenceSessionPresentationIdentity(session: stored)
+        else { return }
         removedSessionIDs.insert(sessionID)
         reloadTasksBySessionID.removeValue(forKey: sessionID)?.cancel()
         reloadTokensBySessionID.removeValue(forKey: sessionID)
         invalidateWork(for: sessionID)
-        presentationsBySessionID.removeValue(forKey: sessionID)
+        replaceSnapshot(snapshot.removing(identity))
         sessionsByID.removeValue(forKey: sessionID)
         latestPublicationsBySessionID.removeValue(forKey: sessionID)
     }
@@ -310,9 +393,10 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         // imply that a session was deleted, nor cancel a live generation.
         // Explicit removal/trash paths call `remove(sessionID:)` themselves.
         for session in sessions {
-            sessionsByID[session.id] = session
-            removedSessionIDs.remove(session.id)
-            loadPresentation(for: session)
+            guard let canonicalSession = canonicalSession(for: session) else { continue }
+            sessionsByID[canonicalSession.id] = canonicalSession
+            removedSessionIDs.remove(canonicalSession.id)
+            loadPresentation(for: canonicalSession)
         }
     }
 
@@ -387,7 +471,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         latestPublicationsBySessionID.removeAll()
         sessionsByID.removeAll()
         removedSessionIDs.removeAll()
-        presentationsBySessionID.removeAll()
+        // A workspace boundary is visible even where its prior projection was
+        // already empty, so the consumer can invalidate a captured snapshot.
+        replaceSnapshot(snapshot.resettingWorkspace())
     }
 
     private func startAutomatic(event: TranscriptPublished, ticket: Ticket) async {
@@ -625,7 +711,13 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     private func setPresentation(_ value: MeetingIntelligencePresentation, for session: RecordingSession) {
         guard !isShutDown, !removedSessionIDs.contains(session.id) else { return }
-        presentationsBySessionID[session.id] = value
+        replaceSnapshot(snapshot.replacing(value, for: session))
+    }
+
+    private func replaceSnapshot(_ next: MeetingIntelligenceFeatureSnapshot?) {
+        guard let next else { return }
+        snapshot = next
+        onSnapshotDidChange?(next)
     }
 
     private func persist(
@@ -745,11 +837,15 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     private func deliverDurablePublication(_ publication: MeetingIntelligencePublished) async {
+        // Capture the recipient at the durable boundary. Feature shutdown is
+        // permitted to detach its live callback, but it cannot erase a
+        // semantic publication whose artifact/title mutation has committed.
+        let delivery = onPublication
         await publicationDeliveryScheduler.awaitDeliveryAdmission()
         // Do not consult task ownership or cancellation here. Publisher/title
         // success is the durable boundary, and this one semantic event must
         // survive later cancellation, removal, or shutdown.
-        onPublication?(publication)
+        delivery?(publication)
     }
 
     private func finishCancellationIfOwned(_ ticket: Ticket, session: RecordingSession) async {

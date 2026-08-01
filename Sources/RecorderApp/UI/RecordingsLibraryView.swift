@@ -4,6 +4,7 @@ struct RecordingsLibraryView: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var libraryFeature: LibraryFeatureModel
     @ObservedObject private var transcriptionFeature: TranscriptionFeatureModel
+    @ObservedObject private var meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
     @State private var searchText = ""
     @State private var favoritesOnly = false
 
@@ -12,6 +13,9 @@ struct RecordingsLibraryView: View {
         _libraryFeature = ObservedObject(wrappedValue: model.libraryFeature)
         _transcriptionFeature = ObservedObject(
             wrappedValue: model.transcriptionFeature
+        )
+        _meetingIntelligenceFeature = ObservedObject(
+            wrappedValue: model.meetingIntelligenceFeature
         )
     }
 
@@ -23,6 +27,9 @@ struct RecordingsLibraryView: View {
         )
         let librarySessions = libraryFeature.sessions
         let visibleSessions = query.filter(librarySessions)
+        // Capture exactly one immutable projection for this body evaluation.
+        // The UI never reconstructs meeting-intelligence state in AppModel.
+        let meetingIntelligenceSnapshot = meetingIntelligenceFeature.snapshot
         let toolbarPresentation = RecordingsToolbarPresentation.make(
             isTranscribing: transcription.transcribingSessionID != nil
         )
@@ -48,7 +55,9 @@ struct RecordingsLibraryView: View {
             saveTranscript: model.saveTranscript,
             exportTranscript: model.exportTranscript,
             copyTranscript: model.copyTranscript,
-            meetingIntelligencePresentation: model.meetingIntelligencePresentation,
+            meetingIntelligencePresentation: { session in
+                meetingIntelligenceSnapshot.presentation(for: session)?.presentation ?? .empty
+            },
             checkMeetingIntelligenceAvailability: model.checkMeetingIntelligenceAvailability,
             generateMeetingIntelligence: model.generateMeetingIntelligence,
             regenerateMeetingIntelligence: model.regenerateMeetingIntelligence,

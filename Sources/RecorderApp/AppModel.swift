@@ -101,10 +101,9 @@ final class AppModel: ObservableObject {
     /// Compatibility bridge until PR C: all mutable recording artifacts use
     /// the Library feature's one gate, including when that feature is injected.
     let transcriptMutationGate: RecordingSessionMutationGate
-    /// AppModel owns the sole meeting-intelligence coordinator.  It projects
-    /// presentation and forwards commands; it deliberately owns no parallel
-    /// attempt/task/generation state.
-    private let meetingIntelligenceCoordinator: MeetingIntelligenceJobCoordinator
+    /// PR B compatibility construction owner. AppModel retains precisely one
+    /// feature boundary and deliberately mirrors none of its mutable state.
+    let meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
 
     var isCaptureLifecycleWorking: Bool {
         recordingSessionCoordinator.isWorking
@@ -301,11 +300,8 @@ final class AppModel: ObservableObject {
         transcriptionService: (any TranscriptionServicing)? = nil,
         transcriptionFeatureFactory: TranscriptionFeatureFactory? = nil,
         libraryFeature: LibraryFeatureModel? = nil,
-        meetingIntelligenceCoordinatorFactory: ((
-            any OpenAICompatibleProviderManaging,
-            UUID,
-            RecordingSessionMutationGate
-        ) -> MeetingIntelligenceJobCoordinator)? = nil,
+        meetingIntelligenceFeature: MeetingIntelligenceFeatureModel? = nil,
+        meetingIntelligenceFeatureFactory: MeetingIntelligenceFeatureFactory? = nil,
         playbackCoordinator: (any PlaybackCoordinating)? = nil,
         playbackFeature: PlaybackFeatureModel? = nil,
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
@@ -374,17 +370,25 @@ final class AppModel: ObservableObject {
                 )
             )
         }
-        if let meetingIntelligenceCoordinatorFactory {
-            meetingIntelligenceCoordinator = meetingIntelligenceCoordinatorFactory(
+        precondition(
+            meetingIntelligenceFeature == nil || meetingIntelligenceFeatureFactory == nil,
+            "Inject either a meeting intelligence feature or feature factory, not both."
+        )
+        if let meetingIntelligenceFeature {
+            self.meetingIntelligenceFeature = meetingIntelligenceFeature
+        } else if let meetingIntelligenceFeatureFactory {
+            self.meetingIntelligenceFeature = meetingIntelligenceFeatureFactory(
                 activeProviderRepository,
                 self.transcriptionFeature.publicationSourceID,
                 transcriptMutationGate
             )
         } else {
-            meetingIntelligenceCoordinator = Self.makeMeetingIntelligenceCoordinator(
-                repository: activeProviderRepository,
-                expectedPublicationSourceID: self.transcriptionFeature.publicationSourceID,
-                mutationGate: transcriptMutationGate
+            self.meetingIntelligenceFeature = MeetingIntelligenceFeatureModel(
+                coordinator: Self.makeMeetingIntelligenceCoordinator(
+                    repository: activeProviderRepository,
+                    expectedPublicationSourceID: self.transcriptionFeature.publicationSourceID,
+                    mutationGate: transcriptMutationGate
+                )
             )
         }
         self.appPaths = appPaths
@@ -469,7 +473,7 @@ final class AppModel: ObservableObject {
         self.libraryFeature.onSessionsLoaded = { [weak self] snapshot in
             guard let self else { return }
             self.transcriptionFeature.replaceLoadedStates(snapshot.transcriptionStates)
-            self.meetingIntelligenceCoordinator.reload(sessions: snapshot.sessions)
+            self.meetingIntelligenceFeature.reload(sessions: snapshot.sessions)
         }
         self.libraryFeature.onTranscriptPublicationCommitted = { [weak self] event in
             guard let self,
@@ -487,7 +491,7 @@ final class AppModel: ObservableObject {
                   event.publication.normalizedSessionFolder
                     == RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL)
             else { return }
-            self.meetingIntelligenceCoordinator.handleTranscriptPublished(event.publication)
+            self.meetingIntelligenceFeature.handleTranscriptPublished(event.publication)
         }
         self.libraryFeature.onTranscriptEdited = { [weak self] event in
             guard let self,
@@ -495,7 +499,7 @@ final class AppModel: ObservableObject {
                     event.identity,
                     canonical: event.canonicalSession
                   ) else { return }
-            self.meetingIntelligenceCoordinator.transcriptDidSave(event.canonicalSession)
+            self.meetingIntelligenceFeature.transcriptDidSave(event.canonicalSession)
         }
         self.libraryFeature.onMetadataSaved = { [weak self] event in
             guard let self,
@@ -504,7 +508,7 @@ final class AppModel: ObservableObject {
                     canonical: event.canonicalSession
                   ) else { return }
             // Targeted observational reload retains all other MI projections.
-            self.meetingIntelligenceCoordinator.reload(
+            self.meetingIntelligenceFeature.reload(
                 sessions: [event.canonicalSession]
             )
         }
@@ -523,17 +527,14 @@ final class AppModel: ObservableObject {
                     .deletingLastPathComponent()
                     == RecordingLibraryURLIdentity.normalized(self.outputFolder)
             else { return }
-            self.meetingIntelligenceCoordinator.remove(sessionID: event.identity.sessionID)
+            self.meetingIntelligenceFeature.remove(sessionID: event.identity.sessionID)
             self.transcriptionFeature.removeProjection(for: event.identity.sessionID)
         }
-        meetingIntelligenceCoordinator.objectWillChange
-            .sink { [weak self] in self?.objectWillChange.send() }
-            .store(in: &cancellables)
-        meetingIntelligenceCoordinator.onPublication = {
+        self.meetingIntelligenceFeature.onPublished = {
             [weak self] event in
             guard let self,
                   event.identity.coordinatorInstanceID
-                    == self.meetingIntelligenceCoordinator.publicationSourceID,
+                    == self.meetingIntelligenceFeature.publicationSourceID,
                   event.identity.workspaceFence == self.workspacePublicationFence,
                   let canonicalSession = self.libraryFeature.session(withID: event.identity.sessionID),
                   event.identity.sessionID == canonicalSession.id,
@@ -638,43 +639,43 @@ final class AppModel: ObservableObject {
     func meetingIntelligencePresentation(
         for session: RecordingSession
     ) -> MeetingIntelligencePresentation {
-        meetingIntelligenceCoordinator.presentation(for: session)
+        meetingIntelligenceFeature.presentation(for: session)
     }
 
     func checkMeetingIntelligenceAvailability(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.checkAvailability(
+        meetingIntelligenceFeature.checkAvailability(
             for: session,
             workspaceFence: workspacePublicationFence
         )
     }
 
     func generateMeetingIntelligence(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.generate(
+        meetingIntelligenceFeature.generate(
             for: session,
             workspaceFence: workspacePublicationFence
         )
     }
 
     func regenerateMeetingIntelligence(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.regenerate(
+        meetingIntelligenceFeature.regenerate(
             for: session,
             workspaceFence: workspacePublicationFence
         )
     }
 
     func retryMeetingIntelligenceGeneration(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.retryGeneration(
+        meetingIntelligenceFeature.retryGeneration(
             for: session,
             workspaceFence: workspacePublicationFence
         )
     }
 
     func cancelMeetingIntelligence(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.cancel(sessionID: session.id)
+        meetingIntelligenceFeature.cancel(sessionID: session.id)
     }
 
     func applyMeetingIntelligenceSuggestedTitle(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.applySuggestedTitle(
+        meetingIntelligenceFeature.applySuggestedTitle(
             for: session,
             workspaceFence: workspacePublicationFence
         )
@@ -685,7 +686,7 @@ final class AppModel: ObservableObject {
         isShutDown = true
         playbackFeature.shutdown()
         transcriptionFeature.shutdown()
-        meetingIntelligenceCoordinator.shutdown()
+        meetingIntelligenceFeature.shutdown()
         libraryFeature.shutdown()
     }
 
@@ -1384,7 +1385,7 @@ final class AppModel: ObservableObject {
             to: workspacePublicationFence
         )
         libraryFeature.clearForWorkspaceChange()
-        meetingIntelligenceCoordinator.resetForWorkspaceChange()
+        meetingIntelligenceFeature.resetForWorkspaceChange()
         transcriptionFeature.clearProjections()
         refreshSessions()
     }

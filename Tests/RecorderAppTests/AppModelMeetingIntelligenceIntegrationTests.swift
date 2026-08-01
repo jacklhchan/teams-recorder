@@ -4,6 +4,76 @@ import XCTest
 
 @MainActor
 final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
+    func testMeetingIntelligenceFeatureFactoryBuildsExactlyOneRetainedFeature() async throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+        var factoryCalls = 0
+        var receivedTranscriptionPublicationSourceID: UUID?
+        var returnedFeature: MeetingIntelligenceFeatureModel?
+        var returnedCoordinator: MeetingIntelligenceJobCoordinator?
+
+        let model = AppModel(
+            performStartupWork: false,
+            initialOutputFolder: fixture.workspace,
+            meetingIntelligenceFeatureFactory: { _, transcriptionPublicationSourceID, _ in
+                factoryCalls += 1
+                receivedTranscriptionPublicationSourceID = transcriptionPublicationSourceID
+                let coordinator = fixture.coordinator(
+                    expectedPublicationSourceID: transcriptionPublicationSourceID,
+                    availability: .confirmed
+                )
+                let feature = MeetingIntelligenceFeatureModel(coordinator: coordinator)
+                returnedCoordinator = coordinator
+                returnedFeature = feature
+                return feature
+            }
+        )
+        defer { model.shutdown() }
+
+        XCTAssertEqual(factoryCalls, 1)
+        XCTAssertEqual(
+            receivedTranscriptionPublicationSourceID,
+            model.transcriptionFeature.publicationSourceID
+        )
+        XCTAssertTrue(model.meetingIntelligenceFeature === returnedFeature)
+
+        // The compatibility command must mutate the single feature returned by
+        // the factory, rather than a parallel default coordinator/model.
+        model.checkMeetingIntelligenceAvailability(for: fixture.session())
+        await returnedCoordinator?.waitUntilIdleForTesting(
+            sessionID: fixture.session().id
+        )
+        XCTAssertEqual(
+            returnedFeature?.snapshot.presentation(for: fixture.session())?.presentation.phase,
+            .notGenerated
+        )
+    }
+
+    func testAppModelRetainsInjectedMeetingIntelligenceFeatureWithoutRelayingItsChanges() async throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+        let coordinator = fixture.coordinator(availability: .confirmed)
+        let feature = MeetingIntelligenceFeatureModel(coordinator: coordinator)
+        let model = AppModel(
+            performStartupWork: false,
+            initialOutputFolder: fixture.workspace,
+            meetingIntelligenceFeature: feature
+        )
+        defer { model.shutdown() }
+        XCTAssertTrue(model.meetingIntelligenceFeature === feature)
+
+        let appModelChanged = expectation(description: "MI snapshot is not mirrored through AppModel")
+        appModelChanged.isInverted = true
+        let cancellable = model.objectWillChange.sink { appModelChanged.fulfill() }
+        defer { cancellable.cancel() }
+
+        feature.checkAvailability(for: fixture.session())
+        await coordinator.waitUntilIdleForTesting(sessionID: fixture.session().id)
+
+        XCTAssertEqual(feature.snapshot.presentation(for: fixture.session())?.presentation.phase, .notGenerated)
+        await fulfillment(of: [appModelChanged], timeout: 0.05)
+    }
+
     func testTranscriptionPublicationEntersAutomaticMeetingIntelligenceOnlyAfterSearchRebuild() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
@@ -476,7 +546,9 @@ private final class IntegrationFixture {
                reloader: @escaping @Sendable (RecordingSession) -> RecordingSession) -> AppModel {
         AppModel(performStartupWork: false, initialOutputFolder: workspace,
                  recordingSessionReloader: reloader,
-                 meetingIntelligenceCoordinatorFactory: { _, _, _ in coordinator })
+                 meetingIntelligenceFeatureFactory: { _, _, _ in
+                     MeetingIntelligenceFeatureModel(coordinator: coordinator)
+                 })
     }
 
     func transcribingModel(
@@ -493,8 +565,10 @@ private final class IntegrationFixture {
             recordingSearchDocumentLoader: searchLoader,
             transcriptionAudioPreparer: IntegrationAudioPreparer(),
             transcriptionService: transcriptionService,
-            meetingIntelligenceCoordinatorFactory: { _, sourceID, _ in
-                coordinatorFactory(sourceID)
+            meetingIntelligenceFeatureFactory: { _, sourceID, _ in
+                MeetingIntelligenceFeatureModel(
+                    coordinator: coordinatorFactory(sourceID)
+                )
             }
         )
         model.aiProviderSettingsModel.baseURLText = "https://api.example.com/v1"

@@ -61,6 +61,27 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
         XCTAssertTrue(host.contains("meeting-intelligence.feedback.completion"))
     }
 
+    func testDisappearingAfterFeedbackDoesNotReplayItOnReappearance() throws {
+        let state = MeetingIntelligenceSectionRenderState(
+            presentation: generatingPresentation(),
+            observedSnapshot: snapshot(1, phase: .working, title: "Initial title")
+        )
+        let host = try MeetingIntelligenceSectionRenderHost(state: state)
+
+        state.presentation = readyPresentation()
+        state.observedSnapshot = snapshot(2, phase: .ready, title: "Generated title")
+        host.renderWithoutWaitingForAnimationCompletion()
+        XCTAssertTrue(host.contains("meeting-intelligence.feedback.completion"))
+
+        state.isVisible = false
+        host.renderWithoutWaitingForAnimationCompletion()
+        state.isVisible = true
+        host.renderWithoutWaitingForAnimationCompletion()
+
+        XCTAssertFalse(host.contains("meeting-intelligence.feedback.completion"))
+        XCTAssertFalse(host.contains("meeting-intelligence.feedback.generated-title"))
+    }
+
     func testNewerReadyTitleChangeShowsGeneratedTitleHighlight() throws {
         let state = MeetingIntelligenceSectionRenderState(
             presentation: readyPresentation(),
@@ -184,6 +205,7 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
 private final class MeetingIntelligenceSectionRenderState: ObservableObject {
     @Published var presentation: MeetingIntelligencePresentation
     @Published var observedSnapshot: RecorderObservedSnapshot?
+    @Published var isVisible = true
     var invokedActions: [String] = []
 
     init(presentation: MeetingIntelligencePresentation, observedSnapshot: RecorderObservedSnapshot? = nil) {
@@ -197,18 +219,22 @@ private struct MeetingIntelligenceSectionRenderFixture: View {
     let reduceMotion: Bool?
 
     var body: some View {
-        MeetingIntelligenceSectionView(
-            presentation: state.presentation,
-            observedSnapshot: state.observedSnapshot,
-            actions: .init(
-                generate: { state.invokedActions.append("generate") },
-                regenerate: { state.invokedActions.append("regenerate") },
-                checkAgain: { state.invokedActions.append("checkAgain") },
-                retryGeneration: { state.invokedActions.append("retry") },
-                cancel: { state.invokedActions.append("cancel") },
-                applySuggestedTitle: { state.invokedActions.append("apply") }
-            )
-        )
+        Group {
+            if state.isVisible {
+                MeetingIntelligenceSectionView(
+                    presentation: state.presentation,
+                    observedSnapshot: state.observedSnapshot,
+                    actions: .init(
+                        generate: { state.invokedActions.append("generate") },
+                        regenerate: { state.invokedActions.append("regenerate") },
+                        checkAgain: { state.invokedActions.append("checkAgain") },
+                        retryGeneration: { state.invokedActions.append("retry") },
+                        cancel: { state.invokedActions.append("cancel") },
+                        applySuggestedTitle: { state.invokedActions.append("apply") }
+                    )
+                )
+            }
+        }
         .environment(\.meetingIntelligenceReduceMotionOverride, reduceMotion)
     }
 }
@@ -229,13 +255,6 @@ private final class MeetingIntelligenceSectionRenderHost {
     }
 
     func contains(_ identifier: String) -> Bool { marker(identifier) != nil }
-
-    func accessibilityValue(for identifier: String) -> String? {
-        guard let view = descendants(of: hostingView).first(where: { $0.accessibilityIdentifier() == identifier }) else {
-            return nil
-        }
-        return view.accessibilityValue() as? String
-    }
 
     func frame(_ identifier: String) throws -> NSRect {
         guard let marker = marker(identifier) else { throw RenderError.missing(identifier) }

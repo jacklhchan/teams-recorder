@@ -221,6 +221,7 @@ struct MeetingIntelligenceSectionView: View {
         .accessibilityIdentifier(RecorderActionID.meetingIntelligenceCard)
         .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceCard))
         .onAppear {
+            resetObservedFeedback()
             previousObservedSnapshot = observedSnapshot
             revealsContent = true
         }
@@ -228,7 +229,7 @@ struct MeetingIntelligenceSectionView: View {
             updateObservedFeedback(current)
         }
         .onDisappear {
-            feedbackResetTask?.cancel()
+            resetObservedFeedback()
         }
         .animation(.easeInOut(duration: motionPolicy.revealDuration), value: showsCompletionFeedback)
         .animation(.easeInOut(duration: motionPolicy.revealDuration), value: highlightsSuggestedTitle)
@@ -270,7 +271,7 @@ struct MeetingIntelligenceSectionView: View {
 
     private func updateObservedFeedback(_ current: RecorderObservedSnapshot?) {
         defer { previousObservedSnapshot = current }
-        feedbackResetTask?.cancel()
+        resetObservedFeedback()
         guard let previous = previousObservedSnapshot, let current else {
             showsCompletionFeedback = false
             highlightsSuggestedTitle = false
@@ -289,6 +290,13 @@ struct MeetingIntelligenceSectionView: View {
                 highlightsSuggestedTitle = false
             }
         }
+    }
+
+    private func resetObservedFeedback() {
+        feedbackResetTask?.cancel()
+        feedbackResetTask = nil
+        showsCompletionFeedback = false
+        highlightsSuggestedTitle = false
     }
 
     private func markedButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {

@@ -605,5 +605,31 @@ Report exact branch, worktree, commits, focused/full test results, visual eviden
 
 2026-08-01 gate snapshot: PR B task
 `019fae39-ebd1-7611-8a23-de5aee74293d` remains active in its separate
-worktree; its latest visible update is Task 4.2 TDD RED. No rebase, merge,
-push, or PR B overlap-file edit has been attempted.
+worktree. Task 4's stable read-only UI contract was verified at commit
+`4056a8ad8649422ba4c163e3fb5918b82d518248`:
+`MeetingIntelligenceFeatureModel.snapshot`,
+`MeetingIntelligenceFeatureSnapshot.revision`, snapshot
+`presentation(for:)`, and the typed
+`MeetingIntelligenceSessionPresentation.identity` containing both `sessionID`
+and `normalizedSessionFolder`. It adds no AppModel mirror or duplicate
+identity state.
+
+The post-rebase integration must observe `model.meetingIntelligenceFeature`
+directly in `RecordingsLibraryView`, capture exactly one immutable snapshot per
+body evaluation, and use the same entry for both the visible presentation and
+motion feedback. `RecorderObservedSnapshot` must replace its temporary
+`String` session ID with the contract's typed presentation identity; its
+`featureRevision` comes directly from the captured snapshot revision. The
+transcript detail then passes that observed snapshot into
+`MeetingIntelligenceSectionView`, so non-ready-to-ready completion and
+ready-to-ready generated-title feedback are driven in production rather than
+only in render fixtures. UI code must not repeat URL normalization or mirror
+feature state into AppModel.
+
+Current read-only merge analysis from base `6fafacf` identifies
+`MeetingIntelligenceSectionView.swift` as the textual conflict requiring manual
+resolution, with semantic integration also required in
+`RecordingsLibraryView.swift`, `RecorderObservedTransition.swift`, and the
+production render tests. PR B Task 5 remains in review fixes, so no rebase,
+cherry-pick, merge, push, or overlap-file edit has been attempted. Re-run this
+analysis against the final PR B tip before integration.

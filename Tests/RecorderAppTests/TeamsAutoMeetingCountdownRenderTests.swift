@@ -11,17 +11,19 @@ final class TeamsAutoMeetingCountdownRenderTests: XCTestCase {
             let host = CountdownRenderHost(rootView: TeamsAutoMeetingCountdownView(seconds: seconds, cancel: { cancellations += 1 }))
             defer { host.close() }
             XCTAssertEqual(host.frame.size, .init(width: 360, height: 94))
-            for identifier in ["teams-auto-countdown-panel", "teams-auto-countdown-seconds", "teams-auto-countdown-cancel"] { XCTAssertTrue(host.boundsContain(identifier), identifier) }
-            try host.click("teams-auto-countdown-cancel")
+            for identifier in TeamsAutoMeetingCountdownAccessibility.allIDs { XCTAssertTrue(host.boundsContain(identifier), identifier) }
+            try host.click(TeamsAutoMeetingCountdownAccessibility.cancelID)
             XCTAssertEqual(cancellations, 1)
         }
     }
 
     func testCountdownUsesSharedOverrideBranchesWithoutChangingBounds() {
-        let identifiers = ["teams-auto-countdown-panel", "teams-auto-countdown-seconds", "teams-auto-countdown-cancel"]
+        let identifiers = TeamsAutoMeetingCountdownAccessibility.allIDs
         let variants: [(Bool, Bool, String, String)] = [(false, false, "recorder.motion.scale", "recorder.glass.native"), (true, false, "recorder.motion.no-scale", "recorder.glass.native"), (false, true, "recorder.motion.scale", "recorder.glass.material-separator")]
         var baseline: [String: NSRect]?
         for (motion, transparency, expectedMotion, expectedGlass) in variants {
+            XCTAssertEqual(TeamsAutoMeetingCountdownAccessibility.allIDs, identifiers)
+            XCTAssertEqual(TeamsAutoMeetingCountdownAccessibility.cancelLabel, "Cancel automatic recording")
             let host = CountdownRenderHost(rootView: TeamsAutoMeetingCountdownView(seconds: 8, cancel: {}).environment(\.recorderReduceMotionOverride, motion).environment(\.recorderReduceTransparencyOverride, transparency))
             defer { host.close() }
             XCTAssertTrue(host.contains(expectedMotion))

@@ -23,10 +23,10 @@ final class RecordingControllerRenderTests: XCTestCase {
         defer { host.close() }
 
         XCTAssertEqual(host.frame.size, .init(width: 390, height: 112))
-        for identifier in ["recording-controller-status", "recording-controller-elapsed", "recording-controller-screen-status", "recording-controller-screen-toggle", "recording-controller-stop"] {
+        for identifier in RecordingControllerAccessibility.allIDs {
             XCTAssertTrue(host.boundsContain(identifier), identifier)
         }
-        try host.click("recording-controller-stop")
+        try host.click(RecordingControllerAccessibility.stopID)
         XCTAssertEqual(stops, 1)
         XCTAssertTrue(screenRequests.isEmpty)
     }
@@ -44,18 +44,23 @@ final class RecordingControllerRenderTests: XCTestCase {
         )
         defer { host.close() }
 
-        try host.rawClick("recording-controller-stop")
-        try host.rawClick("recording-controller-screen-toggle")
+        try host.rawClick(RecordingControllerAccessibility.stopID)
+        try host.rawClick(RecordingControllerAccessibility.screenToggleID)
         XCTAssertEqual(stops, 0)
         XCTAssertTrue(screenRequests.isEmpty)
     }
 
     func testMotionAndTransparencyOverridesAreEmittedByPanelModifiers() {
         let presentation = RecordingControllerPresentation.make(snapshot: .init(isRecording: true, isFinalizing: false, startedAt: Date(), showsTeamsScreenControl: true, screenRequested: false, screenStatusText: TeamsScreenStatusText.off, screenToggleDisabled: false), now: Date())
-        let identifiers = ["recording-controller-status", "recording-controller-elapsed", "recording-controller-screen-status", "recording-controller-screen-toggle", "recording-controller-stop"]
+        let identifiers = RecordingControllerAccessibility.allIDs
         let variants: [(Bool, Bool, String, String)] = [(false, false, "recorder.motion.scale", "recorder.glass.native"), (true, false, "recorder.motion.no-scale", "recorder.glass.native"), (false, true, "recorder.motion.scale", "recorder.glass.material-separator")]
         var baseline: [String: NSRect]?
         for (motion, transparency, expectedMotion, expectedGlass) in variants {
+            XCTAssertEqual(RecordingControllerAccessibility.allIDs, identifiers)
+            XCTAssertEqual(RecordingControllerAccessibility.stopLabel, "Stop recording")
+            XCTAssertEqual(RecordingControllerAccessibility.screenCaptureLabel, "Capture Teams screen")
+            XCTAssertEqual(RecordingControllerAccessibility.screenCaptureValue(isOn: false), "Off")
+            XCTAssertEqual(RecordingControllerAccessibility.screenCaptureValue(isOn: true), "On")
             let host = PanelRenderHost(rootView: RecordingControllerPanelContent(presentation: presentation, stop: {}, setScreenRequested: { _ in }).environment(\.recorderReduceMotionOverride, motion).environment(\.recorderReduceTransparencyOverride, transparency), size: .init(width: 390, height: 112))
             defer { host.close() }
             XCTAssertTrue(host.contains(expectedMotion))

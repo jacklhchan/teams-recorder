@@ -65,7 +65,7 @@ After PR B finishes, a separate post-rebase plan must first record the actual, c
 - Consumes: immutable booleans and value snapshots only.
 - Produces: `RecorderMotionPolicy.make(reduceMotion:)`, `RecorderObservedSnapshot`, and `RecorderObservedTransition.feedback(previous:current:)` for later views.
 
-- [ ] **Step 1: Write the failing pure tests**
+- [x] **Step 1: Write the failing pure tests**
 
 ```swift
 import XCTest
@@ -130,7 +130,7 @@ final class RecorderMotionPolicyTests: XCTestCase {
 }
 ```
 
-- [ ] **Step 2: Run RED and verify the missing-type failure**
+- [x] **Step 2: Run RED and verify the missing-type failure**
 
 Run:
 
@@ -140,7 +140,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter Rec
 
 Expected: compile failure naming missing `RecorderMotionPolicy` or `RecorderObservedSnapshot`, not a fixture or XCTest error.
 
-- [ ] **Step 3: Add the minimal pure implementation**
+- [x] **Step 3: Add the minimal pure implementation**
 
 ```swift
 import Foundation
@@ -192,7 +192,13 @@ enum RecorderObservedTransition {
 }
 ```
 
-- [ ] **Step 4: Run GREEN and commit**
+`completed` alone is restricted to non-ready → ready. `generatedTitleChanged`
+intentionally also permits a strictly newer ready → ready snapshot because
+canonical Library metadata may publish the generated display title after the
+MI ready snapshot; same-session, changed-title, and unprotected ownership
+remain mandatory.
+
+- [x] **Step 4: Run GREEN and commit**
 
 Run the focused test, then `git diff --check`. Expected: all `RecorderMotionPolicyTests` pass. Commit only the three Task 1 paths with:
 

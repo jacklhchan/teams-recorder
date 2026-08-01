@@ -21,6 +21,7 @@ final class PRBWorkspaceTransitionIntegrationTests: XCTestCase {
                 let createdCoordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
                     availabilityChecker: ConfirmedWorkspaceAvailability(),
                     generator: generator,
                     publisher: MeetingIntelligencePublisher(

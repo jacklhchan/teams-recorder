@@ -117,6 +117,7 @@ struct MeetingIntelligenceSectionView: View {
     @Environment(\.meetingIntelligenceReduceMotionOverride) private var reduceMotionOverride
     let section: MeetingIntelligenceSectionPresentation
     let actions: MeetingIntelligenceActions
+    private let palette: TranscriptDetailPalette
     private let observedSnapshot: RecorderObservedSnapshot?
     @State private var previousObservedSnapshot: RecorderObservedSnapshot?
     @State private var showsCompletionFeedback = false
@@ -127,11 +128,13 @@ struct MeetingIntelligenceSectionView: View {
     init(
         presentation: MeetingIntelligencePresentation,
         observedSnapshot: RecorderObservedSnapshot? = nil,
-        actions: MeetingIntelligenceActions = .init()
+        actions: MeetingIntelligenceActions = .init(),
+        palette: TranscriptDetailPalette = .light
     ) {
         self.section = .make(presentation: presentation)
         self.observedSnapshot = observedSnapshot
         self.actions = actions
+        self.palette = palette
     }
 
     var body: some View {
@@ -156,6 +159,7 @@ struct MeetingIntelligenceSectionView: View {
             if let summary = section.summary, !summary.isEmpty {
                 Text(summary)
                     .font(.callout)
+                    .foregroundStyle(palette.text)
                     .textSelection(.enabled)
                     .accessibilityIdentifier(RecorderActionID.meetingIntelligenceSummary)
                     .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceSummary))
@@ -177,7 +181,7 @@ struct MeetingIntelligenceSectionView: View {
                     }
                     Text(title)
                         .font(.callout.weight(.medium))
-                        .foregroundStyle(Color.primary)
+                        .foregroundStyle(palette.text)
                         .accessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
                         .accessibilityLabel(title)
                         .background(
@@ -195,7 +199,7 @@ struct MeetingIntelligenceSectionView: View {
                 if section.showsManualTitleProtection {
                     Text(section.manualTitleProtectionCopy)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondary)
                         .accessibilityLabel(section.manualTitleProtectionAccessibilityLabel)
                         .accessibilityIdentifier(RecorderActionID.meetingIntelligenceManualTitleProtection)
                         .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceManualTitleProtection))
@@ -223,7 +227,8 @@ struct MeetingIntelligenceSectionView: View {
             }
         }
         .padding(14)
-        .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 12))
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.hairline))
         .accessibilityIdentifier(RecorderActionID.meetingIntelligenceCard)
         .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceCard))
         .onAppear {
@@ -244,7 +249,7 @@ struct MeetingIntelligenceSectionView: View {
 
     private var statusColor: Color {
         switch section.statusTone {
-        case .neutral: .secondary
+        case .neutral: palette.secondary
         case .working: .blue
         case .success: .green
         case .warning: .orange

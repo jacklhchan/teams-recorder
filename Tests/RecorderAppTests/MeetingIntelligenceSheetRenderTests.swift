@@ -6,17 +6,77 @@ import XCTest
 @MainActor
 final class MeetingIntelligenceSheetRenderTests: XCTestCase {
     func testTranscriptDetailSourceDoesNotDeclareEmbeddedPlaybackViews() throws {
-        let source = try String(
-            contentsOf: URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .appendingPathComponent("Sources/RecorderApp/UI/RecordingsLibraryView.swift"),
-            encoding: .utf8
-        )
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        for path in [
+            "Sources/RecorderApp/UI/RecordingsLibraryView.swift",
+            "Sources/RecorderApp/UI/TranscriptDetailView.swift"
+        ] {
+            let source = try String(
+                contentsOf: repositoryRoot.appendingPathComponent(path),
+                encoding: .utf8
+            )
+            XCTAssertFalse(source.contains("AVPlayerView"), path)
+            XCTAssertFalse(source.contains("VideoPlayer"), path)
+            XCTAssertFalse(source.contains("RecordingPlaybackView"), path)
+        }
+    }
 
-        XCTAssertFalse(source.contains("AVPlayerView"))
-        XCTAssertFalse(source.contains("RecordingPlaybackView"))
+    func testTranscriptDetailUsesSystemAppearanceAndKeepsHeaderFooterAtBothSupportedSizes() throws {
+        let sizes = [
+            CGSize(width: 860, height: 680),
+            CGSize(width: 1_280, height: 800)
+        ]
+        let schemes: [ColorScheme] = [.light, .dark]
+
+        for size in sizes {
+            for scheme in schemes {
+                let openedSession = session()
+                let root = TranscriptDetailView(
+                    openedSession: openedSession,
+                    allSessions: [openedSession],
+                    close: {},
+                    load: { "Draft transcript" },
+                    save: { _ in .saved(sessionID: openedSession.id, .transcript) },
+                    openFolder: {},
+                    play: {},
+                    export: {},
+                    copy: {},
+                    editDetails: { _ in },
+                    meetingIntelligencePresentation: { _ in
+                        .init(
+                            phase: .ready,
+                            summary: "A concise meeting summary.",
+                            suggestedTitle: "Atlas planning",
+                            statusMessage: "Ready.",
+                            model: "test-model",
+                            titleIsProtected: false,
+                            unavailableReason: nil
+                        )
+                    },
+                    meetingIntelligenceObservedSnapshot: { _ in nil },
+                    checkMeetingIntelligenceAvailability: { _ in },
+                    generateMeetingIntelligence: { _ in },
+                    regenerateMeetingIntelligence: { _ in },
+                    retryMeetingIntelligenceGeneration: { _ in },
+                    cancelMeetingIntelligence: { _ in },
+                    applyMeetingIntelligenceSuggestedTitle: { _ in }
+                )
+                .environment(\.colorScheme, scheme)
+                let host = try SheetRenderHost(size: size, root: root)
+                defer { host.close() }
+
+                let appearance = RecorderVisualStyle.transcriptAppearance(for: scheme)
+                XCTAssertTrue(host.contains(appearance.accessibilityIdentifier))
+                XCTAssertTrue(host.contains(RecorderActionID.transcriptDetailTitle))
+                XCTAssertTrue(host.contains(RecorderActionID.saveTranscript))
+                XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceCard))
+                XCTAssertTrue(host.windowContentRect.contains(try XCTUnwrap(host.frame(for: RecorderActionID.transcriptDetailTitle))))
+                XCTAssertTrue(host.windowContentRect.contains(try XCTUnwrap(host.frame(for: RecorderActionID.saveTranscript))))
+            }
+        }
     }
 
     func test860By680SheetRendersMeetingIntelligenceAndNeverEmbedsPlaybackView() throws {

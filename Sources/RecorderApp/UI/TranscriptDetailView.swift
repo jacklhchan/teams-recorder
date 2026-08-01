@@ -4,6 +4,7 @@ import SwiftUI
 /// stable opened session, while every render resolves presentation and command
 /// routing from the latest library projection for that recording ID.
 struct TranscriptDetailView: View {
+    @Environment(\.colorScheme) private var colorScheme
     let openedSession: RecordingSession
     let allSessions: [RecordingSession]
     let close: () -> Void
@@ -24,6 +25,8 @@ struct TranscriptDetailView: View {
     let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
 
     var body: some View {
+        let palette = TranscriptDetailPalette(colorScheme: colorScheme)
+        let appearance = RecorderVisualStyle.transcriptAppearance(for: colorScheme)
         let currentSession = TranscriptDetailActionProjection.current(
             opened: openedSession,
             allSessions: allSessions
@@ -55,10 +58,50 @@ struct TranscriptDetailView: View {
             editDetails: editDetails,
             meetingIntelligencePresentation: { _ in effectivePresentation },
             meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
-            meetingIntelligenceActions: { _ in actions }
+            meetingIntelligenceActions: { _ in actions },
+            palette: palette
         )
         .id(openedSession.id)
+        .background(palette.canvas)
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: appearance.accessibilityIdentifier
+            )
+        )
     }
+}
+
+/// Opaque, system-appearance-derived colors for the transcript detail. This
+/// is a presentation value, passed from the detail boundary to its sections;
+/// it is not a user preference or a second source of state.
+struct TranscriptDetailPalette {
+    let canvas: Color
+    let card: Color
+    let editor: Color
+    let text: Color
+    let secondary: Color
+    let hairline: Color
+
+    init(colorScheme: ColorScheme) {
+        switch colorScheme {
+        case .dark:
+            canvas = RecorderVisualStyle.transcriptDarkCanvas
+            card = RecorderVisualStyle.transcriptDarkCard
+            editor = RecorderVisualStyle.transcriptDarkEditor
+            text = RecorderVisualStyle.transcriptDarkText
+            secondary = RecorderVisualStyle.transcriptDarkSecondary
+            hairline = RecorderVisualStyle.transcriptDarkHairline
+        default:
+            canvas = RecorderVisualStyle.transcriptLightCanvas
+            card = RecorderVisualStyle.transcriptLightCard
+            editor = RecorderVisualStyle.transcriptLightEditor
+            text = RecorderVisualStyle.transcriptLightText
+            secondary = RecorderVisualStyle.transcriptLightSecondary
+            hairline = RecorderVisualStyle.transcriptLightHairline
+        }
+    }
+
+    static let light = TranscriptDetailPalette(colorScheme: .light)
 }
 enum TranscriptEditorDraft {
     /// The sheet owns its in-progress text. A model publication may rerender
@@ -140,6 +183,7 @@ struct TranscriptEditorView: View {
     private let meetingIntelligencePresentationForSession: (RecordingSession) -> MeetingIntelligencePresentation
     private let meetingIntelligenceObservedSnapshotForSession: (RecordingSession) -> RecorderObservedSnapshot?
     private let meetingIntelligenceActionsForSession: (RecordingSession) -> MeetingIntelligenceActions
+    private let palette: TranscriptDetailPalette
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @State private var hasLoadedDraft = false
@@ -158,7 +202,8 @@ struct TranscriptEditorView: View {
         editDetails: @escaping (RecordingSession) -> Void = { _ in },
         meetingIntelligencePresentation: MeetingIntelligencePresentation = .empty,
         meetingIntelligenceObservedSnapshot: RecorderObservedSnapshot? = nil,
-        meetingIntelligenceActions: MeetingIntelligenceActions = .init()
+        meetingIntelligenceActions: MeetingIntelligenceActions = .init(),
+        palette: TranscriptDetailPalette = .light
     ) {
         self.session = session
         self.resolvedSession = resolvedSession
@@ -176,6 +221,7 @@ struct TranscriptEditorView: View {
         meetingIntelligencePresentationForSession = { _ in meetingIntelligencePresentation }
         meetingIntelligenceObservedSnapshotForSession = { _ in meetingIntelligenceObservedSnapshot }
         meetingIntelligenceActionsForSession = { _ in meetingIntelligenceActions }
+        self.palette = palette
     }
 
     init(
@@ -191,7 +237,8 @@ struct TranscriptEditorView: View {
         editDetails: @escaping (RecordingSession) -> Void = { _ in },
         meetingIntelligencePresentation: @escaping (RecordingSession) -> MeetingIntelligencePresentation,
         meetingIntelligenceObservedSnapshot: @escaping (RecordingSession) -> RecorderObservedSnapshot? = { _ in nil },
-        meetingIntelligenceActions: @escaping (RecordingSession) -> MeetingIntelligenceActions
+        meetingIntelligenceActions: @escaping (RecordingSession) -> MeetingIntelligenceActions,
+        palette: TranscriptDetailPalette = .light
     ) {
         self.session = session
         self.resolvedSession = resolvedSession
@@ -206,26 +253,29 @@ struct TranscriptEditorView: View {
         meetingIntelligencePresentationForSession = meetingIntelligencePresentation
         meetingIntelligenceObservedSnapshotForSession = meetingIntelligenceObservedSnapshot
         meetingIntelligenceActionsForSession = meetingIntelligenceActions
+        self.palette = palette
     }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Divider().overlay(palette.hairline)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     playbackControls
                     MeetingIntelligenceSectionView(
                         presentation: meetingIntelligencePresentationForSession(displayedSession),
                         observedSnapshot: meetingIntelligenceObservedSnapshotForSession(displayedSession),
-                        actions: meetingIntelligenceActionsForSession(displayedSession)
+                        actions: meetingIntelligenceActionsForSession(displayedSession),
+                        palette: palette
                     )
                     transcriptEditor
                     details
                 }
                 .padding(20)
             }
-            Divider()
+            .background(palette.canvas)
+            Divider().overlay(palette.hairline)
             footer
         }
         .frame(
@@ -236,6 +286,8 @@ struct TranscriptEditorView: View {
             idealHeight: 720,
             maxHeight: .infinity
         )
+        .foregroundStyle(palette.text)
+        .background(palette.canvas)
         .background(
             RecorderDestinationAccessibilityMarker(
                 identifier: "recorder.transcript.detail.root"
@@ -299,6 +351,7 @@ struct TranscriptEditorView: View {
         }
         .padding(.horizontal, 20)
         .frame(height: 52)
+        .background(palette.card)
     }
 
     private var playbackControls: some View {
@@ -312,7 +365,8 @@ struct TranscriptEditorView: View {
                 .buttonStyle(.bordered)
         }
         .padding(12)
-        .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 10))
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.hairline))
     }
 
     private var transcriptEditor: some View {
@@ -321,6 +375,10 @@ struct TranscriptEditorView: View {
             TextEditor(text: $text)
                 .font(.body)
                 .frame(minHeight: 260)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .background(palette.editor, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.hairline))
                 .accessibilityIdentifier("recorder.transcript.editor")
                 .background(
                     RecorderDestinationAccessibilityMarker(
@@ -337,7 +395,7 @@ struct TranscriptEditorView: View {
             Label(displayedSession.fileSizeText, systemImage: "internaldrive")
         }
         .font(.caption)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(palette.secondary)
         .padding(.vertical, 4)
     }
 
@@ -375,6 +433,7 @@ struct TranscriptEditorView: View {
         }
         .padding(.horizontal, 20)
         .frame(height: 60)
+        .background(palette.card)
     }
 
     private var isSaving: Bool {

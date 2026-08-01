@@ -320,6 +320,7 @@ private struct SessionListView: View {
             RecordingMetadataEditorView(session: session) { title, tags, favorite in
                 await saveMetadata(title, tags, favorite, session)
             }
+            .id(session.id)
         }
         .confirmationDialog(
             "Move recording to Trash?",
@@ -422,6 +423,7 @@ struct TranscriptDetailSheetView: View {
             meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
             meetingIntelligenceActions: { _ in actions }
         )
+        .id(openedSession.id)
     }
 }
 
@@ -507,6 +509,7 @@ struct TranscriptEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @State private var hasLoadedDraft = false
+    @StateObject private var saveState = LibraryEditorSaveState()
 
     init(
         session: RecordingSession,
@@ -608,6 +611,7 @@ struct TranscriptEditorView: View {
             )
             hasLoadedDraft = true
         }
+        .onDisappear { saveState.invalidate() }
     }
 
     private var header: some View {
@@ -617,6 +621,8 @@ struct TranscriptEditorView: View {
             }
             .buttonStyle(.borderless)
             .help("Back")
+            .disabled(isSaving)
+            .accessibilityIdentifier(RecorderActionID.transcriptBack)
             Text(displayedSession.displayName)
                 .font(.headline)
                 .lineLimit(1)
@@ -701,62 +707,143 @@ struct TranscriptEditorView: View {
 
     private var footer: some View {
         HStack {
+            LibraryEditorSaveFeedback(
+                state: saveState.state,
+                inFlightIdentifier: RecorderActionID.transcriptSaveInFlight,
+                errorIdentifier: RecorderActionID.transcriptSaveError
+            )
             Spacer()
             Button("Cancel") { dismiss() }
-            Button("Save") {
+                .disabled(isSaving)
+                .accessibilityIdentifier(RecorderActionID.transcriptCancel)
+            LibraryEditorSaveButton(
+                identifier: RecorderActionID.saveTranscript,
+                isSaving: isSaving
+            ) {
+                guard let attempt = saveState.begin(sessionID: session.id, artifact: .transcript) else {
+                    return
+                }
+                let draft = text
                 Task {
-                    let outcome = await save(text)
-                    if LibraryEditorSaveDisposition.disposition(
-                        for: .transcript,
-                        expectedSessionID: session.id,
-                        outcome: outcome
-                    ) == .dismiss { dismiss() }
+                    let outcome = await save(draft)
+                    if saveState.complete(attempt, outcome: outcome) == .dismiss { dismiss() }
                 }
             }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier(RecorderActionID.saveTranscript)
-                .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.saveTranscript))
         }
         .padding(.horizontal, 20)
         .frame(height: 60)
     }
+
+    private var isSaving: Bool {
+        saveState.state == .saving
+    }
 }
 
-private struct RecordingMetadataEditorView: View {
+struct RecordingMetadataEditorView: View {
     let session: RecordingSession
     let save: (String, String, Bool) async -> LibrarySaveOutcome
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var tags = ""
     @State private var isFavorite = false
+    @State private var hasLoadedDraft = false
+    @StateObject private var saveState = LibraryEditorSaveState()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Recording Details").font(.headline)
             TextField("Title", text: $title)
+                .accessibilityIdentifier(RecorderActionID.metadataTitle)
             TextField("Tags, separated by commas", text: $tags)
+                .accessibilityIdentifier(RecorderActionID.metadataTags)
             Toggle("Favorite", isOn: $isFavorite)
+                .accessibilityIdentifier(RecorderActionID.metadataFavorite)
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: RecorderActionID.metadataFavorite
+                    )
+                )
+            LibraryEditorSaveFeedback(
+                state: saveState.state,
+                inFlightIdentifier: RecorderActionID.metadataSaveInFlight,
+                errorIdentifier: RecorderActionID.metadataSaveError
+            )
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Save") {
-                    Task {
-                        let outcome = await save(title, tags, isFavorite)
-                        if LibraryEditorSaveDisposition.disposition(
-                            for: .metadata,
-                            expectedSessionID: session.id,
-                            outcome: outcome
-                        ) == .dismiss { dismiss() }
+                    .disabled(isSaving)
+                    .accessibilityIdentifier(RecorderActionID.metadataCancel)
+                LibraryEditorSaveButton(
+                    identifier: RecorderActionID.saveMetadata,
+                    isSaving: isSaving
+                ) {
+                    guard let attempt = saveState.begin(sessionID: session.id, artifact: .metadata) else {
+                        return
                     }
-                }.buttonStyle(.borderedProminent)
+                    let draft = (title, tags, isFavorite)
+                    Task {
+                        let outcome = await save(draft.0, draft.1, draft.2)
+                        if saveState.complete(attempt, outcome: outcome) == .dismiss { dismiss() }
+                    }
+                }
             }
         }
         .padding(20)
         .frame(width: 440)
         .onAppear {
+            guard !hasLoadedDraft else { return }
             title = session.metadata.title ?? ""
             tags = session.tags.joined(separator: ", ")
             isFavorite = session.isFavorite
+            hasLoadedDraft = true
+        }
+        .onDisappear { saveState.invalidate() }
+    }
+
+    private var isSaving: Bool {
+        saveState.state == .saving
+    }
+}
+
+struct LibraryEditorSaveButton: View {
+    let identifier: String
+    let isSaving: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button("Save", action: action)
+            .buttonStyle(.borderedProminent)
+            .disabled(isSaving)
+            .accessibilityIdentifier(identifier)
+            .background(RecorderDestinationAccessibilityMarker(identifier: identifier))
+    }
+}
+
+private struct LibraryEditorSaveFeedback: View {
+    let state: LibraryEditorSaveStateValue
+    let inFlightIdentifier: String
+    let errorIdentifier: String
+
+    var body: some View {
+        switch state {
+        case .idle:
+            EmptyView()
+        case .saving:
+            Text("Saving…")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(inFlightIdentifier)
+                .background(RecorderDestinationAccessibilityMarker(identifier: inFlightIdentifier))
+        case let .failed(failure):
+            Text(failure.userMessage)
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(errorIdentifier)
+                .accessibilityLabel(failure.userMessage)
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: errorIdentifier,
+                        label: failure.userMessage
+                    )
+                )
         }
     }
 }

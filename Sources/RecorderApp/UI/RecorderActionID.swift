@@ -13,6 +13,17 @@ enum RecorderActionID {
     static let filterFavorites = "recorder.action.filter-favorites"
     static let openTranscript = "recorder.action.open-transcript"
     static let saveTranscript = "recorder.action.save-transcript"
+    static let saveMetadata = "recorder.action.save-metadata"
+    static let transcriptSaveInFlight = "recorder.transcript.save-in-flight"
+    static let metadataSaveInFlight = "recorder.metadata.save-in-flight"
+    static let transcriptSaveError = "recorder.transcript.save-error"
+    static let metadataSaveError = "recorder.metadata.save-error"
+    static let transcriptBack = "recorder.action.transcript-back"
+    static let transcriptCancel = "recorder.action.transcript-cancel"
+    static let metadataCancel = "recorder.action.metadata-cancel"
+    static let metadataTitle = "recorder.metadata.title"
+    static let metadataTags = "recorder.metadata.tags"
+    static let metadataFavorite = "recorder.metadata.favorite"
     static let transcriptDetailTitle = "recorder.transcript.detail.title"
     static let transcriptDetailFavorite = "recorder.transcript.detail.favorite"
     static let captureRecovery = "recorder.action.capture-recovery"
@@ -56,6 +67,17 @@ enum RecorderActionID {
         filterFavorites,
         openTranscript,
         saveTranscript,
+        saveMetadata,
+        transcriptSaveInFlight,
+        metadataSaveInFlight,
+        transcriptSaveError,
+        metadataSaveError,
+        transcriptBack,
+        transcriptCancel,
+        metadataCancel,
+        metadataTitle,
+        metadataTags,
+        metadataFavorite,
         transcriptDetailTitle,
         transcriptDetailFavorite,
         captureRecovery,

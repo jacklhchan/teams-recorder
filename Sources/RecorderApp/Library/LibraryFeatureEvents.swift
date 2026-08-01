@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// Repository-wide identity representation for recording-library filesystem
@@ -109,6 +110,88 @@ enum LibraryEditorSaveDisposition: Equatable, Sendable {
         outcome.sessionID == expectedSessionID && outcome.savedArtifacts.contains(artifact)
             ? .dismiss
             : .keepOpen
+    }
+}
+
+/// Identifies one admitted editor save. The episode prevents an asynchronous
+/// completion captured by an earlier sheet presentation from affecting the
+/// current one.
+struct LibraryEditorSaveAttempt: Equatable, Sendable {
+    let episode: UUID
+    let identifier: UUID
+    let sessionID: RecordingSession.ID
+    let artifact: LibraryEditableArtifact
+}
+
+enum LibraryEditorSaveStateValue: Equatable, Sendable {
+    case idle
+    case saving
+    case failed(LibrarySaveFailure)
+}
+
+/// Main-actor admission for a single editor sheet. `begin` is deliberately
+/// synchronous so a second button event cannot create a second durable write
+/// before the first save task has started.
+@MainActor
+final class LibraryEditorSaveState: ObservableObject {
+    @Published private(set) var state: LibraryEditorSaveStateValue = .idle
+    private var episode = UUID()
+    private var currentAttempt: LibraryEditorSaveAttempt?
+    private(set) var didDismiss = false
+
+    func begin(
+        sessionID: RecordingSession.ID,
+        artifact: LibraryEditableArtifact
+    ) -> LibraryEditorSaveAttempt? {
+        guard currentAttempt == nil, !didDismiss else { return nil }
+        let attempt = LibraryEditorSaveAttempt(
+            episode: episode,
+            identifier: UUID(),
+            sessionID: sessionID,
+            artifact: artifact
+        )
+        currentAttempt = attempt
+        state = .saving
+        return attempt
+    }
+
+    func complete(
+        _ attempt: LibraryEditorSaveAttempt,
+        outcome: LibrarySaveOutcome
+    ) -> LibraryEditorSaveDisposition {
+        guard attempt.episode == episode,
+              attempt == currentAttempt,
+              !didDismiss
+        else { return .keepOpen }
+
+        currentAttempt = nil
+        guard outcome.sessionID == attempt.sessionID else {
+            state = .idle
+            return .keepOpen
+        }
+
+        if let failure = outcome.failures.first(where: { $0.artifact == attempt.artifact }) {
+            state = .failed(failure)
+            return .keepOpen
+        }
+
+        guard outcome.savedArtifacts.contains(attempt.artifact) else {
+            state = .idle
+            return .keepOpen
+        }
+
+        didDismiss = true
+        state = .idle
+        return .dismiss
+    }
+
+    /// Called when the owning sheet disappears. A completion retained by an
+    /// old task can no longer affect a later presentation of that editor.
+    func invalidate() {
+        episode = UUID()
+        currentAttempt = nil
+        state = .idle
+        didDismiss = false
     }
 }
 

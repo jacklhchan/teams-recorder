@@ -111,7 +111,7 @@ struct AIProviderSettingsView: View {
         .providerAccessibility(
             RecorderSurfaceAppearance.providerDark.accessibilityIdentifier
         )
-        .preferredColorScheme(.dark)
+        .environment(\.colorScheme, .dark)
     }
 
     @ViewBuilder

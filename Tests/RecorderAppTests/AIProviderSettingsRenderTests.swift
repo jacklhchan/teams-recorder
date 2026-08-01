@@ -5,6 +5,20 @@ import XCTest
 
 @MainActor
 final class AIProviderSettingsRenderTests: XCTestCase {
+    func testProviderColorSchemeIsLocallyDarkWithoutOverridingAdjacentLightSettingsContent() throws {
+        let repository = RecordingProviderRepository(hasAPIKey: true)
+        let model = makeConfiguredModel(repository: repository)
+        let host = ProviderColorSchemeIsolationHost(model: model)
+        defer { host.close() }
+
+        XCTAssertEqual(
+            host.appearance(for: RecorderSurfaceAppearance.providerDark.accessibilityIdentifier + ".marker"),
+            .darkAqua
+        )
+        XCTAssertEqual(host.providerPickerAppearance, .darkAqua)
+        XCTAssertEqual(host.appearance(for: "recorder.test.adjacent-settings"), .aqua)
+    }
+
     func testProductionSettingsFormKeepsProviderControlLocationsReachableAtSupportedSizes() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
         let defaultsSuite = "provider-render-\(UUID().uuidString)"
@@ -124,6 +138,92 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         ] {
             XCTAssertTrue(host.reveal(identifier), "Unreachable provider control: \(identifier)")
         }
+    }
+}
+
+@MainActor
+private final class ProviderColorSchemeIsolationHost {
+    private let hostingView: NSHostingView<ProviderColorSchemeIsolationRoot>
+    private let window: NSWindow
+
+    init(model: AIProviderSettingsModel) {
+        let frame = NSRect(x: 0, y: 0, width: 900, height: 680)
+        hostingView = NSHostingView(rootView: ProviderColorSchemeIsolationRoot(model: model))
+        hostingView.frame = frame
+        window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        render()
+    }
+
+    var providerPickerAppearance: NSAppearance.Name? {
+        allViews(hostingView)
+            .compactMap { $0 as? NSPopUpButton }
+            .first?
+            .effectiveAppearance
+            .bestMatch(from: [.darkAqua, .aqua])
+    }
+
+    func appearance(for identifier: String) -> NSAppearance.Name? {
+        guard let view = allViews(hostingView)
+            .first(where: { $0.accessibilityIdentifier() == identifier }) else {
+            return nil
+        }
+        return view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+    }
+
+    func close() {
+        window.orderOut(nil)
+        window.contentView = nil
+    }
+
+    private func render() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    private func allViews(_ view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap(allViews)
+    }
+}
+
+@MainActor
+private struct ProviderColorSchemeIsolationRoot: View {
+    @ObservedObject var model: AIProviderSettingsModel
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            AIProviderSettingsView(model: model)
+                .frame(width: 520, alignment: .topLeading)
+            VStack(alignment: .leading) {
+                Text("Adjacent Settings")
+                AppearanceProbe(identifier: "recorder.test.adjacent-settings")
+                    .frame(width: 1, height: 1)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding()
+        }
+    }
+}
+
+private struct AppearanceProbe: NSViewRepresentable {
+    let identifier: String
+
+    func makeNSView(context _: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.setAccessibilityIdentifier(identifier)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context _: Context) {
+        view.setAccessibilityIdentifier(identifier)
     }
 }
 

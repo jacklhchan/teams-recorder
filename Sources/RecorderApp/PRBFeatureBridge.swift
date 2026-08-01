@@ -343,7 +343,9 @@ final class PRBFeatureBridge {
     }
 
     private func valid(_ identity: LibraryMutationIdentity, session: RecordingSession, workspace: LibraryWorkspaceSnapshot) -> Bool {
-        guard identity.librarySourceID == routes.expectedLibrarySourceID,
+        guard let canonical = routes.canonicalSession(identity.sessionID),
+              canonical == session,
+              identity.librarySourceID == routes.expectedLibrarySourceID,
               identity.sessionID == session.id,
               identity.normalizedSessionFolder == RecordingLibraryURLIdentity.normalized(session.folderURL),
               validCanonical(session), admits(session, fence: identity.workspaceFence, workspace: workspace) else { return false }

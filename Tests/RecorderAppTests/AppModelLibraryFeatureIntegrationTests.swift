@@ -389,6 +389,13 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
             ),
             publication: publicationWithUpdatedSearchDocument, canonicalSession: session
         ))
+        await coordinator.waitUntilIdleForTesting(sessionID: session.id)
+        XCTAssertEqual(reader.count, 0)
+        XCTAssertEqual(availability.count, 0)
+
+        model.transcriptionFeature.onSuccessfulPublication?(
+            publicationWithUpdatedSearchDocument
+        )
         await fulfillment(of: [availabilityReached], timeout: 1)
         await coordinator.waitUntilIdleForTesting(sessionID: session.id)
         XCTAssertEqual(reader.count, 1)
@@ -497,13 +504,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
             workspaceFence: .initial
         )
 
-        feature.onTranscriptPublicationCommitted?(.init(
-            identity: libraryIdentity(
-                for: session, feature: feature,
-                transcriptRevision: publication.revision
-            ),
-            publication: publication, canonicalSession: session
-        ))
+        model.transcriptionFeature.onSuccessfulPublication?(publication)
 
         await fulfillment(of: [availabilityReached], timeout: 1)
         await coordinator.waitUntilIdleForTesting(sessionID: session.id)

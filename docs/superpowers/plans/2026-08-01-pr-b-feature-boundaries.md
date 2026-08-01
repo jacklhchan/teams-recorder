@@ -819,6 +819,7 @@ while IFS= read -r changed_path; do
     Tests/RecorderAppTests/AppModelPRBFeatureBoundaryTests.swift|\
     Tests/RecorderAppTests/AppModelRecordingFinalizationTests.swift|\
     Tests/RecorderAppTests/AppModelTranscriptionTests.swift|\
+    Tests/RecorderAppTests/AppRuntimeTests.swift|\
     Tests/RecorderAppTests/LibraryFeatureModelTests.swift|\
     Tests/RecorderAppTests/ManualTranscriptionImporterTests.swift|\
     Tests/RecorderAppTests/MeetingIntelligenceFeatureModelTests.swift|\

@@ -236,6 +236,7 @@ final class AppModelMuteTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            initialOutputFolder: URL(fileURLWithPath: "/tmp", isDirectory: true),
             recordingSessionLoader: { _ in
                 let currentCall = callCounter.next()
                 if currentCall == 1 {
@@ -244,7 +245,8 @@ final class AppModelMuteTests: XCTestCase {
                     return [oldSession]
                 }
                 return [newSession]
-            }
+            },
+            recordingSessionRecovery: { _ in }
         )
 
         model.refreshSessions()

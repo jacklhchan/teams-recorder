@@ -519,6 +519,7 @@ private struct TranscriptDetailLifecycleRoot: View {
                 copy: {},
                 editDetails: { _ in },
                 meetingIntelligencePresentation: state.meetingIntelligencePresentation,
+                meetingIntelligenceObservedSnapshot: { _ in nil },
                 checkMeetingIntelligenceAvailability: { state.record("checkAgain", session: $0) },
                 generateMeetingIntelligence: { state.record("generate", session: $0) },
                 regenerateMeetingIntelligence: { state.record("regenerate", session: $0) },

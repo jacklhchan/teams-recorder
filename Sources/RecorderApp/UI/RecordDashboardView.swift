@@ -303,16 +303,21 @@ private struct RecordDashboardControls: View {
             )
             .frame(minWidth: 180)
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .tint(
-            model.recorder.isRecording
-                ? RecorderVisualStyle.recording
-                : .accentColor
+        .buttonStyle(
+            RecorderMotionButtonStyle(
+                prominence: .prominent,
+                tint: model.recorder.isRecording ? .red : .accentColor
+            )
         )
+        .controlSize(.large)
         .accessibilityIdentifier(RecorderActionID.startStop)
         .background(
             RecordDashboardFrameMarker(identifier: RecorderActionID.startStop)
+        )
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: RecorderActionID.primaryActionCluster
+            )
         )
         .disabled(presentation.startStopDisabled)
     }

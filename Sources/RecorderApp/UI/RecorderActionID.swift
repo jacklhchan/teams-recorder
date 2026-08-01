@@ -1,5 +1,7 @@
 enum RecorderActionID {
     static let startStop = "recorder.action.start-stop"
+    static let primaryActionCluster = "recorder.visual.primary-action-cluster"
+    static let indeterminateProgress = "recorder.visual.indeterminate-progress"
     static let refreshCapture = "recorder.action.refresh-capture"
     static let muteMic = "recorder.action.mute-mic"
     static let testAudio = "recorder.action.test-audio"
@@ -41,6 +43,8 @@ enum RecorderActionID {
 
     static let all = [
         startStop,
+        primaryActionCluster,
+        indeterminateProgress,
         refreshCapture,
         muteMic,
         testAudio,

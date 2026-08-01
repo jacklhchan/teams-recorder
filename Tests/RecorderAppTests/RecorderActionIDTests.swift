@@ -4,6 +4,14 @@ import XCTest
 final class RecorderActionIDTests: XCTestCase {
     func testExactAndUniqueIDs() {
         XCTAssertEqual(RecorderActionID.startStop, "recorder.action.start-stop")
+        XCTAssertEqual(
+            RecorderActionID.primaryActionCluster,
+            "recorder.visual.primary-action-cluster"
+        )
+        XCTAssertEqual(
+            RecorderActionID.indeterminateProgress,
+            "recorder.visual.indeterminate-progress"
+        )
         XCTAssertEqual(RecorderActionID.refreshCapture, "recorder.action.refresh-capture")
         XCTAssertEqual(RecorderActionID.muteMic, "recorder.action.mute-mic")
         XCTAssertEqual(RecorderActionID.testAudio, "recorder.action.test-audio")

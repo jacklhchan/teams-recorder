@@ -58,6 +58,17 @@ struct RecordingsLibraryView: View {
             meetingIntelligencePresentation: { session in
                 meetingIntelligenceSnapshot.presentation(for: session)?.presentation ?? .empty
             },
+            meetingIntelligenceObservedSnapshot: { session in
+                guard let sessionPresentation = meetingIntelligenceSnapshot.presentation(for: session) else {
+                    return nil
+                }
+                return MeetingIntelligenceObservedSnapshotAdapter.make(
+                    featureRevision: meetingIntelligenceSnapshot.revision,
+                    sessionPresentation: sessionPresentation,
+                    canonicalSession: session,
+                    titleIsProtected: sessionPresentation.presentation.titleIsProtected
+                )
+            },
             checkMeetingIntelligenceAvailability: model.checkMeetingIntelligenceAvailability,
             generateMeetingIntelligence: model.generateMeetingIntelligence,
             regenerateMeetingIntelligence: model.regenerateMeetingIntelligence,
@@ -133,6 +144,7 @@ private struct SessionListView: View {
     let exportTranscript: (RecordingSession) -> Void
     let copyTranscript: (RecordingSession) -> Void
     let meetingIntelligencePresentation: (RecordingSession) -> MeetingIntelligencePresentation
+    let meetingIntelligenceObservedSnapshot: (RecordingSession) -> RecorderObservedSnapshot?
     let checkMeetingIntelligenceAvailability: (RecordingSession) -> Void
     let generateMeetingIntelligence: (RecordingSession) -> Void
     let regenerateMeetingIntelligence: (RecordingSession) -> Void
@@ -295,6 +307,7 @@ private struct SessionListView: View {
                 copy: { copyTranscript(session) },
                 editDetails: { metadataSession = $0 },
                 meetingIntelligencePresentation: meetingIntelligencePresentation,
+                meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
                 checkMeetingIntelligenceAvailability: checkMeetingIntelligenceAvailability,
                 generateMeetingIntelligence: generateMeetingIntelligence,
                 regenerateMeetingIntelligence: regenerateMeetingIntelligence,
@@ -368,6 +381,7 @@ struct TranscriptDetailSheetView: View {
     let copy: () -> Void
     let editDetails: (RecordingSession) -> Void
     let meetingIntelligencePresentation: (RecordingSession) -> MeetingIntelligencePresentation
+    let meetingIntelligenceObservedSnapshot: (RecordingSession) -> RecorderObservedSnapshot?
     let checkMeetingIntelligenceAvailability: (RecordingSession) -> Void
     let generateMeetingIntelligence: (RecordingSession) -> Void
     let regenerateMeetingIntelligence: (RecordingSession) -> Void
@@ -401,6 +415,7 @@ struct TranscriptDetailSheetView: View {
             copy: copy,
             editDetails: editDetails,
             meetingIntelligencePresentation: meetingIntelligencePresentation,
+            meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
             meetingIntelligenceActions: { _ in actions }
         )
     }
@@ -468,6 +483,7 @@ struct TranscriptEditorView: View {
     let copy: () -> Void
     let editDetails: (RecordingSession) -> Void
     private let meetingIntelligencePresentationForSession: (RecordingSession) -> MeetingIntelligencePresentation
+    private let meetingIntelligenceObservedSnapshotForSession: (RecordingSession) -> RecorderObservedSnapshot?
     private let meetingIntelligenceActionsForSession: (RecordingSession) -> MeetingIntelligenceActions
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -484,6 +500,7 @@ struct TranscriptEditorView: View {
         copy: @escaping () -> Void,
         editDetails: @escaping (RecordingSession) -> Void = { _ in },
         meetingIntelligencePresentation: MeetingIntelligencePresentation = .empty,
+        meetingIntelligenceObservedSnapshot: RecorderObservedSnapshot? = nil,
         meetingIntelligenceActions: MeetingIntelligenceActions = .init()
     ) {
         self.session = session
@@ -499,6 +516,7 @@ struct TranscriptEditorView: View {
         self.copy = copy
         self.editDetails = editDetails
         meetingIntelligencePresentationForSession = { _ in meetingIntelligencePresentation }
+        meetingIntelligenceObservedSnapshotForSession = { _ in meetingIntelligenceObservedSnapshot }
         meetingIntelligenceActionsForSession = { _ in meetingIntelligenceActions }
     }
 
@@ -513,6 +531,7 @@ struct TranscriptEditorView: View {
         copy: @escaping () -> Void,
         editDetails: @escaping (RecordingSession) -> Void = { _ in },
         meetingIntelligencePresentation: @escaping (RecordingSession) -> MeetingIntelligencePresentation,
+        meetingIntelligenceObservedSnapshot: @escaping (RecordingSession) -> RecorderObservedSnapshot? = { _ in nil },
         meetingIntelligenceActions: @escaping (RecordingSession) -> MeetingIntelligenceActions
     ) {
         self.session = session
@@ -525,6 +544,7 @@ struct TranscriptEditorView: View {
         self.copy = copy
         self.editDetails = editDetails
         meetingIntelligencePresentationForSession = meetingIntelligencePresentation
+        meetingIntelligenceObservedSnapshotForSession = meetingIntelligenceObservedSnapshot
         meetingIntelligenceActionsForSession = meetingIntelligenceActions
     }
 
@@ -537,6 +557,7 @@ struct TranscriptEditorView: View {
                     playbackControls
                     MeetingIntelligenceSectionView(
                         presentation: meetingIntelligencePresentationForSession(displayedSession),
+                        observedSnapshot: meetingIntelligenceObservedSnapshotForSession(displayedSession),
                         actions: meetingIntelligenceActionsForSession(displayedSession)
                     )
                     transcriptEditor

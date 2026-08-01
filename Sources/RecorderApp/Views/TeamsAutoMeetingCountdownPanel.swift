@@ -1,6 +1,14 @@
 import AppKit
 import SwiftUI
 
+enum TeamsAutoMeetingCountdownAccessibility {
+    static let panelID = "teams-auto-countdown-panel"
+    static let secondsID = "teams-auto-countdown-seconds"
+    static let cancelID = "teams-auto-countdown-cancel"
+    static let allIDs = [panelID, secondsID, cancelID]
+    static let cancelLabel = "Cancel automatic recording"
+}
+
 struct TeamsAutoMeetingPresentation: Equatable {
     let title: String
     let detail: String
@@ -259,7 +267,7 @@ final class TeamsAutoMeetingCountdownPanelController:
     }
 }
 
-private struct TeamsAutoMeetingCountdownView: View {
+struct TeamsAutoMeetingCountdownView: View {
     let seconds: Int
     let cancel: @MainActor () -> Void
 
@@ -276,8 +284,9 @@ private struct TeamsAutoMeetingCountdownView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier(
-                        "teams-auto-countdown-seconds"
+                        TeamsAutoMeetingCountdownAccessibility.secondsID
                     )
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
             }
 
             Spacer(minLength: 8)
@@ -285,13 +294,16 @@ private struct TeamsAutoMeetingCountdownView: View {
             Button(action: cancel) {
                 Image(systemName: "xmark")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(RecorderMotionButtonStyle(prominence: .compact, tint: .secondary))
             .help("Cancel automatic recording")
-            .accessibilityLabel("Cancel automatic recording")
-            .accessibilityIdentifier("teams-auto-countdown-cancel")
+            .accessibilityLabel(TeamsAutoMeetingCountdownAccessibility.cancelLabel)
+            .accessibilityIdentifier(TeamsAutoMeetingCountdownAccessibility.cancelID)
+            .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.cancelID))
         }
         .padding(.horizontal, 16)
-        .frame(minWidth: 360, minHeight: 62)
-        .accessibilityIdentifier("teams-auto-countdown-panel")
+        .frame(width: 360, height: 94)
+        .recorderGlassSurface(.navigation)
+        .accessibilityIdentifier(TeamsAutoMeetingCountdownAccessibility.panelID)
+        .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.panelID))
     }
 }

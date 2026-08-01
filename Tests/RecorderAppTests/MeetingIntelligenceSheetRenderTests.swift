@@ -984,6 +984,11 @@ private final class TranscriptDetailLifecycleHost {
             view(for: identifier),
             "Missing rendered action marker: \(identifier)"
         )
+        if let button = marker as? NSButton {
+            button.performClick(nil)
+            render()
+            return
+        }
         let location = marker.convert(
             NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
             to: nil
@@ -1136,6 +1141,11 @@ private final class TranscriptEditorSaveLifecycleHost {
             },
             "Missing rendered action marker: \(identifier)"
         )
+        if let button = marker as? NSButton {
+            button.performClick(nil)
+            render()
+            return
+        }
         let location = marker.convert(
             NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
             to: nil
@@ -1255,6 +1265,11 @@ private final class MetadataEditorSaveLifecycleHost {
 
     func click(_ identifier: String) throws {
         let actionView = try XCTUnwrap(actionView(for: identifier), "Missing rendered action: \(identifier)")
+        if let button = actionView as? NSButton {
+            button.performClick(nil)
+            render()
+            return
+        }
         let location = actionView.convert(
             NSPoint(x: actionView.bounds.midX, y: actionView.bounds.midY),
             to: nil
@@ -1372,6 +1387,11 @@ private final class SheetRenderHost<Root: View> {
             allViews(startingAt: hostingView).first { $0.accessibilityIdentifier() == identifier },
             "Missing rendered action marker: \(identifier)"
         )
+        if let button = marker as? NSButton {
+            button.performClick(nil)
+            render()
+            return
+        }
         let location = marker.convert(
             NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
             to: nil

@@ -45,6 +45,48 @@ final class RecordingsPresentationRouteTests: XCTestCase {
         XCTAssertEqual(writes, 0)
     }
 
+    func testSaveRejectsMissingCanonicalSessionWithoutInvokingWrite() async {
+        let original = makeSession(title: "Original")
+        var currentSessions = [original]
+        let admission = RecordingsCanonicalActionAdmission { currentSessions }
+        currentSessions = []
+        var writes = 0
+
+        let outcome = await admission.save(
+            sessionID: original.id,
+            artifact: .transcript
+        ) { _ in
+            writes += 1
+            return .saved(sessionID: original.id, .transcript)
+        }
+
+        XCTAssertEqual(writes, 0)
+        XCTAssertEqual(
+            outcome,
+            .failed(
+                sessionID: original.id,
+                .transcript,
+                "The recording is no longer available."
+            )
+        )
+    }
+
+    func testPerformAsyncRejectsReplacementCanonicalSessionWithoutInvokingAction() async {
+        let original = makeSession(title: "Shared title")
+        let replacement = makeSession(title: "Shared title")
+        var currentSessions = [original]
+        let admission = RecordingsCanonicalActionAdmission { currentSessions }
+        currentSessions = [replacement]
+        var invoked = false
+
+        let admitted = await admission.performAsync(sessionID: original.id) { _ in
+            invoked = true
+        }
+
+        XCTAssertFalse(admitted)
+        XCTAssertFalse(invoked)
+    }
+
     private func makeSession(title: String) -> RecordingSession {
         let folder = URL(fileURLWithPath: "/tmp/recordings-route-\(UUID().uuidString)")
         return RecordingSession(id: folder, folderURL: folder,

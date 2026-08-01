@@ -17,6 +17,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             RecorderSurfaceAppearance.recordingsDark.accessibilityIdentifier
         ))
         let rowID = fixture.session.id.lastPathComponent
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
         XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.transcript.detail.root"))
         XCTAssertFalse(host.containsView(named: "AVPlayerView"))
@@ -28,15 +29,23 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         host.render()
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.recordings.list"))
         XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.saveTranscript))
+        XCTAssertFalse(host.containsAccessibilityIdentifier(
+            RecorderActionID.meetingIntelligenceCard
+        ))
+        XCTAssertFalse(host.containsView(named: "AVPlayerView"))
+        XCTAssertFalse(host.containsView(named: "RecordingPlaybackView"))
         XCTAssertFalse(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
         fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
             [fixture.session], workspace: fixture.workspace, fence: .initial
         )
         host.render()
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
         XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
-        try waitUntil(timeout: 1) {
+        try waitUntil(timeout: 1, message: "reopened detail to load original transcript") {
             host.transcriptEditorText == "Production recordings transcript"
         }
+        XCTAssertFalse(host.containsView(named: "AVPlayerView"))
+        XCTAssertFalse(host.containsView(named: "RecordingPlaybackView"))
     }
 
     func testDirectionARecordingsCardsAllowExactlyOneExpandedSession() throws {
@@ -57,10 +66,125 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         host.select(.recordings)
         let firstID = fixture.session.id.lastPathComponent
         let secondID = second.id.lastPathComponent
-        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.card.\(firstID).marker"))
-        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.card.\(secondID).marker"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.card.\(firstID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.card.\(secondID)"))
+        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(firstID)") as? String, "Collapsed")
+        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(secondID)") as? String, "Collapsed")
         XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(firstID)"))
         XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(secondID)"))
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(firstID)"))
+        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(firstID)") as? String, "Expanded")
+        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(secondID)") as? String, "Collapsed")
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.expanded.\(firstID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(secondID)"))
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(secondID)"))
+        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(firstID)") as? String, "Collapsed")
+        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(secondID)") as? String, "Expanded")
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(firstID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.expanded.\(secondID)"))
+    }
+
+    func testInFlightSaveCannotReopenInvalidatedRecordingsDetail() async throws {
+        let mutationAttempt = DispatchSemaphore(value: 0)
+        let releaseMutation = DispatchSemaphore(value: 0)
+        let holderEntered = DispatchSemaphore(value: 0)
+        let gate = RecordingSessionMutationGate {
+            mutationAttempt.signal()
+        }
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture(
+            mutationGate: gate
+        )
+        defer {
+            releaseMutation.signal()
+            fixture.remove()
+        }
+        let folder = fixture.session.folderURL
+        let holder = Task.detached {
+            gate.withMutation(for: folder) {
+                holderEntered.signal()
+                releaseMutation.wait()
+            }
+        }
+        XCTAssertEqual(holderEntered.wait(timeout: .now() + 1), .success)
+        // Drain the holder's own mutation-attempt notification. The next
+        // signal must come from the admitted transcript save waiting on the
+        // same gate.
+        try waitUntil(timeout: 1, message: "holder mutation notification") {
+            mutationAttempt.wait(timeout: .now()) == .success
+        }
+
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
+        XCTAssertTrue(host.click(
+            atAccessibilityFrame: "recorder.row.transcript.\(rowID)"
+        ))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(
+            "recorder.transcript.detail.root"
+        ))
+        XCTAssertTrue(host.replaceTranscriptEditorText(
+            with: "Durable in-flight transcript"
+        ))
+        XCTAssertEqual(
+            host.transcriptEditorText,
+            "Durable in-flight transcript"
+        )
+        XCTAssertTrue(host.click(
+            atAccessibilityFrame: RecorderActionID.saveTranscript
+        ))
+        await waitUntilAsync(timeout: 1, message: "transcript save to enter in-flight state") {
+            host.containsAccessibilityIdentifier(
+                RecorderActionID.transcriptSaveInFlight
+            )
+        }
+        await waitUntilAsync(timeout: 1, message: "transcript save to wait on the shared gate") {
+            mutationAttempt.wait(timeout: .now()) == .success
+        }
+
+        fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
+            [], workspace: fixture.workspace, fence: .initial
+        )
+        host.render()
+        await waitUntilAsync(timeout: 1, message: "removed session to close transcript detail") {
+            host.containsAccessibilityIdentifier("recorder.recordings.list")
+                && !host.containsAccessibilityIdentifier(
+                    "recorder.transcript.detail.root"
+                )
+        }
+        XCTAssertFalse(host.containsAccessibilityIdentifier(
+            RecorderActionID.meetingIntelligenceCard
+        ))
+
+        releaseMutation.signal()
+        await holder.value
+        await waitUntilAsync(timeout: 2, message: "admitted transcript write to become durable") {
+            (try? TranscriptDocumentStore.read(in: folder))
+                == "Durable in-flight transcript"
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier(
+            "recorder.recordings.list"
+        ))
+        XCTAssertFalse(host.containsAccessibilityIdentifier(
+            "recorder.transcript.detail.root"
+        ))
+
+        fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
+            [fixture.session], workspace: fixture.workspace, fence: .initial
+        )
+        host.render()
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
+        XCTAssertTrue(host.click(
+            atAccessibilityFrame: "recorder.row.transcript.\(rowID)"
+        ))
+        await waitUntilAsync(timeout: 1, message: "reopened detail to load durable transcript") {
+            host.transcriptEditorText
+                == (try? TranscriptDocumentStore.read(in: folder))
+        }
     }
     func testDirectionASidebarRendersAtSupportedSizes() throws {
         for size in [
@@ -301,9 +425,30 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         defer { host.close() }
 
         host.select(.recordings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"))
 
         XCTAssertTrue(host.containsAccessibilityLabel("Play \(fixture.session.displayName)"))
         XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(fixture.session.displayName)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.openTranscript))
+        let rowID = fixture.session.id.lastPathComponent
+        for identifier in [
+            "recorder.row.play.\(rowID)",
+            "recorder.row.open.\(rowID)",
+            "recorder.row.edit.\(rowID)",
+            "recorder.row.transcribe.\(rowID)",
+            "recorder.row.transcript.\(rowID)",
+            "recorder.row.trash.\(rowID)",
+            "recorder.row.log.\(rowID)"
+        ] {
+            let frame = try XCTUnwrap(
+                host.frame(forAccessibilityIdentifier: identifier),
+                "Missing wide-layout session action: \(identifier)"
+            )
+            XCTAssertTrue(
+                host.windowContentRect.contains(frame),
+                "\(identifier) must remain inside the 1280×800 window"
+            )
+        }
     }
 
     func testMinimumRecordingsKeepsSessionActionsInsideWindow() throws {
@@ -315,6 +460,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         defer { host.close() }
 
         host.select(.recordings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"))
 
         let rowID = fixture.session.id.lastPathComponent
         for identifier in [
@@ -346,6 +492,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         defer { host.close() }
 
         host.select(.recordings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"))
         let originalName = fixture.session.displayName
         let renamedName = "Renamed workspace recording"
         XCTAssertTrue(host.containsAccessibilityLabel("Play \(originalName)"))
@@ -379,6 +526,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
         host.select(.recordings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"))
 
         var appModelChanges = 0
         let appModelChange = fixture.model.objectWillChange.sink { _ in
@@ -421,6 +569,9 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
         host.select(.recordings)
+        XCTAssertTrue(host.click(
+            atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"
+        ))
 
         var appModelChanges = 0
         let appModelChange = fixture.model.objectWillChange.sink { _ in
@@ -499,6 +650,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
         host.select(.recordings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"))
 
         XCTAssertTrue(
             host.click(
@@ -808,13 +960,31 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 
     private func waitUntil(
         timeout: TimeInterval,
+        message: String = "expected lifecycle state",
         condition: @escaping () -> Bool
     ) throws {
         let deadline = Date().addingTimeInterval(timeout)
-        while !condition(), Date() < deadline {
+        var satisfied = condition()
+        while !satisfied, Date() < deadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            satisfied = condition()
         }
-        XCTAssertTrue(condition(), "Timed out waiting for expected lifecycle state")
+        XCTAssertTrue(satisfied, "Timed out waiting for \(message)")
+    }
+
+    private func waitUntilAsync(
+        timeout: TimeInterval,
+        message: String,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        var satisfied = condition()
+        while !satisfied, Date() < deadline {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            satisfied = condition()
+        }
+        XCTAssertTrue(satisfied, "Timed out waiting for \(message)")
     }
 
     private func makeWorkspaceHost(model: AppModel, size: CGSize) throws -> WorkspaceHost {
@@ -850,7 +1020,7 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
     let generatorFinished: XCTestExpectation
     let published: XCTestExpectation
 
-    init() throws {
+    init(mutationGate: RecordingSessionMutationGate? = nil) throws {
         let generationGate = RenderMeetingIntelligenceGenerationGate()
         let generatorEntered = XCTestExpectation(description: "recordings MI generation entered")
         let generatorFinished = XCTestExpectation(description: "recordings MI generation finished")
@@ -900,6 +1070,23 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
         let defaultsName = "RecorderWorkspaceRenderTests.mi.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
         defaults.removePersistentDomain(forName: defaultsName)
+        let injectedLibraryFeature = mutationGate.map { gate in
+            LibraryFeatureModel(
+                sessionLoader: { _ in [] },
+                sessionReloader: { $0 },
+                searchDocumentLoader: { session in
+                    RecordingLibrarySearchDocument.load(
+                        folderURL: session.folderURL,
+                        displayName: session.displayName,
+                        createdAt: session.createdAt,
+                        metadata: session.metadata
+                    )
+                },
+                recovery: { _ in },
+                trashHandler: { _ in true },
+                mutationGate: gate
+            )
+        }
         model = AppModel(
             defaults: defaults,
             providerRepository: providerRepository,
@@ -907,6 +1094,7 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
             defaultInputDeviceID: { nil },
             performStartupWork: false,
             initialOutputFolder: workspace,
+            libraryFeature: injectedLibraryFeature,
             meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
                 let coordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,
@@ -1028,6 +1216,7 @@ final class WorkspaceHost {
     func containsAccessibilityIdentifier(_ identifier: String) -> Bool {
         view(forAccessibilityIdentifier: identifier) != nil
             || accessibilityElement(forAccessibilityIdentifier: identifier) != nil
+            || view(forAccessibilityIdentifier: identifier + ".marker") != nil
     }
 
     func accessibilityIdentifierCount(_ identifier: String) -> Int {
@@ -1082,6 +1271,8 @@ final class WorkspaceHost {
             return element.accessibilityFrame()
         }
         return view(forAccessibilityIdentifier: identifier)?.accessibilityFrame()
+            ?? view(forAccessibilityIdentifier: identifier + ".marker")?
+                .accessibilityFrame()
     }
 
     @discardableResult
@@ -1091,13 +1282,44 @@ final class WorkspaceHost {
         )), identifier.hasPrefix("recorder.settings.navigation.") {
             return clickSettingsRailRow(for: section)
         }
-        let cardButtonFrame: CGRect? = identifier.hasPrefix("recorder.row.card.")
-            ? allViews(startingAt: hostingView)
-                .compactMap { $0 as? NSButton }
-                .first { $0.accessibilityIdentifier() == identifier }?
-                .accessibilityFrame()
-            : nil
-        guard let frame = cardButtonFrame ?? frame(forAccessibilityIdentifier: identifier) else {
+        // Prefer the real AppKit control whenever SwiftUI materializes one.
+        // Coordinate-only mouse-down dispatch can enter AppKit's synchronous
+        // tracking loop before the test has a chance to deliver mouse-up.
+        let matchingNativeButtons = renderedRoots
+            .flatMap({ allViews(startingAt: $0) })
+            .compactMap({ $0 as? NSButton })
+            .filter { $0.accessibilityIdentifier() == identifier }
+        if let nativeButton = matchingNativeButtons.first(where: {
+                guard $0.accessibilityIdentifier() == identifier,
+                      !$0.isHidden else { return false }
+                let frame = $0.accessibilityFrame()
+                return !frame.isEmpty && windowContentRect.intersects(frame)
+            }) {
+            nativeButton.performClick(nil)
+            render()
+            return true
+        }
+        // The Transcript button keeps the pre-existing generic action ID while
+        // its passive row marker carries the session-specific ID. Resolve that
+        // marker to the intersecting real AppKit control for a stable press.
+        if let markerFrame = frame(forAccessibilityIdentifier: identifier),
+           let nativeButton = renderedRoots
+            .flatMap({ allViews(startingAt: $0) })
+            .compactMap({ $0 as? NSButton })
+            .first(where: {
+                !$0.isHidden
+                    && !$0.accessibilityFrame().isEmpty
+                    && markerFrame.intersects($0.accessibilityFrame())
+            }) {
+            nativeButton.performClick(nil)
+            render()
+            return true
+        }
+        if performAccessibilityPress(forAccessibilityIdentifier: identifier) {
+            render()
+            return true
+        }
+        guard let frame = frame(forAccessibilityIdentifier: identifier) else {
             return false
         }
         let location = window.convertPoint(fromScreen: .init(
@@ -1146,10 +1368,7 @@ final class WorkspaceHost {
 
     @discardableResult
     func replaceTranscriptEditorText(with text: String) -> Bool {
-        guard let editor = allViews(startingAt: hostingView)
-            .compactMap({ $0 as? NSTextView }).first else {
-            return false
-        }
+        guard let editor = transcriptEditorTextView else { return false }
         editor.string = text
         editor.didChangeText()
         render()
@@ -1157,7 +1376,32 @@ final class WorkspaceHost {
     }
 
     var transcriptEditorText: String? {
-        allViews(startingAt: hostingView).compactMap { $0 as? NSTextView }.first?.string
+        transcriptEditorTextView?.string
+    }
+
+    private var transcriptEditorTextView: NSTextView? {
+        if let root = view(
+            forAccessibilityIdentifier: "recorder.transcript.editor"
+        ), let editor = allViews(startingAt: root)
+            .compactMap({ $0 as? NSTextView }).first {
+            return editor
+        }
+        guard let editorFrame = frame(
+            forAccessibilityIdentifier: "recorder.transcript.editor"
+        ) ?? frame(
+            forAccessibilityIdentifier: "recorder.transcript.editor.marker"
+        ) else { return nil }
+        let editors = renderedRoots
+            .flatMap({ allViews(startingAt: $0) })
+            .compactMap({ $0 as? NSTextView })
+        return editors.first { textView in
+                let frame = textView.accessibilityFrame()
+                return !frame.isEmpty && editorFrame.intersects(frame)
+            }
+    }
+
+    func accessibilityValue(for identifier: String) -> Any? {
+        view(forAccessibilityIdentifier: identifier)?.accessibilityValue()
     }
 
     func revealSettingsControl(_ identifier: String) -> Bool {
@@ -1304,6 +1548,43 @@ final class WorkspaceHost {
             }
         }
         return nil
+    }
+
+    private func performAccessibilityPress(
+        forAccessibilityIdentifier identifier: String
+    ) -> Bool {
+        let selector = NSSelectorFromString("accessibilityPerformPress")
+        func find(in children: [Any]) -> NSObject? {
+            for child in children {
+                if let element = child as? any NSAccessibilityElementProtocol,
+                   element.accessibilityIdentifier?() == identifier,
+                   let object = child as? NSObject,
+                   object.responds(to: selector) {
+                    return object
+                }
+                if let found = find(in: accessibilityChildren(of: child)) {
+                    return found
+                }
+            }
+            return nil
+        }
+        var pressingObject: NSObject?
+        for root in renderedRoots {
+            if root.accessibilityIdentifier() == identifier,
+               root.responds(to: selector) {
+                pressingObject = root
+                break
+            }
+            if let found = find(in: root.accessibilityChildren() ?? []) {
+                pressingObject = found
+                break
+            }
+        }
+        guard let pressingObject else { return false }
+        typealias PressFunction = @convention(c) (AnyObject, Selector) -> Bool
+        let implementation = pressingObject.method(for: selector)
+        let press = unsafeBitCast(implementation, to: PressFunction.self)
+        return press(pressingObject, selector)
     }
 
     private func accessibilityChildren(of element: Any) -> [Any] {

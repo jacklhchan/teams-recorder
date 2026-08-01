@@ -33,7 +33,25 @@ struct RecordingSession: Identifiable, Hashable, Sendable {
     }
 
     var displayName: String {
-        metadata.title ?? folderURL.lastPathComponent
+        Self.resolvedDisplayName(
+            metadata: metadata,
+            fallbackFolderName: folderURL.lastPathComponent
+        )
+    }
+
+    /// Imported sessions have UUID-owned physical folders. Those folder names
+    /// are not user-facing when legacy metadata has no source-file title.
+    static func resolvedDisplayName(
+        metadata: RecordingSessionMetadata,
+        fallbackFolderName: String
+    ) -> String {
+        if let title = metadata.title {
+            return title
+        }
+        if metadata.source == .imported {
+            return "Imported recording"
+        }
+        return fallbackFolderName
     }
 
     var tags: [String] { metadata.tags }
@@ -133,7 +151,14 @@ enum ManualTranscriptionImporter {
         do {
             let recordingURL = folder.appendingPathComponent("recording.\(fileExtension)")
             try operations.copyItem(sourceURL, recordingURL)
-            try operations.saveMetadata(.init(source: .imported), folder)
+            try operations.saveMetadata(
+                .init(
+                    title: sourceURL.deletingPathExtension().lastPathComponent,
+                    titleOrigin: .unset,
+                    source: .imported
+                ),
+                folder
+            )
 
             return RecordingSessionStore.session(for: folder, recordingURL: recordingURL)
         } catch {
@@ -186,6 +211,11 @@ enum RecordingSessionStore {
             metadata.capturedTeamsWindow = nil
         }
 
+        let displayName = RecordingSession.resolvedDisplayName(
+            metadata: metadata,
+            fallbackFolderName: folder.lastPathComponent
+        )
+
         return RecordingSession(
             id: folder,
             folderURL: folder,
@@ -196,7 +226,7 @@ enum RecordingSessionStore {
             metadata: metadata,
             searchDocument: RecordingLibrarySearchDocument.load(
                 folderURL: folder,
-                displayName: metadata.title ?? folder.lastPathComponent,
+                displayName: displayName,
                 createdAt: createdAt,
                 metadata: metadata
             )

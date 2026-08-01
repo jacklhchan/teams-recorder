@@ -52,6 +52,66 @@ final class ManualTranscriptionImporterTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: second.recordingURL), Data([0x52, 0x49, 0x46, 0x46]))
     }
 
+    func testImportedAudioUsesSourceStemForVisibleAndSearchNameWhileKeepingOwnedFoldersUnique() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quarterly Review 2026.wav")
+        try Data([0x52, 0x49, 0x46, 0x46]).write(to: source)
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+
+        let first = try ManualTranscriptionImporter.importAudioFile(source, into: root, now: now)
+        let second = try ManualTranscriptionImporter.importAudioFile(source, into: root, now: now)
+
+        XCTAssertNotEqual(first.folderURL.standardizedFileURL, second.folderURL.standardizedFileURL)
+        XCTAssertEqual(first.displayName, "Quarterly Review 2026")
+        XCTAssertEqual(second.displayName, "Quarterly Review 2026")
+        XCTAssertFalse(first.displayName.contains("manual-"))
+        XCTAssertFalse(second.displayName.contains("manual-"))
+        XCTAssertTrue(first.searchDocument.metadataText.contains("Quarterly Review 2026"))
+        XCTAssertFalse(first.searchDocument.metadataText.contains(first.folderURL.lastPathComponent))
+    }
+
+    func testImportedAudioKeepsUnsetTitleOriginForMeetingIntelligence() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Customer Discovery.m4a")
+        try Data([0x00]).write(to: source)
+
+        let imported = try ManualTranscriptionImporter.importAudioFile(source, into: root)
+
+        XCTAssertEqual(imported.metadata.source, .imported)
+        XCTAssertEqual(imported.metadata.title, "Customer Discovery")
+        XCTAssertEqual(imported.metadata.titleOrigin, .unset)
+        XCTAssertFalse(imported.metadata.titleOrigin == .manual)
+    }
+
+    func testLegacyImportedSessionWithoutTitleUsesSafeSharedDisplayAndSearchFallback() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent(
+            "manual-2026-05-29-042640-D2D97D65-2939-4637-A54E-19047B52E491",
+            isDirectory: true
+        )
+        let recordingURL = folder.appendingPathComponent("recording.wav")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data([0x52, 0x49, 0x46, 0x46]).write(to: recordingURL)
+        try RecordingSessionMetadataStore.save(
+            .init(source: .imported),
+            in: folder
+        )
+
+        let imported = RecordingSessionStore.session(
+            for: folder,
+            recordingURL: recordingURL
+        )
+
+        XCTAssertEqual(imported.displayName, "Imported recording")
+        XCTAssertTrue(imported.searchDocument.metadataText.contains("Imported recording"))
+        XCTAssertFalse(imported.displayName.contains("manual-"))
+        XCTAssertFalse(imported.searchDocument.metadataText.contains(folder.lastPathComponent))
+        XCTAssertEqual(imported.metadata.titleOrigin, .unset)
+    }
+
     func testExistingExactDestinationIsRejectedBeforeCopyOrMetadataAndPreservesMarker() throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }

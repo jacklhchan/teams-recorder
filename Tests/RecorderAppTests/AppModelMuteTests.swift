@@ -78,11 +78,13 @@ final class AppModelMuteTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            initialOutputFolder: URL(fileURLWithPath: "/tmp", isDirectory: true),
             recordingSessionLoader: { _ in
                 XCTAssertFalse(Thread.isMainThread)
                 loaderCalled.fulfill()
                 return []
-            }
+            },
+            recordingSessionRecovery: { _ in }
         )
 
         model.refreshSessions()
@@ -113,11 +115,13 @@ final class AppModelMuteTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            initialOutputFolder: root,
             recordingSessionLoader: { _ in
                 loaderCalled.fulfill()
                 releaseLoader.wait()
                 return [session]
-            }
+            },
+            recordingSessionRecovery: { _ in }
         )
 
         model.refreshSessions()
@@ -169,7 +173,9 @@ final class AppModelMuteTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
-            recordingSessionLoader: { _ in [session] }
+            initialOutputFolder: root,
+            recordingSessionLoader: { _ in [session] },
+            recordingSessionRecovery: { _ in }
         )
 
         model.refreshSessions()

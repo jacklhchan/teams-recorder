@@ -27,7 +27,7 @@ final class RecorderMotionRenderTests: XCTestCase {
         host.render()
 
         XCTAssertFalse(host.isEnabled(RecorderActionID.primaryActionCluster))
-        XCTAssertFalse(host.click(RecorderActionID.primaryActionCluster))
+        host.rawClick(RecorderActionID.primaryActionCluster)
         XCTAssertEqual(state.acceptedClicks, 1)
     }
 }
@@ -147,6 +147,29 @@ private final class MotionRenderHost {
         }
         render()
         return true
+    }
+
+    func rawClick(_ identifier: String) {
+        guard let view = view(for: identifier) else { return }
+        let location = view.convert(
+            NSPoint(x: view.bounds.midX, y: view.bounds.midY),
+            to: nil
+        )
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: location,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: type == .leftMouseDown ? 1 : 0
+            ) else { continue }
+            window.sendEvent(event)
+        }
+        render()
     }
 
     func render() {

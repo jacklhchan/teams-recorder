@@ -191,91 +191,15 @@ struct RecordingControllerView: View {
                 snapshot: snapshot,
                 now: context.date
             )
-
-            VStack(spacing: 10) {
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 10, height: 10)
-                    Text(presentation.title)
-                        .font(.headline)
-                        .accessibilityIdentifier(
-                            "recording-controller-status"
-                        )
-                    Spacer(minLength: 8)
-                    Text(presentation.elapsedText)
-                        .font(.system(.body, design: .monospaced))
-                        .monospacedDigit()
-                        .accessibilityIdentifier(
-                            "recording-controller-elapsed"
-                        )
-                    Button(action: model.startOrStop) {
-                        Image(systemName: "stop.fill")
+            RecordingControllerPanelContent(
+                presentation: presentation,
+                stop: model.startOrStop,
+                setScreenRequested: { requested in
+                    Task {
+                        await model.setTeamsScreenCaptureRequested(requested)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                    .controlSize(.small)
-                    .disabled(presentation.stopDisabled)
-                    .help("Stop recording")
-                    .accessibilityLabel(
-                        RecordingControllerAccessibility.stopLabel
-                    )
-                    .accessibilityIdentifier(
-                        "recording-controller-stop"
-                    )
                 }
-
-                HStack(spacing: 10) {
-                    Image(systemName: "rectangle.inset.filled")
-                        .foregroundStyle(screenColor(
-                            for: presentation.screenTone
-                        ))
-                    Text(presentation.screenStatusText)
-                        .foregroundStyle(screenColor(
-                            for: presentation.screenTone
-                        ))
-                        .lineLimit(1)
-                        .accessibilityIdentifier(
-                            "recording-controller-screen-status"
-                        )
-                    Spacer(minLength: 8)
-                    Toggle(
-                        "",
-                        isOn: Binding(
-                            get: { presentation.screenRequested },
-                            set: { requested in
-                                Task {
-                                    await model
-                                        .setTeamsScreenCaptureRequested(
-                                            requested
-                                        )
-                                }
-                            }
-                        )
-                    )
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .disabled(
-                        presentation.screenToggleDisabled ||
-                            presentation.stopDisabled
-                    )
-                    .help("Capture Teams screen")
-                    .accessibilityLabel(
-                        RecordingControllerAccessibility.screenCaptureLabel
-                    )
-                    .accessibilityValue(
-                        RecordingControllerAccessibility.screenCaptureValue(
-                            isOn: presentation.screenRequested
-                        )
-                    )
-                    .accessibilityIdentifier(
-                        "recording-controller-screen-toggle"
-                    )
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(width: 390, height: 112)
+            )
         }
     }
 
@@ -292,9 +216,67 @@ struct RecordingControllerView: View {
         )
     }
 
-    private func screenColor(
-        for tone: RecordingControllerTone
-    ) -> Color {
+}
+
+struct RecordingControllerPanelContent: View {
+    let presentation: RecordingControllerPresentation
+    let stop: () -> Void
+    let setScreenRequested: (Bool) -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Circle().fill(.red).frame(width: 10, height: 10)
+                Text(presentation.title)
+                    .font(.headline)
+                    .accessibilityIdentifier("recording-controller-status")
+                    .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-status"))
+                Spacer(minLength: 8)
+                Text(presentation.elapsedText)
+                    .font(.system(.body, design: .monospaced))
+                    .monospacedDigit()
+                    .accessibilityIdentifier("recording-controller-elapsed")
+                    .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-elapsed"))
+                Button(action: stop) {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .buttonStyle(RecorderMotionButtonStyle(prominence: .prominent, tint: .red))
+                .disabled(presentation.stopDisabled)
+                .help("Stop recording")
+                .accessibilityLabel(RecordingControllerAccessibility.stopLabel)
+                .accessibilityIdentifier("recording-controller-stop")
+                .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-stop"))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.inset.filled").foregroundStyle(screenColor(for: presentation.screenTone))
+                Text(presentation.screenStatusText)
+                    .foregroundStyle(screenColor(for: presentation.screenTone))
+                    .lineLimit(1)
+                    .accessibilityIdentifier("recording-controller-screen-status")
+                    .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-screen-status"))
+                Spacer(minLength: 8)
+                Toggle("", isOn: Binding(get: { presentation.screenRequested }, set: setScreenRequested))
+                    .labelsHidden().toggleStyle(.switch)
+                    .disabled(presentation.screenToggleDisabled || presentation.stopDisabled)
+                    .help("Capture Teams screen")
+                    .accessibilityLabel(RecordingControllerAccessibility.screenCaptureLabel)
+                    .accessibilityValue(RecordingControllerAccessibility.screenCaptureValue(isOn: presentation.screenRequested))
+                    .accessibilityIdentifier("recording-controller-screen-toggle")
+                    .background(RecorderPanelAccessibilityBridge(identifier: "recording-controller-screen-toggle"))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(width: 390, height: 112)
+        .recorderGlassSurface(.navigation)
+    }
+}
+
+private func screenColor(for tone: RecordingControllerTone) -> Color {
         switch tone {
         case .neutral:
             return .secondary
@@ -304,6 +286,5 @@ struct RecordingControllerView: View {
             return .red
         case .warning:
             return .orange
-        }
     }
 }

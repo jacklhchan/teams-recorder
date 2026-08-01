@@ -1,4 +1,25 @@
 import Foundation
+import SwiftUI
+
+private struct RecorderReduceMotionOverrideKey: EnvironmentKey {
+    static let defaultValue: Bool? = nil
+}
+
+private struct RecorderReduceTransparencyOverrideKey: EnvironmentKey {
+    static let defaultValue: Bool? = nil
+}
+
+extension EnvironmentValues {
+    var recorderReduceMotionOverride: Bool? {
+        get { self[RecorderReduceMotionOverrideKey.self] }
+        set { self[RecorderReduceMotionOverrideKey.self] = newValue }
+    }
+
+    var recorderReduceTransparencyOverride: Bool? {
+        get { self[RecorderReduceTransparencyOverrideKey.self] }
+        set { self[RecorderReduceTransparencyOverrideKey.self] = newValue }
+    }
+}
 
 struct RecorderMotionPolicy: Equatable, Sendable {
     let pressedScale: Double

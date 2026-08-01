@@ -259,7 +259,7 @@ final class MeetingIntelligenceFeatureModelTests: XCTestCase {
         await gate.release()
         await fulfillment(of: [finished, published], timeout: 1)
         await fixture.waitForIdle()
-        host.render()
+        host.renderWaitingForStatusTransition()
 
         XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceSummary))
         XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceSuggestedTitle))
@@ -557,6 +557,14 @@ private final class FeatureObservedTranscriptHost {
 
     func render() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    func renderWaitingForStatusTransition() {
+        render()
+        let duration = RecorderMotionPolicy.make(reduceMotion: false).statusDuration
+        RunLoop.main.run(until: Date().addingTimeInterval(duration + 0.05))
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
     }

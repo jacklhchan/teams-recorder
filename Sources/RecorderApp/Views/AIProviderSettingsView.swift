@@ -1,89 +1,117 @@
+import AppKit
 import SwiftUI
 
 struct AIProviderSettingsView: View {
     @ObservedObject var model: AIProviderSettingsModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("AI Provider", systemImage: "server.rack")
-                .font(.headline)
-
-            Picker("Provider", selection: providerKindBinding) {
-                ForEach(model.providerKinds, id: \.rawValue) { kind in
-                    Text(providerLabel(for: kind)).tag(kind.rawValue)
+        VStack(alignment: .leading, spacing: 12) {
+            providerSurface("Connection", systemImage: "server.rack") {
+                Picker("Provider", selection: providerKindBinding) {
+                    ForEach(model.providerKinds, id: \.rawValue) { kind in
+                        Text(providerLabel(for: kind)).tag(kind.rawValue)
+                    }
                 }
+                .providerAccessibility(RecorderActionID.providerKind)
+
+                providerEndpointFields
+
+                SecureField(model.apiKeyFieldLabel, text: $model.apiKeyReplacement)
+                    .providerAccessibility(RecorderActionID.providerAPIKey)
             }
-            .accessibilityIdentifier(RecorderActionID.providerKind)
 
-            providerEndpointFields
-
-            SecureField(model.apiKeyFieldLabel, text: $model.apiKeyReplacement)
-                .accessibilityIdentifier(RecorderActionID.providerAPIKey)
-            modelField(
-                "ASR Model", text: $model.asrModel,
-                accessibilityIdentifier: RecorderActionID.providerASRModel,
-                selectDiscoveredModel: model.selectDiscoveredASRModel
-            )
-            Text("Used for transcription.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            modelField(
-                "LLM Model", text: $model.llmModel,
-                accessibilityIdentifier: RecorderActionID.providerLLMModel,
-                selectDiscoveredModel: model.selectDiscoveredLLMModel
-            )
-            Text("Used for summary and contextual title generation. Automatic meeting intelligence requires this model to appear in the provider model list.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Picker("Language", selection: languageBinding) {
-                ForEach(model.languages, id: \.rawValue) { language in
-                    Text(language.displayName).tag(language.rawValue)
-                }
-            }
-            .accessibilityIdentifier(RecorderActionID.providerLanguage)
-
-            Text("ASR Prompt")
-                .font(.subheadline)
-            Text("Optional transcription guidance sent only with future transcription jobs.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextEditor(text: $model.prompt)
-                .accessibilityLabel("ASR Prompt")
-                .accessibilityIdentifier(RecorderActionID.providerPrompt)
-                .frame(minHeight: 58, maxHeight: 96)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(.separator)
+            providerSurface("Models", systemImage: "cpu") {
+                modelField(
+                    "ASR Model", text: $model.asrModel,
+                    accessibilityIdentifier: RecorderActionID.providerASRModel,
+                    selectDiscoveredModel: model.selectDiscoveredASRModel
                 )
+                Text("Used for transcription.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                modelField(
+                    "LLM Model", text: $model.llmModel,
+                    accessibilityIdentifier: RecorderActionID.providerLLMModel,
+                    selectDiscoveredModel: model.selectDiscoveredLLMModel
+                )
+                Text("Used for summary and contextual title generation. Automatic meeting intelligence requires this model to appear in the provider model list.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
-            HStack {
-                Button("Save", systemImage: "square.and.arrow.down") { model.save() }
-                    .accessibilityIdentifier(RecorderActionID.providerSave)
-                Button("Test", systemImage: "network") {
-                    Task { await model.testConnection() }
+            providerSurface("Transcription", systemImage: "waveform") {
+                Picker("Language", selection: languageBinding) {
+                    ForEach(model.languages, id: \.rawValue) { language in
+                        Text(language.displayName).tag(language.rawValue)
+                    }
                 }
-                .accessibilityIdentifier(RecorderActionID.providerTest)
-                .disabled(model.isTesting)
+                .providerAccessibility(RecorderActionID.providerLanguage)
+
+                Text("ASR Prompt")
+                    .font(.subheadline)
+                Text("Optional transcription guidance sent only with future transcription jobs.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextEditor(text: $model.prompt)
+                    .accessibilityLabel("ASR Prompt")
+                    .providerAccessibility(RecorderActionID.providerPrompt)
+                    .frame(minHeight: 58, maxHeight: 96)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
+            }
+
+            HStack(alignment: .center, spacing: 10) {
+                GlassEffectContainer(spacing: 8) {
+                    HStack(spacing: 8) {
+                        Button("Save", systemImage: "square.and.arrow.down") { model.save() }
+                            .recorderGlassSurface(.primaryControls)
+                            .providerAccessibility(RecorderActionID.providerSave)
+                        Button("Test", systemImage: "network") {
+                            Task { await model.testConnection() }
+                        }
+                        .recorderGlassSurface(.primaryControls)
+                        .providerAccessibility(RecorderActionID.providerTest)
+                        .disabled(model.isTesting)
+                    }
+                }
+
                 Button("Remove Key", systemImage: "key.slash", role: .destructive) {
                     model.removeAPIKey()
                 }
-                .accessibilityIdentifier(RecorderActionID.providerRemoveKey)
+                .buttonStyle(.borderless)
+                .providerAccessibility(RecorderActionID.providerRemoveKey)
                 .disabled(!model.canRemoveAPIKey)
-                Spacer()
-                if model.isTesting { ProgressView().controlSize(.small) }
+
+                Spacer(minLength: 0)
+                if model.isTesting {
+                    ProgressView().controlSize(.small)
+                    Text("Testing connection…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .background(ProviderSettingsAccessibilityMarker(label: "Testing connection…"))
+                }
                 Text(model.status)
                     .font(.caption)
                     .foregroundStyle(model.statusIsError ? .orange : .secondary)
-                    .accessibilityIdentifier(RecorderActionID.providerStatus)
+                    .providerAccessibility(RecorderActionID.providerStatus, label: model.status)
             }
         }
         .padding(14)
-        .background(.background, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.separator.opacity(0.55))
-        )
+    }
+
+    @ViewBuilder
+    private func providerSurface<Content: View>(
+        _ title: String, systemImage: String, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+                .accessibilityLabel(title)
+                .background(ProviderSettingsAccessibilityMarker(label: title))
+            content()
+        }
+        .padding(12)
+        .background(.background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(.separator.opacity(0.55)))
     }
 
     @ViewBuilder
@@ -92,17 +120,17 @@ struct AIProviderSettingsView: View {
         case .hktGenAI:
             TextField("Group ID", text: $model.groupIDText)
                 .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier(RecorderActionID.providerHKTGroupID)
+                .providerAccessibility(RecorderActionID.providerHKTGroupID)
             LabeledContent("Resolved API Base URL") {
                 Text(model.resolvedHKTURLText)
                     .textSelection(.enabled)
                     .font(.caption.monospaced())
-                    .accessibilityIdentifier(RecorderActionID.providerHKTResolvedURL)
+                    .providerAccessibility(RecorderActionID.providerHKTResolvedURL)
             }
         case .openAICompatible:
             TextField("API Base URL", text: $model.baseURLText)
                 .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier(RecorderActionID.providerBaseURL)
+                .providerAccessibility(RecorderActionID.providerBaseURL)
         }
     }
 
@@ -135,7 +163,7 @@ struct AIProviderSettingsView: View {
         HStack {
             TextField(title, text: text)
                 .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier(accessibilityIdentifier)
+                .providerAccessibility(accessibilityIdentifier)
             if !model.discoveredModels.isEmpty {
                 Menu {
                     ForEach(model.discoveredModels, id: \.self) { value in
@@ -150,3 +178,34 @@ struct AIProviderSettingsView: View {
         }
     }
 }
+
+private extension View {
+    func providerAccessibility(
+        _ identifier: String, label: String? = nil
+    ) -> some View {
+        accessibilityIdentifier(identifier)
+            .background(
+                ProviderSettingsAccessibilityMarker(
+                    identifier: identifier + ".marker", label: label
+                )
+            )
+    }
+}
+
+private struct ProviderSettingsAccessibilityMarker: NSViewRepresentable {
+    var identifier: String? = nil
+    var label: String? = nil
+
+    func makeNSView(context _: Context) -> ProviderSettingsAccessibilityMarkerView {
+        let view = ProviderSettingsAccessibilityMarkerView(frame: .zero)
+        if let identifier { view.setAccessibilityIdentifier(identifier) }
+        if let label { view.setAccessibilityLabel(label) }
+        return view
+    }
+
+    func updateNSView(_ view: ProviderSettingsAccessibilityMarkerView, context _: Context) {
+        if let label { view.setAccessibilityLabel(label) }
+    }
+}
+
+private final class ProviderSettingsAccessibilityMarkerView: NSView {}

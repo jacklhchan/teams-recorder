@@ -216,13 +216,15 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         })
         var coordinator: MeetingIntelligenceJobCoordinator!
         let model = AppModel(
+            providerRepository: ImportTestProvider(),
             performStartupWork: false, initialOutputFolder: root,
             libraryFeature: feature,
-            meetingIntelligenceFeatureFactory: { _, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 coordinator = MeetingIntelligenceJobCoordinator(
-                    providerRepository: ImportTestProvider(),
+                    providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
                     transcriptReader: reader,
                     availabilityChecker: availability,
                     generator: NeverGeneratingMeetingIntelligence(),
@@ -467,13 +469,15 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         })
         var coordinator: MeetingIntelligenceJobCoordinator!
         let model = AppModel(
+            providerRepository: ImportTestProvider(),
             performStartupWork: false, initialOutputFolder: linkedWorkspace,
             libraryFeature: feature,
-            meetingIntelligenceFeatureFactory: { _, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 coordinator = MeetingIntelligenceJobCoordinator(
-                    providerRepository: ImportTestProvider(),
+                    providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
                     transcriptReader: CountingTranscriptReader(),
                     availabilityChecker: availability,
                     generator: NeverGeneratingMeetingIntelligence(),

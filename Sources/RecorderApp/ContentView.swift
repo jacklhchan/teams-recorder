@@ -100,11 +100,15 @@ struct RecorderWorkspaceContent: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            RecorderSidebar(selection: selection)
+            RecorderSidebar(
+                selection: selection,
+                outputFolder: model.outputFolder,
+                storageWarning: model.storageWarningMessage
+            )
                 .navigationSplitViewColumnWidth(
-                    min: 180,
-                    ideal: 200,
-                    max: 240
+                    min: 185,
+                    ideal: 232,
+                    max: 278
                 )
         } detail: {
             destinationContent

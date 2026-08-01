@@ -6,6 +6,54 @@ import XCTest
 
 @MainActor
 final class RecorderWorkspaceRenderTests: XCTestCase {
+    func testDirectionASidebarRendersAtSupportedSizes() throws {
+        for size in [
+            CGSize(width: 860, height: 680),
+            CGSize(width: 1_280, height: 800)
+        ] {
+            let fixture = makeStartupDisabledFixture()
+            let host = try makeWorkspaceHost(model: fixture.model, size: size)
+            defer { host.close() }
+
+            for identifier in [
+                "recorder.workspace.sidebar",
+                "recorder.sidebar.brand",
+                "recorder.sidebar.storage",
+                "recorder.navigation.record",
+                "recorder.navigation.recordings",
+                "recorder.navigation.settings"
+            ] {
+                let frame = try XCTUnwrap(
+                    host.frame(forAccessibilityIdentifier: identifier),
+                    "Missing Direction A sidebar element: \(identifier)"
+                )
+                XCTAssertTrue(host.windowContentRect.contains(frame))
+            }
+        }
+    }
+
+    func testDirectionASidebarUsesNativeGlassFallbackAndContrastMarkers() throws {
+        let variants: [(Bool, ColorSchemeContrast, String, String)] = [
+            (false, .standard,
+             "recorder.glass.native", "recorder.surface.contrast.standard"),
+            (true, .increased,
+             "recorder.glass.material-separator",
+             "recorder.surface.contrast.increased")
+        ]
+        for (reduceTransparency, contrast, glassID, contrastID) in variants {
+            let fixture = makeStartupDisabledFixture()
+            let host = try WorkspaceHost(
+                model: fixture.model,
+                size: .init(width: 860, height: 680),
+                reduceTransparencyOverride: reduceTransparency,
+                contrast: contrast
+            )
+            defer { host.close() }
+            XCTAssertTrue(host.containsAccessibilityIdentifier(glassID))
+            XCTAssertTrue(host.containsAccessibilityIdentifier(contrastID))
+        }
+    }
+
     func testNavigationShellStartsOnRecordAndCanRenderBaselineDestinations() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
@@ -50,6 +98,16 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
                 )
                 XCTAssertEqual(host.navigationState.selection, destination)
                 XCTAssertNil(host.navigationState.pendingDestination)
+                for identifier in [
+                    "recorder.sidebar.brand",
+                    "recorder.sidebar.storage"
+                ] {
+                    XCTAssertEqual(
+                        host.accessibilityIdentifierCount(identifier),
+                        1,
+                        "\(identifier) must remain unique after repeat navigation."
+                    )
+                }
             }
         }
     }
@@ -771,6 +829,8 @@ private final class WorkspaceNavigationDriver: ObservableObject {
 private struct WorkspaceHostRoot: View {
     @ObservedObject var navigationDriver: WorkspaceNavigationDriver
     let model: AppModel
+    let reduceTransparencyOverride: Bool?
+    let contrast: ColorSchemeContrast
 
     var body: some View {
         RecorderWorkspaceContent(
@@ -784,6 +844,14 @@ private struct WorkspaceHostRoot: View {
                 set: { navigationDriver.columnVisibility = $0 }
             )
         )
+        .environment(
+            \.recorderReduceTransparencyOverride,
+            reduceTransparencyOverride
+        )
+        // `colorSchemeContrast` is read-only in the macOS 26 SwiftUI SDK;
+        // retain the production environment and inject this deterministic
+        // render-test override through the workspace-only test seam.
+        .environment(\.recorderColorSchemeContrastOverride, contrast)
     }
 }
 
@@ -793,11 +861,18 @@ final class WorkspaceHost {
     private let hostingView: NSHostingView<WorkspaceHostRoot>
     private let window: NSWindow
 
-    init(model: AppModel, size: CGSize) throws {
+    init(
+        model: AppModel,
+        size: CGSize,
+        reduceTransparencyOverride: Bool? = nil,
+        contrast: ColorSchemeContrast = .standard
+    ) throws {
         hostingView = NSHostingView(
             rootView: WorkspaceHostRoot(
                 navigationDriver: navigationDriver,
-                model: model
+                model: model,
+                reduceTransparencyOverride: reduceTransparencyOverride,
+                contrast: contrast
             )
         )
         let frame = NSRect(origin: .zero, size: size)
@@ -822,6 +897,12 @@ final class WorkspaceHost {
     func containsAccessibilityIdentifier(_ identifier: String) -> Bool {
         view(forAccessibilityIdentifier: identifier) != nil
             || accessibilityElement(forAccessibilityIdentifier: identifier) != nil
+    }
+
+    func accessibilityIdentifierCount(_ identifier: String) -> Int {
+        renderedRoots.reduce(into: 0) { count, root in
+            count += accessibilityIdentifierCount(identifier, in: root)
+        }
     }
 
     func containsAccessibilityLabel(_ label: String) -> Bool {
@@ -960,6 +1041,16 @@ final class WorkspaceHost {
             }
         }
         return nil
+    }
+
+    private func accessibilityIdentifierCount(
+        _ identifier: String,
+        in candidate: NSView
+    ) -> Int {
+        let ownCount = candidate.accessibilityIdentifier() == identifier ? 1 : 0
+        return ownCount + candidate.subviews.reduce(0) { count, subview in
+            count + accessibilityIdentifierCount(identifier, in: subview)
+        }
     }
 
     private func accessibilityElement(

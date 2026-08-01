@@ -209,12 +209,319 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
     func testSuccessfulGenerationEmitsOneSemanticPublicationCallback() async throws {
         let fixture = try CoordinatorFixture(availability: .confirmed)
         var callbackCount = 0
-        fixture.coordinator.onSuccessfulPublication = { _ in callbackCount += 1 }
+        fixture.coordinator.onPublication = { _ in callbackCount += 1 }
 
         fixture.coordinator.generate(for: fixture.session)
         await fixture.waitForIdle()
 
         XCTAssertEqual(callbackCount, 1)
+    }
+
+    func testAutomaticPublicationCarriesCoordinatorSessionAttemptTranscriptWorkspaceAndKind() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+        let fence = WorkspacePublicationFence(revision: 42)
+
+        fixture.coordinator.handleTranscriptPublished(
+            fixture.event(generation: 7, workspaceFence: fence)
+        )
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(publications.count, 1)
+        let identity = try XCTUnwrap(publications.first?.identity)
+        XCTAssertEqual(identity.coordinatorInstanceID, fixture.publicationSourceID)
+        XCTAssertEqual(identity.sessionID.path, fixture.session.id.path)
+        XCTAssertEqual(identity.normalizedSessionFolder, RecordingLibraryURLIdentity.normalized(fixture.root))
+        XCTAssertEqual(identity.generation, 1)
+        XCTAssertEqual(identity.transcriptRevision, fixture.reader.snapshot.revision)
+        XCTAssertEqual(identity.workspaceFence, fence)
+        XCTAssertEqual(identity.kind, .artifactAndAutomaticTitle)
+    }
+
+    func testArtifactAndAutomaticTitleEmitOneCombinedPublication() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.handleTranscriptPublished(fixture.event(generation: 1))
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.kind, .artifactAndAutomaticTitle)
+        XCTAssertEqual(publications.first?.artifact?.summary, "Summary")
+        XCTAssertEqual(publications.first?.titleOutcome, .preserved)
+    }
+
+    func testProtectedAutomaticTitleIsOnePreservedOutcomeNotASecondEvent() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.generate(for: fixture.session, workspaceFence: .initial)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.titleOutcome, .preserved)
+        XCTAssertEqual(publications.first?.identity.kind, .artifactAndAutomaticTitle)
+    }
+
+    func testManualGenerationPreservesItsAdmissionWorkspaceFence() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+        let fence = WorkspacePublicationFence(revision: 93)
+
+        fixture.coordinator.generate(for: fixture.session, workspaceFence: fence)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.workspaceFence, fence)
+    }
+
+    func testExplicitApplyEmitsOnlyWhenMetadataActuallyChanges() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed, titleApplierOverride: true)
+        fixture.artifactStore.loaded = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+        let fence = WorkspacePublicationFence(revision: 18)
+
+        fixture.coordinator.applySuggestedTitle(for: fixture.session, workspaceFence: fence)
+        await fixture.waitForIdle()
+        fixture.coordinator.applySuggestedTitle(for: fixture.session, workspaceFence: .initial)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.kind, .explicitSuggestedTitle)
+        XCTAssertEqual(publications.first?.artifact, nil)
+        XCTAssertEqual(publications.first?.titleOutcome, .explicitApplied)
+        XCTAssertEqual(publications.first?.identity.workspaceFence, fence)
+    }
+
+    func testCancellationBeforeDurableCommitEmitsNothing() async throws {
+        let entered = expectation(description: "generator entered")
+        let gate = GenerationGate()
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            generatorOverride: BlockingCoordinatorGenerator(entered: entered, gate: gate)
+        )
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.generate(for: fixture.session, workspaceFence: .initial)
+        await fulfillment(of: [entered], timeout: 1)
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        await gate.release()
+        await fixture.waitForIdle()
+
+        XCTAssertTrue(publications.isEmpty)
+    }
+
+    func testCancellationAfterDurableCommitStillEmitsExactlyOnce() async throws {
+        let delivery = BlockingPublicationDelivery()
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            publicationDeliveryOverride: delivery
+        )
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.generate(for: fixture.session, workspaceFence: .initial)
+        await fulfillment(of: [delivery.admitted], timeout: 1)
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        await delivery.release()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(publications.count, 1)
+    }
+
+    func testCancellationAfterExplicitTitleCommitStillEmitsExactlyOnce() async throws {
+        let delivery = BlockingPublicationDelivery()
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            titleApplierOverride: true,
+            publicationDeliveryOverride: delivery
+        )
+        fixture.artifactStore.loaded = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.applySuggestedTitle(for: fixture.session, workspaceFence: .initial)
+        await fulfillment(of: [delivery.admitted], timeout: 1)
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        await delivery.release()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.kind, .explicitSuggestedTitle)
+    }
+
+    func testFailureOrNoOpBeforeCommitEmitsNothing() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed, titleApplierOverride: true)
+        fixture.artifactStore.loaded = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        fixture.titleMetadataStore?.metadata.title = "Manual title"
+        fixture.titleMetadataStore?.metadata.titleOrigin = .manual
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.applySuggestedTitle(for: fixture.session, workspaceFence: .initial)
+        await fixture.waitForIdle()
+
+        XCTAssertTrue(publications.isEmpty)
+    }
+
+    func testForgedNoncanonicalSessionEmitsNoPublication() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let forged = RecordingSession(
+            id: fixture.session.id,
+            folderURL: fixture.root.appendingPathComponent("forged-alias"),
+            recordingURL: fixture.session.recordingURL,
+            createdAt: fixture.session.createdAt,
+            duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize,
+            metadata: fixture.session.metadata
+        )
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.generate(for: forged, workspaceFence: .initial)
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: forged.id)
+
+        XCTAssertEqual(fixture.publisher.requests, 0)
+        XCTAssertTrue(publications.isEmpty)
+    }
+
+    func testSymlinkAliasSessionIsRejectedBeforeAvailabilityGenerationAndPublication() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let alias = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("alias-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(
+            atPath: alias.path,
+            withDestinationPath: fixture.root.path
+        )
+        defer { try? FileManager.default.removeItem(at: alias) }
+        let aliasSession = RecordingSession(
+            id: alias,
+            folderURL: alias,
+            recordingURL: alias.appendingPathComponent("recording.m4a"),
+            createdAt: fixture.session.createdAt,
+            duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize,
+            metadata: fixture.session.metadata
+        )
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.generate(for: aliasSession, workspaceFence: .initial)
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: aliasSession.id)
+
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.generator.requests, 0)
+        XCTAssertEqual(fixture.publisher.requests, 0)
+        XCTAssertTrue(publications.isEmpty)
+    }
+
+    func testSymlinkAliasIsRejectedBeforeAvailabilityCheck() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let alias = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("availability-alias-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: fixture.root.path)
+        defer { try? FileManager.default.removeItem(at: alias) }
+        let aliasSession = RecordingSession(
+            id: alias, folderURL: alias,
+            recordingURL: alias.appendingPathComponent("recording.m4a"),
+            createdAt: fixture.session.createdAt, duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize, metadata: fixture.session.metadata
+        )
+
+        fixture.coordinator.checkAvailability(for: aliasSession, workspaceFence: .initial)
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: aliasSession.id)
+
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.reader.requests, 0)
+    }
+
+    func testSymlinkCanonicalTranscriptURLIsRejectedBeforeAutomaticIO() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let alias = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("transcript-alias-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: fixture.root.path)
+        defer { try? FileManager.default.removeItem(at: alias) }
+        let original = fixture.event(generation: 1)
+        let forged = TranscriptPublished(
+            session: original.session,
+            canonicalURL: alias.appendingPathComponent(TranscriptDocumentStore.editableFileName),
+            revision: original.revision,
+            normalizedSessionFolder: original.normalizedSessionFolder,
+            identity: original.identity,
+            workspaceFence: original.workspaceFence
+        )
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.handleTranscriptPublished(forged)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.reader.requests, 0)
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.generator.requests, 0)
+        XCTAssertEqual(fixture.publisher.requests, 0)
+        XCTAssertTrue(publications.isEmpty)
+    }
+
+    func testSymlinkAtLiteralTranscriptPathIsRejectedBeforeAutomaticIO() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let literalTranscriptURL = TranscriptDocumentStore.editableURL(in: fixture.root)
+        let target = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("transcript-target-\(UUID().uuidString).txt")
+        try Data("not the canonical transcript".utf8).write(to: target)
+        try FileManager.default.removeItem(at: literalTranscriptURL)
+        try FileManager.default.createSymbolicLink(
+            atPath: literalTranscriptURL.path,
+            withDestinationPath: target.path
+        )
+        defer { try? FileManager.default.removeItem(at: target) }
+
+        fixture.coordinator.handleTranscriptPublished(fixture.event(generation: 1))
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.reader.requests, 0)
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.generator.requests, 0)
+        XCTAssertEqual(fixture.publisher.requests, 0)
+    }
+
+    func testSymlinkAliasIsRejectedBeforeSuggestedTitleApplyIO() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed, titleApplierOverride: true)
+        fixture.artifactStore.loaded = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        let alias = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("title-alias-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: fixture.root.path)
+        defer { try? FileManager.default.removeItem(at: alias) }
+        let aliasSession = RecordingSession(
+            id: alias, folderURL: alias,
+            recordingURL: alias.appendingPathComponent("recording.m4a"),
+            createdAt: fixture.session.createdAt, duration: fixture.session.duration,
+            fileSize: fixture.session.fileSize, metadata: fixture.session.metadata
+        )
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        fixture.coordinator.applySuggestedTitle(for: aliasSession, workspaceFence: .initial)
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: aliasSession.id)
+
+        XCTAssertEqual(fixture.reader.requests, 0)
+        XCTAssertEqual(fixture.titleMetadataStore?.saveCount, 0)
+        XCTAssertTrue(publications.isEmpty)
+    }
+
+    func testMeetingIntelligencePublicationValueContractsAreHashableAndSendable() {
+        func requiresHashableAndSendable<T: Hashable & Sendable>(_: T.Type) {}
+        requiresHashableAndSendable(TranscriptDocumentRevision.self)
+        requiresHashableAndSendable(WorkspacePublicationFence.self)
+        requiresHashableAndSendable(TranscriptPublicationIdentity.self)
+        requiresHashableAndSendable(MeetingIntelligencePublicationIdentity.self)
+        requiresHashableAndSendable(MeetingIntelligencePublicationKind.self)
     }
 
     func testGenerationRetainsExactProviderSnapshotAfterRepositoryChanges() async throws {
@@ -285,7 +592,7 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         let publisher = BlockingPublisher(entered: entered, gate: gate)
         let fixture = try CoordinatorFixture(availability: .confirmed, publisherOverride: publisher)
         var callbacks = 0
-        fixture.coordinator.onSuccessfulPublication = { _ in callbacks += 1 }
+        fixture.coordinator.onPublication = { _ in callbacks += 1 }
 
         fixture.coordinator.generate(for: fixture.session)
         await fulfillment(of: [entered], timeout: 1)
@@ -319,7 +626,7 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         let callbacks = CallbackCount()
         let bothCallbacks = expectation(description: "two durable publication callbacks")
         bothCallbacks.expectedFulfillmentCount = 2
-        fixture.coordinator.onSuccessfulPublication = { _ in
+        fixture.coordinator.onPublication = { _ in
             callbacks.increment()
             bothCallbacks.fulfill()
         }
@@ -582,7 +889,7 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         let scheduler = BlockSecondStateSaveScheduler()
         let fixture = try CoordinatorFixture(availability: .confirmed, stateSaveSchedulerOverride: scheduler)
         let callbackCount = CallbackCount()
-        fixture.coordinator.onSuccessfulPublication = { _ in callbackCount.increment() }
+        fixture.coordinator.onPublication = { _ in callbackCount.increment() }
         return .init(coordinator: fixture.coordinator, session: fixture.session, scheduler: scheduler, callbackCount: callbackCount)
     }
 }
@@ -605,16 +912,22 @@ private final class CoordinatorFixture {
     let publisher = CoordinatorPublisher()
     let artifactStore = CoordinatorArtifactStore()
     let stateStore = CoordinatorStateStore()
+    let titleMetadataStore: CoordinatorMetadataStore?
     let coordinator: MeetingIntelligenceJobCoordinator
-    private let coordinatorID = UUID()
+    let coordinatorInstanceID = UUID()
+    let publicationSourceID = UUID()
 
     init(availability: MeetingIntelligenceAvailability,
          generatorOverride: (any MeetingIntelligenceGenerating)? = nil,
          stateStoreOverride: (any MeetingIntelligenceStateStoring)? = nil,
          availabilityOverride: (any MeetingIntelligenceAvailabilityChecking)? = nil,
          publisherOverride: (any MeetingIntelligencePublishing)? = nil,
-         stateSaveSchedulerOverride: (any MeetingIntelligenceStateSaveScheduling)? = nil) throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+         stateSaveSchedulerOverride: (any MeetingIntelligenceStateSaveScheduling)? = nil,
+         titleApplierOverride: Bool = false,
+         publicationDeliveryOverride: (any MeetingIntelligencePublicationDeliveryScheduling)? = nil) throws {
+        root = RecordingLibraryURLIdentity.normalized(
+            FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        )
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let transcriptURL = root.appendingPathComponent("transcript.txt")
         let data = Data("Original transcript".utf8)
@@ -625,19 +938,33 @@ private final class CoordinatorFixture {
                         createdAt: .distantPast, duration: 0, fileSize: 0, metadata: .init())
         repository = .init(snapshotValue: try Self.makeSnapshot(llmModel: "llm"))
         self.availability = .init(value: availability)
-        coordinator = .init(providerRepository: repository, expectedPublicationSourceID: coordinatorID, transcriptReader: reader,
+        let titleMetadataStore = titleApplierOverride ? CoordinatorMetadataStore() : nil
+        self.titleMetadataStore = titleMetadataStore
+        let titleApplier: MeetingIntelligenceSuggestedTitleApplier?
+        if let titleMetadataStore {
+            titleApplier = MeetingIntelligenceSuggestedTitleApplier(
+                mutationGate: RecordingSessionMutationGate(),
+                transcriptReader: reader,
+                metadataStore: titleMetadataStore
+            )
+        } else { titleApplier = nil }
+        coordinator = .init(providerRepository: repository, expectedPublicationSourceID: coordinatorInstanceID,
+                            publicationSourceID: publicationSourceID, transcriptReader: reader,
                             availabilityChecker: availabilityOverride ?? self.availability, generator: generatorOverride ?? generator,
                             publisher: publisherOverride ?? publisher, artifactStore: artifactStore, stateStore: stateStoreOverride ?? stateStore,
+                            titleApplier: titleApplier,
                             stateSaveScheduler: stateSaveSchedulerOverride ?? ImmediateTestStateSaveScheduler(),
+                            publicationDeliveryScheduler: publicationDeliveryOverride ?? ImmediateMeetingIntelligencePublicationDeliveryScheduler(),
                             now: { .distantPast })
     }
 
     deinit { try? FileManager.default.removeItem(at: root) }
 
-    func event(generation: UInt64) -> TranscriptPublished {
+    func event(generation: UInt64, workspaceFence: WorkspacePublicationFence = .initial) -> TranscriptPublished {
         .init(session: session, canonicalURL: reader.snapshot.url, revision: reader.snapshot.revision,
               normalizedSessionFolder: root.standardizedFileURL,
-              identity: .init(coordinatorInstanceID: coordinatorID, generation: generation, attemptID: UUID()))
+              identity: .init(coordinatorInstanceID: coordinatorInstanceID, generation: generation, attemptID: UUID()),
+              workspaceFence: workspaceFence)
     }
 
     func snapshot(llmModel: String) throws -> OpenAICompatibleProviderSnapshot { try Self.makeSnapshot(llmModel: llmModel) }
@@ -805,6 +1132,18 @@ private final class BlockSecondStateSaveScheduler: MeetingIntelligenceStateSaveS
     func release() async { await gate.release() }
 }
 
+private final class BlockingPublicationDelivery: MeetingIntelligencePublicationDeliveryScheduling, @unchecked Sendable {
+    let admitted = XCTestExpectation(description: "durable publication delivery admitted")
+    private let gate = GenerationGate()
+
+    func awaitDeliveryAdmission() async {
+        admitted.fulfill()
+        await gate.wait()
+    }
+
+    func release() async { await gate.release() }
+}
+
 private final class CallbackCount: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -815,8 +1154,10 @@ private final class CallbackCount: @unchecked Sendable {
 private final class CoordinatorTranscriptReader: TranscriptDocumentReading, @unchecked Sendable {
     var snapshot: TranscriptDocumentSnapshot
     var readError: Error?
+    private(set) var requests = 0
     init(snapshot: TranscriptDocumentSnapshot) { self.snapshot = snapshot }
     func readCanonical(in _: URL, allowLegacy _: Bool) throws -> TranscriptDocumentSnapshot {
+        requests += 1
         if let readError { throw readError }
         return snapshot
     }
@@ -898,6 +1239,16 @@ private final class CoordinatorArtifactStore: MeetingIntelligenceArtifactStoring
     func stage(_: MeetingIntelligenceArtifact, in folder: URL) throws -> URL { folder }
     func promoteStaged(_: URL, in _: URL) throws {}
     func removeStaged(_: URL, in _: URL) throws {}
+}
+
+private final class CoordinatorMetadataStore: RecordingSessionMetadataStoring, @unchecked Sendable {
+    var metadata = RecordingSessionMetadata()
+    private(set) var saveCount = 0
+    func load(in _: URL) -> RecordingSessionMetadata { metadata }
+    func save(_ metadata: RecordingSessionMetadata, in _: URL) throws {
+        saveCount += 1
+        self.metadata = metadata
+    }
 }
 
 private final class CoordinatorStateStore: MeetingIntelligenceStateStoring, @unchecked Sendable {

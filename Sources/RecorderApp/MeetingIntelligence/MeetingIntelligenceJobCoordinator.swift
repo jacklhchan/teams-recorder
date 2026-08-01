@@ -121,13 +121,15 @@ private actor MeetingIntelligenceIO {
 final class MeetingIntelligenceJobCoordinator: ObservableObject {
     typealias DateNow = @Sendable () -> Date
 
-    var onSuccessfulPublication: ((RecordingSession) -> Void)?
+    var onPublication: ((MeetingIntelligencePublished) -> Void)?
 
     private let expectedPublicationSourceID: UUID
+    let publicationSourceID: UUID
     private let io: MeetingIntelligenceIO
     private let availabilityChecker: any MeetingIntelligenceAvailabilityChecking
     private let generator: any MeetingIntelligenceGenerating
     private let titleApplier: MeetingIntelligenceSuggestedTitleApplier?
+    private let publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling
     private let now: DateNow
 
     private var tasksBySessionID: [RecordingSession.ID: Task<Void, Never>] = [:]
@@ -146,6 +148,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     init(
         providerRepository: any OpenAICompatibleProviderManaging,
         expectedPublicationSourceID: UUID,
+        publicationSourceID: UUID = UUID(),
         transcriptReader: any TranscriptDocumentReading = SecureTranscriptDocumentReader(),
         availabilityChecker: any MeetingIntelligenceAvailabilityChecking,
         generator: any MeetingIntelligenceGenerating,
@@ -154,15 +157,18 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         stateStore: any MeetingIntelligenceStateStoring,
         titleApplier: MeetingIntelligenceSuggestedTitleApplier? = nil,
         stateSaveScheduler: any MeetingIntelligenceStateSaveScheduling = ImmediateMeetingIntelligenceStateSaveScheduler(),
+        publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling = ImmediateMeetingIntelligencePublicationDeliveryScheduler(),
         now: @escaping DateNow = { Date() }
     ) {
         self.expectedPublicationSourceID = expectedPublicationSourceID
+        self.publicationSourceID = publicationSourceID
         io = .init(repository: providerRepository, reader: transcriptReader,
                    artifacts: artifactStore, states: stateStore, publisher: publisher,
                    stateSaveScheduler: stateSaveScheduler)
         self.availabilityChecker = availabilityChecker
         self.generator = generator
         self.titleApplier = titleApplier
+        self.publicationDeliveryScheduler = publicationDeliveryScheduler
         self.now = now
     }
 
@@ -185,39 +191,63 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     func handleTranscriptPublished(_ event: TranscriptPublished) {
+        let expectedTranscriptURL = TranscriptDocumentStore.editableURL(in: event.session.folderURL)
+        let receivedTranscriptPath = event.canonicalURL.standardizedFileURL.path
+        let normalizedReceivedTranscriptURL = RecordingLibraryURLIdentity.normalized(event.canonicalURL)
+        let normalizedExpectedTranscriptURL = RecordingLibraryURLIdentity.normalized(expectedTranscriptURL)
         guard !isShutDown, !removedSessionIDs.contains(event.session.id),
-              event.identity.coordinatorInstanceID == expectedPublicationSourceID else { return }
-        let sessionID = event.session.id
+              event.identity.coordinatorInstanceID == expectedPublicationSourceID,
+              let session = canonicalSession(for: event.session),
+              RecordingLibraryURLIdentity.normalized(event.normalizedSessionFolder).path == session.folderURL.path,
+              // The callback must name the literal physical transcript path,
+              // not a symlink that happens to resolve to it (or elsewhere).
+              // Validate this before admitting work so the transcript reader
+              // never receives an alias path.
+              receivedTranscriptPath == normalizedReceivedTranscriptURL.path,
+              normalizedReceivedTranscriptURL.path == normalizedExpectedTranscriptURL.path
+        else { return }
+        let canonicalEvent = TranscriptPublished(
+            session: session,
+            canonicalURL: normalizedExpectedTranscriptURL,
+            revision: event.revision,
+            normalizedSessionFolder: RecordingLibraryURLIdentity.normalized(session.folderURL),
+            identity: event.identity,
+            workspaceFence: event.workspaceFence
+        )
+        let sessionID = session.id
         guard accepts(event.identity, after: latestPublicationsBySessionID[sessionID]) else { return }
         latestPublicationsBySessionID[sessionID] = event.identity
-        sessionsByID[sessionID] = event.session
-        let ticket = replaceWork(for: event.session)
+        sessionsByID[sessionID] = session
+        let ticket = replaceWork(
+            for: session,
+            workspaceFence: event.workspaceFence
+        )
         tasksBySessionID[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.clearTaskIfOwned(ticket, for: event.session) }
-            await self.startAutomatic(event: event, ticket: ticket)
-        }
-    }
-
-    func checkAvailability(for session: RecordingSession) {
-        guard !isShutDown else { return }
-        sessionsByID[session.id] = session
-        let ticket = replaceWork(for: session)
-        tasksBySessionID[session.id] = Task { @MainActor [weak self] in
-            guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: session) }
-            guard let snapshot = await self.snapshotIfUsable(for: session, ticket: ticket) else { return }
-            await self.setChecking(session, snapshot: snapshot, revision: nil, ticket: ticket)
-            let result = await self.availabilityChecker.availability(for: snapshot)
-            guard self.owns(ticket, for: session) else { return }
-            await self.setAvailability(result, session: session, snapshot: snapshot, ticket: ticket)
-            self.clearTaskIfOwned(ticket, for: session)
+            await self.startAutomatic(event: canonicalEvent, ticket: ticket)
         }
     }
 
-    func generate(for session: RecordingSession) { startManual(session: session, intent: .generate) }
-    func regenerate(for session: RecordingSession) { startManual(session: session, intent: .regenerate) }
-    func retryGeneration(for session: RecordingSession) { startManual(session: session, intent: .retryGeneration) }
+    func checkAvailability(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) {
+        guard !isShutDown, let canonicalSession = canonicalSession(for: session) else { return }
+        sessionsByID[canonicalSession.id] = canonicalSession
+        let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
+        tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.clearTaskIfOwned(ticket, for: canonicalSession) }
+            guard let snapshot = await self.snapshotIfUsable(for: canonicalSession, ticket: ticket) else { return }
+            await self.setChecking(canonicalSession, snapshot: snapshot, revision: nil, ticket: ticket)
+            let result = await self.availabilityChecker.availability(for: snapshot)
+            guard self.owns(ticket, for: canonicalSession) else { return }
+            await self.setAvailability(result, session: canonicalSession, snapshot: snapshot, ticket: ticket)
+            self.clearTaskIfOwned(ticket, for: canonicalSession)
+        }
+    }
+
+    func generate(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) { startManual(session: session, intent: .generate, workspaceFence: workspaceFence) }
+    func regenerate(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) { startManual(session: session, intent: .regenerate, workspaceFence: workspaceFence) }
+    func retryGeneration(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) { startManual(session: session, intent: .retryGeneration, workspaceFence: workspaceFence) }
 
     func cancel(sessionID: RecordingSession.ID) {
         guard let session = sessionsByID[sessionID], !isShutDown else { return }
@@ -286,29 +316,38 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         }
     }
 
-    func applySuggestedTitle(for session: RecordingSession) {
-        guard !isShutDown, let applier = titleApplier else { return }
-        let ticket = replaceWork(for: session)
-        tasksBySessionID[session.id] = Task { @MainActor [weak self] in
+    func applySuggestedTitle(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) {
+        guard !isShutDown, let applier = titleApplier,
+              let canonicalSession = canonicalSession(for: session) else { return }
+        let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
+        tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.clearTaskIfOwned(ticket, for: session) }
+            defer { self.clearTaskIfOwned(ticket, for: canonicalSession) }
             do {
-                let artifact = try await self.io.artifact(in: session.folderURL)
-                let current = try await self.io.transcript(in: session.folderURL)
+                let artifact = try await self.io.artifact(in: canonicalSession.folderURL)
+                let current = try await self.io.transcript(in: canonicalSession.folderURL)
                 guard let artifact,
                       artifact.sourceTranscriptSHA256 == current.revision.sha256,
                       artifact.sourceTranscriptByteCount == current.revision.byteCount,
-                      self.owns(ticket, for: session) else { return }
-                let applied = try await applier.applySuggestedTitle(.init(session: session, artifact: artifact,
+                      self.owns(ticket, for: canonicalSession) else { return }
+                let applied = try await applier.applySuggestedTitle(.init(session: canonicalSession, artifact: artifact,
                                                                             sourceRevision: current.revision,
-                                                                            capturedTitle: session.metadata.title,
-                                                                            capturedTitleOrigin: session.metadata.titleOrigin,
+                                                                            capturedTitle: canonicalSession.metadata.title,
+                                                                            capturedTitleOrigin: canonicalSession.metadata.titleOrigin,
                                                                             lease: ticket.lease))
-                guard self.owns(ticket, for: session) else { return }
-                if applied { self.onSuccessfulPublication?(session) }
+                guard applied else { return }
+                let publication = self.makePublication(
+                    session: canonicalSession,
+                    ticket: ticket,
+                    revision: current.revision,
+                    kind: .explicitSuggestedTitle,
+                    artifact: nil,
+                    titleOutcome: .explicitApplied
+                )
+                await self.deliverDurablePublication(publication)
             } catch {
-                guard self.owns(ticket, for: session), !Task.isCancelled else { return }
-                self.setFailed(self.manualApplyFailureMessage(for: error), for: session)
+                guard self.owns(ticket, for: canonicalSession), !Task.isCancelled else { return }
+                self.setFailed(self.manualApplyFailureMessage(for: error), for: canonicalSession)
             }
         }
     }
@@ -363,7 +402,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         }
         guard owns(ticket, for: session), transcript.url == event.canonicalURL,
               transcript.revision == event.revision,
-              normalizedFolder(for: session) == event.normalizedSessionFolder else { return }
+              normalizedFolder(for: session)?.path == event.normalizedSessionFolder.path else { return }
         // A persisted result for the exact canonical bytes is already the
         // desired automatic outcome; do not spend a fresh /models or chat call.
         let existingArtifact: MeetingIntelligenceArtifact?
@@ -395,24 +434,28 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                             intent: .automatic, ticket: ticket)
     }
 
-    private func startManual(session: RecordingSession, intent: MeetingIntelligenceIntent) {
-        guard !isShutDown else { return }
-        sessionsByID[session.id] = session
-        let ticket = replaceWork(for: session)
-        tasksBySessionID[session.id] = Task { @MainActor [weak self] in
+    private func startManual(
+        session: RecordingSession,
+        intent: MeetingIntelligenceIntent,
+        workspaceFence: WorkspacePublicationFence
+    ) {
+        guard !isShutDown, let canonicalSession = canonicalSession(for: session) else { return }
+        sessionsByID[canonicalSession.id] = canonicalSession
+        let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
+        tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.clearTaskIfOwned(ticket, for: session) }
-            guard let snapshot = await self.snapshotIfUsable(for: session, ticket: ticket) else { return }
+            defer { self.clearTaskIfOwned(ticket, for: canonicalSession) }
+            guard let snapshot = await self.snapshotIfUsable(for: canonicalSession, ticket: ticket) else { return }
             let transcript: TranscriptDocumentSnapshot
             do {
-                transcript = try await self.io.transcript(in: session.folderURL)
+                transcript = try await self.io.transcript(in: canonicalSession.folderURL)
             } catch {
-                guard self.owns(ticket, for: session), !Task.isCancelled else { return }
-                self.setFailed("Transcript needs attention.", for: session)
+                guard self.owns(ticket, for: canonicalSession), !Task.isCancelled else { return }
+                self.setFailed("Transcript needs attention.", for: canonicalSession)
                 return
             }
-            guard self.owns(ticket, for: session) else { return }
-            await self.generateOwned(session: session, transcript: transcript, snapshot: snapshot,
+            guard self.owns(ticket, for: canonicalSession) else { return }
+            await self.generateOwned(session: canonicalSession, transcript: transcript, snapshot: snapshot,
                                      intent: intent, ticket: ticket)
         }
     }
@@ -449,10 +492,18 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                                                       content: content, snapshot: snapshot, intent: intent,
                                                       generatedAt: now(), lease: ticket.lease))
             // A successful publisher return is the durable semantic boundary.
-            // Lifecycle ownership still controls the terminal UI state below,
-            // but cannot suppress the one library/search refresh for an
-            // artifact that was already committed.
-            onSuccessfulPublication?(session)
+            // The typed event is deliberately delivered before lifecycle UI
+            // checks: cancellation/removal after this point cannot erase one
+            // already-committed Library refresh.
+            let publication = makePublication(
+                session: session,
+                ticket: ticket,
+                revision: transcript.revision,
+                kind: .artifactAndAutomaticTitle,
+                artifact: outcome.artifact,
+                titleOutcome: outcome.titleOutcome
+            )
+            await deliverDurablePublication(publication)
             guard owns(ticket, for: session), !Task.isCancelled else { return }
             setPresentation(from: outcome.artifact, phase: .ready,
                             message: outcome.titleWarning ?? "Ready.", session: session)
@@ -605,10 +656,14 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         let attempt: UUID
         let lease: MeetingIntelligenceAttemptLease
         let startedAt: Date
+        let workspaceFence: WorkspacePublicationFence
         static func == (lhs: Self, rhs: Self) -> Bool { lhs.generation == rhs.generation && lhs.attempt == rhs.attempt }
     }
 
-    private func replaceWork(for session: RecordingSession) -> Ticket {
+    private func replaceWork(
+        for session: RecordingSession,
+        workspaceFence: WorkspacePublicationFence = .initial
+    ) -> Ticket {
         invalidateWork(for: session.id)
         let generation = (generationsBySessionID[session.id] ?? 0) &+ 1
         let attempt = UUID()
@@ -619,7 +674,13 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         nextWriteSequenceBySessionID[session.id] = 0
         reloadTasksBySessionID.removeValue(forKey: session.id)?.cancel()
         reloadTokensBySessionID.removeValue(forKey: session.id)
-        return .init(generation: generation, attempt: attempt, lease: lease, startedAt: now())
+        return .init(
+            generation: generation,
+            attempt: attempt,
+            lease: lease,
+            startedAt: now(),
+            workspaceFence: workspaceFence
+        )
     }
 
     private func invalidateWork(for sessionID: RecordingSession.ID) {
@@ -640,6 +701,55 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         attemptsBySessionID.removeValue(forKey: session.id)
         leasesBySessionID.removeValue(forKey: session.id)
         nextWriteSequenceBySessionID.removeValue(forKey: session.id)
+    }
+
+    private func canonicalSession(for session: RecordingSession) -> RecordingSession? {
+        let folder = RecordingLibraryURLIdentity.normalized(session.folderURL)
+        let recording = RecordingLibraryURLIdentity.normalized(session.recordingURL)
+        guard session.id.path == folder.path,
+              session.folderURL.path == folder.path,
+              session.recordingURL.path == recording.path else { return nil }
+        // URL equality also incorporates directory-hint representation on
+        // Darwin. The verified input path is already physical/canonical; keep
+        // the Library's value identity unchanged for task dictionaries.
+        return session
+    }
+
+    private func makePublication(
+        session: RecordingSession,
+        ticket: Ticket,
+        revision: TranscriptDocumentRevision,
+        kind: MeetingIntelligencePublicationKind,
+        artifact: MeetingIntelligenceArtifact?,
+        titleOutcome: MeetingIntelligenceTitleOutcome
+    ) -> MeetingIntelligencePublished {
+        // Commands are admitted through canonicalSession(for:) before work
+        // starts. A durable publisher return can therefore never encounter a
+        // new identity rejection at delivery time.
+        precondition(session.id.path == session.folderURL.path)
+        return .init(
+            identity: .init(
+                coordinatorInstanceID: publicationSourceID,
+                sessionID: session.id,
+                normalizedSessionFolder: RecordingLibraryURLIdentity.normalized(session.folderURL),
+                generation: ticket.generation,
+                attemptID: ticket.attempt,
+                transcriptRevision: revision,
+                workspaceFence: ticket.workspaceFence,
+                kind: kind
+            ),
+            canonicalSession: session,
+            artifact: artifact,
+            titleOutcome: titleOutcome
+        )
+    }
+
+    private func deliverDurablePublication(_ publication: MeetingIntelligencePublished) async {
+        await publicationDeliveryScheduler.awaitDeliveryAdmission()
+        // Do not consult task ownership or cancellation here. Publisher/title
+        // success is the durable boundary, and this one semantic event must
+        // survive later cancellation, removal, or shutdown.
+        onPublication?(publication)
     }
 
     private func finishCancellationIfOwned(_ ticket: Ticket, session: RecordingSession) async {
@@ -666,8 +776,8 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private func isUsableModel(_ model: String) -> Bool { let v = model.trimmingCharacters(in: .whitespacesAndNewlines); return !v.isEmpty && v != "legacy-unconfigured-llm" }
     private func sanitized(_ message: String) -> String { String(message.unicodeScalars.filter { $0.properties.generalCategory != .control || $0 == "\n" || $0 == "\t" }.map(String.init).joined().prefix(1_024)) }
     private func normalizedFolder(for session: RecordingSession) -> URL? {
-        let folder = session.folderURL.resolvingSymlinksInPath().standardizedFileURL
-        return session.id.standardizedFileURL == folder ? folder : nil
+        let folder = RecordingLibraryURLIdentity.normalized(session.folderURL)
+        return RecordingLibraryURLIdentity.normalized(session.id).path == folder.path ? folder : nil
     }
     private func failureMessage(for error: Error) -> String {
         switch error {

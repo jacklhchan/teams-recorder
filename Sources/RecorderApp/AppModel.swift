@@ -529,12 +529,25 @@ final class AppModel: ObservableObject {
         meetingIntelligenceCoordinator.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
-        meetingIntelligenceCoordinator.onSuccessfulPublication = {
-            [weak self] session in
-            guard let self else { return }
+        meetingIntelligenceCoordinator.onPublication = {
+            [weak self] event in
+            guard let self,
+                  event.identity.coordinatorInstanceID
+                    == self.meetingIntelligenceCoordinator.publicationSourceID,
+                  event.identity.workspaceFence == self.workspacePublicationFence,
+                  let canonicalSession = self.libraryFeature.session(withID: event.identity.sessionID),
+                  event.identity.sessionID == canonicalSession.id,
+                  event.canonicalSession.id == canonicalSession.id,
+                  event.identity.normalizedSessionFolder
+                    == RecordingLibraryURLIdentity.normalized(canonicalSession.folderURL),
+                  RecordingLibraryURLIdentity.normalized(event.canonicalSession.folderURL)
+                    == RecordingLibraryURLIdentity.normalized(canonicalSession.folderURL),
+                  RecordingLibraryURLIdentity.normalized(event.canonicalSession.recordingURL)
+                    == RecordingLibraryURLIdentity.normalized(canonicalSession.recordingURL)
+            else { return }
             self.libraryFeature.refreshAfterMeetingIntelligence(
-                session,
-                fence: self.workspacePublicationFence
+                canonicalSession,
+                fence: event.identity.workspaceFence
             )
         }
         autoCoordinator.onStateChange = { [weak self] state in
@@ -629,19 +642,31 @@ final class AppModel: ObservableObject {
     }
 
     func checkMeetingIntelligenceAvailability(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.checkAvailability(for: session)
+        meetingIntelligenceCoordinator.checkAvailability(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
     }
 
     func generateMeetingIntelligence(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.generate(for: session)
+        meetingIntelligenceCoordinator.generate(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
     }
 
     func regenerateMeetingIntelligence(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.regenerate(for: session)
+        meetingIntelligenceCoordinator.regenerate(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
     }
 
     func retryMeetingIntelligenceGeneration(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.retryGeneration(for: session)
+        meetingIntelligenceCoordinator.retryGeneration(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
     }
 
     func cancelMeetingIntelligence(for session: RecordingSession) {
@@ -649,7 +674,10 @@ final class AppModel: ObservableObject {
     }
 
     func applyMeetingIntelligenceSuggestedTitle(for session: RecordingSession) {
-        meetingIntelligenceCoordinator.applySuggestedTitle(for: session)
+        meetingIntelligenceCoordinator.applySuggestedTitle(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
     }
 
     func shutdown() {

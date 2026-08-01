@@ -27,7 +27,7 @@ struct WorkspacePublicationFence: Equatable, Hashable, Sendable {
     }
 }
 
-struct TranscriptPublicationIdentity: Equatable, Sendable {
+struct TranscriptPublicationIdentity: Equatable, Hashable, Sendable {
     let coordinatorInstanceID: UUID
     let generation: UInt64
     let attemptID: UUID

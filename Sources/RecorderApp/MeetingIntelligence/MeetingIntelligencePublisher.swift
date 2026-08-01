@@ -201,8 +201,37 @@ struct MeetingIntelligencePublicationOutcome: Equatable, Sendable {
         "Meeting intelligence was saved, but the generated title could not be applied."
 
     let artifact: MeetingIntelligenceArtifact
-    let titleWasApplied: Bool
-    let titleWarning: String?
+    let titleOutcome: MeetingIntelligenceTitleOutcome
+
+    var titleWasApplied: Bool {
+        titleOutcome == .applied
+    }
+
+    var titleWarning: String? {
+        guard case .warning(let message) = titleOutcome else { return nil }
+        return message
+    }
+
+    init(
+        artifact: MeetingIntelligenceArtifact,
+        titleOutcome: MeetingIntelligenceTitleOutcome
+    ) {
+        self.artifact = artifact
+        self.titleOutcome = titleOutcome
+    }
+
+    // Compatibility initializer for existing publisher-focused fixtures. New
+    // coordinator code consumes the typed outcome above.
+    init(
+        artifact: MeetingIntelligenceArtifact,
+        titleWasApplied: Bool,
+        titleWarning: String?
+    ) {
+        self.init(
+            artifact: artifact,
+            titleOutcome: titleWasApplied ? .applied : titleWarning.map(MeetingIntelligenceTitleOutcome.warning) ?? .preserved
+        )
+    }
 }
 
 protocol MeetingIntelligencePublishing: Sendable {
@@ -311,8 +340,7 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
             guard shouldApplyGeneratedTitle else {
                 return .init(
                     artifact: artifact,
-                    titleWasApplied: false,
-                    titleWarning: nil
+                    titleOutcome: .preserved
                 )
             }
 
@@ -324,16 +352,14 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
                 } else { try metadataStore.save(metadata, in: folder) }
                 return .init(
                     artifact: artifact,
-                    titleWasApplied: true,
-                    titleWarning: nil
+                    titleOutcome: .applied
                 )
             } catch {
                 // The artifact is already valid and visible. Do not leak a
                 // filesystem path or provider detail through the warning.
                 return .init(
                     artifact: artifact,
-                    titleWasApplied: false,
-                    titleWarning: MeetingIntelligencePublicationOutcome.metadataWarning
+                    titleOutcome: .warning(MeetingIntelligencePublicationOutcome.metadataWarning)
                 )
             }
         }

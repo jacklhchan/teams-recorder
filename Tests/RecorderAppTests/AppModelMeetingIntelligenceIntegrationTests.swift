@@ -241,7 +241,7 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             if snapshot.sessions == [indexedReloaded] { updated.fulfill() }
         }
 
-        coordinator.onSuccessfulPublication?(fixture.session())
+        coordinator.onPublication?(meetingPublication(for: fixture.session(), sourceID: coordinator.publicationSourceID))
         wait(for: [reloader.called], timeout: 1)
         wait(for: [updated], timeout: 1)
 
@@ -260,10 +260,28 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: newWorkspace) }
 
         model.setOutputFolder(newWorkspace)
-        coordinator.onSuccessfulPublication?(fixture.session())
+        coordinator.onPublication?(meetingPublication(for: fixture.session(), sourceID: coordinator.publicationSourceID))
 
         XCTAssertEqual(reloader.callCount, 0)
         XCTAssertFalse(model.sessions.contains(where: { $0.id == fixture.session().id }))
+    }
+
+    func testForeignMeetingIntelligencePublicationCannotReloadLibrary() throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+        let reloader = SessionReloader(result: fixture.session())
+        let coordinator = fixture.coordinator()
+        let model = fixture.model(
+            coordinator: coordinator,
+            reloader: { [reloader] session in reloader.reload(session) }
+        )
+        model.seedLibrarySessionsForTesting([fixture.session()])
+
+        coordinator.onPublication?(
+            meetingPublication(for: fixture.session(), sourceID: UUID())
+        )
+
+        XCTAssertEqual(reloader.callCount, 0)
     }
 
     func testLatestMeetingIntelligenceReloadWinsAfterEarlierReloadIsReleased() throws {
@@ -281,9 +299,9 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             if snapshot.sessions == [indexedLatest] { applied.fulfill() }
         }
 
-        coordinator.onSuccessfulPublication?(fixture.session())
+        coordinator.onPublication?(meetingPublication(for: fixture.session(), sourceID: coordinator.publicationSourceID))
         wait(for: [reloader.firstStarted], timeout: 1)
-        coordinator.onSuccessfulPublication?(fixture.session())
+        coordinator.onPublication?(meetingPublication(for: fixture.session(), sourceID: coordinator.publicationSourceID))
         reloader.releaseFirst()
         wait(for: [applied], timeout: 1)
 
@@ -699,6 +717,29 @@ private final class BlockingIntegrationSearchLoader: @unchecked Sendable {
     }
     func release() { semaphore.signal() }
 }
+
+private func meetingPublication(
+    for session: RecordingSession,
+    sourceID: UUID,
+    fence: WorkspacePublicationFence = .initial
+) -> MeetingIntelligencePublished {
+    .init(
+        identity: .init(
+            coordinatorInstanceID: sourceID,
+            sessionID: session.id,
+            normalizedSessionFolder: RecordingLibraryURLIdentity.normalized(session.folderURL),
+            generation: 1,
+            attemptID: UUID(),
+            transcriptRevision: .init(sha256: "sha256:test", byteCount: 4),
+            workspaceFence: fence,
+            kind: .artifactAndAutomaticTitle
+        ),
+        canonicalSession: session,
+        artifact: nil,
+        titleOutcome: .preserved
+    )
+}
+
 @MainActor
 private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     for _ in 0..<300 { if condition() { return true }; await Task.yield() }

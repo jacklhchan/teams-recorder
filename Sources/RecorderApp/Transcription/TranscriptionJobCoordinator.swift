@@ -31,6 +31,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
     /// composition validation; this coordinator remains its sole user for ASR
     /// artifact publication.
     let mutationGate: RecordingSessionMutationGate
+    private let failureDiagnosticPublisher: TranscriptionArtifactPublisher
     private let transcriptReader: any TranscriptDocumentReading
     private let coordinatorInstanceID: UUID
     private let attemptIDFactory: () -> UUID
@@ -56,6 +57,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
         self.audioPreparer = audioPreparer
         self.service = service
         self.mutationGate = mutationGate
+        failureDiagnosticPublisher = .init(mutationGate: mutationGate)
         self.transcriptReader = transcriptReader
         self.coordinatorInstanceID = coordinatorInstanceID
         self.attemptIDFactory = attemptIDFactory
@@ -235,27 +237,14 @@ final class TranscriptionJobCoordinator: ObservableObject {
                 )
             } catch {
                 guard let self else { return }
-                if Task.isCancelled || self.cancellationRequested {
-                    self.finishCancellation(
-                        session: session,
-                        generation: attemptGeneration,
-                        attempt: attempt
-                    )
-                } else {
-                    let prefix = prepared == nil
-                        ? "Transcription preparation failed"
-                        : "Transcription launch failed"
-                    let detail = self.redacted(
-                        error.localizedDescription,
-                        secret: snapshot.apiKey
-                    )
-                    self.finishFailure(
-                        session: session,
-                        message: "\(prefix): \(detail)",
-                        generation: attemptGeneration,
-                        attempt: attempt
-                    )
-                }
+                self.handleFailure(
+                    error,
+                    prepared: prepared,
+                    session: session,
+                    snapshot: snapshot,
+                    generation: attemptGeneration,
+                    attempt: attempt
+                )
             }
         }
     }
@@ -475,6 +464,117 @@ final class TranscriptionJobCoordinator: ObservableObject {
             of: secret,
             with: "[redacted]"
         )
+    }
+
+    func handleFailure(
+        _ error: Error,
+        prepared: PreparedTranscriptionAudio?,
+        session: RecordingSession,
+        snapshot: OpenAICompatibleProviderSnapshot,
+        generation: UInt64,
+        attempt: UUID
+    ) {
+        guard isActive(generation: generation, attempt: attempt) else {
+            return
+        }
+        if Task.isCancelled
+            || cancellationRequested
+            || (error as? URLError)?.code == .cancelled {
+            finishCancellation(
+                session: session,
+                generation: generation,
+                attempt: attempt
+            )
+            return
+        }
+
+        _ = try? failureDiagnosticPublisher.publishFailureDiagnostic(
+            failureDiagnostic(for: error, prepared: prepared),
+            sessionFolder: session.folderURL
+        )
+        let prefix = prepared == nil
+            ? "Transcription preparation failed"
+            : "Transcription launch failed"
+        let detail = redacted(
+            error.localizedDescription,
+            secret: snapshot.apiKey
+        )
+        finishFailure(
+            session: session,
+            message: "\(prefix): \(detail)",
+            generation: generation,
+            attempt: attempt
+        )
+    }
+
+    private func failureDiagnostic(
+        for error: Error,
+        prepared: PreparedTranscriptionAudio?
+    ) -> TranscriptionFailureDiagnostic {
+        guard prepared != nil else {
+            return .init(
+                stage: .preparation,
+                errorCode: .preparationFailure
+            )
+        }
+
+        switch error {
+        case let error as OpenAICompatibleTranscriptionError:
+            switch error {
+            case .audioChunkTooLarge:
+                return .init(
+                    stage: .upload,
+                    errorCode: .audioChunkTooLarge
+                )
+            case .httpStatus(let status):
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerHTTPFailure,
+                    httpStatus: status
+                )
+            case .invalidResponse, .authenticationRejected:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerTransportFailure
+                )
+            }
+        case let error as ProviderHTTPTransportError:
+            switch error {
+            case .responseTooLarge:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerResponseTooLarge
+                )
+            case .redirectRejected:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerTransportFailure
+                )
+            }
+        case let error as CoordinatorError:
+            switch error {
+            case .invalidArtifact:
+                return .init(
+                    stage: .publication,
+                    errorCode: .invalidArtifact
+                )
+            case .committedRevisionMismatch:
+                return .init(
+                    stage: .publication,
+                    errorCode: .committedRevisionMismatch
+                )
+            case .staleAttempt:
+                return .init(
+                    stage: .publication,
+                    errorCode: .publicationFailure
+                )
+            }
+        default:
+            return .init(
+                stage: .upload,
+                errorCode: .providerTransportFailure
+            )
+        }
     }
 
     private func updateState(

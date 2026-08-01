@@ -173,6 +173,43 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
         XCTAssertNotEqual(events[0].identity.attemptID, oldAttempt)
     }
 
+    func testFailureHandlerRejectsWrongActiveAttemptWithoutDiagnosticOrStatusMutation() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let service = DeferredFailureCoordinatorService()
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: CoordinatorPreparer(
+                result: .success(
+                    .init(audioURL: fixture.audioURL, cleanupURL: nil)
+                )
+            ),
+            service: service
+        )
+
+        coordinator.start(session: fixture.session)
+        await service.waitForRequestCount(1)
+        let statusBefore = coordinator.lastTranscriptionStatus
+        coordinator.handleFailure(
+            CoordinatorError.failed,
+            prepared: .init(audioURL: fixture.audioURL, cleanupURL: nil),
+            session: fixture.session,
+            snapshot: try fixture.snapshot(),
+            generation: 999,
+            attempt: UUID()
+        )
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.failureDiagnosticURL.path)
+        )
+        XCTAssertEqual(coordinator.transcribingSessionID, fixture.session.id)
+        XCTAssertEqual(coordinator.lastTranscriptionStatus, statusBefore)
+        service.fail(at: 0)
+        await waitForIdle(coordinator)
+    }
+
     func testPublicationSnapshotsWorkspaceFenceAtAttemptStart() async throws {
         let fixture = try CoordinatorFixture.make()
         defer { fixture.remove() }
@@ -250,6 +287,59 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
         XCTAssertFalse(persisted.message.contains(secret))
     }
 
+    func testNonCancelledFailurePublishesOneSanitizedDiagnostic() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let secret = "Bearer coordinator-private-key"
+        let providerURL = "https://provider.example/v1/audio/transcriptions"
+        let path = "/Users/example/private/recording.m4a"
+        let transcript = "private meeting transcript"
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot(apiKey: secret)
+            ),
+            audioPreparer: CoordinatorPreparer(
+                result: .success(
+                    .init(audioURL: fixture.audioURL, cleanupURL: nil)
+                )
+            ),
+            service: CoordinatorService(
+                result: .failure(
+                    NSError(
+                        domain: [secret, providerURL, path, transcript]
+                            .joined(separator: " "),
+                        code: 1
+                    )
+                )
+            )
+        )
+
+        coordinator.start(session: fixture.session)
+        await waitForIdle(coordinator)
+
+        let data = try Data(contentsOf: fixture.failureDiagnosticURL)
+        let diagnostic = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(diagnostic["stage"] as? String, "upload")
+        XCTAssertEqual(
+            diagnostic["errorCode"] as? String,
+            "provider_transport_failure"
+        )
+        XCTAssertNil(diagnostic["httpStatus"])
+        let persisted = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(persisted.contains(secret))
+        XCTAssertFalse(persisted.contains(providerURL))
+        XCTAssertFalse(persisted.contains(path))
+        XCTAssertFalse(persisted.contains(transcript))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: fixture.session.folderURL.path)
+                .filter { $0 == TranscriptionArtifactPublisher.failureDiagnosticFileName }
+                .count,
+            1
+        )
+    }
+
     func testResponseTooLargeUsesTransportGenericUserFacingMessage() async throws {
         let fixture = try CoordinatorFixture.make()
         defer { fixture.remove() }
@@ -288,6 +378,59 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
         )
     }
 
+    func testCancellationDoesNotPublishFailureDiagnostic() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let preparer = CoordinatorPreparer()
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: preparer,
+            service: CoordinatorService(
+                result: .failure(CoordinatorError.failed)
+            )
+        )
+
+        coordinator.start(session: fixture.session)
+        await preparer.waitUntilStarted()
+        coordinator.cancel()
+        await waitForIdle(coordinator)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.failureDiagnosticURL.path)
+        )
+    }
+
+    func testTransportCancellationDoesNotPublishFailureDiagnostic() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: CoordinatorPreparer(
+                result: .success(
+                    .init(audioURL: fixture.audioURL, cleanupURL: nil)
+                )
+            ),
+            service: CoordinatorService(
+                result: .failure(URLError(.cancelled))
+            )
+        )
+
+        coordinator.start(session: fixture.session)
+        await waitForIdle(coordinator)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.failureDiagnosticURL.path)
+        )
+        XCTAssertEqual(
+            coordinator.transcriptionStatesBySessionID[fixture.session.id]?.phase,
+            .cancelled
+        )
+    }
+
     private func waitForIdle(
         _ coordinator: TranscriptionJobCoordinator
     ) async {
@@ -319,6 +462,12 @@ private struct CoordinatorFixture {
     let audioURL: URL
     let transcriptURL: URL
     let logURL: URL
+
+    var failureDiagnosticURL: URL {
+        session.folderURL.appendingPathComponent(
+            TranscriptionArtifactPublisher.failureDiagnosticFileName
+        )
+    }
 
     static func make() throws -> CoordinatorFixture {
         let root = FileManager.default.temporaryDirectory
@@ -552,5 +701,41 @@ private final class DeferredCoordinatorService: TranscriptionServicing, @uncheck
             continuation.resume(returning: result)
             return attemptIDs[index]
         }
+    }
+}
+
+private final class DeferredFailureCoordinatorService:
+    TranscriptionServicing,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var continuations: [
+        CheckedContinuation<TranscriptionServiceResult, Error>?
+    ] = []
+
+    func transcribe(
+        _: TranscriptionServiceRequest,
+        onProgress _: @escaping @Sendable (TranscriptionServiceProgress) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                continuations.append(continuation)
+            }
+        }
+    }
+
+    func waitForRequestCount(_ expected: Int) async {
+        while lock.withLock({ continuations.count < expected }) {
+            await Task.yield()
+        }
+    }
+
+    func fail(at index: Int) {
+        let continuation = lock.withLock {
+            let continuation = continuations[index]
+            continuations[index] = nil
+            return continuation
+        }
+        continuation?.resume(throwing: CoordinatorError.failed)
     }
 }

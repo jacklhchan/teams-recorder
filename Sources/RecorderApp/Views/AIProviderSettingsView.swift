@@ -6,7 +6,11 @@ struct AIProviderSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            providerSurface("Connection", systemImage: "server.rack") {
+            providerSurface(
+                "Connection",
+                identifier: "recorder.provider.surface.connection",
+                systemImage: "server.rack"
+            ) {
                 Picker("Provider", selection: providerKindBinding) {
                     ForEach(model.providerKinds, id: \.rawValue) { kind in
                         Text(providerLabel(for: kind)).tag(kind.rawValue)
@@ -20,7 +24,11 @@ struct AIProviderSettingsView: View {
                     .providerAccessibility(RecorderActionID.providerAPIKey)
             }
 
-            providerSurface("Models", systemImage: "cpu") {
+            providerSurface(
+                "Models",
+                identifier: "recorder.provider.surface.models",
+                systemImage: "cpu"
+            ) {
                 modelField(
                     "ASR Model", text: $model.asrModel,
                     accessibilityIdentifier: RecorderActionID.providerASRModel,
@@ -39,7 +47,11 @@ struct AIProviderSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            providerSurface("Transcription", systemImage: "waveform") {
+            providerSurface(
+                "Transcription",
+                identifier: "recorder.provider.surface.transcription",
+                systemImage: "waveform"
+            ) {
                 Picker("Language", selection: languageBinding) {
                     ForEach(model.languages, id: \.rawValue) { language in
                         Text(language.displayName).tag(language.rawValue)
@@ -87,12 +99,11 @@ struct AIProviderSettingsView: View {
                     Text("Testing connection…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .background(ProviderSettingsAccessibilityMarker(label: "Testing connection…"))
                 }
                 Text(model.status)
                     .font(.caption)
                     .foregroundStyle(model.statusIsError ? .orange : .secondary)
-                    .providerAccessibility(RecorderActionID.providerStatus, label: model.status)
+                    .providerAccessibility(RecorderActionID.providerStatus)
             }
         }
         .padding(14)
@@ -100,16 +111,18 @@ struct AIProviderSettingsView: View {
 
     @ViewBuilder
     private func providerSurface<Content: View>(
-        _ title: String, systemImage: String, @ViewBuilder content: () -> Content
+        _ title: String, identifier: String, systemImage: String, @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Label(title, systemImage: systemImage)
                 .font(.headline)
                 .accessibilityLabel(title)
-                .background(ProviderSettingsAccessibilityMarker(label: title))
             content()
         }
         .padding(12)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+        .accessibilityIdentifier(identifier)
         .background(.background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(.separator.opacity(0.55)))
     }
@@ -181,31 +194,38 @@ struct AIProviderSettingsView: View {
 
 private extension View {
     func providerAccessibility(
-        _ identifier: String, label: String? = nil
+        _ identifier: String
     ) -> some View {
-        accessibilityIdentifier(identifier)
-            .background(
+        background(
                 ProviderSettingsAccessibilityMarker(
-                    identifier: identifier + ".marker", label: label
+                    identifier: identifier + ".marker"
                 )
             )
+            .accessibilityIdentifier(identifier)
     }
 }
 
 private struct ProviderSettingsAccessibilityMarker: NSViewRepresentable {
-    var identifier: String? = nil
-    var label: String? = nil
+    let identifier: String
 
     func makeNSView(context _: Context) -> ProviderSettingsAccessibilityMarkerView {
         let view = ProviderSettingsAccessibilityMarkerView(frame: .zero)
-        if let identifier { view.setAccessibilityIdentifier(identifier) }
-        if let label { view.setAccessibilityLabel(label) }
+        view.setAccessibilityIdentifier(identifier)
         return view
     }
 
     func updateNSView(_ view: ProviderSettingsAccessibilityMarkerView, context _: Context) {
-        if let label { view.setAccessibilityLabel(label) }
+        view.setAccessibilityIdentifier(identifier)
     }
 }
 
-private final class ProviderSettingsAccessibilityMarkerView: NSView {}
+private final class ProviderSettingsAccessibilityMarkerView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func hitTest(_: NSPoint) -> NSView? { nil }
+}

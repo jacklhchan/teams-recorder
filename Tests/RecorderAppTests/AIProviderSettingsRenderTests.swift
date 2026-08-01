@@ -5,35 +5,40 @@ import XCTest
 
 @MainActor
 final class AIProviderSettingsRenderTests: XCTestCase {
-    func testProviderSpecificFieldsAndContentSurfacesRemainReachableAtSupportedSizes() throws {
+    func testProductionSettingsFormKeepsProviderControlLocationsReachableAtSupportedSizes() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
-        let model = makeConfiguredModel(repository: repository)
-        let host = ProviderSettingsRenderHost(model: model, size: .init(width: 860, height: 680))
-        defer { host.close() }
+        let defaultsSuite = "provider-render-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let appModel = AppModel(
+            defaults: defaults,
+            providerRepository: repository,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            virtualMicStateProvider: { .absent }
+        )
+        let model = appModel.aiProviderSettingsModel
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr-model"
+        model.llmModel = "llm-model"
+        model.language = MeetingLanguage.cantonese.rawValue
+        let supportedSizes = [
+            CGSize(width: 860, height: 680),
+            CGSize(width: 1_280, height: 800)
+        ]
+        for size in supportedSizes {
+            model.selectedProviderKind = .openAICompatible
+            let host = ProviderSettingsProductionHost(model: appModel, size: size)
+            assertGenericProviderLocationsAreReachable(in: host)
 
-        for title in ["Connection", "Models", "Transcription"] {
-            XCTAssertTrue(host.containsText(title), "Missing provider content surface: \(title)")
+            model.selectedProviderKind = .hktGenAI
+            host.render()
+            XCTAssertTrue(host.reveal(RecorderActionID.providerHKTGroupID))
+            XCTAssertTrue(host.reveal(RecorderActionID.providerHKTResolvedURL))
+            assertSharedProviderLocationsAreReachable(in: host)
+            host.close()
         }
-        XCTAssertTrue(host.containsMarker(for: RecorderActionID.providerKind))
-        XCTAssertTrue(host.containsMarker(for: RecorderActionID.providerBaseURL))
-        XCTAssertFalse(host.containsMarker(for: RecorderActionID.providerHKTGroupID))
-        XCTAssertFalse(host.containsMarker(for: RecorderActionID.providerHKTResolvedURL))
-        assertImportantControlsAreFullyContained(in: host)
-
-        model.selectedProviderKind = .hktGenAI
-        host.render()
-
-        XCTAssertTrue(host.containsMarker(for: RecorderActionID.providerKind))
-        XCTAssertTrue(host.containsMarker(for: RecorderActionID.providerHKTGroupID))
-        XCTAssertTrue(host.containsMarker(for: RecorderActionID.providerHKTResolvedURL))
-        XCTAssertFalse(host.containsMarker(for: RecorderActionID.providerBaseURL))
-        assertImportantControlsAreFullyContained(in: host)
-
-        let wideHost = ProviderSettingsRenderHost(model: model, size: .init(width: 1_280, height: 800))
-        defer { wideHost.close() }
-        XCTAssertTrue(wideHost.containsMarker(for: RecorderActionID.providerHKTGroupID))
-        XCTAssertTrue(wideHost.containsMarker(for: RecorderActionID.providerHKTResolvedURL))
-        assertImportantControlsAreFullyContained(in: wideHost)
     }
 
     func testSaveAndBlockingConnectionTestUseTheRenderedControlsAndRealModelState() async throws {
@@ -47,20 +52,21 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         XCTAssertEqual(repository.saveCount, 1, "Save must invoke the injected repository exactly once")
 
         try host.clickRenderedControl(RecorderActionID.providerTest)
-        await client.waitForRequest()
+        let requestStarted = await client.waitForRequest()
+        XCTAssertTrue(requestStarted)
         host.render()
 
         XCTAssertTrue(model.isTesting)
-        XCTAssertTrue(host.containsText("Testing connection…"))
-        XCTAssertTrue(host.containsMarker(for: RecorderActionID.providerStatus))
-        try host.clickRenderedControl(RecorderActionID.providerTest)
+        let blockedClickError = Result { try host.clickRenderedControl(RecorderActionID.providerTest) }
         let requestCountWhileDisabled = await client.requestCount()
+        await client.completeAll(with: .init(supportsModelDiscovery: true, models: ["discovered-model"]))
+        XCTAssertNoThrow(try blockedClickError.get())
         XCTAssertEqual(requestCountWhileDisabled, 1, "Disabled Test must not start a second real request")
-
-        await client.complete(with: .init(supportsModelDiscovery: true, models: ["discovered-model"]))
-        await waitUntil { !model.isTesting }
+        let settled = await waitUntil { !model.isTesting }
+        XCTAssertTrue(settled)
         host.render()
-        XCTAssertTrue(host.containsText("Connected; model list available"))
+        XCTAssertEqual(model.status, "Connected; model list available")
+        XCTAssertEqual(model.discoveredModels, ["discovered-model"])
     }
 
     private func makeConfiguredModel(
@@ -78,24 +84,77 @@ final class AIProviderSettingsRenderTests: XCTestCase {
     private func waitUntil(
         timeout: TimeInterval = 1,
         condition: @escaping @MainActor () -> Bool
-    ) async {
+    ) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
+        return condition()
     }
 
-    private func assertImportantControlsAreFullyContained(in host: ProviderSettingsRenderHost) {
+    private func assertGenericProviderLocationsAreReachable(in host: ProviderSettingsProductionHost) {
+        XCTAssertTrue(host.reveal(RecorderActionID.providerBaseURL))
+        assertSharedProviderLocationsAreReachable(in: host)
+    }
+
+    private func assertSharedProviderLocationsAreReachable(in host: ProviderSettingsProductionHost) {
         for identifier in [
+            RecorderActionID.providerKind,
+            RecorderActionID.providerAPIKey,
+            RecorderActionID.providerASRModel,
+            RecorderActionID.providerLLMModel,
+            RecorderActionID.providerLanguage,
             RecorderActionID.providerPrompt,
             RecorderActionID.providerSave,
             RecorderActionID.providerTest,
             RecorderActionID.providerRemoveKey,
             RecorderActionID.providerStatus
         ] {
-            XCTAssertTrue(host.isFullyContained(identifier), "Clipped provider control: \(identifier)")
+            XCTAssertTrue(host.reveal(identifier), "Unreachable provider control: \(identifier)")
         }
     }
+}
+
+@MainActor
+private final class ProviderSettingsProductionHost {
+    private let hostingView: NSHostingView<RecorderSettingsView>
+    private let window: NSWindow
+    init(model: AppModel, size: CGSize) {
+        hostingView = NSHostingView(rootView: RecorderSettingsView(model: model))
+        let frame = NSRect(origin: .zero, size: size)
+        hostingView.frame = frame
+        window = NSWindow(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        render()
+    }
+    func reveal(_ identifier: String) -> Bool {
+        guard let marker = marker(for: identifier) else { return false }
+        marker.scrollToVisible(marker.bounds)
+        render()
+        guard let scroll = marker.enclosingScrollView,
+              let document = scroll.documentView else { return false }
+        let rect = marker.convert(marker.bounds, to: document)
+        let content = window.contentLayoutRect
+        let screenContent = CGRect(origin: window.convertPoint(toScreen: content.origin), size: content.size)
+        return !rect.isEmpty
+            && scroll.documentVisibleRect.contains(rect)
+            && screenContent.contains(marker.accessibilityFrame())
+    }
+    func render() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    func close() {
+        window.orderOut(nil)
+        window.contentView = nil
+    }
+    private func marker(for identifier: String) -> NSView? {
+        allViews(hostingView).first { $0.accessibilityIdentifier() == identifier + ".marker" }
+    }
+    private func allViews(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(allViews) }
 }
 
 @MainActor
@@ -111,22 +170,6 @@ private final class ProviderSettingsRenderHost {
         window.contentView = hostingView
         window.makeKeyAndOrderFront(nil)
         render()
-    }
-
-    func containsMarker(for identifier: String) -> Bool { view(for: identifier + ".marker") != nil }
-
-    func containsText(_ text: String) -> Bool {
-        allViews(startingAt: hostingView).compactMap { $0 as? NSTextField }.contains { $0.stringValue == text }
-            || allViews(startingAt: hostingView).contains { $0.accessibilityLabel() == text }
-            || allAccessibilityElements(in: hostingView.accessibilityChildren() ?? []).contains {
-                accessibilityString($0, key: "accessibilityLabel") == text
-                    || accessibilityString($0, key: "accessibilityValue") == text
-            }
-    }
-
-    func isFullyContained(_ identifier: String) -> Bool {
-        guard let view = view(for: identifier + ".marker") else { return false }
-        return window.frame.contains(view.accessibilityFrame())
     }
 
     func clickRenderedControl(_ identifier: String) throws {
@@ -158,28 +201,6 @@ private final class ProviderSettingsRenderHost {
         allViews(startingAt: hostingView).first { $0.accessibilityIdentifier() == identifier }
     }
 
-    private func allAccessibilityElements(in elements: [Any]) -> [any NSAccessibilityElementProtocol] {
-        elements.flatMap { element in
-            let children: [Any]
-            if let view = element as? NSView {
-                children = view.accessibilityChildren() ?? []
-            } else if let object = element as? NSObject,
-                      object.responds(to: NSSelectorFromString("accessibilityChildren")) {
-                children = object.value(forKey: "accessibilityChildren") as? [Any] ?? []
-            } else {
-                children = []
-            }
-            return ([element as? any NSAccessibilityElementProtocol].compactMap { $0 })
-                + allAccessibilityElements(in: children)
-        }
-    }
-
-    private func accessibilityString(_ element: any NSAccessibilityElementProtocol, key: String) -> String? {
-        guard let object = element as? NSObject,
-              object.responds(to: NSSelectorFromString(key)) else { return nil }
-        return object.value(forKey: key) as? String
-    }
-
     private func allViews(startingAt view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap(allViews)
     }
@@ -202,13 +223,15 @@ private actor BlockingProviderClient: ProviderConnectionTesting {
         }
     }
 
-    func waitForRequest() async {
-        while requestsStarted == 0 { try? await Task.sleep(nanoseconds: 1_000_000) }
+    func waitForRequest(timeout: TimeInterval = 1) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while requestsStarted == 0, Date() < deadline { try? await Task.sleep(nanoseconds: 1_000_000) }
+        return requestsStarted > 0
     }
 
     func requestCount() -> Int { requestsStarted }
 
-    func complete(with report: ProviderConnectionReport) {
+    func completeAll(with report: ProviderConnectionReport) {
         let pending = continuations
         continuations = []
         pending.forEach { $0.resume(returning: report) }

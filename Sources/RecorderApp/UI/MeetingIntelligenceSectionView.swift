@@ -105,8 +105,14 @@ struct MeetingIntelligenceActions {
 }
 
 struct MeetingIntelligenceSectionView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let section: MeetingIntelligenceSectionPresentation
     let actions: MeetingIntelligenceActions
+    private let observedSnapshot: RecorderObservedSnapshot?
+    @State private var previousObservedSnapshot: RecorderObservedSnapshot?
+    @State private var showsCompletionFeedback = false
+    @State private var highlightsSuggestedTitle = false
+    @State private var feedbackResetTask: Task<Void, Never>?
 
     init(
         presentation: MeetingIntelligencePresentation,
@@ -114,6 +120,7 @@ struct MeetingIntelligenceSectionView: View {
         actions: MeetingIntelligenceActions = .init()
     ) {
         self.section = .make(presentation: presentation, observedSnapshot: observedSnapshot)
+        self.observedSnapshot = observedSnapshot
         self.actions = actions
     }
 
@@ -124,6 +131,10 @@ struct MeetingIntelligenceSectionView: View {
                     .font(.headline)
                 Spacer()
                 if section.showsProgress { RecorderIndeterminateProgress().controlSize(.small) }
+                if showsCompletionFeedback {
+                    completionCheck
+                        .transition(.opacity.combined(with: .offset(y: motionPolicy.revealOffset)))
+                }
                 Text(section.status)
                     .font(.caption)
                     .foregroundStyle(statusColor)
@@ -140,10 +151,20 @@ struct MeetingIntelligenceSectionView: View {
                     .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceSummary))
             }
             if let title = section.suggestedTitle, !title.isEmpty {
-                Text(title)
-                    .font(.callout.weight(.medium))
-                    .accessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
-                    .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceSuggestedTitle))
+                HStack(spacing: 4) {
+                    Text(title)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(highlightsSuggestedTitle ? Color.accentColor : Color.primary)
+                        .accessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
+                        .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceSuggestedTitle))
+                    if highlightsSuggestedTitle {
+                        Image(systemName: "sparkles")
+                            .foregroundStyle(.tint)
+                            .accessibilityIdentifier("meeting-intelligence.feedback.generated-title")
+                            .background(RecorderDestinationAccessibilityMarker(identifier: "meeting-intelligence.feedback.generated-title"))
+                            .transition(.opacity.combined(with: .offset(y: motionPolicy.revealOffset)))
+                    }
+                }
                 if section.showsManualTitleProtection {
                     Text(section.manualTitleProtectionCopy)
                         .font(.caption)
@@ -178,6 +199,17 @@ struct MeetingIntelligenceSectionView: View {
         .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 12))
         .accessibilityIdentifier(RecorderActionID.meetingIntelligenceCard)
         .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceCard))
+        .onAppear {
+            previousObservedSnapshot = observedSnapshot
+        }
+        .onChange(of: observedSnapshot) { _, current in
+            updateObservedFeedback(current)
+        }
+        .onDisappear {
+            feedbackResetTask?.cancel()
+        }
+        .animation(.easeInOut(duration: motionPolicy.revealDuration), value: showsCompletionFeedback)
+        .animation(.easeInOut(duration: motionPolicy.revealDuration), value: highlightsSuggestedTitle)
     }
 
     private var statusColor: Color {
@@ -186,6 +218,49 @@ struct MeetingIntelligenceSectionView: View {
         case .working: .blue
         case .success: .green
         case .warning: .orange
+        }
+    }
+
+    private var motionPolicy: RecorderMotionPolicy {
+        RecorderMotionPolicy.make(reduceMotion: reduceMotion)
+    }
+
+    @ViewBuilder
+    private var completionCheck: some View {
+        if motionPolicy.drawsCompletionStroke {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .symbolEffect(.drawOn, isActive: showsCompletionFeedback)
+                .accessibilityIdentifier("meeting-intelligence.feedback.completion")
+                .background(RecorderDestinationAccessibilityMarker(identifier: "meeting-intelligence.feedback.completion"))
+        } else {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityIdentifier("meeting-intelligence.feedback.completion")
+                .background(RecorderDestinationAccessibilityMarker(identifier: "meeting-intelligence.feedback.completion"))
+        }
+    }
+
+    private func updateObservedFeedback(_ current: RecorderObservedSnapshot?) {
+        defer { previousObservedSnapshot = current }
+        feedbackResetTask?.cancel()
+        guard let previous = previousObservedSnapshot, let current else {
+            showsCompletionFeedback = false
+            highlightsSuggestedTitle = false
+            return
+        }
+
+        let feedback = RecorderObservedTransition.feedback(previous: previous, current: current)
+        showsCompletionFeedback = feedback.completed
+        highlightsSuggestedTitle = feedback.generatedTitleChanged
+        if feedback.completed || feedback.generatedTitleChanged {
+            let snapshot = current
+            feedbackResetTask = Task {
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                guard !Task.isCancelled, previousObservedSnapshot == snapshot else { return }
+                showsCompletionFeedback = false
+                highlightsSuggestedTitle = false
+            }
         }
     }
 

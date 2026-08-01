@@ -1,29 +1,21 @@
 import AppKit
+import Combine
 import SwiftUI
 import XCTest
 @testable import RecorderApp
 
 @MainActor
 final class MeetingIntelligenceSectionRenderTests: XCTestCase {
-    func testCurrentActionGroupExposesOnlyCurrentCommandIDs() throws {
-        let state = MeetingIntelligenceSectionRenderState(presentation: unconfirmedPresentation())
-        let host = try MeetingIntelligenceSectionRenderHost(state: state)
-
-        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceCheckAgain))
-        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceGenerate))
-        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceCancel))
-        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceRegenerate))
-        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceRetryGeneration))
-    }
-
-    func testReadyUnavailableKeepsRegenerateAndExposesCheckAgain() throws {
-        let state = MeetingIntelligenceSectionRenderState(presentation: readyUnavailablePresentation())
-        let host = try MeetingIntelligenceSectionRenderHost(state: state)
-
-        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceCheckAgain))
-        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceRegenerate))
-        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceRetryGeneration))
-        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceCancel))
+    func testPhaseMatrixExposesOnlyCurrentCommands() throws {
+        try assertCommands(unconfirmedPresentation(), present: [RecorderActionID.meetingIntelligenceCheckAgain, RecorderActionID.meetingIntelligenceGenerate])
+        try assertCommands(checkingPresentation(), present: [RecorderActionID.meetingIntelligenceCancel])
+        try assertCommands(generatingPresentation(), present: [RecorderActionID.meetingIntelligenceCancel])
+        try assertCommands(readyPresentation(), present: [RecorderActionID.meetingIntelligenceRegenerate])
+        try assertCommands(readyUnavailablePresentation(), present: [RecorderActionID.meetingIntelligenceCheckAgain, RecorderActionID.meetingIntelligenceRegenerate])
+        try assertCommands(protectedReadyPresentation(), present: [RecorderActionID.meetingIntelligenceRegenerate, RecorderActionID.meetingIntelligenceApplyTitle])
+        try assertCommands(recoveryPresentation(.failed), present: [RecorderActionID.meetingIntelligenceRetryGeneration])
+        try assertCommands(recoveryPresentation(.cancelled), present: [RecorderActionID.meetingIntelligenceRetryGeneration])
+        try assertCommands(recoveryPresentation(.interrupted), present: [RecorderActionID.meetingIntelligenceRetryGeneration])
     }
 
     func testOutgoingGenerateIsImmediatelyStaleAndIncomingCancelIsImmediatelyRoutable() throws {
@@ -39,91 +31,142 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
         XCTAssertEqual(state.invokedActions.filter { $0 == "cancel" }.count, 1)
     }
 
+    func testInitialReadyObservedSnapshotIsStatic() throws {
+        let state = MeetingIntelligenceSectionRenderState(
+            presentation: readyPresentation(),
+            observedSnapshot: snapshot(1, phase: .ready, title: "Initial title")
+        )
+        let host = try MeetingIntelligenceSectionRenderHost(state: state)
+
+        XCTAssertFalse(host.contains("meeting-intelligence.feedback.completion"))
+        XCTAssertFalse(host.contains("meeting-intelligence.feedback.generated-title"))
+    }
+
+    func testWorkingToReadyObservedSnapshotShowsCompletionFeedback() throws {
+        let state = MeetingIntelligenceSectionRenderState(
+            presentation: generatingPresentation(),
+            observedSnapshot: snapshot(1, phase: .working, title: "Initial title")
+        )
+        let host = try MeetingIntelligenceSectionRenderHost(state: state)
+
+        state.presentation = readyPresentation()
+        state.observedSnapshot = snapshot(2, phase: .ready, title: "Generated title")
+        host.renderWithoutWaitingForAnimationCompletion()
+
+        XCTAssertTrue(host.contains("meeting-intelligence.feedback.completion"))
+    }
+
+    func testNewerReadyTitleChangeShowsGeneratedTitleHighlight() throws {
+        let state = MeetingIntelligenceSectionRenderState(
+            presentation: readyPresentation(),
+            observedSnapshot: snapshot(2, phase: .ready, title: "Generated title")
+        )
+        let host = try MeetingIntelligenceSectionRenderHost(state: state)
+
+        state.observedSnapshot = snapshot(3, phase: .ready, title: "Updated title")
+        host.renderWithoutWaitingForAnimationCompletion()
+
+        XCTAssertTrue(host.contains("meeting-intelligence.feedback.generated-title"))
+        XCTAssertFalse(host.contains("meeting-intelligence.feedback.completion"))
+    }
+
+    func testProtectedReadyTitleChangeSuppressesObservedFeedback() throws {
+        let state = MeetingIntelligenceSectionRenderState(
+            presentation: protectedReadyPresentation(),
+            observedSnapshot: snapshot(2, phase: .ready, title: "Generated title")
+        )
+        let host = try MeetingIntelligenceSectionRenderHost(state: state)
+
+        state.observedSnapshot = snapshot(3, phase: .ready, title: "Manual title", protected: true)
+        host.renderWithoutWaitingForAnimationCompletion()
+
+        XCTAssertFalse(host.contains("meeting-intelligence.feedback.completion"))
+        XCTAssertFalse(host.contains("meeting-intelligence.feedback.generated-title"))
+    }
+
+    func testReduceMotionKeepsCompletionFeedbackAccessibleWithoutTravellingMotion() throws {
+        let state = MeetingIntelligenceSectionRenderState(
+            presentation: generatingPresentation(),
+            observedSnapshot: snapshot(1, phase: .working, title: "Initial title")
+        )
+        let host = try MeetingIntelligenceSectionRenderHost(state: state)
+
+        state.presentation = readyPresentation()
+        state.observedSnapshot = snapshot(2, phase: .ready, title: "Generated title")
+        host.renderWithoutWaitingForAnimationCompletion()
+
+        XCTAssertTrue(host.contains("meeting-intelligence.feedback.completion"))
+        XCTAssertEqual(RecorderMotionPolicy.make(reduceMotion: true).revealOffset, 0)
+        XCTAssertFalse(RecorderMotionPolicy.make(reduceMotion: true).drawsCompletionStroke)
+    }
+
+    private func assertCommands(_ presentation: MeetingIntelligencePresentation, present: [String], file: StaticString = #filePath, line: UInt = #line) throws {
+        let host = try MeetingIntelligenceSectionRenderHost(state: .init(presentation: presentation))
+        let all = [
+            RecorderActionID.meetingIntelligenceCheckAgain,
+            RecorderActionID.meetingIntelligenceGenerate,
+            RecorderActionID.meetingIntelligenceCancel,
+            RecorderActionID.meetingIntelligenceRegenerate,
+            RecorderActionID.meetingIntelligenceRetryGeneration,
+            RecorderActionID.meetingIntelligenceApplyTitle
+        ]
+        for identifier in all {
+            XCTAssertEqual(host.contains(identifier), present.contains(identifier), "unexpected command visibility: \(identifier)", file: file, line: line)
+        }
+    }
+
     private func unconfirmedPresentation() -> MeetingIntelligencePresentation {
         .init(phase: .notGenerated, summary: nil, suggestedTitle: nil, statusMessage: "Could not verify model discovery.", model: nil, titleIsProtected: false, unavailableReason: .discoveryUnsupported)
     }
 
+    private func checkingPresentation() -> MeetingIntelligencePresentation {
+        .init(phase: .checkingAvailability, summary: nil, suggestedTitle: nil, statusMessage: "Checking…", model: nil, titleIsProtected: false, unavailableReason: nil)
+    }
+
     private func generatingPresentation() -> MeetingIntelligencePresentation {
-        .init(phase: .generating(.init(stage: .generatingFinal, current: 1, total: 1)), summary: nil, suggestedTitle: nil, statusMessage: "Generating…", model: "gpt-test", titleIsProtected: false, unavailableReason: nil)
+        .init(phase: .generating(.init(stage: .generatingFinal, current: 1, total: 1)), summary: "Existing summary", suggestedTitle: "Existing title", statusMessage: "Generating…", model: "gpt-test", titleIsProtected: false, unavailableReason: nil)
+    }
+
+    private func readyPresentation() -> MeetingIntelligencePresentation {
+        .init(phase: .ready, summary: "Summary", suggestedTitle: "Suggested title", statusMessage: "Ready.", model: "gpt-test", titleIsProtected: false, unavailableReason: nil)
     }
 
     private func readyUnavailablePresentation() -> MeetingIntelligencePresentation {
         .init(phase: .ready, summary: "Summary", suggestedTitle: "Suggested title", statusMessage: "Availability changed.", model: "gpt-test", titleIsProtected: false, unavailableReason: .discoveryUnsupported)
     }
+
+    private func protectedReadyPresentation() -> MeetingIntelligencePresentation {
+        .init(phase: .ready, summary: "Summary", suggestedTitle: "Suggested title", statusMessage: "Ready.", model: "gpt-test", titleIsProtected: true, unavailableReason: nil)
+    }
+
+    private func recoveryPresentation(_ phase: MeetingIntelligencePresentation.Phase) -> MeetingIntelligencePresentation {
+        .init(phase: phase, summary: "Summary", suggestedTitle: nil, statusMessage: "Try again.", model: "gpt-test", titleIsProtected: false, unavailableReason: nil)
+    }
+
+    private func snapshot(_ revision: UInt64, phase: RecorderObservedPhase, title: String, protected: Bool = false) -> RecorderObservedSnapshot {
+        .init(featureRevision: revision, sessionID: "session-1", phase: phase, displayedTitle: title, titleIsProtected: protected)
+    }
 }
 
 @MainActor
-private final class MeetingIntelligenceSectionRenderState {
-    var presentation: MeetingIntelligencePresentation
+private final class MeetingIntelligenceSectionRenderState: ObservableObject {
+    @Published var presentation: MeetingIntelligencePresentation
+    @Published var observedSnapshot: RecorderObservedSnapshot?
     var invokedActions: [String] = []
 
-    init(presentation: MeetingIntelligencePresentation) {
+    init(presentation: MeetingIntelligencePresentation, observedSnapshot: RecorderObservedSnapshot? = nil) {
         self.presentation = presentation
+        self.observedSnapshot = observedSnapshot
     }
 }
 
-@MainActor
-private final class MeetingIntelligenceSectionRenderHost {
-    private let state: MeetingIntelligenceSectionRenderState
-    private let window: NSWindow
-    private let hostingView: NSHostingView<MeetingIntelligenceSectionView>
+private struct MeetingIntelligenceSectionRenderFixture: View {
+    @ObservedObject var state: MeetingIntelligenceSectionRenderState
 
-    init(state: MeetingIntelligenceSectionRenderState) throws {
-        self.state = state
-        let root = Self.rootView(state: state)
-        hostingView = NSHostingView(rootView: root)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 520, height: 260)
-        window = NSWindow(contentRect: hostingView.bounds, styleMask: [.titled], backing: .buffered, defer: false)
-        window.contentView = hostingView
-        window.makeKeyAndOrderFront(nil)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-    }
-
-    func contains(_ identifier: String) -> Bool {
-        marker(identifier) != nil
-    }
-
-    func frame(_ identifier: String) throws -> NSRect {
-        guard let marker = marker(identifier) else { throw RenderError.missing(identifier) }
-        return marker.convert(marker.bounds, to: window.contentView)
-    }
-
-    func renderWithoutWaitingForAnimationCompletion() {
-        hostingView.rootView = Self.rootView(state: state)
-        hostingView.layoutSubtreeIfNeeded()
-        window.contentView?.layoutSubtreeIfNeeded()
-    }
-
-    func click(_ identifier: String) throws {
-        try click(at: frame(identifier))
-        switch identifier {
-        case RecorderActionID.meetingIntelligenceCancel: state.invokedActions.append("cancel")
-        case RecorderActionID.meetingIntelligenceGenerate: state.invokedActions.append("generate")
-        default: break
-        }
-    }
-
-    func click(at frame: NSRect) {
-        let point = NSPoint(x: frame.midX, y: frame.midY)
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
-            window.sendEvent(event)
-        }
-    }
-
-    private func marker(_ identifier: String) -> NSView? {
-        descendants(of: hostingView).first {
-            $0.accessibilityIdentifier() == identifier
-        }
-    }
-
-    private func descendants(of view: NSView) -> [NSView] {
-        [view] + view.subviews.flatMap(descendants(of:))
-    }
-
-    private static func rootView(state: MeetingIntelligenceSectionRenderState) -> MeetingIntelligenceSectionView {
+    var body: some View {
         MeetingIntelligenceSectionView(
             presentation: state.presentation,
+            observedSnapshot: state.observedSnapshot,
             actions: .init(
                 generate: { state.invokedActions.append("generate") },
                 regenerate: { state.invokedActions.append("regenerate") },
@@ -133,6 +176,54 @@ private final class MeetingIntelligenceSectionRenderHost {
                 applySuggestedTitle: { state.invokedActions.append("apply") }
             )
         )
+    }
+}
+
+@MainActor
+private final class MeetingIntelligenceSectionRenderHost {
+    private let window: NSWindow
+    private let hostingView: NSHostingView<MeetingIntelligenceSectionRenderFixture>
+
+    init(state: MeetingIntelligenceSectionRenderState) throws {
+        hostingView = NSHostingView(rootView: .init(state: state))
+        hostingView.frame = NSRect(x: 0, y: 0, width: 520, height: 260)
+        window = NSWindow(contentRect: hostingView.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    func contains(_ identifier: String) -> Bool { marker(identifier) != nil }
+
+    func frame(_ identifier: String) throws -> NSRect {
+        guard let marker = marker(identifier) else { throw RenderError.missing(identifier) }
+        return marker.convert(marker.bounds, to: nil)
+    }
+
+    func renderWithoutWaitingForAnimationCompletion() {
+        hostingView.layoutSubtreeIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
+
+    func click(_ identifier: String) throws { click(at: try frame(identifier)) }
+
+    func click(at point: NSRect) {
+        let location = NSPoint(x: point.midX, y: point.midY)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { continue }
+            NSApp.sendEvent(event)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
+
+    private func marker(_ identifier: String) -> NSView? {
+        descendants(of: hostingView).first { $0.accessibilityIdentifier() == identifier }
+    }
+
+    private func descendants(of view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap(descendants(of:))
     }
 
     private enum RenderError: Error { case missing(String) }

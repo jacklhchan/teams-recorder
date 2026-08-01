@@ -550,14 +550,36 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 
 Expected: zero failures. Existing SDK deprecation warnings are recorded separately and are not rewritten by this UI phase.
 
+Final pre-rebase run on 2026-08-01: 1061 tests executed, 5 skipped,
+0 failures in 25.501 seconds.
+
 - [ ] **Step 3: Build the app and inspect the implemented foundation**
 
 Use the repository's existing build script without overwriting a non-staging installed app. Inspect Start/Stop press behavior, MI unavailable/working/ready/failure/manual-title states, HKT and generic provider settings, active/finalizing recording controller, Teams automatic-start countdown, light/dark, Reduce Motion, Reduce Transparency, and increased contrast. Confirm floating Stop/Cancel, main Stop, Cancel, Save, Retry, provider Test, and navigation remain immediate and the panels do not steal focus. Treat this as pre-rebase visual evidence, not full Recordings/transcript acceptance.
 
-- [ ] **Step 4: Request independent whole-phase review**
+2026-08-01 progress: `scripts/build-app.sh` and
+`scripts/verify-app-bundle.sh` passed for the worktree-local
+`build/Local Meeting Recorder Staging.app` (`local.meeting.recorder.staging`);
+the `/Applications` installer was deliberately not used. ScreenCaptureKit
+captured production-view compositing for active recording, finalizing, and
+Teams countdown without starting a recording. The temporary export test was
+removed. The remaining desktop click-through matrix is pending because the
+Mac was locked during the staging-app inspection attempt.
+
+- [x] **Step 4: Request independent whole-phase review**
 
 Generate a review package from `1df4187` to HEAD. The reviewer checks this phase's spec subset, ownership, accessibility, outgoing-only hit-test suppression, animation lifetime, provider state fidelity, no embedded playback, and the exact allowlist. Fix all Critical/Important findings in one reviewed fix wave and rerun covering tests.
+
+The independent review reported Critical 0 / Important 1 / Minor 0. Commit
+`b86899f` separated first-ready completion feedback from later ready-to-ready
+generated-title highlighting. Focused tests proved RED (14 tests, 2 failures)
+then GREEN (14 tests, 0 failures); independent re-review closed the finding
+with no new findings.
 
 - [ ] **Step 5: Record the later integration gate**
 
 Report exact branch, worktree, commits, focused/full test results, visual evidence, working-tree status, and intentionally deferred PR B overlap files. Wait for the PR B worktree to become clean; then write the separate post-rebase plan from the actual committed feature APIs before rebasing or editing Recordings/transcript code.
+
+2026-08-01 gate snapshot: PR B task
+`019fae39-ebd1-7611-8a23-de5aee74293d` remains active in its separate
+worktree. No rebase, merge, push, or PR B overlap-file edit has been attempted.

@@ -20,13 +20,13 @@ final class RecorderMotionRenderTests: XCTestCase {
         )
         XCTAssertTrue(host.containsMarker(RecorderActionID.primaryActionCluster))
         XCTAssertTrue(host.containsMarker(RecorderActionID.indeterminateProgress))
-        host.rawClick(RecorderActionID.primaryActionCluster)
+        try host.rawClick(RecorderActionID.primaryActionCluster)
         XCTAssertEqual(state.acceptedClicks, 1)
 
         state.isEnabled = false
         host.render()
 
-        host.rawClick(RecorderActionID.primaryActionCluster)
+        try host.rawClick(RecorderActionID.primaryActionCluster)
         XCTAssertEqual(state.acceptedClicks, 1)
     }
 }
@@ -112,14 +112,17 @@ private final class MotionRenderHost {
         view(forMarker: productionIdentifier) != nil
     }
 
-    func rawClick(_ identifier: String) {
-        guard let view = view(forMarker: identifier) else { return }
+    func rawClick(_ identifier: String) throws {
+        let view = try XCTUnwrap(
+            view(forMarker: identifier),
+            "missing marker for \(identifier)"
+        )
         let location = view.convert(
             NSPoint(x: view.bounds.midX, y: view.bounds.midY),
             to: nil
         )
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
                 with: type,
                 location: location,
                 modifierFlags: [],
@@ -129,7 +132,7 @@ private final class MotionRenderHost {
                 eventNumber: 0,
                 clickCount: 1,
                 pressure: type == .leftMouseDown ? 1 : 0
-            ) else { continue }
+            ), "missing \(type) event")
             window.sendEvent(event)
         }
         render()

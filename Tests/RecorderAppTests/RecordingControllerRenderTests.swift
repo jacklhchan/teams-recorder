@@ -44,8 +44,8 @@ final class RecordingControllerRenderTests: XCTestCase {
         )
         defer { host.close() }
 
-        host.rawClick("recording-controller-stop")
-        host.rawClick("recording-controller-screen-toggle")
+        try host.rawClick("recording-controller-stop")
+        try host.rawClick("recording-controller-screen-toggle")
         XCTAssertEqual(stops, 0)
         XCTAssertTrue(screenRequests.isEmpty)
     }
@@ -98,9 +98,9 @@ private final class PanelRenderHost {
     func close() { window.orderOut(nil); window.contentView = nil }
     func boundsContain(_ productionIdentifier: String) -> Bool { guard let view = locationMarker(for: productionIdentifier) else { return false }; return hostingView.bounds.contains(hostingView.convert(view.bounds, from: view)) }
     func locationMarkerFrame(_ productionIdentifier: String) -> NSRect? { guard let view = locationMarker(for: productionIdentifier) else { return nil }; return hostingView.convert(view.bounds, from: view) }
-    func click(_ productionIdentifier: String) throws { guard let view = locationMarker(for: productionIdentifier) else { throw XCTSkip("control marker missing") }; sendEvents(to: view); render() }
-    func rawClick(_ productionIdentifier: String) { if let view = locationMarker(for: productionIdentifier) { sendEvents(to: view); render() } }
-    private func sendEvents(to view: NSView) { let location = view.convert(.init(x: view.bounds.midX, y: view.bounds.midY), to: nil); for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] { if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) { window.sendEvent(event) } } }
+    func click(_ productionIdentifier: String) throws { try rawClick(productionIdentifier) }
+    func rawClick(_ productionIdentifier: String) throws { let view = try XCTUnwrap(locationMarker(for: productionIdentifier), "missing marker for \(productionIdentifier)"); try sendEvents(to: view); render() }
+    private func sendEvents(to view: NSView) throws { let location = view.convert(.init(x: view.bounds.midX, y: view.bounds.midY), to: nil); for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] { let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0), "missing \(type) event"); window.sendEvent(event) } }
     private func render() { RunLoop.main.run(until: Date().addingTimeInterval(0.03)); window.layoutIfNeeded(); hostingView.layoutSubtreeIfNeeded() }
     private func view(_ identifier: String) -> NSView? { allViews(hostingView).first { $0.accessibilityIdentifier() == identifier } }
     private func locationMarker(for productionIdentifier: String) -> NSView? { view("\(productionIdentifier).marker") }

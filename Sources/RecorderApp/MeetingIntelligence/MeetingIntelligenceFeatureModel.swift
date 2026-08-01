@@ -39,6 +39,12 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
         }
     }
 
+    /// Composition-only identity for the durable mutation gate supplied to
+    /// this coordinator's artifact/state publishers.
+    var mutationGate: RecordingSessionMutationGate {
+        coordinator.mutationGate
+    }
+
     var snapshot: MeetingIntelligenceFeatureSnapshot { coordinator.snapshot }
 
     func presentation(for session: RecordingSession) -> MeetingIntelligencePresentation {

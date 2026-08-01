@@ -30,6 +30,19 @@ struct PRBFeatureBoundaries {
         )
     }
 
+    /// All durable per-session mutations must serialize through the same gate.
+    /// This is separate from the ASR publication-source check: a correctly
+    /// wired event stream with split gates can still race transcript, metadata
+    /// and meeting-intelligence artifact writes.
+    var hasCompatibleMutationGates: Bool {
+        library.mutationGate === transcription.mutationGate
+            && library.mutationGate === meetingIntelligence.mutationGate
+    }
+
+    var isCompatible: Bool {
+        hasCompatiblePublicationSources && hasCompatibleMutationGates
+    }
+
     static func arePublicationSourcesCompatible(
         transcriptionSourceID: UUID,
         meetingIntelligenceExpectedSourceID: UUID

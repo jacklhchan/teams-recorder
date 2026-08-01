@@ -377,8 +377,8 @@ final class AppModel: ObservableObject {
         self.transcriptMutationGate = transcriptMutationGate
         if let selectedFeatureBoundaries {
             precondition(
-                selectedFeatureBoundaries.hasCompatiblePublicationSources,
-                "Meeting Intelligence must accept publications from the injected Transcription feature."
+                selectedFeatureBoundaries.isCompatible,
+                "Injected PR B boundaries must share the mutation gate and use compatible publication sources."
             )
             self.libraryFeature = selectedFeatureBoundaries.library
             self.transcriptionFeature = selectedFeatureBoundaries.transcription
@@ -606,6 +606,7 @@ final class AppModel: ObservableObject {
         return MeetingIntelligenceJobCoordinator(
             providerRepository: repository,
             expectedPublicationSourceID: expectedPublicationSourceID,
+            mutationGate: mutationGate,
             availabilityChecker:
                 OpenAICompatibleMeetingIntelligenceAvailabilityChecker(
                     client: OpenAICompatibleProviderClient()

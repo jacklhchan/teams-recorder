@@ -118,14 +118,40 @@ final class AppModelPRBFeatureBoundaryTests: XCTestCase {
         XCTAssertFalse(mismatched.hasCompatiblePublicationSources)
     }
 
+    func testAggregateCompatibilityRejectsFeatureBoundariesWithDifferentMutationGates() {
+        let libraryBoundary = defaultFeatureBoundaries()
+        let asrAndMeetingIntelligenceBoundary = defaultFeatureBoundaries()
+
+        let mismatched = PRBFeatureBoundaries(
+            library: libraryBoundary.library,
+            transcription: asrAndMeetingIntelligenceBoundary.transcription,
+            meetingIntelligence:
+                asrAndMeetingIntelligenceBoundary.meetingIntelligence,
+            playback: libraryBoundary.playback
+        )
+
+        XCTAssertTrue(mismatched.hasCompatiblePublicationSources)
+        XCTAssertFalse(mismatched.hasCompatibleMutationGates)
+        XCTAssertFalse(mismatched.isCompatible)
+    }
+
     func testDefaultBoundaryConstructionBuildsOneConsistentFeatureSet() {
         let model = AppModel(performStartupWork: false)
         defer { model.shutdown() }
+
+        let boundaries = PRBFeatureBoundaries(
+            library: model.libraryFeature,
+            transcription: model.transcriptionFeature,
+            meetingIntelligence: model.meetingIntelligenceFeature,
+            playback: model.playbackFeature
+        )
 
         // PR B has one shared mutation gate for Library, ASR, and MI.  The
         // AppModel compatibility bridge must retain the Library gate rather
         // than constructing a parallel mutable artifact path.
         XCTAssertTrue(model.libraryFeature.mutationGate === model.transcriptMutationGate)
+        XCTAssertTrue(boundaries.hasCompatibleMutationGates)
+        XCTAssertTrue(boundaries.isCompatible)
 
         // Meeting intelligence must only accept publications from the single
         // retained transcription boundary, never from an independently made

@@ -205,6 +205,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         expectedPublicationSourceID
     }
     let publicationSourceID: UUID
+    /// PR B composition identity. Production construction injects the same
+    /// gate into the artifact/state/title collaborators for this coordinator.
+    let mutationGate: RecordingSessionMutationGate
     private let io: MeetingIntelligenceIO
     private let availabilityChecker: any MeetingIntelligenceAvailabilityChecking
     private let generator: any MeetingIntelligenceGenerating
@@ -229,6 +232,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         providerRepository: any OpenAICompatibleProviderManaging,
         expectedPublicationSourceID: UUID,
         publicationSourceID: UUID = UUID(),
+        mutationGate: RecordingSessionMutationGate = .init(),
         transcriptReader: any TranscriptDocumentReading = SecureTranscriptDocumentReader(),
         availabilityChecker: any MeetingIntelligenceAvailabilityChecking,
         generator: any MeetingIntelligenceGenerating,
@@ -242,6 +246,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     ) {
         self.expectedPublicationSourceID = expectedPublicationSourceID
         self.publicationSourceID = publicationSourceID
+        self.mutationGate = mutationGate
         io = .init(repository: providerRepository, reader: transcriptReader,
                    artifacts: artifactStore, states: stateStore, publisher: publisher,
                    stateSaveScheduler: stateSaveScheduler)

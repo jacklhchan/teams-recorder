@@ -38,6 +38,11 @@ final class TranscriptionFeatureModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// Composition-only identity. The coordinator remains the owner of the
+    /// gate; PR B uses this to reject an aggregate that would split one
+    /// recording session's durable mutations across multiple locks.
+    var mutationGate: RecordingSessionMutationGate { coordinator.mutationGate }
+
     var presentation: TranscriptionFeaturePresentation {
         .init(
             transcribingSessionID: coordinator.transcribingSessionID,

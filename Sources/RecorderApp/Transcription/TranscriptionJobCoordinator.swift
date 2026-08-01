@@ -26,7 +26,10 @@ final class TranscriptionJobCoordinator: ObservableObject {
         any OpenAICompatibleProviderManaging
     private let audioPreparer: any TranscriptionAudioPreparing
     private let service: any TranscriptionServicing
-    private let mutationGate: RecordingSessionMutationGate
+    /// The feature boundary exposes this identity for PR B aggregate
+    /// composition validation; this coordinator remains its sole user for ASR
+    /// artifact publication.
+    let mutationGate: RecordingSessionMutationGate
     private let transcriptReader: any TranscriptDocumentReading
     private let coordinatorInstanceID: UUID
     private let attemptIDFactory: () -> UUID

@@ -41,16 +41,6 @@ enum RecorderVisualStyle {
         .init(red: 0x24, green: 0x4F, blue: 0x9E),
         .init(red: 0x11, green: 0x2B, blue: 0x63)
     ]
-    static let sidebarPrimaryText = RecorderSRGBColor(
-        red: 0xF5,
-        green: 0xF7,
-        blue: 0xFF
-    )
-    static let sidebarSecondaryText = RecorderSRGBColor(
-        red: 0xDD,
-        green: 0xE6,
-        blue: 0xFF
-    )
     static let sidebarWarningText = RecorderSRGBColor(
         red: 0xFF,
         green: 0xD2,

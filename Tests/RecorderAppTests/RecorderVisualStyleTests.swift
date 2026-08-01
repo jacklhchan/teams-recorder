@@ -21,25 +21,21 @@ final class RecorderVisualStyleTests: XCTestCase {
         XCTAssertEqual(stops[2].blue, 0x63)
     }
 
-    func testSidebarTextTokensRemainReadableAcrossEveryGradientStop() {
+    func testSidebarWarningTokenRemainsReadableAcrossEveryGradientStop() {
         for background in RecorderVisualStyle.sidebarGradientStops {
             XCTAssertGreaterThanOrEqual(
                 contrastRatio(
-                    RecorderVisualStyle.sidebarPrimaryText,
+                    RecorderVisualStyle.sidebarWarningText,
                     background
                 ),
                 4.5,
-                "Primary sidebar text must remain readable over \(background.hexToken)"
-            )
-            XCTAssertGreaterThanOrEqual(
-                contrastRatio(
-                    RecorderVisualStyle.sidebarSecondaryText,
-                    background
-                ),
-                4.5,
-                "Secondary sidebar text must remain readable over \(background.hexToken)"
+                "Sidebar warning text must remain readable over \(background.hexToken)"
             )
         }
+    }
+
+    func testSidebarUsesLocalDarkSemanticAppearance() {
+        XCTAssertEqual(RecorderSidebar.semanticColorScheme, .dark)
     }
 
     func testTranscriptAppearanceIsDistinctAcrossSystemSchemes() {

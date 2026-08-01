@@ -12,6 +12,10 @@ extension EnvironmentValues {
 }
 
 struct RecorderSidebar: View {
+    // Local only: this restores AppKit's native selected-row, keyboard-focus,
+    // and VoiceOver foreground semantics without changing workspace content.
+    static let semanticColorScheme: ColorScheme = .dark
+
     @Binding var selection: RecorderDestination
     let outputFolder: URL
     let storageWarning: String?
@@ -45,7 +49,6 @@ struct RecorderSidebar: View {
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
-            .foregroundStyle(RecorderVisualStyle.sidebarPrimaryText.color)
             storageCard
                 .background(
                     RecorderDestinationAccessibilityMarker(
@@ -66,6 +69,7 @@ struct RecorderSidebar: View {
                 identifier: "recorder.workspace.sidebar"
             )
         )
+        .environment(\.colorScheme, Self.semanticColorScheme)
         .accessibilityIdentifier("recorder.workspace.sidebar")
     }
 
@@ -73,11 +77,11 @@ struct RecorderSidebar: View {
         VStack(alignment: .leading, spacing: 3) {
             Label("Local Meeting Recorder", systemImage: "waveform.circle.fill")
                 .font(.headline.weight(.semibold))
-                .foregroundStyle(RecorderVisualStyle.sidebarPrimaryText.color)
+                .foregroundStyle(.primary)
             if let version {
                 Text("Version \(version)")
                     .font(.caption)
-                    .foregroundStyle(RecorderVisualStyle.sidebarSecondaryText.color)
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -89,16 +93,16 @@ struct RecorderSidebar: View {
         VStack(alignment: .leading, spacing: 5) {
             Label("Recording location", systemImage: "folder")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(RecorderVisualStyle.sidebarSecondaryText.color)
+                .foregroundStyle(.secondary)
             Text(outputFolder.lastPathComponent)
                 .font(.subheadline.weight(.medium))
                 .lineLimit(1)
-                .foregroundStyle(RecorderVisualStyle.sidebarPrimaryText.color)
+                .foregroundStyle(.primary)
             Text(storageWarning ?? "Ready to save recordings here")
                 .font(.caption)
                 .foregroundStyle(
                     storageWarning == nil
-                        ? RecorderVisualStyle.sidebarSecondaryText.color
+                        ? .secondary
                         : RecorderVisualStyle.sidebarWarningText.color
                 )
                 .lineLimit(2)

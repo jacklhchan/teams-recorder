@@ -376,10 +376,6 @@ final class AppModel: ObservableObject {
             ?? RecordingSessionMutationGate()
         self.transcriptMutationGate = transcriptMutationGate
         if let selectedFeatureBoundaries {
-            precondition(
-                selectedFeatureBoundaries.isCompatible,
-                "Injected PR B boundaries must share the mutation gate and use compatible publication sources."
-            )
             self.libraryFeature = selectedFeatureBoundaries.library
             self.transcriptionFeature = selectedFeatureBoundaries.transcription
             self.meetingIntelligenceFeature = selectedFeatureBoundaries.meetingIntelligence
@@ -517,6 +513,13 @@ final class AppModel: ObservableObject {
             transcription: self.transcriptionFeature,
             meetingIntelligence: self.meetingIntelligenceFeature,
             playback: self.playbackFeature
+        )
+        precondition(
+            retainedFeatureBoundaries.isCompatible(
+                with: activeProviderRepository.compositionIdentity
+            ) && aiProviderSettingsModel.providerRepositoryIdentity
+                == activeProviderRepository.compositionIdentity,
+            "PR B boundaries and Provider Settings must share one provider repository, one mutation gate, and compatible ASR/meeting-intelligence publication sources."
         )
         let bridge = PRBFeatureBridge(
             boundaries: retainedFeatureBoundaries,

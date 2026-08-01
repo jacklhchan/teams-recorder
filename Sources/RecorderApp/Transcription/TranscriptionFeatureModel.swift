@@ -43,6 +43,12 @@ final class TranscriptionFeatureModel: ObservableObject {
     /// recording session's durable mutations across multiple locks.
     var mutationGate: RecordingSessionMutationGate { coordinator.mutationGate }
 
+    /// Read-only composition identity; the coordinator remains the only ASR
+    /// owner of the repository and of immutable per-attempt snapshots.
+    var providerRepositoryIdentity: ObjectIdentifier {
+        coordinator.providerRepositoryIdentity
+    }
+
     var presentation: TranscriptionFeaturePresentation {
         .init(
             transcribingSessionID: coordinator.transcribingSessionID,

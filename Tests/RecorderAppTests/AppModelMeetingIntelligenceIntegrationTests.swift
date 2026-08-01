@@ -4,6 +4,86 @@ import XCTest
 
 @MainActor
 final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
+    func testOneProviderSaveChangesOnlyFutureSharedASRAndMeetingIntelligenceSnapshots() async throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+        let repository = IntegrationRepository()
+        let gate = RecordingSessionMutationGate()
+        let asrService = SharedSnapshotBlockingTranscriptionService()
+        let generator = SharedSnapshotBlockingGenerator()
+        let transcription = TranscriptionFeatureModel(coordinator: .init(
+            providerRepository: repository,
+            audioPreparer: IntegrationAudioPreparer(),
+            service: asrService,
+            mutationGate: gate
+        ))
+        let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let meeting = MeetingIntelligenceFeatureModel(coordinator: .init(
+            providerRepository: repository,
+            expectedPublicationSourceID: transcription.publicationSourceID,
+            mutationGate: gate,
+            availabilityChecker: IntegrationAvailability(result: .confirmed),
+            generator: generator,
+            publisher: MeetingIntelligencePublisher(
+                mutationGate: gate,
+                artifactStore: artifacts
+            ),
+            artifactStore: artifacts,
+            stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
+        ))
+        let settings = AIProviderSettingsModel(repository: repository, loadImmediately: false)
+
+        transcription.start(session: fixture.session(), providerIsConfigured: true)
+        meeting.generate(for: fixture.session())
+        await asrService.waitForRequestCount(1)
+        await generator.waitForRequestCount(1)
+
+        settings.baseURLText = "https://api.example.com/v1"
+        settings.asrModel = "saved-asr"
+        settings.llmModel = "saved-llm"
+        settings.language = "en"
+        settings.save()
+
+        XCTAssertEqual(asrService.models, ["asr"])
+        XCTAssertEqual(generator.models, ["llm"])
+        XCTAssertEqual(transcription.presentation.transcribingSessionID, fixture.session().id)
+        if case .generating = meeting.presentation(for: fixture.session()).phase {} else {
+            XCTFail("The active meeting-intelligence attempt must retain its old snapshot")
+        }
+
+        asrService.releaseNext(for: fixture.session())
+        await generator.releaseNext()
+        let transcriptionFinished = await eventually {
+            transcription.presentation.transcribingSessionID == nil
+        }
+        XCTAssertTrue(transcriptionFinished)
+        let meetingFinished = await eventually {
+            meeting.presentation(for: fixture.session()).phase == .ready
+        }
+        XCTAssertTrue(meetingFinished)
+
+        transcription.start(session: fixture.session(), providerIsConfigured: true)
+        meeting.regenerate(for: fixture.session())
+        await asrService.waitForRequestCount(2)
+        await generator.waitForRequestCount(2)
+
+        XCTAssertEqual(asrService.models, ["asr", "saved-asr"])
+        XCTAssertEqual(generator.models, ["llm", "saved-llm"])
+
+        asrService.releaseNext(for: fixture.session())
+        await generator.releaseNext()
+        let secondTranscriptionFinished = await eventually {
+            transcription.presentation.transcribingSessionID == nil
+        }
+        XCTAssertTrue(secondTranscriptionFinished)
+        let secondMeetingFinished = await eventually {
+            meeting.presentation(for: fixture.session()).phase == .ready
+        }
+        XCTAssertTrue(secondMeetingFinished)
+
+        transcription.shutdown()
+        meeting.shutdown()
+    }
     func testMeetingIntelligenceFeatureFactoryBuildsExactlyOneRetainedFeature() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
@@ -13,13 +93,16 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         var returnedCoordinator: MeetingIntelligenceJobCoordinator?
 
         let model = AppModel(
+            providerRepository: IntegrationRepository(),
             performStartupWork: false,
             initialOutputFolder: fixture.workspace,
-            meetingIntelligenceFeatureFactory: { _, transcriptionPublicationSourceID, _ in
+            meetingIntelligenceFeatureFactory: { repository, transcriptionPublicationSourceID, gate in
                 factoryCalls += 1
                 receivedTranscriptionPublicationSourceID = transcriptionPublicationSourceID
                 let coordinator = fixture.coordinator(
+                    providerRepository: repository,
                     expectedPublicationSourceID: transcriptionPublicationSourceID,
+                    mutationGate: gate,
                     availability: .confirmed
                 )
                 let feature = MeetingIntelligenceFeatureModel(coordinator: coordinator)
@@ -52,12 +135,26 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
     func testAppModelRetainsInjectedMeetingIntelligenceFeatureWithoutRelayingItsChanges() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
-        let coordinator = fixture.coordinator(availability: .confirmed)
-        let feature = MeetingIntelligenceFeatureModel(coordinator: coordinator)
+        var coordinator: MeetingIntelligenceJobCoordinator!
+        var feature: MeetingIntelligenceFeatureModel!
         let model = AppModel(
+            providerRepository: IntegrationRepository(),
             performStartupWork: false,
             initialOutputFolder: fixture.workspace,
-            meetingIntelligenceFeature: feature
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+                let createdCoordinator = fixture.coordinator(
+                    providerRepository: repository,
+                    expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
+                    availability: .confirmed
+                )
+                let createdFeature = MeetingIntelligenceFeatureModel(
+                    coordinator: createdCoordinator
+                )
+                coordinator = createdCoordinator
+                feature = createdFeature
+                return createdFeature
+            }
         )
         defer { model.shutdown() }
         XCTAssertTrue(model.meetingIntelligenceFeature === feature)
@@ -83,9 +180,11 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let generator = IntegrationGenerator()
         var coordinator: MeetingIntelligenceJobCoordinator!
         let model = fixture.transcribingModel(
-            coordinatorFactory: { sourceID in
+            coordinatorFactory: { repository, sourceID, gate in
                 let created = fixture.coordinator(
+                    providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
                     availability: .confirmed,
                     generator: generator
                 )
@@ -117,9 +216,11 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         defer { fixture.remove() }
         let generator = IntegrationGenerator()
         var coordinator: MeetingIntelligenceJobCoordinator!
-        let model = fixture.transcribingModel(coordinatorFactory: { sourceID in
+        let model = fixture.transcribingModel(coordinatorFactory: { repository, sourceID, gate in
             let created = fixture.coordinator(
+                providerRepository: repository,
                 expectedPublicationSourceID: sourceID,
+                mutationGate: gate,
                 availability: .unconfirmed(.modelNotAdvertised),
                 generator: generator
             )
@@ -158,9 +259,11 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let generator = IntegrationGenerator()
         var coordinator: MeetingIntelligenceJobCoordinator!
         let model = fixture.transcribingModel(
-            coordinatorFactory: { sourceID in
+            coordinatorFactory: { repository, sourceID, gate in
                 let created = fixture.coordinator(
+                    providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
                     availability: .confirmed,
                     generator: generator,
                     availabilityChecker: availability
@@ -231,9 +334,11 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         )
         let generator = IntegrationGenerator()
         let model = fixture.transcribingModel(
-            coordinatorFactory: { sourceID in
+            coordinatorFactory: { repository, sourceID, gate in
                 fixture.coordinator(
+                    providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
                     availability: .confirmed,
                     generator: generator,
                     availabilityChecker: availability
@@ -269,8 +374,20 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
         let generator = IntegrationGenerator()
-        let coordinator = fixture.coordinator(availability: .confirmed, generator: generator)
-        let model = fixture.model(coordinator: coordinator, reloader: { $0 })
+        let composition = fixture.model(
+            coordinatorFactory: { repository, sourceID, gate in
+                fixture.coordinator(
+                    providerRepository: repository,
+                    expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
+                    availability: .confirmed,
+                    generator: generator
+                )
+            },
+            reloader: { $0 }
+        )
+        let model = composition.model
+        let coordinator = composition.coordinator
         model.seedLibrarySessionsForTesting([fixture.session()])
         let original = "original searchable transcript"
         let edited = "edited searchable transcript"
@@ -278,7 +395,11 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
 
         // A confirmed automatic generation creates the exact artifact used by
         // the subsequent save path.
-        coordinator.handleTranscriptPublished(fixture.publicationEvent())
+        coordinator.handleTranscriptPublished(
+            fixture.publicationEvent(
+                sourceID: coordinator.expectedTranscriptionPublicationSourceID
+            )
+        )
         await coordinator.waitUntilIdleForTesting(sessionID: fixture.session().id)
         XCTAssertEqual(coordinator.presentation(for: fixture.session()).phase, .ready)
         XCTAssertEqual(generator.requests, 1)
@@ -300,11 +421,18 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let reloaded = fixture.session(with: .init(title: "Suggested", titleOrigin: .meetingIntelligence))
         let indexedReloaded = fixture.indexed(reloaded)
         let reloader = SessionReloader(result: reloaded)
-        let coordinator = fixture.coordinator()
-        let model = fixture.model(
-            coordinator: coordinator,
+        let composition = fixture.model(
+            coordinatorFactory: { repository, sourceID, gate in
+                fixture.coordinator(
+                    providerRepository: repository,
+                    expectedPublicationSourceID: sourceID,
+                    mutationGate: gate
+                )
+            },
             reloader: { [reloader] session in reloader.reload(session) }
         )
+        let model = composition.model
+        let coordinator = composition.coordinator
         model.seedLibrarySessionsForTesting([fixture.session()])
         let updated = expectation(description: "targeted session applied on main")
         let cancellable = model.libraryFeature.$snapshot.dropFirst().sink { snapshot in
@@ -323,9 +451,19 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
     func testWorkspaceSwitchSuppressesOldMeetingIntelligenceCallback() throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
-        let coordinator = fixture.coordinator()
         let reloader = SessionReloader(result: fixture.session())
-        let model = fixture.model(coordinator: coordinator, reloader: { [reloader] session in reloader.reload(session) })
+        let composition = fixture.model(
+            coordinatorFactory: { repository, sourceID, gate in
+                fixture.coordinator(
+                    providerRepository: repository,
+                    expectedPublicationSourceID: sourceID,
+                    mutationGate: gate
+                )
+            },
+            reloader: { [reloader] session in reloader.reload(session) }
+        )
+        let model = composition.model
+        let coordinator = composition.coordinator
         let newWorkspace = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: newWorkspace) }
 
@@ -340,11 +478,18 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
         let reloader = SessionReloader(result: fixture.session())
-        let coordinator = fixture.coordinator()
-        let model = fixture.model(
-            coordinator: coordinator,
+        let composition = fixture.model(
+            coordinatorFactory: { repository, sourceID, gate in
+                fixture.coordinator(
+                    providerRepository: repository,
+                    expectedPublicationSourceID: sourceID,
+                    mutationGate: gate
+                )
+            },
             reloader: { [reloader] session in reloader.reload(session) }
         )
+        let model = composition.model
+        let coordinator = composition.coordinator
         model.seedLibrarySessionsForTesting([fixture.session()])
 
         coordinator.onPublication?(
@@ -361,8 +506,18 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let latest = fixture.session(with: .init(title: "Latest"))
         let indexedLatest = fixture.indexed(latest)
         let reloader = SequencedSessionReloader(first: first, latest: latest)
-        let coordinator = fixture.coordinator()
-        let model = fixture.model(coordinator: coordinator, reloader: { [reloader] session in reloader.reload(session) })
+        let composition = fixture.model(
+            coordinatorFactory: { repository, sourceID, gate in
+                fixture.coordinator(
+                    providerRepository: repository,
+                    expectedPublicationSourceID: sourceID,
+                    mutationGate: gate
+                )
+            },
+            reloader: { [reloader] session in reloader.reload(session) }
+        )
+        let model = composition.model
+        let coordinator = composition.coordinator
         model.seedLibrarySessionsForTesting([fixture.session()])
         let applied = expectation(description: "latest reload applied")
         let cancellable = model.libraryFeature.$snapshot.dropFirst().sink { snapshot in
@@ -515,44 +670,68 @@ private final class IntegrationFixture {
     }
 
     func coordinator(
+        providerRepository: any OpenAICompatibleProviderManaging = IntegrationRepository(),
         expectedPublicationSourceID: UUID? = nil,
+        mutationGate: RecordingSessionMutationGate = .init(),
         availability: MeetingIntelligenceAvailability = .unconfirmed(.connectionFailed),
         generator: IntegrationGenerator = .init(),
         availabilityChecker: (any MeetingIntelligenceAvailabilityChecking)? = nil
     ) -> MeetingIntelligenceJobCoordinator {
-        let gate = RecordingSessionMutationGate()
         let checker: any MeetingIntelligenceAvailabilityChecking =
             availabilityChecker ?? IntegrationAvailability(result: availability)
         return MeetingIntelligenceJobCoordinator(
-            providerRepository: IntegrationRepository(), expectedPublicationSourceID: expectedPublicationSourceID ?? publicationSourceID,
+            providerRepository: providerRepository, expectedPublicationSourceID: expectedPublicationSourceID ?? publicationSourceID,
+            mutationGate: mutationGate,
             availabilityChecker: checker, generator: generator,
-            publisher: MeetingIntelligencePublisher(mutationGate: gate, artifactStore: MeetingIntelligenceArtifactStore(mutationGate: gate)), artifactStore: MeetingIntelligenceArtifactStore(mutationGate: gate),
-            stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
+            publisher: MeetingIntelligencePublisher(mutationGate: mutationGate, artifactStore: MeetingIntelligenceArtifactStore(mutationGate: mutationGate)), artifactStore: MeetingIntelligenceArtifactStore(mutationGate: mutationGate),
+            stateStore: MeetingIntelligenceStateStore(mutationGate: mutationGate)
         )
     }
 
     private let publicationSourceID = UUID()
 
-    func publicationEvent() -> TranscriptPublished {
+    func publicationEvent(sourceID: UUID? = nil) -> TranscriptPublished {
         let snapshot = try! SecureTranscriptDocumentReader().readCanonical(in: folder, allowLegacy: false)
         return .init(
             session: session(), canonicalURL: snapshot.url, revision: snapshot.revision,
             normalizedSessionFolder: folder.resolvingSymlinksInPath().standardizedFileURL,
-            identity: .init(coordinatorInstanceID: publicationSourceID, generation: 1, attemptID: UUID())
+            identity: .init(
+                coordinatorInstanceID: sourceID ?? publicationSourceID,
+                generation: 1,
+                attemptID: UUID()
+            )
         )
     }
 
-    func model(coordinator: MeetingIntelligenceJobCoordinator,
-               reloader: @escaping @Sendable (RecordingSession) -> RecordingSession) -> AppModel {
-        AppModel(performStartupWork: false, initialOutputFolder: workspace,
-                 recordingSessionReloader: reloader,
-                 meetingIntelligenceFeatureFactory: { _, _, _ in
-                     MeetingIntelligenceFeatureModel(coordinator: coordinator)
-                 })
+    func model(
+        coordinatorFactory: @escaping (
+            any OpenAICompatibleProviderManaging,
+            UUID,
+            RecordingSessionMutationGate
+        ) -> MeetingIntelligenceJobCoordinator,
+        reloader: @escaping @Sendable (RecordingSession) -> RecordingSession
+    ) -> (model: AppModel, coordinator: MeetingIntelligenceJobCoordinator) {
+        var retainedCoordinator: MeetingIntelligenceJobCoordinator?
+        let model = AppModel(
+            providerRepository: IntegrationRepository(),
+            performStartupWork: false,
+            initialOutputFolder: workspace,
+            recordingSessionReloader: reloader,
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+                let coordinator = coordinatorFactory(repository, sourceID, gate)
+                retainedCoordinator = coordinator
+                return MeetingIntelligenceFeatureModel(coordinator: coordinator)
+            }
+        )
+        return (model, retainedCoordinator!)
     }
 
     func transcribingModel(
-        coordinatorFactory: @escaping (UUID) -> MeetingIntelligenceJobCoordinator,
+        coordinatorFactory: @escaping (
+            any OpenAICompatibleProviderManaging,
+            UUID,
+            RecordingSessionMutationGate
+        ) -> MeetingIntelligenceJobCoordinator,
         searchLoader: @escaping @Sendable (RecordingSession) -> RecordingLibrarySearchDocument = { session in
             RecordingLibrarySearchDocument.load(folderURL: session.folderURL, displayName: session.displayName, createdAt: session.createdAt, metadata: session.metadata)
         },
@@ -565,9 +744,9 @@ private final class IntegrationFixture {
             recordingSearchDocumentLoader: searchLoader,
             transcriptionAudioPreparer: IntegrationAudioPreparer(),
             transcriptionService: transcriptionService,
-            meetingIntelligenceFeatureFactory: { _, sourceID, _ in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
                 MeetingIntelligenceFeatureModel(
-                    coordinator: coordinatorFactory(sourceID)
+                    coordinator: coordinatorFactory(repository, sourceID, gate)
                 )
             }
         )
@@ -616,8 +795,12 @@ private final class IntegrationRepository: OpenAICompatibleProviderManaging, @un
     private var savedProfile: OpenAICompatibleProviderProfile?
     func loadProfile() throws -> OpenAICompatibleProviderProfile? { savedProfile }
     func save(profile: OpenAICompatibleProviderProfile, replacementAPIKey _: String?) throws { savedProfile = profile }
-    func snapshot() throws -> OpenAICompatibleProviderSnapshot { try snapshot(overriding: savedProfile ?? profile) }
-    func snapshot(overriding _: OpenAICompatibleProviderProfile) throws -> OpenAICompatibleProviderSnapshot { try .validated(profile: profile, apiKey: "test") }
+    func snapshot() throws -> OpenAICompatibleProviderSnapshot {
+        try snapshot(overriding: savedProfile ?? profile)
+    }
+    func snapshot(overriding profile: OpenAICompatibleProviderProfile) throws -> OpenAICompatibleProviderSnapshot {
+        try .validated(profile: profile, apiKey: "test")
+    }
     func hasAPIKey() throws -> Bool { true }
     func removeAPIKey() throws {}
     func migrateLegacyIfNeeded(settingsURL _: URL) throws -> LegacyProviderMigrationOutcome { .notFound }
@@ -671,6 +854,105 @@ private struct IntegrationTranscriptionService: TranscriptionServicing {
                      logURL: nil, committedTranscriptRevision: revision)
     }
 }
+
+private final class SharedSnapshotBlockingTranscriptionService:
+    TranscriptionServicing,
+    @unchecked Sendable
+{
+    private struct Pending {
+        let request: TranscriptionServiceRequest
+        let continuation: CheckedContinuation<TranscriptionServiceResult, Error>
+    }
+
+    private let lock = NSLock()
+    private var pending: [Pending] = []
+    private var capturedModels: [String] = []
+
+    var models: [String] { lock.withLock { capturedModels } }
+
+    func transcribe(
+        _ request: TranscriptionServiceRequest,
+        onProgress _: @escaping @Sendable (TranscriptionServiceProgress) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                capturedModels.append(request.snapshot.profile.asrModel)
+                pending.append(.init(request: request, continuation: continuation))
+            }
+        }
+    }
+
+    func waitForRequestCount(_ count: Int) async {
+        while lock.withLock({ capturedModels.count < count }) { await Task.yield() }
+    }
+
+    func releaseNext(for session: RecordingSession) {
+        let pendingRequest: Pending? = lock.withLock {
+            guard !pending.isEmpty else { return nil }
+            return pending.removeFirst()
+        }
+        guard let pendingRequest else { return }
+        do {
+            let snapshot = try SecureTranscriptDocumentReader().readCanonical(
+                in: session.folderURL,
+                allowLegacy: false
+            )
+            pendingRequest.continuation.resume(returning: .init(
+                transcriptURL: snapshot.url,
+                rawTranscriptURL: nil,
+                manifestURL: nil,
+                logURL: nil,
+                committedTranscriptRevision: snapshot.revision
+            ))
+        } catch {
+            pendingRequest.continuation.resume(throwing: error)
+        }
+    }
+}
+
+private final class SharedSnapshotBlockingGenerator:
+    MeetingIntelligenceGenerating,
+    @unchecked Sendable
+{
+    private struct Pending {
+        let continuation: CheckedContinuation<MeetingIntelligenceGeneratedContent, Error>
+    }
+
+    private let lock = NSLock()
+    private var pending: [Pending] = []
+    private var capturedModels: [String] = []
+
+    var models: [String] { lock.withLock { capturedModels } }
+
+    func generate(
+        transcript _: TranscriptDocumentSnapshot,
+        snapshot: OpenAICompatibleProviderSnapshot,
+        onProgress _: @escaping @Sendable (MeetingIntelligenceProgress) -> Void
+    ) async throws -> MeetingIntelligenceGeneratedContent {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                capturedModels.append(snapshot.profile.llmModel)
+                pending.append(.init(continuation: continuation))
+            }
+        }
+    }
+
+    func waitForRequestCount(_ count: Int) async {
+        while lock.withLock({ capturedModels.count < count }) { await Task.yield() }
+    }
+
+    func releaseNext() async {
+        let pendingRequest: Pending? = lock.withLock {
+            guard !pending.isEmpty else { return nil }
+            return pending.removeFirst()
+        }
+        pendingRequest?.continuation.resume(returning: .init(
+            title: "Generated title",
+            summary: "Generated summary"
+        ))
+    }
+}
+
 private final class DeferredIntegrationTranscriptionService:
     TranscriptionServicing,
     @unchecked Sendable

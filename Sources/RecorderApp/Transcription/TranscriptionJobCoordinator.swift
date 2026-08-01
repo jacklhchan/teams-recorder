@@ -24,6 +24,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
 
     private let providerRepository:
         any OpenAICompatibleProviderManaging
+    let providerRepositoryIdentity: ObjectIdentifier
     private let audioPreparer: any TranscriptionAudioPreparing
     private let service: any TranscriptionServicing
     /// The feature boundary exposes this identity for PR B aggregate
@@ -51,6 +52,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
         attemptIDFactory: @escaping () -> UUID = UUID.init
     ) {
         self.providerRepository = providerRepository
+        providerRepositoryIdentity = providerRepository.compositionIdentity
         self.audioPreparer = audioPreparer
         self.service = service
         self.mutationGate = mutationGate

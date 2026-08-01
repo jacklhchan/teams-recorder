@@ -45,6 +45,12 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
         coordinator.mutationGate
     }
 
+    /// Read-only composition identity for the repository that owns the
+    /// immutable availability/generation snapshots.
+    var providerRepositoryIdentity: ObjectIdentifier {
+        coordinator.providerRepositoryIdentity
+    }
+
     var snapshot: MeetingIntelligenceFeatureSnapshot { coordinator.snapshot }
 
     func presentation(for session: RecordingSession) -> MeetingIntelligencePresentation {

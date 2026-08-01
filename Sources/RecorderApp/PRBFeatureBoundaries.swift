@@ -39,8 +39,26 @@ struct PRBFeatureBoundaries {
             && library.mutationGate === meetingIntelligence.mutationGate
     }
 
+    /// Settings is intentionally outside this four-feature aggregate, but
+    /// ASR and meeting intelligence must still retain the same mutable
+    /// provider repository before Settings identity is compared at the
+    /// composition root.
+    var hasCompatibleProviderRepositories: Bool {
+        transcription.providerRepositoryIdentity
+            == meetingIntelligence.providerRepositoryIdentity
+    }
+
     var isCompatible: Bool {
-        hasCompatiblePublicationSources && hasCompatibleMutationGates
+        hasCompatiblePublicationSources
+            && hasCompatibleMutationGates
+            && hasCompatibleProviderRepositories
+    }
+
+    /// The single aggregate compatibility predicate used by both aggregate
+    /// and individual injection paths after all retained boundaries exist.
+    func isCompatible(with settingsRepositoryIdentity: ObjectIdentifier) -> Bool {
+        isCompatible
+            && transcription.providerRepositoryIdentity == settingsRepositoryIdentity
     }
 
     static func arePublicationSourcesCompatible(

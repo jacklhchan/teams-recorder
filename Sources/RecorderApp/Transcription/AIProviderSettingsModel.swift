@@ -112,6 +112,9 @@ final class AIProviderSettingsModel: ObservableObject {
     }
 
     private let repository: any OpenAICompatibleProviderManaging
+    /// Settings owns only the UI projection. This identity proves its saves
+    /// target the same mutable repository observed by future ASR/MI jobs.
+    let providerRepositoryIdentity: ObjectIdentifier
     private let client: any ProviderConnectionTesting
     private var drafts: [AIProviderKind: Draft] = [:]
     private var replacements: [AIProviderKind: String] = [:]
@@ -128,6 +131,7 @@ final class AIProviderSettingsModel: ObservableObject {
         initialErrorStatus: String? = nil
     ) {
         self.repository = repository
+        providerRepositoryIdentity = repository.compositionIdentity
         self.client = client
         if loadImmediately { reload() }
         if let initialErrorStatus {

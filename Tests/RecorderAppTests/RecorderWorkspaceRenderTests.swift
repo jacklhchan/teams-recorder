@@ -629,6 +629,21 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         }
     }
 
+    func testSettingsRailUsesNativeSelectionForKeyboardNavigation() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+        host.select(.settings)
+
+        XCTAssertEqual(host.selectedSettingsRailRow, 0)
+        XCTAssertTrue(host.pressSettingsRailDownArrow())
+        XCTAssertEqual(host.selectedSettingsRailRow, 1)
+        XCTAssertTrue(host.containsAccessibilityIdentifier("capture-mode-picker"))
+    }
+
     private func assertVisibleSettingsRecoveryDeepLink(
         for fixture: StartupDisabledFixture
     ) throws {
@@ -1015,6 +1030,11 @@ final class WorkspaceHost {
 
     @discardableResult
     func click(atAccessibilityFrame identifier: String) -> Bool {
+        if let section = RecorderSettingsSection(rawValue: String(
+            identifier.dropFirst("recorder.settings.navigation.".count)
+        )), identifier.hasPrefix("recorder.settings.navigation.") {
+            return clickSettingsRailRow(for: section)
+        }
         guard let frame = frame(forAccessibilityIdentifier: identifier) else {
             return false
         }
@@ -1072,6 +1092,47 @@ final class WorkspaceHost {
         return windowContentRect.contains(marker.accessibilityFrame())
     }
 
+    var selectedSettingsRailRow: Int? {
+        settingsRailTableView?.selectedRow
+    }
+
+    @discardableResult
+    func pressSettingsRailDownArrow() -> Bool {
+        guard let table = settingsRailTableView else { return false }
+        return sendSettingsRailKey(.downArrow, to: table)
+    }
+
+    private enum SettingsRailKey {
+        case upArrow
+        case downArrow
+
+        var characters: String { self == .downArrow ? "\u{F701}" : "\u{F700}" }
+        var keyCode: UInt16 { self == .downArrow ? 125 : 126 }
+    }
+
+    @discardableResult
+    private func sendSettingsRailKey(
+        _ key: SettingsRailKey,
+        to table: NSTableView
+    ) -> Bool {
+        window.makeFirstResponder(table)
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: key.characters,
+            charactersIgnoringModifiers: key.characters,
+            isARepeat: false,
+            keyCode: key.keyCode
+        ) else { return false }
+        window.sendEvent(event)
+        render()
+        return true
+    }
+
     func setColumnVisibility(_ visibility: NavigationSplitViewVisibility) {
         navigationDriver.columnVisibility = visibility
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
@@ -1092,6 +1153,24 @@ final class WorkspaceHost {
         return windows.compactMap(\.contentView).filter {
             seen.insert(ObjectIdentifier($0)).inserted
         }
+    }
+
+    private var settingsRailTableView: NSTableView? {
+        allViews(startingAt: hostingView).compactMap { $0 as? NSTableView }.first
+    }
+
+    private func clickSettingsRailRow(for section: RecorderSettingsSection) -> Bool {
+        guard let table = settingsRailTableView,
+              let row = RecorderSettingsSection.allCases.firstIndex(of: section) else {
+            return false
+        }
+        while table.selectedRow < row {
+            guard sendSettingsRailKey(.downArrow, to: table) else { return false }
+        }
+        while table.selectedRow > row {
+            guard sendSettingsRailKey(.upArrow, to: table) else { return false }
+        }
+        return table.selectedRow == row
     }
 
     private func view(forAccessibilityIdentifier identifier: String) -> NSView? {

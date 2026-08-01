@@ -28,11 +28,9 @@ struct RecorderSettingsView: View {
     }
 
     private var settingsRail: some View {
-        List(RecorderSettingsSection.allCases) { section in
-            Button {
-                selectedSection = section
-            } label: {
-                Label(section.title, systemImage: section.systemImage)
+        List(RecorderSettingsSection.allCases, selection: $selectedSection) { section in
+            Label(section.title, systemImage: section.systemImage)
+                .tag(section)
                 .contentShape(Rectangle())
                 .accessibilityIdentifier(
                     "recorder.settings.navigation.\(section.rawValue)"
@@ -43,8 +41,6 @@ struct RecorderSettingsView: View {
                 .background(RecorderSettingsAccessibilityMarker(
                     identifier: "recorder.settings.navigation.\(section.rawValue)"
                 ).allowsHitTesting(false))
-            }
-            .buttonStyle(.plain)
         }
         .listStyle(.sidebar)
         .frame(minWidth: 176, idealWidth: 210, maxWidth: 240)

@@ -161,32 +161,53 @@ private final class ProviderSettingsProductionHost {
 
     func selectSettingsSection(_ section: String) {
         let identifier = "recorder.settings.navigation.\(section)"
-        guard let marker = marker(for: identifier) else {
+        guard marker(for: identifier) != nil else {
             XCTFail("Missing settings navigation marker: \(identifier)")
             return
         }
-        let location = marker.convert(
-            NSPoint(x: marker.bounds.midX, y: marker.bounds.midY),
-            to: nil
-        )
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(
-                with: type,
-                location: location,
-                modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: 0,
-                clickCount: 1,
-                pressure: type == .leftMouseDown ? 1 : 0
-            ) else {
-                XCTFail("Could not create settings navigation event")
-                return
-            }
-            window.sendEvent(event)
+        guard let settingsSection = RecorderSettingsSection(rawValue: section),
+              let row = RecorderSettingsSection.allCases.firstIndex(of: settingsSection),
+              let table = allViews(hostingView).compactMap({ $0 as? NSTableView }).first else {
+            XCTFail("Missing native settings List for marker: \(identifier)")
+            return
+        }
+        while table.selectedRow < row {
+            guard sendSettingsRailKey(.downArrow, table: table) else { return }
+        }
+        while table.selectedRow > row {
+            guard sendSettingsRailKey(.upArrow, table: table) else { return }
         }
         render()
+    }
+
+    private enum SettingsRailKey {
+        case upArrow
+        case downArrow
+
+        var characters: String { self == .downArrow ? "\u{F701}" : "\u{F700}" }
+        var keyCode: UInt16 { self == .downArrow ? 125 : 126 }
+    }
+
+    private func sendSettingsRailKey(_ key: SettingsRailKey, table: NSTableView) -> Bool {
+        window.makeFirstResponder(table)
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: key.characters,
+            charactersIgnoringModifiers: key.characters,
+            isARepeat: false,
+            keyCode: key.keyCode
+        ) else {
+            XCTFail("Could not create settings navigation event")
+            return false
+        }
+        window.sendEvent(event)
+        render()
+        return true
     }
 
     func close() {

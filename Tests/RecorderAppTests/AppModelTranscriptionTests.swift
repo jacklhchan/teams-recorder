@@ -3,6 +3,122 @@ import XCTest
 
 @MainActor
 final class AppModelTranscriptionTests: XCTestCase {
+    func testTranscriptionFeatureFactoryReceivesTheActiveRepositoryAndMutationGateOnce() throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let repository = RecordingProviderRepository()
+        let preparer = ControlledPreparer(.immediate(.failure(TestError.failed)))
+        let launcher = ControlledLauncher()
+        var factoryCalls = 0
+        weak var receivedRepository: AnyObject?
+        weak var receivedGate: RecordingSessionMutationGate?
+
+        let model = AppModel(
+            providerRepository: repository,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            initialOutputFolder: fixture.root,
+            transcriptionAudioPreparer: preparer,
+            transcriptionProcessLauncher: launcher,
+            transcriptionScriptURL: fixture.scriptURL,
+            transcriptionFeatureFactory: { provider, configuredPreparer, service, gate in
+                factoryCalls += 1
+                receivedRepository = provider as AnyObject
+                receivedGate = gate
+                return TranscriptionFeatureModel(
+                    coordinator: TranscriptionJobCoordinator(
+                        providerRepository: provider,
+                        audioPreparer: configuredPreparer,
+                        service: service,
+                        mutationGate: gate,
+                        coordinatorInstanceID: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+                    )
+                )
+            }
+        )
+
+        XCTAssertEqual(factoryCalls, 1)
+        XCTAssertTrue(receivedRepository === repository)
+        XCTAssertNotNil(receivedGate)
+        XCTAssertEqual(
+            model.transcriptionFeature.publicationSourceID,
+            UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        )
+    }
+
+    func testProgressPublishesOnlyTheFeatureAndCancellationUpdatesItImmediately() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let preparer = ControlledPreparer(.immediate(.success(.init(
+            audioURL: fixture.temporaryAudioURL,
+            cleanupURL: nil
+        ))))
+        let launcher = ControlledLauncher()
+        let model = makeModel(
+            fixture: fixture,
+            preparer: preparer,
+            launcher: launcher
+        )
+        var appPublications = 0
+        let token = model.objectWillChange.sink { appPublications += 1 }
+        defer { token.cancel() }
+
+        model.transcribe(session: fixture.session)
+        let process = await launcher.nextProcess()
+        appPublications = 0
+        process.emit("STATUS=Uploading transcription")
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertEqual(
+            model.transcriptionFeature.presentation.transcriptionStatus,
+            "Uploading transcription"
+        )
+        XCTAssertEqual(appPublications, 0)
+
+        model.cancelTranscription()
+        XCTAssertEqual(
+            model.transcriptionFeature.presentation.transcriptionStatus,
+            "Cancelling transcription..."
+        )
+    }
+
+    func testRefreshKeepsTheLiveBlockingTranscriptionState() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let preparer = ControlledPreparer(.immediate(.success(.init(
+            audioURL: fixture.temporaryAudioURL,
+            cleanupURL: nil
+        ))))
+        let launcher = ControlledLauncher()
+        let loaderStarted = expectation(description: "library load started")
+        let releaseLoader = DispatchSemaphore(value: 0)
+        defer { releaseLoader.signal() }
+        let model = makeModel(
+            fixture: fixture,
+            preparer: preparer,
+            launcher: launcher,
+            recordingSessionLoader: { _ in
+                loaderStarted.fulfill()
+                releaseLoader.wait()
+                return [fixture.session]
+            }
+        )
+
+        model.transcribe(session: fixture.session)
+        _ = await launcher.nextProcess()
+        model.refreshSessions()
+        await fulfillment(of: [loaderStarted], timeout: 1)
+        releaseLoader.signal()
+        _ = await eventually { model.sessions == [fixture.session] }
+
+        XCTAssertEqual(
+            model.transcriptionFeature.presentation
+                .transcriptionStatesBySessionID[fixture.session.id]?.phase,
+            .queued
+        )
+        model.cancelTranscription()
+    }
     func testPreparedAudioIsPassedToLauncherAndCleanedAfterSuccess() async throws {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
@@ -366,8 +482,14 @@ final class AppModelTranscriptionTests: XCTestCase {
         let legacyLog = fixture.session.folderURL.appendingPathComponent("transcription_qwen_asr.log")
         try "legacy".write(to: legacyTranscript, atomically: true, encoding: .utf8)
         try Data().write(to: legacyLog)
-        model.transcriptURLsBySessionID[fixture.session.id] = legacyTranscript
-        model.transcriptLogURLsBySessionID[fixture.session.id] = legacyLog
+        model.transcriptionFeature.setTranscriptURL(
+            legacyTranscript,
+            for: fixture.session.id
+        )
+        model.transcriptionFeature.setTranscriptLogURL(
+            legacyLog,
+            for: fixture.session.id
+        )
 
         let canonicalTranscript = fixture.session.folderURL.appendingPathComponent("transcript.txt")
         let canonicalLog = fixture.session.folderURL.appendingPathComponent("transcription.log")
@@ -392,8 +514,14 @@ final class AppModelTranscriptionTests: XCTestCase {
         let log = fixture.session.folderURL.appendingPathComponent("transcription.log")
         try "cached".write(to: transcript, atomically: true, encoding: .utf8)
         try Data().write(to: log)
-        model.transcriptURLsBySessionID[fixture.session.id] = transcript
-        model.transcriptLogURLsBySessionID[fixture.session.id] = log
+        model.transcriptionFeature.setTranscriptURL(
+            transcript,
+            for: fixture.session.id
+        )
+        model.transcriptionFeature.setTranscriptLogURL(
+            log,
+            for: fixture.session.id
+        )
         try FileManager.default.removeItem(at: transcript)
         try FileManager.default.removeItem(at: log)
 

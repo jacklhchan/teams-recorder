@@ -88,7 +88,7 @@ final class AppModelMuteTests: XCTestCase {
         await fulfillment(of: [loaderCalled], timeout: 1)
     }
 
-    func testRefreshSessionsCannotInterruptTranscriptionStartedWhileLoadIsInFlight() async throws {
+    func testRefreshSessionsProjectsPersistedInFlightTranscriptionAsInterrupted() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let folder = root.appendingPathComponent("manual-race", isDirectory: true)
@@ -126,14 +126,15 @@ final class AppModelMuteTests: XCTestCase {
             message: "Uploading audio",
             startedAt: Date()
         )
-        model.transcribingSessionID = session.id
-        model.transcriptionStatesBySessionID[session.id] = activeState
         try TranscriptionStateStore.save(activeState, in: session.folderURL)
         releaseLoader.signal()
 
         await waitUntil { model.sessions == [session] }
 
-        XCTAssertEqual(model.transcriptionStatesBySessionID[session.id], activeState)
+        XCTAssertEqual(
+            model.transcriptionStatesBySessionID[session.id]?.phase,
+            .interrupted
+        )
         XCTAssertEqual(
             try TranscriptionStateStore.load(in: session.folderURL)?.phase,
             .uploading
@@ -204,12 +205,14 @@ final class AppModelMuteTests: XCTestCase {
             }
         )
         model.sessions = [oldSession]
-        model.transcriptionStatesBySessionID[oldSession.id] = .init(
-            phase: .completed,
-            message: "Done",
-            startedAt: Date(),
-            finishedAt: Date()
-        )
+        model.transcriptionFeature.replaceLoadedStates([
+            oldSession.id: .init(
+                phase: .completed,
+                message: "Done",
+                startedAt: Date(),
+                finishedAt: Date()
+            )
+        ])
 
         model.setOutputFolder(URL(fileURLWithPath: "/tmp/recordings-new", isDirectory: true))
 

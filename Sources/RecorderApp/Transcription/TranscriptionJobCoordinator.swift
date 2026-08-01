@@ -3,16 +3,16 @@ import Foundation
 
 @MainActor
 final class TranscriptionJobCoordinator: ObservableObject {
-    @Published var transcribingSessionID: RecordingSession.ID?
-    @Published var transcriptionStatus = ""
-    @Published var lastTranscriptionSessionID: RecordingSession.ID?
-    @Published var lastTranscriptionStatus = ""
-    @Published var lastTranscriptionDidFail = false
-    @Published var transcriptURLsBySessionID:
+    @Published private(set) var transcribingSessionID: RecordingSession.ID?
+    @Published private(set) var transcriptionStatus = ""
+    @Published private(set) var lastTranscriptionSessionID: RecordingSession.ID?
+    @Published private(set) var lastTranscriptionStatus = ""
+    @Published private(set) var lastTranscriptionDidFail = false
+    @Published private(set) var transcriptURLsBySessionID:
         [RecordingSession.ID: URL] = [:]
-    @Published var transcriptLogURLsBySessionID:
+    @Published private(set) var transcriptLogURLsBySessionID:
         [RecordingSession.ID: URL] = [:]
-    @Published var transcriptionStatesBySessionID:
+    @Published private(set) var transcriptionStatesBySessionID:
         [RecordingSession.ID: TranscriptionState] = [:]
 
     var onStatusMessage: ((String) -> Void)?
@@ -284,6 +284,48 @@ final class TranscriptionJobCoordinator: ObservableObject {
         activeSession = nil
     }
 
+    func replaceLoadedStates(_ states: [RecordingSession.ID: TranscriptionState]) {
+        var projected = states.mapValues { state in
+            guard [.queued, .uploading, .transcribing].contains(state.phase) else {
+                return state
+            }
+            var interrupted = state
+            interrupted.phase = .interrupted
+            interrupted.message = "Transcription interrupted. You can start it again."
+            interrupted.finishedAt = Date()
+            return interrupted
+        }
+
+        if let activeID = transcribingSessionID {
+            if let liveState = transcriptionStatesBySessionID[activeID] {
+                projected[activeID] = liveState
+            } else if let loadedState = states[activeID] {
+                projected[activeID] = loadedState
+            }
+        }
+        transcriptionStatesBySessionID = projected
+    }
+
+    func clearProjections() {
+        transcriptURLsBySessionID = [:]
+        transcriptLogURLsBySessionID = [:]
+        transcriptionStatesBySessionID = [:]
+    }
+
+    func setTranscriptURL(_ url: URL?, for sessionID: RecordingSession.ID) {
+        transcriptURLsBySessionID[sessionID] = url
+    }
+
+    func setTranscriptLogURL(_ url: URL?, for sessionID: RecordingSession.ID) {
+        transcriptLogURLsBySessionID[sessionID] = url
+    }
+
+    func removeProjection(for sessionID: RecordingSession.ID) {
+        transcriptionStatesBySessionID.removeValue(forKey: sessionID)
+        transcriptURLsBySessionID.removeValue(forKey: sessionID)
+        transcriptLogURLsBySessionID.removeValue(forKey: sessionID)
+    }
+
     private func apply(
         _ progress: TranscriptionServiceProgress,
         session: RecordingSession,
@@ -306,7 +348,6 @@ final class TranscriptionJobCoordinator: ObservableObject {
             ),
             for: session
         )
-        publishGlobalStatus(progress.message)
     }
 
     private func finishSuccess(

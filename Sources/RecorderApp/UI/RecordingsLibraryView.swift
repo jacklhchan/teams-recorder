@@ -2,30 +2,39 @@ import SwiftUI
 
 struct RecordingsLibraryView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var transcriptionFeature: TranscriptionFeatureModel
     @State private var searchText = ""
     @State private var favoritesOnly = false
 
+    init(model: AppModel) {
+        self.model = model
+        _transcriptionFeature = ObservedObject(
+            wrappedValue: model.transcriptionFeature
+        )
+    }
+
     var body: some View {
+        let transcription = transcriptionFeature.presentation
         let query = RecordingLibraryQuery(
             text: searchText,
             favoritesOnly: favoritesOnly
         )
         let visibleSessions = query.filter(model.sessions)
         let toolbarPresentation = RecordingsToolbarPresentation.make(
-            isTranscribing: model.transcribingSessionID != nil
+            isTranscribing: transcription.transcribingSessionID != nil
         )
 
         SessionListView(
             sessions: visibleSessions,
             allSessions: model.sessions,
             query: query,
-            transcribingSessionID: model.transcribingSessionID,
-            transcriptionStatus: model.transcriptionStatus,
-            lastTranscriptionSessionID: model.lastTranscriptionSessionID,
-            lastTranscriptionStatus: model.lastTranscriptionStatus,
-            lastTranscriptionDidFail: model.lastTranscriptionDidFail,
+            transcribingSessionID: transcription.transcribingSessionID,
+            transcriptionStatus: transcription.transcriptionStatus,
+            lastTranscriptionSessionID: transcription.lastTranscriptionSessionID,
+            lastTranscriptionStatus: transcription.lastTranscriptionStatus,
+            lastTranscriptionDidFail: transcription.lastTranscriptionDidFail,
             hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
-            transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
+            transcriptionStatesBySessionID: transcription.transcriptionStatesBySessionID,
             play: model.play,
             open: model.open,
             transcribe: model.transcribe,

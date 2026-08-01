@@ -55,6 +55,12 @@ enum RecordingOwnership: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    typealias TranscriptionFeatureFactory = (
+        any OpenAICompatibleProviderManaging,
+        any TranscriptionAudioPreparing,
+        any TranscriptionServicing,
+        RecordingSessionMutationGate
+    ) -> TranscriptionFeatureModel
     @Published var devices: [AudioDevice] = []
     @Published var selectedMicDevice: AudioDevice?
     @Published private(set) var selectedMicrophoneUID: String?
@@ -91,7 +97,7 @@ final class AppModel: ObservableObject {
     let aiProviderSettingsModel: AIProviderSettingsModel
     private let recordingSessionCoordinator:
         RecordingSessionCoordinator
-    private let transcriptionCoordinator: TranscriptionJobCoordinator
+    let transcriptionFeature: TranscriptionFeatureModel
     private let transcriptMutationGate: RecordingSessionMutationGate
     /// AppModel owns the sole meeting-intelligence coordinator.  It projects
     /// presentation and forwards commands; it deliberately owns no parallel
@@ -108,50 +114,36 @@ final class AppModel: ObservableObject {
     }
 
     var transcribingSessionID: RecordingSession.ID? {
-        get { transcriptionCoordinator.transcribingSessionID }
-        set { transcriptionCoordinator.transcribingSessionID = newValue }
+        transcriptionFeature.presentation.transcribingSessionID
     }
 
     var transcriptionStatus: String {
-        get { transcriptionCoordinator.transcriptionStatus }
-        set { transcriptionCoordinator.transcriptionStatus = newValue }
+        transcriptionFeature.presentation.transcriptionStatus
     }
 
     var lastTranscriptionSessionID: RecordingSession.ID? {
-        get { transcriptionCoordinator.lastTranscriptionSessionID }
-        set { transcriptionCoordinator.lastTranscriptionSessionID = newValue }
+        transcriptionFeature.presentation.lastTranscriptionSessionID
     }
 
     var lastTranscriptionStatus: String {
-        get { transcriptionCoordinator.lastTranscriptionStatus }
-        set { transcriptionCoordinator.lastTranscriptionStatus = newValue }
+        transcriptionFeature.presentation.lastTranscriptionStatus
     }
 
     var lastTranscriptionDidFail: Bool {
-        get { transcriptionCoordinator.lastTranscriptionDidFail }
-        set { transcriptionCoordinator.lastTranscriptionDidFail = newValue }
+        transcriptionFeature.presentation.lastTranscriptionDidFail
     }
 
     var transcriptURLsBySessionID: [RecordingSession.ID: URL] {
-        get { transcriptionCoordinator.transcriptURLsBySessionID }
-        set { transcriptionCoordinator.transcriptURLsBySessionID = newValue }
+        transcriptionFeature.presentation.transcriptURLsBySessionID
     }
 
     var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] {
-        get { transcriptionCoordinator.transcriptLogURLsBySessionID }
-        set {
-            transcriptionCoordinator.transcriptLogURLsBySessionID =
-                newValue
-        }
+        transcriptionFeature.presentation.transcriptLogURLsBySessionID
     }
 
     var transcriptionStatesBySessionID:
         [RecordingSession.ID: TranscriptionState] {
-        get { transcriptionCoordinator.transcriptionStatesBySessionID }
-        set {
-            transcriptionCoordinator.transcriptionStatesBySessionID =
-                newValue
-        }
+        transcriptionFeature.presentation.transcriptionStatesBySessionID
     }
 
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
@@ -310,6 +302,7 @@ final class AppModel: ObservableObject {
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
         transcriptionScriptURL: URL? = nil,
         transcriptionService: (any TranscriptionServicing)? = nil,
+        transcriptionFeatureFactory: TranscriptionFeatureFactory? = nil,
         meetingIntelligenceCoordinatorFactory: ((
             any OpenAICompatibleProviderManaging,
             UUID,
@@ -350,16 +343,14 @@ final class AppModel: ObservableObject {
         )
         let transcriptMutationGate = RecordingSessionMutationGate()
         self.transcriptMutationGate = transcriptMutationGate
-        let activeTranscriptionService:
-            any TranscriptionServicing
+        let activeTranscriptionService: any TranscriptionServicing
         if let transcriptionService {
             activeTranscriptionService = transcriptionService
         } else if let transcriptionScriptURL {
-            activeTranscriptionService =
-                LegacyProcessTranscriptionService(
-                    launcher: transcriptionProcessLauncher,
-                    scriptURL: transcriptionScriptURL
-                )
+            activeTranscriptionService = LegacyProcessTranscriptionService(
+                launcher: transcriptionProcessLauncher,
+                scriptURL: transcriptionScriptURL
+            )
         } else {
             activeTranscriptionService = NativeOpenAICompatibleTranscriptionService(
                 publisher: TranscriptionArtifactPublisher(
@@ -367,22 +358,33 @@ final class AppModel: ObservableObject {
                 )
             )
         }
-        transcriptionCoordinator = TranscriptionJobCoordinator(
-            providerRepository: activeProviderRepository,
-            audioPreparer: transcriptionAudioPreparer,
-            service: activeTranscriptionService,
-            mutationGate: transcriptMutationGate
-        )
+        if let transcriptionFeatureFactory {
+            self.transcriptionFeature = transcriptionFeatureFactory(
+                activeProviderRepository,
+                transcriptionAudioPreparer,
+                activeTranscriptionService,
+                transcriptMutationGate
+            )
+        } else {
+            self.transcriptionFeature = TranscriptionFeatureModel(
+                coordinator: TranscriptionJobCoordinator(
+                    providerRepository: activeProviderRepository,
+                    audioPreparer: transcriptionAudioPreparer,
+                    service: activeTranscriptionService,
+                    mutationGate: transcriptMutationGate
+                )
+            )
+        }
         if let meetingIntelligenceCoordinatorFactory {
             meetingIntelligenceCoordinator = meetingIntelligenceCoordinatorFactory(
                 activeProviderRepository,
-                transcriptionCoordinator.publicationSourceID,
+                self.transcriptionFeature.publicationSourceID,
                 transcriptMutationGate
             )
         } else {
             meetingIntelligenceCoordinator = Self.makeMeetingIntelligenceCoordinator(
                 repository: activeProviderRepository,
-                expectedPublicationSourceID: transcriptionCoordinator.publicationSourceID,
+                expectedPublicationSourceID: self.transcriptionFeature.publicationSourceID,
                 mutationGate: transcriptMutationGate
             )
         }
@@ -449,20 +451,15 @@ final class AppModel: ObservableObject {
         self.playbackFeature.onStatusMessage = { [weak self] message in
             self?.statusMessage = message
         }
-        transcriptionCoordinator.objectWillChange
-            .sink { [weak self] in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
         recordingSessionCoordinator.objectWillChange
             .sink { [weak self] in
                 self?.objectWillChange.send()
             }
             .store(in: &cancellables)
-        transcriptionCoordinator.onStatusMessage = { [weak self] message in
+        self.transcriptionFeature.onStatusMessage = { [weak self] message in
             self?.statusMessage = message
         }
-        transcriptionCoordinator.onSuccessfulPublication = {
+        self.transcriptionFeature.onSuccessfulPublication = {
             [weak self] event in
             guard let self,
                   self.admitsTranscriptPublication(event) else { return }
@@ -600,7 +597,7 @@ final class AppModel: ObservableObject {
 
     func shutdown() {
         playbackFeature.shutdown()
-        transcriptionCoordinator.shutdown()
+        transcriptionFeature.shutdown()
         meetingIntelligenceCoordinator.shutdown()
     }
 
@@ -1295,14 +1292,12 @@ final class AppModel: ObservableObject {
     func setOutputFolder(_ folder: URL) {
         outputFolder = folder
         workspacePublicationFence = workspacePublicationFence.advanced()
-        transcriptionCoordinator.advanceWorkspacePublicationFence(
+        transcriptionFeature.advanceWorkspacePublicationFence(
             to: workspacePublicationFence
         )
         sessions = []
         meetingIntelligenceCoordinator.resetForWorkspaceChange()
-        transcriptionStatesBySessionID = [:]
-        transcriptURLsBySessionID = [:]
-        transcriptLogURLsBySessionID = [:]
+        transcriptionFeature.clearProjections()
         refreshSessions()
     }
 
@@ -1367,7 +1362,7 @@ final class AppModel: ObservableObject {
                     return
                 }
                 self.sessions = loadedSessions
-                self.transcriptionStatesBySessionID = self.projectTranscriptionStates(
+                self.transcriptionFeature.replaceLoadedStates(
                     transcriptionStates
                 )
                 self.meetingIntelligenceCoordinator.reload(sessions: loadedSessions)
@@ -1481,31 +1476,6 @@ final class AppModel: ObservableObject {
             isInCurrentWorkspace(session)
     }
 
-    private func projectTranscriptionStates(
-        _ loadedStates: [RecordingSession.ID: TranscriptionState]
-    ) -> [RecordingSession.ID: TranscriptionState] {
-        var projected = loadedStates.mapValues { state in
-            guard [.queued, .uploading, .transcribing].contains(state.phase) else {
-                return state
-            }
-            var interrupted = state
-            interrupted.phase = .interrupted
-            interrupted.message = "Transcription interrupted. You can start it again."
-            interrupted.finishedAt = Date()
-            return interrupted
-        }
-
-        guard let currentActiveID = transcribingSessionID else {
-            return projected
-        }
-        if let liveState = transcriptionStatesBySessionID[currentActiveID] {
-            projected[currentActiveID] = liveState
-        } else if let loadedState = loadedStates[currentActiveID] {
-            projected[currentActiveID] = loadedState
-        }
-        return projected
-    }
-
     var playingSessionID: RecordingSession.ID? { playbackFeature.activeSessionID }
     var playbackPresentation: PlaybackPresentationModel {
         playbackFeature.presentation
@@ -1542,16 +1512,14 @@ final class AppModel: ObservableObject {
     }
 
     func transcribe(session: RecordingSession) {
-        guard aiProviderSettingsModel.hasSavedProfile else {
-            statusMessage =
-                "Configure and save an AI provider before starting transcription."
-            return
-        }
-        transcriptionCoordinator.start(session: session)
+        transcriptionFeature.start(
+            session: session,
+            providerIsConfigured: aiProviderSettingsModel.hasSavedProfile
+        )
     }
 
     func cancelTranscription() {
-        transcriptionCoordinator.cancel()
+        transcriptionFeature.cancel()
     }
     func openTranscript(for session: RecordingSession) {
         if let url = currentTranscriptURL(for: session) {
@@ -1571,13 +1539,13 @@ final class AppModel: ObservableObject {
 
     func currentTranscriptURL(for session: RecordingSession) -> URL? {
         let url = TranscriptDocumentStore.resolvedURL(in: session.folderURL)
-        transcriptURLsBySessionID[session.id] = url
+        transcriptionFeature.setTranscriptURL(url, for: session.id)
         return url
     }
 
     func currentTranscriptLogURL(for session: RecordingSession) -> URL? {
         let url = TranscriptDocumentStore.logURL(in: session.folderURL)
-        transcriptLogURLsBySessionID[session.id] = url
+        transcriptionFeature.setTranscriptLogURL(url, for: session.id)
         return url
     }
 
@@ -1871,7 +1839,10 @@ final class AppModel: ObservableObject {
             try transcriptMutationGate.withMutation(for: session.folderURL) {
                 try TranscriptDocumentStore.save(text, in: session.folderURL)
             }
-            transcriptURLsBySessionID[session.id] = TranscriptDocumentStore.editableURL(in: session.folderURL)
+            transcriptionFeature.setTranscriptURL(
+                TranscriptDocumentStore.editableURL(in: session.folderURL),
+                for: session.id
+            )
             rebuildSearchDocument(
                 for: session,
                 publicationFence: workspacePublicationFence
@@ -1948,9 +1919,7 @@ final class AppModel: ObservableObject {
             meetingIntelligenceCoordinator.remove(sessionID: session.id)
             if playingSessionID == session.id { stopPlayback() }
             sessions.removeAll { $0.id == session.id }
-            transcriptionStatesBySessionID.removeValue(forKey: session.id)
-            transcriptURLsBySessionID.removeValue(forKey: session.id)
-            transcriptLogURLsBySessionID.removeValue(forKey: session.id)
+            transcriptionFeature.removeProjection(for: session.id)
             refreshSessions()
             statusMessage = "Moved \(session.displayName) to Trash"
         } catch {

@@ -323,7 +323,7 @@ git commit -m "feat: add native recorder motion primitives"
 - Consumes: Task 1 policy/observed types, Task 2 transition/progress/button primitives, current immutable `MeetingIntelligencePresentation`, and existing `MeetingIntelligenceActions` closures.
 - Produces: one exclusive `MeetingIntelligenceActionGroup`, status tone, opaque output sections, accessible working/failure/ready states, and optional observed-snapshot feedback input. It creates no job or feature state.
 
-- [ ] **Step 1: Write RED phase-matrix tests**
+- [x] **Step 1: Write RED phase-matrix tests**
 
 Add explicit expectations for `.notGenerated`, `.checkingAvailability`, `.generating`, `.ready`, `.stale`, `.failed`, `.cancelled`, and `.interrupted`. The expected projection is:
 
@@ -331,16 +331,17 @@ Add explicit expectations for `.notGenerated`, `.checkingAvailability`, `.genera
 XCTAssertEqual(unconfirmed.actionGroup, .availability(checkAgain: true))
 XCTAssertEqual(checking.actionGroup, .working)
 XCTAssertEqual(generating.actionGroup, .working)
-XCTAssertEqual(ready.actionGroup, .ready(applySuggestedTitle: false))
-XCTAssertEqual(staleProtected.actionGroup, .ready(applySuggestedTitle: true))
-XCTAssertEqual(failed.actionGroup, .recovery(applySuggestedTitle: false))
-XCTAssertEqual(cancelled.actionGroup, .recovery(applySuggestedTitle: false))
-XCTAssertEqual(interrupted.actionGroup, .recovery(applySuggestedTitle: false))
+XCTAssertEqual(ready.actionGroup, .ready(checkAgain: false, applySuggestedTitle: false))
+XCTAssertEqual(staleProtected.actionGroup, .ready(checkAgain: false, applySuggestedTitle: true))
+XCTAssertEqual(failed.actionGroup, .recovery(checkAgain: false, applySuggestedTitle: false))
+XCTAssertEqual(cancelled.actionGroup, .recovery(checkAgain: false, applySuggestedTitle: false))
+XCTAssertEqual(interrupted.actionGroup, .recovery(checkAgain: false, applySuggestedTitle: false))
+XCTAssertEqual(readyUnavailable.actionGroup, .ready(checkAgain: true, applySuggestedTitle: false))
 ```
 
 Also assert the exact manual-title copy and `Manual title protected` accessibility label.
 
-- [ ] **Step 2: Write RED AppKit render/interaction tests**
+- [x] **Step 2: Write RED AppKit render/interaction tests**
 
 In the new dedicated render file, host `MeetingIntelligenceSectionView` directly and assert every phase exposes only its current command IDs. For the real-duration replacement test:
 
@@ -354,9 +355,11 @@ try host.click(RecorderActionID.meetingIntelligenceCancel)
 XCTAssertEqual(state.invokedActions.filter { $0 == "cancel" }.count, 1)
 ```
 
-The host uses real `NSEvent` mouse-down/up events. It proves that the outgoing Generate command is stale immediately while the incoming Cancel command is routable immediately; it does not wait for animation completion before invoking Cancel.
+The host uses one persistent `NSHostingView` whose root observes an `ObservableObject` render state. Its real `NSEvent` mouse-down/up events must invoke the actual `Button` closures; click helpers must never append to `invokedActions` themselves. It proves that the outgoing Generate command is stale immediately while the incoming Cancel command is routable immediately; it does not wait for animation completion before invoking Cancel.
 
-- [ ] **Step 3: Run RED**
+The render matrix must cover initial availability, both working phases, normal ready, ready with unavailable feedback, protected-title ready, and all recovery phases. Each fixture asserts the exact current action IDs and the absence of every stale action ID.
+
+- [x] **Step 3: Run RED**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'MeetingIntelligencePresentationTests|MeetingIntelligenceSectionRenderTests'
@@ -364,24 +367,26 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'Me
 
 Expected: compile/assertion failure for missing `actionGroup` and transition behavior.
 
-- [ ] **Step 4: Implement the exclusive state tree**
+- [x] **Step 4: Implement the exclusive state tree**
 
 ```swift
 enum MeetingIntelligenceActionGroup: Equatable, Sendable {
     case availability(checkAgain: Bool)
     case working
-    case ready(applySuggestedTitle: Bool)
-    case recovery(applySuggestedTitle: Bool)
+    case ready(checkAgain: Bool, applySuggestedTitle: Bool)
+    case recovery(checkAgain: Bool, applySuggestedTitle: Bool)
 }
 
 enum RecorderStatusTone: Equatable, Sendable { case neutral, working, success, warning }
 ```
 
-Map phases once in `MeetingIntelligenceSectionPresentation.make`, then render actions through one structural switch inside `RecorderStatusTransition(value: section.actionGroup)`. Keep `Check Again` plus `Generate` in `.availability(true)`, `Cancel` in `.working`, `Regenerate` plus optional Apply in `.ready`, and `Retry Generation` plus optional Apply in `.recovery`. `RecorderStatusTransition` alone disables and accessibility-hides its outgoing layer; never disable the incoming action group as part of animation.
+Map phases once in `MeetingIntelligenceSectionPresentation.make`, then render actions through one structural switch inside `RecorderStatusTransition(value: section.actionGroup)`. Keep `Check Again` plus `Generate` in `.availability(true)`, `Cancel` in `.working`, `Regenerate` plus optional Check Again/Apply in `.ready`, and `Retry Generation` plus optional Check Again/Apply in `.recovery`. The `checkAgain` value on ready/recovery preserves the existing PR #7 contract where durable output may coexist with a later availability warning. `RecorderStatusTransition` alone disables and accessibility-hides its outgoing layer; never disable the incoming action group as part of animation.
 
-Use `RecorderIndeterminateProgress` only for working states. Existing summaries may remain visible while regenerating if present. Render summary/title in stable content surfaces with opacity/≤6-point reveal; render failure status in orange without shake. Apply `.accessibilityLabel("Manual title protected")` to the exact visible manual-title explanation while preserving its existing identifier and copy. The completion check and generated-title highlight are driven only when an optional `RecorderObservedSnapshot` is supplied; nil or initial-ready input renders statically.
+Use `RecorderIndeterminateProgress` only for working states. Existing summaries may remain visible while regenerating if present. Render summary/title in stable content surfaces with opacity/≤6-point reveal; render failure status in orange without shake. Apply `.accessibilityLabel("Manual title protected")` to the exact visible manual-title explanation while preserving its existing identifier and copy.
 
-- [ ] **Step 5: Run GREEN, regress exact PR #7 behavior, and commit**
+Keep the optional `RecorderObservedSnapshot` as view-local presentation input: store the initial visible snapshot without feedback, compare each later visible snapshot with `RecorderObservedTransition.feedback`, and update the stored snapshot even when feedback is `.none`. A same-session non-ready→ready update may trigger only the transient completion check; a strictly newer same-session ready→ready displayed-title change may trigger only the transient title highlight when manual-title protection is false. Nil input, initial-ready input, cross-session replacement, stale revisions, and protected titles render without feedback. Under Reduce Motion, feedback may use opacity or a static accent only—no movement, scale, or travelling stroke. Add render assertions for initial-ready static, working→ready completion, newer ready→ready title highlight, and protected-title suppression.
+
+- [x] **Step 5: Run GREEN, regress exact PR #7 behavior, and commit**
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecorderMotionPolicyTests|MeetingIntelligencePresentationTests|MeetingIntelligenceSectionRenderTests|MeetingIntelligenceSheetRenderTests'

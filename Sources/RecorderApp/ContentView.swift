@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject private var model: AppModel
+    @ObservedObject private var playbackFeature: PlaybackFeatureModel
     @State private var autoMeetingPanel:
         any TeamsAutoMeetingCountdownPresenting
     @State private var playbackWindow:
@@ -24,6 +25,9 @@ struct ContentView: View {
         navigationOverride: Binding<RecorderNavigationState>? = nil
     ) {
         self.model = model
+        _playbackFeature = ObservedObject(
+            wrappedValue: model.playbackFeature
+        )
         _autoMeetingPanel = State(
             initialValue: autoMeetingPanelFactory.makePresenter()
         )
@@ -54,7 +58,7 @@ struct ContentView: View {
             }
         }
         .onChange(
-            of: model.playingSessionID,
+            of: playbackFeature.activeSessionID,
             initial: true
         ) { _, sessionID in
             guard sessionID != nil else {
@@ -62,7 +66,7 @@ struct ContentView: View {
                 return
             }
             playbackWindow.present(
-                presentation: model.playbackPresentation,
+                presentation: playbackFeature.presentation,
                 togglePlayback: model.playbackToggle,
                 stopPlayback: {
                     model.stopPlayback()

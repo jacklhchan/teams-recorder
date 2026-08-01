@@ -70,7 +70,6 @@ final class AppModel: ObservableObject {
     @Published var lastHealthReport: RecordingHealthReport?
     @Published private(set) var lastRecordingSavedAsM4A = false
     @Published var isRunningTestRecording = false
-    @Published var playingSessionID: RecordingSession.ID?
     @Published private(set) var inputMuteControlAvailable = false
     @Published private(set) var virtualMicInstallationState: VirtualMicInstallationState = .absent
     @Published private(set) var teamsMuteSyncStatus: TeamsMuteSyncStatus = .disabled
@@ -158,11 +157,7 @@ final class AppModel: ObservableObject {
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
-    private let playbackCoordinator: any PlaybackCoordinating
-    let playbackPresentation: PlaybackPresentationModel
-    private var playbackLoadTask: Task<Void, Never>?
-    private var playbackGeneration: UInt64 = 0
-    private var playbackSessionID: RecordingSession.ID?
+    let playbackFeature: PlaybackFeatureModel
     private let appPaths: AppPaths
     private let capturePersistence: CaptureSelectionPersistence
     private let inputDevices: () -> [AudioDevice]
@@ -321,6 +316,7 @@ final class AppModel: ObservableObject {
             RecordingSessionMutationGate
         ) -> MeetingIntelligenceJobCoordinator)? = nil,
         playbackCoordinator: (any PlaybackCoordinating)? = nil,
+        playbackFeature: PlaybackFeatureModel? = nil,
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
         teamsIntegrationScheduler: @escaping (
             @escaping @MainActor @Sendable () -> Void
@@ -413,12 +409,17 @@ final class AppModel: ObservableObject {
         self.teamsScreenRefreshTick = teamsScreenRefreshTick
         self.teamsScreenDisconnectCleanupScheduler =
             teamsScreenDisconnectCleanupScheduler
-        let activePlaybackCoordinator =
-            playbackCoordinator ?? PlaybackCoordinator()
-        self.playbackCoordinator = activePlaybackCoordinator
-        playbackPresentation = PlaybackPresentationModel(
-            player: activePlaybackCoordinator.player
+        precondition(
+            playbackCoordinator == nil || playbackFeature == nil,
+            "Inject either a playback coordinator or playback feature, not both."
         )
+        if let playbackFeature {
+            self.playbackFeature = playbackFeature
+        } else {
+            self.playbackFeature = PlaybackFeatureModel(
+                coordinator: playbackCoordinator ?? PlaybackCoordinator()
+            )
+        }
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
@@ -445,8 +446,8 @@ final class AppModel: ObservableObject {
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
-        self.playbackCoordinator.onSnapshot = { [weak self] snapshot in
-            self?.handlePlaybackSnapshot(snapshot)
+        self.playbackFeature.onStatusMessage = { [weak self] message in
+            self?.statusMessage = message
         }
         transcriptionCoordinator.objectWillChange
             .sink { [weak self] in
@@ -530,7 +531,6 @@ final class AppModel: ObservableObject {
     deinit {
         storageMonitorTask?.cancel()
         testRecordingStopTask?.cancel()
-        playbackLoadTask?.cancel()
         teamsScreenRefreshTask?.cancel()
         teamsMuteRelay.invalidate()
         teamsMuteSyncClient.stop()
@@ -599,6 +599,7 @@ final class AppModel: ObservableObject {
     }
 
     func shutdown() {
+        playbackFeature.shutdown()
         transcriptionCoordinator.shutdown()
         meetingIntelligenceCoordinator.shutdown()
     }
@@ -1505,45 +1506,35 @@ final class AppModel: ObservableObject {
         return projected
     }
 
-    var playbackPlayer: AVPlayer { playbackPresentation.player }
-    var playbackProgress: TimeInterval { playbackPresentation.progress }
-    var playbackDuration: TimeInterval { playbackPresentation.duration }
-    var isPlaybackActive: Bool { playbackPresentation.isPlaying }
+    var playingSessionID: RecordingSession.ID? { playbackFeature.activeSessionID }
+    var playbackPresentation: PlaybackPresentationModel {
+        playbackFeature.presentation
+    }
+    var playbackPlayer: AVPlayer { playbackFeature.presentation.player }
+    var playbackProgress: TimeInterval { playbackFeature.presentation.progress }
+    var playbackDuration: TimeInterval { playbackFeature.presentation.duration }
+    var isPlaybackActive: Bool { playbackFeature.presentation.isPlaying }
 
     func play(session: RecordingSession) {
-        startPlayback(session: session, successStatus: "Playing \(session.displayName)")
+        playbackFeature.play(
+            session,
+            successStatus: "Playing \(session.displayName)"
+        )
     }
 
     func playbackToggle() {
-        guard playbackSessionID != nil else { return }
-        if isPlaybackActive {
-            playbackCoordinator.pause()
-        } else {
-            playbackCoordinator.play()
-        }
+        playbackFeature.toggle()
     }
 
     func stopPlayback(resetStatus: Bool = true) {
-        playbackGeneration &+= 1
-        playbackLoadTask?.cancel()
-        playbackLoadTask = nil
-        playbackSessionID = nil
-        playbackCoordinator.stop()
-        playingSessionID = nil
-        playbackPresentation.clear()
+        playbackFeature.stop()
         if resetStatus {
             statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
         }
     }
 
     func seekPlayback(to time: TimeInterval) {
-        guard playbackSessionID != nil else { return }
-        let generation = playbackGeneration
-        let coordinator = playbackCoordinator
-        Task { [weak self, coordinator] in
-            await coordinator.seek(to: time)
-            guard let self, self.playbackGeneration == generation else { return }
-        }
+        playbackFeature.seek(to: time)
     }
 
     func open(session: RecordingSession) {
@@ -2007,8 +1998,8 @@ final class AppModel: ObservableObject {
                     for: result.folderURL,
                     recordingURL: result.recordingURL
                 )
-                startPlayback(
-                    session: session,
+                playbackFeature.play(
+                    session,
                     successStatus:
                         "Test saved and playing: \(result.health.summary)"
                 )
@@ -2028,47 +2019,6 @@ final class AppModel: ObservableObject {
               token == nil || token == pendingToken else { return }
         automaticStopIntentToken = nil
         teamsAutoMeetingCoordinator.automaticStopCompleted()
-    }
-
-    private func startPlayback(session: RecordingSession, successStatus: String) {
-        playbackGeneration &+= 1
-        let generation = playbackGeneration
-        playbackLoadTask?.cancel()
-        playbackCoordinator.stop()
-        playbackSessionID = session.id
-        playbackPresentation.begin(session: session)
-        playingSessionID = session.id
-        let coordinator = playbackCoordinator
-        playbackLoadTask = Task { [weak self, coordinator] in
-            do {
-                try await coordinator.load(session)
-                guard !Task.isCancelled,
-                      let self,
-                      self.playbackGeneration == generation,
-                      self.playbackSessionID == session.id else { return }
-                coordinator.play()
-                self.statusMessage = successStatus
-                self.playbackLoadTask = nil
-            } catch {
-                guard !Task.isCancelled,
-                      let self,
-                      self.playbackGeneration == generation,
-                      self.playbackSessionID == session.id else { return }
-                self.playbackLoadTask = nil
-                self.playbackSessionID = nil
-                self.playingSessionID = nil
-                self.playbackPresentation.clear()
-                self.statusMessage = "Playback failed: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func handlePlaybackSnapshot(_ snapshot: PlaybackSnapshot) {
-        guard snapshot.sessionID == playbackSessionID else { return }
-        if playingSessionID != snapshot.sessionID {
-            playingSessionID = snapshot.sessionID
-        }
-        playbackPresentation.apply(snapshot)
     }
 
     func requestSystemAudioPermission() {

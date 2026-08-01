@@ -41,6 +41,13 @@ struct MeetingIntelligenceSuggestedTitleApplier: @unchecked Sendable {
                 guard metadataMatchesCapturedValue(metadata, request: request) else {
                     return false
                 }
+                // A repeated click can outlive the Library publication which
+                // refreshed the sheet. Once this exact MI-owned title is
+                // canonical, it is a successful no-op: do not create another
+                // durable metadata write or publication.
+                guard !isExactAppliedMeetingIntelligenceTitle(metadata, request: request) else {
+                    return false
+                }
                 // The reader check is intentionally repeated immediately
                 // before the metadata write: a manually edited transcript
                 // must never receive a title generated from old bytes.
@@ -102,5 +109,13 @@ struct MeetingIntelligenceSuggestedTitleApplier: @unchecked Sendable {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func isExactAppliedMeetingIntelligenceTitle(
+        _ metadata: RecordingSessionMetadata,
+        request: MeetingIntelligenceSuggestedTitleRequest
+    ) -> Bool {
+        metadata.titleOrigin == .meetingIntelligence
+            && normalizedTitle(metadata.title) == normalizedTitle(request.artifact.suggestedTitle)
     }
 }

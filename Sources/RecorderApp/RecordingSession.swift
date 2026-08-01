@@ -33,7 +33,25 @@ struct RecordingSession: Identifiable, Hashable, Sendable {
     }
 
     var displayName: String {
-        metadata.title ?? folderURL.lastPathComponent
+        Self.resolvedDisplayName(
+            metadata: metadata,
+            fallbackFolderName: folderURL.lastPathComponent
+        )
+    }
+
+    /// Imported sessions have UUID-owned physical folders. Those folder names
+    /// are not user-facing when legacy metadata has no source-file title.
+    static func resolvedDisplayName(
+        metadata: RecordingSessionMetadata,
+        fallbackFolderName: String
+    ) -> String {
+        if let title = metadata.title {
+            return title
+        }
+        if metadata.source == .imported {
+            return "Imported recording"
+        }
+        return fallbackFolderName
     }
 
     var tags: [String] { metadata.tags }
@@ -85,7 +103,34 @@ enum ManualTranscriptionImportError: LocalizedError {
 enum ManualTranscriptionImporter {
     static let supportedExtensions: Set<String> = ["m4a", "mp3", "wav", "flac", "aac", "aiff", "aif", "caf"]
 
+    struct ImportOperations {
+        let makeFolderName: (Date) -> String
+        let copyItem: (URL, URL) throws -> Void
+        let saveMetadata: (RecordingSessionMetadata, URL) throws -> Void
+
+        static let live = ImportOperations(
+            makeFolderName: { now in
+                "manual-\(folderStamp.string(from: now))-\(UUID().uuidString)"
+            },
+            copyItem: { sourceURL, recordingURL in
+                try FileManager.default.copyItem(at: sourceURL, to: recordingURL)
+            },
+            saveMetadata: { metadata, folder in
+                try RecordingSessionMetadataStore.save(metadata, in: folder)
+            }
+        )
+    }
+
     static func importAudioFile(_ sourceURL: URL, into baseFolder: URL, now: Date = Date()) throws -> RecordingSession {
+        try importAudioFile(sourceURL, into: baseFolder, now: now, operations: .live)
+    }
+
+    static func importAudioFile(
+        _ sourceURL: URL,
+        into baseFolder: URL,
+        now: Date,
+        operations: ImportOperations
+    ) throws -> RecordingSession {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: sourceURL.path) else {
             throw ManualTranscriptionImportError.missingSourceFile
@@ -96,21 +141,30 @@ enum ManualTranscriptionImporter {
             throw ManualTranscriptionImportError.unsupportedAudioFile
         }
 
-        let folder = baseFolder
-            .appendingPathComponent("manual-\(folderStamp.string(from: now))", isDirectory: true)
-        try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
-
-        let recordingURL = folder.appendingPathComponent("recording.\(fileExtension)")
-        if fileManager.fileExists(atPath: recordingURL.path) {
-            try fileManager.removeItem(at: recordingURL)
-        }
-        try fileManager.copyItem(at: sourceURL, to: recordingURL)
-        try RecordingSessionMetadataStore.save(
-            .init(source: .imported),
-            in: folder
+        try fileManager.createDirectory(at: baseFolder, withIntermediateDirectories: true)
+        let folder = baseFolder.appendingPathComponent(
+            operations.makeFolderName(now),
+            isDirectory: true
         )
+        try fileManager.createDirectory(at: folder, withIntermediateDirectories: false)
 
-        return RecordingSessionStore.session(for: folder, recordingURL: recordingURL)
+        do {
+            let recordingURL = folder.appendingPathComponent("recording.\(fileExtension)")
+            try operations.copyItem(sourceURL, recordingURL)
+            try operations.saveMetadata(
+                .init(
+                    title: sourceURL.deletingPathExtension().lastPathComponent,
+                    titleOrigin: .unset,
+                    source: .imported
+                ),
+                folder
+            )
+
+            return RecordingSessionStore.session(for: folder, recordingURL: recordingURL)
+        } catch {
+            try? fileManager.removeItem(at: folder)
+            throw error
+        }
     }
 
     private static let folderStamp: DateFormatter = {
@@ -157,6 +211,11 @@ enum RecordingSessionStore {
             metadata.capturedTeamsWindow = nil
         }
 
+        let displayName = RecordingSession.resolvedDisplayName(
+            metadata: metadata,
+            fallbackFolderName: folder.lastPathComponent
+        )
+
         return RecordingSession(
             id: folder,
             folderURL: folder,
@@ -167,7 +226,7 @@ enum RecordingSessionStore {
             metadata: metadata,
             searchDocument: RecordingLibrarySearchDocument.load(
                 folderURL: folder,
-                displayName: metadata.title ?? folder.lastPathComponent,
+                displayName: displayName,
                 createdAt: createdAt,
                 metadata: metadata
             )

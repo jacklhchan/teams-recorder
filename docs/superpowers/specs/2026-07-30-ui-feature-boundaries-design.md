@@ -2,9 +2,15 @@
 
 **Date:** 2026-07-30
 **Status:** Approved architecture baseline with approved macOS 26 PR A revision
+and approved PR B/C Meeting Intelligence amendment
 **Approved baseline SHA:** `8f110466093c9a3fabc5f5d1fad3c69afa849c53`
 **Approval date:** 2026-07-30
 **macOS 26 PR A revision approval:** 2026-07-31
+**PR B/C amendment review:** Approved 2026-08-01
+**Approved PR B/C amendment content SHA:**
+`cf7c83a120610eb62bd9b32de75b02db169d4767`
+**PR B stacked base:** Draft PR #7, `codex/meeting-intelligence-summary-title`
+at `ab9395598505f1272f2efa7d8918b8ac69e96fd2`
 **Revision dependency:** PR #5 merged at
 `b84b79fefd915a97beaf8c97f667e774ef0d7ab7`
 **Delivery:** Three sequential, bounded Draft pull requests
@@ -18,7 +24,8 @@ containers. This makes otherwise local changes risky:
 
 - `AppModel` owns capture, permissions, recording, storage, Teams integration,
   virtual microphone state, playback, library operations, provider settings,
-  transcription, and global status.
+  transcription, Meeting Intelligence availability and job routing,
+  summary/title presentation, and global status.
 - `ContentView` contains the main workspace, recording controls, permissions,
   capture settings, Teams controls, virtual microphone controls, library,
   transcript editing, metadata editing, and provider settings.
@@ -41,19 +48,25 @@ to merge.
 4. Keep lifecycle and business rules in the existing coordinators.
 5. Keep persistence and credential handling in repositories.
 6. Preserve exactly one owner for recording lifecycle, Teams auto-meeting
-   state, playback runtime, provider storage, and transcription jobs.
+   state, playback runtime, provider storage, transcription jobs, and Meeting
+   Intelligence jobs.
 7. Prevent high-frequency recording or meter updates from republishing
    unrelated library, settings, or transcription views.
-8. Preserve all current recorder, Teams, playback, transcription, library,
-   metadata, and recovery behavior.
+8. Preserve all current recorder, Teams, playback, transcription, Meeting
+   Intelligence summary/title, title-origin, stale-result, library, metadata,
+   and recovery behavior.
 9. Deliver the work in three independently reviewable and reversible PRs.
+10. Give PR B four independent UI-facing boundaries so ASR success remains
+    durable and usable even when later LLM availability or generation fails.
 
 ## 3. Non-goals
 
 This program does not add:
 
 - timestamped transcript UI;
-- AI summaries, actions, or meeting intelligence;
+- new Meeting Intelligence outputs beyond the existing summary, suggested
+  title, availability, regeneration, stale-result, and recovery contract,
+  including action items, decisions, risks, questions, or follow-up drafts;
 - new ASR providers or changes to native transcription transport;
 - Windows migration or cross-platform UI work;
 - recording/media format changes;
@@ -69,7 +82,28 @@ It also does not:
 - mirror mutable state between `AppModel` and a feature model;
 - cherry-pick the previous Liquid Glass branch wholesale.
 
+PR B and PR C also do not reopen the provider transport, retry limits,
+artifact formats, title-origin policy, prompt contract, or automatic-generation
+eligibility implemented by Draft PR #7. They move ownership without changing
+those product semantics.
+
 ## 4. Delivery Strategy
+
+The Meeting Intelligence ownership amendment considered three placements:
+
+1. **Selected — a fourth PR B feature boundary.** This keeps ASR and LLM
+   lifecycle, presentation, cancellation, and failure domains separate while
+   allowing Library to remain the canonical session/search owner.
+2. **Rejected — fold Meeting Intelligence into
+   `TranscriptionFeatureModel`.** That would couple ASR success to LLM
+   availability/generation state and recreate a large workflow feature.
+3. **Rejected — leave Meeting Intelligence in `AppModel` until PR C.** That
+   would make the PR B ownership cutover incomplete and force PR C to move
+   live MI state while also changing the composition root.
+
+The selected design keeps three delivery PRs. It changes the number of PR B
+feature boundaries from three to four; it does not create a fourth delivery
+PR.
 
 ### PR A — Workspace shell and UI source decomposition
 
@@ -91,12 +125,13 @@ PR A must not change lifecycle ownership, provider behavior, session storage,
 transcription publication, capture behavior, Teams behavior, or playback
 window ownership.
 
-### PR B — Library, transcription, and playback presentation boundaries
+### PR B — Library, transcription, Meeting Intelligence, and playback boundaries
 
 PR B introduces:
 
 - `LibraryFeatureModel`;
 - `TranscriptionFeatureModel`;
+- `MeetingIntelligenceFeatureModel`;
 - the focused playback model boundary around the existing
   `PlaybackPresentationModel` and playback coordinator;
 - small state snapshots and command protocols consumed by the Recordings and
@@ -104,24 +139,73 @@ PR B introduces:
 
 During PR B, the existing single `AppModel` is the temporary construction
 owner. It constructs and retains exactly one `LibraryFeatureModel`, exactly one
-`TranscriptionFeatureModel`, and exactly one playback feature boundary.
-`AppModel` may expose read-only projections and forwarding commands, but must
-not mirror those features' mutable state, tasks, generations, callback
-dictionaries, or coordinator dictionaries.
+`TranscriptionFeatureModel`, exactly one `MeetingIntelligenceFeatureModel`, and
+exactly one `PlaybackFeatureModel`. Each can also be injected as an already
+constructed instance for tests and the later PR C handoff, but there is never
+more than one live instance of any boundary. `AppModel` may expose read-only
+projections and forwarding commands, but must not mirror those features'
+mutable state, tasks, attempts, generations, leases, callback dictionaries, or
+coordinator dictionaries.
+
+`TranscriptionFeatureModel` is the ASR boundary only. It owns ASR job
+presentation, Start/Cancel commands, transcription state and log projections,
+and emission of the existing immutable `TranscriptPublished` event. Exactly
+one injected `TranscriptionJobCoordinator` remains the lifecycle owner. The
+feature neither imports Meeting Intelligence types nor invokes LLM work.
+
+`MeetingIntelligenceFeatureModel` owns availability checking,
+Generate/Regenerate/Retry/Cancel, summary and suggested-title presentation,
+stale-transcript detection, and title-ownership commands. It is the sole
+UI-facing boundary over exactly one injected
+`MeetingIntelligenceJobCoordinator`; no sibling feature or `AppModel` retains
+parallel MI attempts, tasks, generations, leases, presentations, or reload
+dictionaries. “Owns availability checking” means the feature owns the
+UI-facing Check command and availability presentation; the coordinator owns
+the asynchronous endpoint-discovery attempt and its immutable provider
+snapshot. No second provider model or editable provider state is introduced.
+
+`LibraryFeatureModel` owns the canonical session list, search documents,
+transcript and metadata refresh, imported-session publication, and move to
+trash. It receives typed Transcription and Meeting Intelligence publication
+events and performs only the affected session refresh/index update.
+
+`PlaybackFeatureModel` owns playback loading, active-session identity, load and
+snapshot generations, transport commands, and the existing
+`PlaybackPresentationModel`. The AppKit playback-window presenter remains
+owned only by `ContentView`.
 
 Library refresh and search-document rebuild remain automatic after recording
 publication, successful transcription publication, and transcript editing.
 Transcription continues to use one immutable provider snapshot per job and one
-shared provider repository.
+shared provider repository. Meeting Intelligence availability and generation
+also capture one immutable provider snapshot per attempt from that same
+repository. Saving provider settings affects future ASR and MI jobs only.
 
 PR B introduces a typed save outcome for transcript and metadata publication.
 It identifies which artifact succeeded and carries a user-facing failure.
 Detail drafts may become clean only for artifacts confirmed as saved; partial
 failure leaves the affected draft dirty.
 
-The corresponding private state and task ownership must leave `AppModel` in
-the same PR. Temporary `AppModel` forwarding APIs may exist only when they
-delegate to the single feature owner.
+The corresponding private state, refresh generation, task, and lifecycle
+ownership must leave `AppModel` in the same PR. Temporary `AppModel`
+forwarding APIs may exist only when they delegate to the single feature owner.
+`AppModel` temporarily owns the typed cross-feature bridge registrations in PR
+B, not feature state. Those registrations have explicit start/stop and stale
+event invalidation and are transferred once in PR C. The bridge may retain
+only opaque subscription/admission tokens and a bridge-local stale-delivery
+fence. These are not copied feature attempts, tasks, playback loads, session
+refreshes, transcription generations, or MI generations and are inaccessible
+outside the bridge.
+
+On PR B runtime teardown, `AppModel` idempotently closes bridge admission and
+unregisters its Transcription, Meeting Intelligence, Library, and Playback
+callbacks before cancelling or releasing any PR B feature/coordinator. A
+queued callback accepted after admission closes has no consumer-visible
+effect.
+
+PR B is a Draft stacked on Draft PR #7 so its review diff contains only the
+four-boundary refactor and its tests. After PR #7 merges, PR B is rebased onto
+the latest `main` and retargeted to `main`. It must never merge before its base.
 
 ### PR C — Record, integrations, settings, and composition boundary
 
@@ -130,13 +214,20 @@ PR C introduces:
 - `RecordFeatureModel`;
 - `IntegrationsFeatureModel`;
 - `SettingsFeatureModel`;
-- `AppCoordinator` as the explicit composition boundary.
+- `AppCoordinator` as the explicit composition boundary;
+- `WorkspaceFolderRepository` as the repository-level output/workspace-folder
+  source of truth.
+
+PR C migrates the existing `AppModel.outputFolder` and
+`WorkspacePublicationFence` compatibility source into that one repository and
+revision stream. The old source is removed before the repository stream is
+enabled; there is no parallel live folder source.
 
 `AppCoordinator` wires feature models, existing coordinators, repositories,
 and platform adapters. It does not implement recording or Teams state machines
 and does not construct AppKit presenter instances.
 
-PR C moves construction of the three PR B feature boundaries from `AppModel`
+PR C moves construction of the four PR B feature boundaries from `AppModel`
 to `AppCoordinator`. This is an ownership handoff, not a state migration:
 PR C creates one instance of each feature at composition time, injects those
 same instances into the narrow `AppModel` compatibility adapter, and removes
@@ -154,8 +245,13 @@ PR that changes the runtime and floating-panel presenter protocols together.
 PR B and by `AppCoordinator` after the PR C construction handoff, always using
 the shared provider repository. `SettingsFeatureModel` owns its persisted
 Settings UI projection and delegates provider edits to that model.
-`TranscriptionFeatureModel` reads only repository/job-coordinator results and
-never creates or owns a second editable provider draft.
+`TranscriptionFeatureModel` and `MeetingIntelligenceFeatureModel` read only
+repository/job-coordinator results and never create or own a second editable
+provider draft.
+
+PR C is stacked on PR B while PR B remains open. After PR B merges, PR C is
+rebased onto the latest `main` and retargeted. Neither PR adds product behavior
+or bundles unrelated Windows work.
 
 ## 5. Target Architecture
 
@@ -164,23 +260,23 @@ LocalMeetingRecorderApp / AppRuntime
                  |
                  v
           AppCoordinator
-         /       |        \
-        v        v         v
- RecordFeature  Library    Settings
- Model          Feature    Feature
-        \        Model      Model
-         \       |          |
-          v      v          v
-      Transcription     Integrations
-      FeatureModel      FeatureModel
-             \             /
-              v           v
-        Existing coordinators
-      / capture / Teams / jobs /
-             |
-             v
-        Repositories and
-        platform adapters
+       |-- RecordFeatureModel
+       |-- LibraryFeatureModel
+       |-- TranscriptionFeatureModel
+       |-- MeetingIntelligenceFeatureModel
+       |-- PlaybackFeatureModel
+       |-- IntegrationsFeatureModel
+       `-- SettingsFeatureModel
+                  |
+                  v
+      Existing lifecycle coordinators
+   / capture / Teams / ASR / MI / playback /
+                  |
+                  v
+      Repositories and platform adapters
+
+ ContentView alone retains:
+   playback-window presenter + Teams-countdown presenter
 ```
 
 Dependency direction is one-way:
@@ -197,8 +293,8 @@ must not read or mutate a sibling feature model's private tasks, generations,
 timers, or coordinator dictionaries.
 
 The diagram is the PR C target. PR B uses `AppModel` as the temporary
-construction shell for the three PR B feature boundaries; it does not
-introduce `AppCoordinator` early.
+construction shell and typed-event bridge owner for the four PR B feature
+boundaries; it does not introduce `AppCoordinator` early.
 
 All UI-facing feature models and `AppCoordinator` are `@MainActor`.
 Long-running or blocking work remains behind existing asynchronous
@@ -211,6 +307,7 @@ the main actor.
 |---|---|---|
 | App lifetime and shutdown | `AppRuntime` | application lifecycle only |
 | Feature construction and wiring | PR B: single `AppModel`; PR C: `AppCoordinator` | initializer/composition only; never parallel instances |
+| Cross-feature callback registrations and bridge-admission token | PR B: single `AppModel`; PR C: `AppCoordinator` | one phase-owned bridge; token invalidates queued delivery without mirroring any feature generation; old callbacks removed before replacement |
 | Active capture attempt, lifecycle generation, and auto/manual recording ownership | `RecordingSessionCoordinator` | typed recording commands |
 | Stop orchestration, media/metadata finalization settlement, and semantic finalization outcome | `RecordingSessionCoordinator` using injected engine/repository operations | one typed stop/finalize command and one outcome |
 | `RecordingEngine` instance lifetime and construction | PR A/B: single `AppModel`; PR C: `AppCoordinator` | composition only; exactly one injected instance |
@@ -220,13 +317,20 @@ the main actor.
 | Teams connection, pairing, Auto Meeting, and mute-sync integration projections | `IntegrationsFeatureModel` | Teams adapters, ingress, and coordinator events |
 | Library sessions, refresh generation, search documents | `LibraryFeatureModel` | library commands and publication events |
 | Active transcription task, generation, state, result publication | `TranscriptionJobCoordinator` exposed by `TranscriptionFeatureModel` | start/cancel and coordinator callbacks |
+| ASR presentation, Start/Cancel routing, transcript/log projections | `TranscriptionFeatureModel` | typed ASR commands and immutable coordinator snapshots |
+| Canonical `TranscriptPublished` identity | `TranscriptionJobCoordinator` | one durable publication event per accepted attempt |
+| Meeting Intelligence active attempts, generations, leases, and semantic publication identity | one `MeetingIntelligenceJobCoordinator` exposed by `MeetingIntelligenceFeatureModel` | availability/generate/regenerate/retry/cancel/title commands and coordinator callbacks |
+| Meeting Intelligence summary/title/stale/availability presentation | `MeetingIntelligenceFeatureModel` | immutable coordinator snapshots and typed commands; no copied lifecycle dictionary |
+| Meeting Intelligence artifact and recovery persistence | injected MI artifact/state repositories | repository methods only; not feature-model dictionaries |
+| Transcript, metadata, MI artifact, and title mutation serialization | one shared `RecordingSessionMutationGate` | injected into every session-artifact publisher/editor that mutates the same session |
+| Title-origin metadata mutation | session metadata repository behind the shared mutation gate | compare-and-save title command only |
 | Provider profile and secret persistence | one shared provider repository | repository methods only |
-| Immutable provider job snapshot | `TranscriptionJobCoordinator` | captured before preparation starts |
-| Playback loading/session generation | focused playback feature boundary | playback commands only |
+| Immutable provider job snapshot | the active ASR or MI coordinator attempt | captured before preparation/availability/generation starts; never replaced in flight |
+| Playback loading/session generation | `PlaybackFeatureModel` | playback commands only |
 | Playback UI snapshot | `PlaybackPresentationModel` | playback coordinator snapshots |
 | Persisted preference and provider UI projection | `SettingsFeatureModel` backed by existing repositories | settings commands only; no duplicated runtime capture state |
 | Editable provider settings draft | one `AIProviderSettingsModel`; PR B constructed by `AppModel`, PR C by `AppCoordinator` | delegated settings commands only |
-| Selected output/workspace folder and folder revision | one `WorkspaceFolderRepository` | repository command and change stream only |
+| Selected output/workspace folder and folder revision | PR B: existing `AppModel` compatibility source; PR C onward: one `WorkspaceFolderRepository` | one phase-specific source only; repository command and change stream after PR C |
 | Floating recording-panel lifetime | `AppRuntime.recordingController` | recorder-state observation and runtime shutdown |
 | Playback-window presenter lifetime | workspace shell (`ContentView`) | `playingSessionID` presentation events |
 | Teams-countdown presenter lifetime | workspace shell (`ContentView`) | auto-meeting presentation events |
@@ -256,18 +360,44 @@ folder revision. Record reads the current folder when starting or finalizing;
 Library scopes loading, recovery, and search indexes to the same revision; and
 Settings sends folder-selection commands. No feature maintains an independent
 mutable folder URL. Before PR C introduces this repository, the existing
-single `AppModel.outputFolder` remains the compatibility source of truth.
+single `AppModel.outputFolder` remains the compatibility source of truth and
+its existing `WorkspacePublicationFence` remains the only compatibility
+revision. PR B must not add a second workspace-folder source or revision.
+
+Meeting Intelligence has no AppKit presenter. Its section is part of the
+Library-owned transcript-detail presentation and receives only immutable MI
+presentation plus typed commands. It does not own a window, controller, or
+detail-sheet lifetime.
 
 ## 7. Cross-feature Commands and Events
 
 Cross-feature communication is explicit:
 
 ```text
-transcription published
-  -> LibraryFeatureModel.rebuildSearchDocument(for:)
+TranscriptionFeatureModel emits TranscriptPublished(identity, session,
+                                                     transcriptRevision,
+                                                     workspaceFence)
+  -> phase-owned bridge validates producer and workspace identity
+  -> LibraryFeatureModel.acceptTranscriptPublication(event)
+       refresh canonical session + rebuild search document exactly once
+  -> LibraryTranscriptProjectionCommitted(event.identity)
+  -> MeetingIntelligenceFeatureModel.handleTranscriptPublished(event)
+       availability eligible -> start exactly one automatic MI attempt
+       unavailable/ineligible -> start zero attempts; ASR remains successful
 
-transcript edited
-  -> LibraryFeatureModel.rebuildSearchDocument(for:)
+LibraryFeatureModel saves transcript successfully
+  -> rebuild affected search document exactly once
+  -> TranscriptEdited(libraryMutationIdentity, session,
+                      transcriptRevision, workspaceFence)
+  -> MeetingIntelligenceFeatureModel.markTranscriptChanged(event)
+       mark an existing result stale; start zero automatic attempts
+
+MeetingIntelligenceFeatureModel emits MeetingIntelligencePublished(
+    publicationIdentity, session, publicationOutcome
+)
+  -> LibraryFeatureModel.refreshAfterMeetingIntelligence(event)
+       reload canonical metadata/artifact projection and search index once
+  -> never emits a second TranscriptPublished or recording-finalization event
 
 LibraryFeatureModel.importAudio(url:, workspaceRevision:)
   -> ImportedAudioSessionReady(session, workspaceRevision)
@@ -275,16 +405,37 @@ LibraryFeatureModel.importAudio(url:, workspaceRevision:)
        provider eligible -> start exactly one job
        provider ineligible -> retain session, start zero jobs, publish recovery
 
-SettingsFeatureModel.selectWorkspaceFolder(url:)
+PR B: AppModel.setOutputFolder(url:)
+  -> advance the one existing WorkspacePublicationFence
+  -> phase bridge emits WorkspaceFolderChanged(folder, advancedFence)
+  -> LibraryFeatureModel tombstones the old projection, then invalidates
+     and refreshes the new folder once
+  -> TranscriptionFeatureModel advances the same publication fence
+  -> MeetingIntelligenceFeatureModel cancels/resets the old workspace
+  -> existing Record compatibility projection receives the new folder
+
+PR C: SettingsFeatureModel.selectWorkspaceFolder(url:)
   -> WorkspaceFolderRepository.setFolder(url:)
   -> WorkspaceFolderChanged(folder, revision)
+       -> the same Library tombstone/invalidation sequence
        -> RecordFeatureModel.invalidateFolderDependentReadiness(revision:)
-       -> LibraryFeatureModel.invalidateAndRefresh(folder:, revision:)
+       -> TranscriptionFeatureModel.advancePublicationFence(revision:)
+       -> MeetingIntelligenceFeatureModel.cancelAndResetOldWorkspace(revision:)
 
-SettingsFeatureModel.saveProviderSettings(...)
+PR B: AIProviderSettingsModel.save(...)
+PR C: SettingsFeatureModel.saveProviderSettings(...)
   -> ProviderSettingsSaved(profileRevision)
-       -> future TranscriptionFeatureModel jobs use the new revision
-       -> active TranscriptionJobCoordinator snapshot remains unchanged
+       -> future TranscriptionFeatureModel and
+          MeetingIntelligenceFeatureModel jobs use the new revision
+       -> active ASR, availability, and LLM snapshots remain unchanged
+
+LibraryFeatureModel moves a session to trash successfully
+  -> tombstone session admission in Library
+  -> SessionRemoved(libraryMutationIdentity, sessionIdentity,
+                    workspaceRevision)
+       -> TranscriptionFeatureModel.removeProjection(sessionID:)
+       -> MeetingIntelligenceFeatureModel.cancelAndRemove(sessionID:)
+       -> PlaybackFeatureModel.stopIfActive(sessionID:)
 
 RecordFeatureModel requests stop/finalization
   -> RecordingSessionCoordinator settles media finalization
@@ -309,7 +460,52 @@ TeamsAutoMeetingCoordinator.onCommand(.transferRecordingToManual)
 ```
 
 An event must not be implemented by a feature mutating another feature's
-published property.
+published property. In PR B, `AppModel` owns the bridge registrations shown
+above; in PR C, `AppCoordinator` replaces them only after the PR B callbacks
+are unregistered. The bridge calls typed commands and never reads a sibling
+feature's private state.
+
+Every semantic event carries enough immutable identity to reject stale or
+duplicate delivery: producer instance/source ID, producer generation and
+attempt ID where applicable, normalized session folder, session ID,
+transcript revision, and workspace fence/revision. Each named consumer accepts
+a given identity at most once. Producer progress changes are presentation
+updates, not semantic publication events.
+
+`MeetingIntelligencePublicationIdentity` contains the MI coordinator instance
+ID, session ID and normalized folder, MI ticket generation and attempt UUID,
+source `TranscriptDocumentRevision`, captured workspace fence/revision, and
+publication kind (`artifactAndAutomaticTitle` or `explicitSuggestedTitle`).
+Automatic work inherits the originating `TranscriptPublished.workspaceFence`.
+Manual Generate, Regenerate, Retry, and Apply Suggested Title capture the
+current workspace fence in an immutable command context at command admission;
+`MeetingIntelligenceFeatureModel` does not store a second workspace source.
+
+`MeetingIntelligencePublicationOutcome` distinguishes the combined durable
+artifact result and its automatic-title metadata result (`applied`,
+`preserved`, or `warning`) from an explicit suggested-title mutation. The
+combined artifact/automatic-title commit emits one event. Explicit Apply emits
+one later event only when metadata actually changes; a stale compare-and-save,
+failure, or no-op emits none. Automatic protection of a manual or deliberately
+empty title does not emit a second title event; it is represented by the
+combined artifact event's metadata outcome.
+
+`LibraryMutationIdentity` contains the Library feature instance/source ID, a
+mutation UUID, session ID and normalized folder, resulting transcript revision
+when applicable, and workspace fence/revision. `TranscriptEdited` is emitted
+only after transcript persistence and its affected search rebuild succeed.
+`SessionRemoved` is emitted only after the physical trash mutation succeeds
+and Library first tombstones that session identity. The tombstone rejects any
+already queued ASR or MI callback before cancellation/removal fans out to the
+other features.
+
+The transcript-publication ordering deliberately preserves the Draft PR #7
+behavior: the current Library projection and bounded search document commit
+before automatic Meeting Intelligence admission. That ordering is coordinated
+by the phase-owned bridge, not by either feature importing or owning the other.
+Once `TranscriptPublished` is durable, an availability or LLM failure changes
+only Meeting Intelligence presentation; it cannot roll back ASR success,
+remove the transcript, or replace transcription state.
 
 `ImportedAudioSessionReady` is emitted only after the file import has
 successfully created a valid session in the current workspace revision.
@@ -324,18 +520,31 @@ must reject a pending start that has not begun capture and captured an obsolete
 folder revision. An active recording retains an immutable
 `RecordingWorkspaceSnapshot(folder, revision)` through media and metadata
 finalization, so a folder change cannot redirect or discard its output.
-Library clears folder-scoped sessions, transcription projections,
-transcript/log caches, recovery state, and search generations before one
-refresh for the new revision.
+Library clears folder-scoped sessions, transcript-detail caches, recovery
+state, and search generations before one refresh for the new revision.
+Transcription advances its publication fence and clears old-workspace
+per-session state/log projections without replacing the immutable snapshot of
+an active job. Meeting Intelligence cancels and invalidates old-workspace
+attempts and presentations through its sole coordinator. In PR B this flow
+originates from the existing `AppModel.outputFolder` and
+`WorkspacePublicationFence`; only PR C replaces that source with
+`WorkspaceFolderRepository`.
 
 An active transcription continues against its original session folder and
 immutable provider snapshot. Its publication event carries the originating
-workspace revision; Library updates the matching folder index and changes the
-visible list only when that revision is still selected.
+workspace revision. Library accepts it only while that revision remains
+selected; otherwise the durable old-folder artifact remains on disk and is
+discovered on a later refresh if the user selects that folder again. PR B/PR C
+do not add a hidden multi-workspace index. An active Meeting Intelligence
+attempt is cancelled on selected-workspace change. A durable old-folder
+artifact that won a publication race remains on disk, but its event cannot
+update the newly selected Library projection.
 
-`ProviderSettingsSaved` affects only jobs started after the repository save.
-An active job continues with its immutable profile and credential snapshot,
-even if the user changes or removes the saved settings.
+`ProviderSettingsSaved` is emitted only after the shared repository commits
+the profile and credential reference. It affects only ASR and MI jobs started
+after that save. An active transcription, availability check, or generation
+continues with its immutable endpoint, authentication, model, credential, and
+prompt snapshot, even if the user changes or removes the saved settings.
 
 `RecordingFinalizationOutcome` is semantic and emitted once after media
 finalization and the source-metadata write attempt have both settled. A
@@ -344,6 +553,19 @@ not trigger a second Library refresh. Library performs exactly one targeted
 refresh/index update for the outcome's immutable workspace revision and
 changes the visible list only if that revision is selected. A
 no-active-recording result emits no Library refresh.
+
+`MeetingIntelligencePublished` is a separate semantic outcome. A generated
+artifact and any automatically applied title form one combined publication
+and cause one targeted Library reload/search-index update. An explicit Apply
+Suggested Title is a later distinct publication and also causes one targeted
+update. Neither causes a second recording-finalization refresh or a second
+transcript-publication event. Cancellation, unavailability, or generation
+failure before any durable artifact/title metadata commit causes zero Library
+publication events. If cancellation races with publication and the durable
+commit wins, the coordinator still emits exactly one immutable
+`MeetingIntelligencePublished`; Library performs its one targeted update even
+if the terminal MI presentation subsequently remains cancelled. That event
+does not restart ASR or MI.
 
 `RecordFeatureModel` never performs media or metadata finalization itself. It
 issues the typed stop command and projects the coordinator outcome. The
@@ -368,6 +590,12 @@ shell dismisses playback and countdown presenters on disappearance and
 application termination and clears their action closures before releasing
 feature references.
 
+Meeting Intelligence adds no presenter lifetime. Its transcript-detail
+section is rendered by the Library destination and disappears with that
+detail surface. MI work may continue after that sheet closes, but the feature
+and its sole coordinator never outlive `AppModel` shutdown in PR B or
+`AppCoordinator` shutdown in PR C.
+
 All UI feature models and `AppCoordinator` are `@MainActor`.
 `AppCoordinator` owns every cross-feature subscription, event bridge, and
 callback registration that it creates. Its shutdown is explicit and
@@ -376,17 +604,19 @@ idempotent:
 1. stop accepting cross-feature events and invalidate subscription
    generations;
 2. cancel cross-feature tasks and subscriptions;
-3. unregister or replace playback, transcription, Teams coordinator, and Teams
-   ingress callbacks;
+3. unregister or replace playback, transcription publication, Meeting
+   Intelligence publication, Teams coordinator, and Teams ingress callbacks;
 4. tear down feature models and then their coordinators/adapters;
 5. allow `AppRuntime` and `ContentView` to dismiss only the presenters they
    respectively own.
 
 `AppRuntime.shutdown()` first shuts down the floating recording-controller
 observer, then calls `AppCoordinator.shutdown()` exactly once after PR C.
-No queued Teams ingress event, playback snapshot, transcription callback, or
-folder-change event may target a feature or compatibility adapter after its
-teardown begins.
+No queued Teams ingress event, playback snapshot, transcription callback,
+Meeting Intelligence callback, or folder-change event may target a feature or
+compatibility adapter after its teardown begins. Bridge admission closes
+before MI and ASR cancellation begins, so cancellation persistence cannot
+re-enter a released consumer.
 
 ## 8. Recording Ownership Contract
 
@@ -545,9 +775,10 @@ description with:
 |---|---|
 | old owner | exact `AppModel` state, task, generation, callback, or resource |
 | new owner | one feature model or existing coordinator |
-| construction owner by phase | PR B: the existing single `AppModel` constructs and retains the sole Library, Transcription, and playback feature instances. PR C: `AppCoordinator` constructs the sole instances and injects them into the narrow `AppModel` adapter after removing the PR B construction path. No state is copied and no parallel instance exists. |
-| callback cutover | unregister/replace old callback before enabling the new path |
-| subscription owner by phase | PR B: `AppModel` temporarily owns only the bridges needed by the PR B features. PR C: `AppCoordinator` owns all cross-feature subscriptions and cancels them before feature/coordinator teardown. |
+| construction owner by phase | PR B: the existing single `AppModel` constructs and retains the sole Library, Transcription, Meeting Intelligence, and Playback feature instances. PR C: `AppCoordinator` constructs the sole instances and injects them into the narrow `AppModel` adapter after removing the PR B construction path. No state is copied and no parallel instance exists. |
+| event identity and delivery rule | producer instance/source ID, generation and attempt where applicable, session/folder identity, transcript revision, workspace fence/revision, named consumers, and an at-most-once assertion |
+| callback cutover | unregister/replace the old callback before enabling the new path; one producer has one phase-owned registration |
+| subscription owner by phase | PR B: `AppModel` temporarily owns exactly one transcription-publication bridge and one Meeting Intelligence-publication bridge plus the other bridges needed by the PR B features. PR C: `AppCoordinator` owns all cross-feature subscriptions and cancels them before feature/coordinator teardown. |
 | shutdown/cancel order | deterministic teardown with no callback into a released owner |
 | temporary forwarder | read/command delegation only; no mirrored mutable state |
 | removal condition | tests and reference search proving the old path is gone |
@@ -555,25 +786,33 @@ description with:
 Each cutover adds a single-instance or single-publication assertion where
 practical. `GlobalHotKeyManager`, `AppRuntime.shutdown`, Teams ingress,
 recording finalization, playback snapshots, and transcription callbacks must
-continue to enter one command path only.
+continue to enter one command path only. Meeting Intelligence publication,
+title application, transcript editing, session removal, and workspace change
+also enter one typed path only.
 
 PR B assertions prove `AppModel` retains one instance of each PR B feature and
 contains no parallel mutable state, task, generation, or dictionary for that
-feature. PR C assertions prove construction and subscription ownership moved
-to `AppCoordinator` and the narrow adapter references those same instances.
+feature. In particular, after the Library and MI cutovers, `AppModel` contains
+no session refresh/search generations, MI reload generations, MI lifecycle
+dictionary, or parallel playback/transcription state. PR C assertions prove
+construction and subscription ownership moved to `AppCoordinator` and the
+narrow adapter references those same instances.
 
 PR B defines immutable feature snapshots with per-feature revisions. Observer
 spies verify the allowed publication scope:
 
 | Event | May publish | Must not publish |
 |---|---|---|
-| meter/recording health tick | Record | Library, Settings, Transcription |
-| library refresh/search update | Library | Record, Settings, Playback |
-| transcription job state | Transcription and affected Library session | Record, Settings |
-| playback position snapshot | Playback | Record, Library, Settings, Transcription |
-| provider draft edit | Settings | Record, Library |
-| provider settings saved | Settings and future job eligibility | active Transcription job snapshot, Record, Library |
-| workspace folder changed | Record folder readiness and Library folder scope | Integrations, active immutable Transcription job |
+| meter/recording health tick | Record | Library, Settings, Transcription, Meeting Intelligence |
+| library refresh/search update | Library | Record, Settings, Playback, Meeting Intelligence |
+| transcription job phase/progress/log state | Transcription | Record, Settings, Playback, Library, Meeting Intelligence |
+| canonical transcript publication | Transcription semantic event, then affected Library projection and MI admission once each | Record, Settings, Playback, duplicate consumer delivery |
+| Meeting Intelligence phase/progress | Meeting Intelligence | Record, Settings, Playback, Transcription, Library |
+| Meeting Intelligence semantic publication/title application | Meeting Intelligence semantic event and one affected Library refresh/index update | Record, Settings, Playback, Transcription, duplicate Library refresh |
+| playback position snapshot | Playback | Record, Library, Settings, Transcription, Meeting Intelligence |
+| provider draft edit | Settings | Record, Library, Transcription, Meeting Intelligence |
+| provider settings saved | Settings and future ASR/MI job eligibility | active ASR/availability/LLM snapshots, Record, Library |
+| workspace folder changed | Record folder readiness, Library folder scope, Transcription publication fence, and MI old-workspace reset | Integrations, active immutable ASR provider snapshot, old-workspace visible projection |
 | recording finalization outcome | Record status and one Library refresh | Settings, Integrations, duplicate Library refresh |
 
 ## 12. Runtime Wiring That Must Not Change in PR A
@@ -602,11 +841,28 @@ Refactoring must preserve:
 - bounded retry and upload/response behavior;
 - transcript publication and legacy-artifact cleanup;
 - library search-document rebuild after transcription or editing;
+- Meeting Intelligence cancellation during availability, generation,
+  retry/backoff, response processing, artifact publication, and title apply;
+- stale MI callback rejection after cancellation, a newer same-session
+  attempt, transcript edit, session trash, workspace switch, or shutdown;
+- one active MI attempt per session, while different sessions may progress
+  independently;
+- persisted MI recovery, transcript-revision stale detection, manual-title and
+  deliberate-empty-title protection, and compare-and-save title application;
 - user-facing provider, permission, capture, Teams, playback, and storage
   errors.
 
 No feature model may translate a cancellation into a retryable error or
 replace a specific blocking state with an unrelated global status message.
+An MI unavailability, cancellation, or failure must not change a successfully
+published transcript or its completed ASR state. Provider save/switch does not
+cancel an active ASR or MI attempt; workspace change, session removal, explicit
+Cancel, replacement, and shutdown do. A late callback after bridge shutdown is
+ignored and emits no Library refresh unless it represents a durable commit
+that the bridge admitted before shutdown; that already-admitted identity may
+settle exactly once before teardown completes. Cancellation before durable MI
+commit emits zero semantic publication; cancellation after a winning durable
+commit cannot suppress its one Library update.
 
 ## 14. Testing Strategy
 
@@ -664,28 +920,67 @@ Required existing focused suites include:
 
 ### PR B focused tests
 
+- `AppModel` constructs or accepts exactly one Library, Transcription, Meeting
+  Intelligence, and Playback feature and retains no parallel feature state;
 - library-only publications do not republish playback/settings;
 - transcription state changes do not republish recording controls;
+- Meeting Intelligence phase/progress changes publish only the MI boundary and
+  do not republish Library, Transcription, Record, Settings, or Playback;
 - playback snapshots do not republish the whole workspace;
-- successful transcription and transcript edits immediately rebuild the
-  searchable document;
+- successful transcription emits one canonical event, refreshes/rebuilds the
+  affected Library search document once, and only then admits the same event
+  to Meeting Intelligence once;
+- duplicate, forged-source, stale-attempt, old-transcript, and old-workspace
+  events produce zero duplicate Library deliveries and zero extra model/chat
+  requests;
+- automatic and manual MI publication identities carry the expected
+  coordinator/session/folder/attempt/transcript/workspace/kind fields, and
+  manual commands capture rather than retain the current workspace fence;
+- ASR success remains published when MI is unavailable, cancelled, or fails;
+- transcript editing rebuilds search once, marks existing MI stale once, and
+  starts zero automatic generation attempts;
+- MI artifact publication, automatic title publication, and explicit Apply
+  Suggested Title each cause one semantic targeted Library reload/search
+  update, while progress and pre-commit failure/cancellation cause zero
+  Library refreshes;
+- cancellation before a durable MI commit causes zero Library refreshes;
+  cancellation after the durable commit wins still delivers exactly one
+  targeted refresh and cannot deliver a second event;
+- an artifact plus its automatic-title outcome emits one combined event;
+  automatic protected-title/no-op produces no second event, and explicit
+  Apply emits one event only when metadata actually changes;
+- manual and deliberately cleared titles remain protected by the existing
+  title-origin compare-and-save rules;
 - successful eligible imported-audio publication starts exactly one
   transcription job; successful ineligible import retains one Library session
   and starts zero jobs with provider recovery; failed import creates no session
   and starts no job;
-- provider settings saved during an active job affect future jobs only and do
-  not mutate the active job snapshot;
+- provider settings saved during active ASR and MI jobs affect future jobs
+  only and do not mutate either active snapshot;
+- one MI coordinator permits at most one active attempt per session while
+  preserving independent work for different sessions;
+- workspace change, trash, replacement, explicit cancel, and shutdown cancel
+  or invalidate the intended MI work; delayed callbacks update no wrong
+  workspace/session and publish no duplicate refresh;
+- successful trash tombstones Library admission before cancellation fan-out;
+  failed trash creates no tombstone or removal event;
+- callbacks queued after PR B bridge shutdown produce zero Library or MI
+  delivery, while a durable publication admitted before shutdown settles at
+  most once;
 - favorites and transcript snippets remain available;
 - current transcription cancellation, stale-callback, retention, provider
   snapshot, and error behavior remains unchanged.
 
 Required existing focused suites also include
 `AppModelTranscriptionTests`, `AppModelMuteTests`,
-`RecordingLibraryTests`, and the transcription coordinator/service suites.
+`AppModelMeetingIntelligenceIntegrationTests`,
+`MeetingIntelligenceJobCoordinatorTests`, `RecordingLibraryTests`, and the
+transcription and Meeting Intelligence coordinator/service suites.
 
 ### PR C focused tests
 
-- meter/health updates do not publish library/settings/transcription changes;
+- meter/health updates do not publish
+  library/settings/transcription/Meeting Intelligence changes;
 - Teams state enters through serialized ingress;
 - automatic and manual recording ownership remains correct;
 - workspace-folder changes invalidate Record readiness and Library
@@ -694,14 +989,22 @@ Required existing focused suites also include
 - each semantic recording-finalization outcome triggers exactly one targeted
   Library refresh after media and metadata finalization settle;
 - exactly one recording coordinator, Teams auto-meeting coordinator, engine,
-  provider repository, transcription coordinator, and playback coordinator
+  provider repository, shared session mutation gate, transcription
+  coordinator, Meeting Intelligence coordinator, and playback coordinator
   exists per runtime;
+- the four PR B feature instances injected into the `AppModel` compatibility
+  adapter are the exact instances constructed by `AppCoordinator`;
+- the PR B publication callbacks are unregistered before `AppCoordinator`
+  installs its one replacement registration;
+- callbacks racing the PR B-to-PR C registration handoff are accepted by at
+  most one bridge and never reach both owners;
 - shutdown remains idempotent;
 - runtime shutdown while floating-panel observation is active;
 - playback-window close during feature teardown;
 - countdown cancel while Teams callbacks are being replaced;
-- delayed Teams ingress, playback snapshot, transcription callback, and
-  workspace-folder event after coordinator teardown are ignored.
+- delayed Teams ingress, playback snapshot, transcription callback, Meeting
+  Intelligence callback, and workspace-folder event after coordinator teardown
+  are ignored.
 
 Required existing focused suites also include
 `AppModelScreenCaptureTests`, `AppModelTeamsAutoMeetingTests`, and
@@ -768,6 +1071,15 @@ Required final program smoke tests:
 - playback window open, seek, pause, resume, and close;
 - provider transcription, cancellation, publication, and log access;
 - transcript edit followed by immediate library search;
+- saved eligible provider followed by availability-gated automatic Meeting
+  Intelligence generation; unavailable discovery starts no automatic
+  generation and preserves manual Generate for later;
+- Generate, Regenerate, Retry, and Cancel preserve their Draft PR #7 behavior;
+- summary/suggested-title display, manual-title and deliberately-cleared-title
+  protection, and Apply Suggested Title;
+- transcript edit marks existing intelligence stale without automatic
+  regeneration;
+- workspace switch during generation accepts no stale visible callback;
 - metadata/favorite edit and trash confirmation;
 - 860×680 and wide-window resizing;
 - light/dark appearance;
@@ -788,8 +1100,15 @@ The three-PR program is complete when:
   lifetime;
 - feature views do not receive giant value/closure initializer lists;
 - feature models are the only UI-facing owners of their feature state;
+- the four PR B boundaries have one live instance each, exactly one
+  `MeetingIntelligenceJobCoordinator` exists, and `AppModel` owns no parallel
+  Library, Transcription, Meeting Intelligence, or Playback lifecycle state;
 - coordinators remain the only lifecycle/business-rule owners;
 - repositories remain the only persistence/credential owners;
+- each semantic publication has a named producer, immutable identity, named
+  consumers, and at-most-once assertions;
+- provider saves affect only future ASR/MI snapshots, and workspace switch or
+  shutdown accepts no stale MI callback into the selected Library projection;
 - high-frequency record/meter updates do not republish unrelated features;
 - current behavior and full automated gates remain green;
 - the PR descriptions document before/after architecture, state ownership,
@@ -801,7 +1120,8 @@ The three-PR program is complete when:
 ## 17. Approved macOS 26 Liquid Glass PR A Revision
 
 This section supersedes earlier PR A presentation and test details where they
-conflict. It does not change the PR B or PR C ownership cutovers.
+conflict. It does not override the later PR B/C Meeting Intelligence amendment
+in Sections 1–16.
 
 ### Apple design principles
 

@@ -3,16 +3,16 @@ import Foundation
 
 @MainActor
 final class TranscriptionJobCoordinator: ObservableObject {
-    @Published var transcribingSessionID: RecordingSession.ID?
-    @Published var transcriptionStatus = ""
-    @Published var lastTranscriptionSessionID: RecordingSession.ID?
-    @Published var lastTranscriptionStatus = ""
-    @Published var lastTranscriptionDidFail = false
-    @Published var transcriptURLsBySessionID:
+    @Published private(set) var transcribingSessionID: RecordingSession.ID?
+    @Published private(set) var transcriptionStatus = ""
+    @Published private(set) var lastTranscriptionSessionID: RecordingSession.ID?
+    @Published private(set) var lastTranscriptionStatus = ""
+    @Published private(set) var lastTranscriptionDidFail = false
+    @Published private(set) var transcriptURLsBySessionID:
         [RecordingSession.ID: URL] = [:]
-    @Published var transcriptLogURLsBySessionID:
+    @Published private(set) var transcriptLogURLsBySessionID:
         [RecordingSession.ID: URL] = [:]
-    @Published var transcriptionStatesBySessionID:
+    @Published private(set) var transcriptionStatesBySessionID:
         [RecordingSession.ID: TranscriptionState] = [:]
 
     var onStatusMessage: ((String) -> Void)?
@@ -24,9 +24,14 @@ final class TranscriptionJobCoordinator: ObservableObject {
 
     private let providerRepository:
         any OpenAICompatibleProviderManaging
+    let providerRepositoryIdentity: ObjectIdentifier
     private let audioPreparer: any TranscriptionAudioPreparing
     private let service: any TranscriptionServicing
-    private let mutationGate: RecordingSessionMutationGate
+    /// The feature boundary exposes this identity for PR B aggregate
+    /// composition validation; this coordinator remains its sole user for ASR
+    /// artifact publication.
+    let mutationGate: RecordingSessionMutationGate
+    private let failureDiagnosticPublisher: TranscriptionArtifactPublisher
     private let transcriptReader: any TranscriptDocumentReading
     private let coordinatorInstanceID: UUID
     private let attemptIDFactory: () -> UUID
@@ -48,9 +53,11 @@ final class TranscriptionJobCoordinator: ObservableObject {
         attemptIDFactory: @escaping () -> UUID = UUID.init
     ) {
         self.providerRepository = providerRepository
+        providerRepositoryIdentity = providerRepository.compositionIdentity
         self.audioPreparer = audioPreparer
         self.service = service
         self.mutationGate = mutationGate
+        failureDiagnosticPublisher = .init(mutationGate: mutationGate)
         self.transcriptReader = transcriptReader
         self.coordinatorInstanceID = coordinatorInstanceID
         self.attemptIDFactory = attemptIDFactory
@@ -230,27 +237,14 @@ final class TranscriptionJobCoordinator: ObservableObject {
                 )
             } catch {
                 guard let self else { return }
-                if Task.isCancelled || self.cancellationRequested {
-                    self.finishCancellation(
-                        session: session,
-                        generation: attemptGeneration,
-                        attempt: attempt
-                    )
-                } else {
-                    let prefix = prepared == nil
-                        ? "Transcription preparation failed"
-                        : "Transcription launch failed"
-                    let detail = self.redacted(
-                        error.localizedDescription,
-                        secret: snapshot.apiKey
-                    )
-                    self.finishFailure(
-                        session: session,
-                        message: "\(prefix): \(detail)",
-                        generation: attemptGeneration,
-                        attempt: attempt
-                    )
-                }
+                self.handleFailure(
+                    error,
+                    prepared: prepared,
+                    session: session,
+                    snapshot: snapshot,
+                    generation: attemptGeneration,
+                    attempt: attempt
+                )
             }
         }
     }
@@ -284,6 +278,48 @@ final class TranscriptionJobCoordinator: ObservableObject {
         activeSession = nil
     }
 
+    func replaceLoadedStates(_ states: [RecordingSession.ID: TranscriptionState]) {
+        var projected = states.mapValues { state in
+            guard [.queued, .uploading, .transcribing].contains(state.phase) else {
+                return state
+            }
+            var interrupted = state
+            interrupted.phase = .interrupted
+            interrupted.message = "Transcription interrupted. You can start it again."
+            interrupted.finishedAt = Date()
+            return interrupted
+        }
+
+        if let activeID = transcribingSessionID {
+            if let liveState = transcriptionStatesBySessionID[activeID] {
+                projected[activeID] = liveState
+            } else if let loadedState = states[activeID] {
+                projected[activeID] = loadedState
+            }
+        }
+        transcriptionStatesBySessionID = projected
+    }
+
+    func clearProjections() {
+        transcriptURLsBySessionID = [:]
+        transcriptLogURLsBySessionID = [:]
+        transcriptionStatesBySessionID = [:]
+    }
+
+    func setTranscriptURL(_ url: URL?, for sessionID: RecordingSession.ID) {
+        transcriptURLsBySessionID[sessionID] = url
+    }
+
+    func setTranscriptLogURL(_ url: URL?, for sessionID: RecordingSession.ID) {
+        transcriptLogURLsBySessionID[sessionID] = url
+    }
+
+    func removeProjection(for sessionID: RecordingSession.ID) {
+        transcriptionStatesBySessionID.removeValue(forKey: sessionID)
+        transcriptURLsBySessionID.removeValue(forKey: sessionID)
+        transcriptLogURLsBySessionID.removeValue(forKey: sessionID)
+    }
+
     private func apply(
         _ progress: TranscriptionServiceProgress,
         session: RecordingSession,
@@ -306,7 +342,6 @@ final class TranscriptionJobCoordinator: ObservableObject {
             ),
             for: session
         )
-        publishGlobalStatus(progress.message)
     }
 
     private func finishSuccess(
@@ -429,6 +464,117 @@ final class TranscriptionJobCoordinator: ObservableObject {
             of: secret,
             with: "[redacted]"
         )
+    }
+
+    func handleFailure(
+        _ error: Error,
+        prepared: PreparedTranscriptionAudio?,
+        session: RecordingSession,
+        snapshot: OpenAICompatibleProviderSnapshot,
+        generation: UInt64,
+        attempt: UUID
+    ) {
+        guard isActive(generation: generation, attempt: attempt) else {
+            return
+        }
+        if Task.isCancelled
+            || cancellationRequested
+            || (error as? URLError)?.code == .cancelled {
+            finishCancellation(
+                session: session,
+                generation: generation,
+                attempt: attempt
+            )
+            return
+        }
+
+        _ = try? failureDiagnosticPublisher.publishFailureDiagnostic(
+            failureDiagnostic(for: error, prepared: prepared),
+            sessionFolder: session.folderURL
+        )
+        let prefix = prepared == nil
+            ? "Transcription preparation failed"
+            : "Transcription launch failed"
+        let detail = redacted(
+            error.localizedDescription,
+            secret: snapshot.apiKey
+        )
+        finishFailure(
+            session: session,
+            message: "\(prefix): \(detail)",
+            generation: generation,
+            attempt: attempt
+        )
+    }
+
+    private func failureDiagnostic(
+        for error: Error,
+        prepared: PreparedTranscriptionAudio?
+    ) -> TranscriptionFailureDiagnostic {
+        guard prepared != nil else {
+            return .init(
+                stage: .preparation,
+                errorCode: .preparationFailure
+            )
+        }
+
+        switch error {
+        case let error as OpenAICompatibleTranscriptionError:
+            switch error {
+            case .audioChunkTooLarge:
+                return .init(
+                    stage: .upload,
+                    errorCode: .audioChunkTooLarge
+                )
+            case .httpStatus(let status):
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerHTTPFailure,
+                    httpStatus: status
+                )
+            case .invalidResponse, .authenticationRejected:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerTransportFailure
+                )
+            }
+        case let error as ProviderHTTPTransportError:
+            switch error {
+            case .responseTooLarge:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerResponseTooLarge
+                )
+            case .redirectRejected:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerTransportFailure
+                )
+            }
+        case let error as CoordinatorError:
+            switch error {
+            case .invalidArtifact:
+                return .init(
+                    stage: .publication,
+                    errorCode: .invalidArtifact
+                )
+            case .committedRevisionMismatch:
+                return .init(
+                    stage: .publication,
+                    errorCode: .committedRevisionMismatch
+                )
+            case .staleAttempt:
+                return .init(
+                    stage: .publication,
+                    errorCode: .publicationFailure
+                )
+            }
+        default:
+            return .init(
+                stage: .upload,
+                errorCode: .providerTransportFailure
+            )
+        }
     }
 
     private func updateState(

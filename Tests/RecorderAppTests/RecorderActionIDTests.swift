@@ -4,6 +4,14 @@ import XCTest
 final class RecorderActionIDTests: XCTestCase {
     func testExactAndUniqueIDs() {
         XCTAssertEqual(RecorderActionID.startStop, "recorder.action.start-stop")
+        XCTAssertEqual(
+            RecorderActionID.primaryActionCluster,
+            "recorder.visual.primary-action-cluster"
+        )
+        XCTAssertEqual(
+            RecorderActionID.indeterminateProgress,
+            "recorder.visual.indeterminate-progress"
+        )
         XCTAssertEqual(RecorderActionID.refreshCapture, "recorder.action.refresh-capture")
         XCTAssertEqual(RecorderActionID.muteMic, "recorder.action.mute-mic")
         XCTAssertEqual(RecorderActionID.testAudio, "recorder.action.test-audio")
@@ -24,6 +32,14 @@ final class RecorderActionIDTests: XCTestCase {
         )
         XCTAssertEqual(RecorderActionID.openTranscript, "recorder.action.open-transcript")
         XCTAssertEqual(RecorderActionID.saveTranscript, "recorder.action.save-transcript")
+        XCTAssertEqual(RecorderActionID.saveMetadata, "recorder.action.save-metadata")
+        XCTAssertEqual(RecorderActionID.transcriptSaveInFlight, "recorder.transcript.save-in-flight")
+        XCTAssertEqual(RecorderActionID.metadataSaveInFlight, "recorder.metadata.save-in-flight")
+        XCTAssertEqual(RecorderActionID.transcriptSaveError, "recorder.transcript.save-error")
+        XCTAssertEqual(RecorderActionID.metadataSaveError, "recorder.metadata.save-error")
+        XCTAssertEqual(RecorderActionID.transcriptBack, "recorder.action.transcript-back")
+        XCTAssertEqual(RecorderActionID.transcriptCancel, "recorder.action.transcript-cancel")
+        XCTAssertEqual(RecorderActionID.metadataCancel, "recorder.action.metadata-cancel")
         XCTAssertEqual(RecorderActionID.captureRecovery, "recorder.action.capture-recovery")
         XCTAssertEqual(RecorderActionID.providerKind, "recorder.provider.kind")
         XCTAssertEqual(RecorderActionID.providerHKTGroupID, "recorder.provider.hkt-group-id")

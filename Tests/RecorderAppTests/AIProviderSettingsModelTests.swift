@@ -3,6 +3,32 @@ import XCTest
 
 @MainActor
 final class AIProviderSettingsModelTests: XCTestCase {
+    @MainActor
+    func testProviderSaveObserverTokenCannotRemoveReplacement() {
+        let model = AIProviderSettingsModel(
+            repository: RecordingProviderRepository(),
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        var oldCalls = 0
+        var replacementCalls = 0
+        let oldToken = model.observeProviderSettingsSaved { _ in oldCalls += 1 }
+        let replacementToken = model.observeProviderSettingsSaved { _ in replacementCalls += 1 }
+
+        model.removeProviderSettingsSavedObserver(oldToken)
+        XCTAssertNotNil(model.onProviderSettingsSaved)
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+        model.save()
+        XCTAssertEqual(oldCalls, 0)
+        XCTAssertEqual(replacementCalls, 1)
+
+        model.removeProviderSettingsSavedObserver(replacementToken)
+        XCTAssertNil(model.onProviderSettingsSaved)
+    }
+
     func testStartupSelectsActivePresetAndRetainsIndependentDraftsWithoutSaving() throws {
         let generic = try makeProfile()
         let hkt = try OpenAICompatibleProviderProfile.hktValidated(
@@ -320,6 +346,96 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertTrue(model.statusIsError)
     }
 
+    func testSuccessfulSavesPublishDistinctRevisionsImmediatelyAfterRepositoryCommit() throws {
+        let repository = RecordingProviderRepository()
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+        var publications: [ProviderSettingsSaved] = []
+        var saveCountAtPublication: [Int] = []
+        model.onProviderSettingsSaved = { event in
+            publications.append(event)
+            saveCountAtPublication.append(repository.saveCount)
+        }
+
+        model.save()
+        model.prompt = "second save"
+        model.save()
+
+        XCTAssertEqual(publications.count, 2)
+        XCTAssertEqual(saveCountAtPublication, [1, 2])
+        let first = try XCTUnwrap(publications.first)
+        let second = try XCTUnwrap(publications.last)
+        XCTAssertNotEqual(first.profileRevision, second.profileRevision)
+    }
+
+    func testInvalidDraftAndRepositorySaveFailurePublishNoRevision() {
+        let invalidRepository = RecordingProviderRepository()
+        let invalidModel = AIProviderSettingsModel(
+            repository: invalidRepository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        var invalidPublications: [ProviderSettingsSaved] = []
+        invalidModel.onProviderSettingsSaved = { invalidPublications.append($0) }
+        invalidModel.save()
+        XCTAssertTrue(invalidPublications.isEmpty)
+
+        let failingRepository = RecordingProviderRepository(saveError: TestError.failed)
+        let failingModel = AIProviderSettingsModel(
+            repository: failingRepository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        failingModel.baseURLText = "https://api.example.com/v1"
+        failingModel.asrModel = "asr"
+        failingModel.llmModel = "llm"
+        failingModel.selectedLanguage = .cantonese
+        var failedPublications: [ProviderSettingsSaved] = []
+        failingModel.onProviderSettingsSaved = { failedPublications.append($0) }
+
+        failingModel.save()
+
+        XCTAssertTrue(failedPublications.isEmpty)
+        XCTAssertEqual(failingRepository.saveCount, 0)
+    }
+
+    func testCommittedSavePublishesDespitePostCommitAPIKeyStatusFailure() {
+        let repository = RecordingProviderRepository(apiKeyStatusError: TestError.failed)
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+        var publications: [ProviderSettingsSaved] = []
+        model.onProviderSettingsSaved = { publications.append($0) }
+
+        model.save()
+
+        XCTAssertEqual(repository.saveCount, 1)
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(model.status, "Provider settings saved; API key status unavailable")
+    }
+
+    func testPRBFeatureEventContractsAreEquatableAndSendable() {
+        func requireEquatableAndSendable<T: Equatable & Sendable>(_: T.Type) {}
+
+        requireEquatableAndSendable(WorkspaceFolderChanged.self)
+        requireEquatableAndSendable(ProviderSettingsSaved.self)
+        requireEquatableAndSendable(RecordingSourceMetadataPublicationOutcome.self)
+        requireEquatableAndSendable(RecordingFinalizationOutcome.self)
+    }
+
     func testConnectionFailureDoesNotDeleteManualModelValues() async {
         let model = makeModel(client: StubProviderClient(error: TestError.failed))
         model.asrModel = "manual-asr"
@@ -574,6 +690,7 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
     private let migrationError: Error?
     private let apiKeyStatusError: Error?
     private let removeKeyError: Error?
+    private let saveError: Error?
     private(set) var lastReplacementAPIKey: String?
     private(set) var removeKeyCount = 0
     private(set) var saveCount = 0
@@ -583,7 +700,8 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
         hasAPIKey: Bool = false,
         migrationError: Error? = nil,
         apiKeyStatusError: Error? = nil,
-        removeKeyError: Error? = nil
+        removeKeyError: Error? = nil,
+        saveError: Error? = nil
     ) {
         profiles = profile.map { [.openAICompatible: $0] } ?? [:]
         keys = [.openAICompatible: hasAPIKey, .hktGenAI: false]
@@ -591,6 +709,7 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
         self.migrationError = migrationError
         self.apiKeyStatusError = apiKeyStatusError
         self.removeKeyError = removeKeyError
+        self.saveError = saveError
     }
 
     init(
@@ -604,6 +723,7 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
         migrationError = nil
         apiKeyStatusError = nil
         removeKeyError = nil
+        saveError = nil
     }
 
     func loadProfile() throws -> OpenAICompatibleProviderProfile? { profiles[activeKind] }
@@ -617,6 +737,7 @@ final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
     func setActiveProviderKind(_ kind: AIProviderKind) throws { activeKind = kind }
 
     func save(profile: OpenAICompatibleProviderProfile, replacementAPIKey: String?) throws {
+        if let saveError { throw saveError }
         profiles[profile.providerKind] = profile
         activeKind = profile.providerKind
         saveCount += 1

@@ -148,6 +148,36 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
         XCTAssertFalse(store.loadWasOnMainThread)
     }
 
+    func testExactAlreadyAppliedMeetingIntelligenceTitleReturnsFalseWithoutMetadataWrite() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let revision = TranscriptDocumentRevision(sha256: "sha256:expected", byteCount: 8)
+        let store = RecordingMetadataProbe(
+            metadata: .init(title: "  Customer planning review  ", titleOrigin: .meetingIntelligence)
+        )
+        let session = RecordingSession(id: folder, folderURL: folder,
+                                       recordingURL: folder.appendingPathComponent("recording.m4a"),
+                                       createdAt: .distantPast, duration: 0, fileSize: 0, metadata: .init())
+        let applier = MeetingIntelligenceSuggestedTitleApplier(
+            mutationGate: .init(), transcriptReader: FixedReader(revision: revision), metadataStore: store
+        )
+        let request = MeetingIntelligenceSuggestedTitleRequest(
+            session: session,
+            artifact: .init(schemaVersion: 1, summary: "Summary", suggestedTitle: "Customer planning review",
+                            sourceTranscriptSHA256: revision.sha256, sourceTranscriptByteCount: revision.byteCount,
+                            model: "model", generatedAt: .distantPast, intent: .generate),
+            sourceRevision: revision,
+            capturedTitle: "Customer planning review",
+            capturedTitleOrigin: .meetingIntelligence,
+            lease: .init()
+        )
+
+        let applied = try await applier.applySuggestedTitle(request)
+
+        XCTAssertFalse(applied)
+        XCTAssertEqual(store.saveCount, 0)
+    }
+
     func testTranscriptChangedBetweenGateChecksPreventsTitleSave() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }

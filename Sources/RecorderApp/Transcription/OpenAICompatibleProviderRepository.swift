@@ -23,6 +23,11 @@ protocol OpenAICompatibleProviderManaging: AnyObject {
 }
 
 extension OpenAICompatibleProviderManaging {
+    /// Composition-only object identity.  Provider repositories are mutable
+    /// reference owners; PR B must reject a feature graph that accidentally
+    /// constructs more than one for Settings, ASR, and meeting intelligence.
+    var compositionIdentity: ObjectIdentifier { ObjectIdentifier(self) }
+
     func loadProfile(for kind: AIProviderKind) throws -> OpenAICompatibleProviderProfile? {
         guard kind == .openAICompatible else { return nil }
         return try loadProfile()

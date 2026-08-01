@@ -35,7 +35,7 @@ final class AppModelPlaybackTests: XCTestCase {
         XCTAssertTrue(model.isPlaybackActive)
     }
 
-    func testPeriodicPlaybackSnapshotDoesNotRepublishWholeAppModel() async {
+    func testPeriodicSnapshotsPublishPlaybackPresentationWithoutRepublishingAppModel() async {
         let coordinator = FakePlaybackCoordinator()
         let model = makeModel(playbackCoordinator: coordinator)
         let session = makeSession(extension: "mp4")
@@ -65,6 +65,26 @@ final class AppModelPlaybackTests: XCTestCase {
         withExtendedLifetime(observation) {}
     }
 
+    func testAppModelForwardsTheInjectedPlaybackFeatureWithoutFallback() async {
+        let coordinator = FakePlaybackCoordinator()
+        let feature = PlaybackFeatureModel(coordinator: coordinator)
+        let model = AppModel(
+            defaults: makeDefaults(),
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            playbackFeature: feature
+        )
+        let session = makeSession(extension: "m4a")
+
+        XCTAssertTrue(model.playbackFeature === feature)
+        model.play(session: session)
+        await Task.yield()
+
+        XCTAssertEqual(coordinator.loadedSessionIDs, [session.id])
+        XCTAssertEqual(model.playingSessionID, session.id)
+    }
+
     func testVideoPlaybackIsNotEmbeddedInMainContentHierarchy() async {
         let coordinator = FakePlaybackCoordinator()
         let model = makeModel(playbackCoordinator: coordinator)
@@ -74,7 +94,7 @@ final class AppModelPlaybackTests: XCTestCase {
                 RecordedScreenInterval(startSeconds: 0, endSeconds: 10)
             ]
         )
-        model.sessions = [session]
+        model.seedLibrarySessionsForTesting([session])
         model.play(session: session)
         await Task.yield()
 
@@ -119,7 +139,7 @@ final class AppModelPlaybackTests: XCTestCase {
             extension: "mp4",
             screenIntervals: [.init(startSeconds: 0, endSeconds: 12)]
         )
-        model.sessions = [session]
+        model.seedLibrarySessionsForTesting([session])
         let countdownFactory = CountdownPresenterFactorySpy()
         let playbackFactory = PlaybackPresenterFactorySpy()
         let navigationDriver = ContentViewNavigationDriver()

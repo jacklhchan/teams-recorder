@@ -2,30 +2,49 @@ import SwiftUI
 
 struct RecordingsLibraryView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var libraryFeature: LibraryFeatureModel
+    @ObservedObject private var transcriptionFeature: TranscriptionFeatureModel
+    @ObservedObject private var meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
     @State private var searchText = ""
     @State private var favoritesOnly = false
 
+    init(model: AppModel) {
+        self.model = model
+        _libraryFeature = ObservedObject(wrappedValue: model.libraryFeature)
+        _transcriptionFeature = ObservedObject(
+            wrappedValue: model.transcriptionFeature
+        )
+        _meetingIntelligenceFeature = ObservedObject(
+            wrappedValue: model.meetingIntelligenceFeature
+        )
+    }
+
     var body: some View {
+        let transcription = transcriptionFeature.presentation
         let query = RecordingLibraryQuery(
             text: searchText,
             favoritesOnly: favoritesOnly
         )
-        let visibleSessions = query.filter(model.sessions)
+        let librarySessions = libraryFeature.sessions
+        let visibleSessions = query.filter(librarySessions)
+        // Capture exactly one immutable projection for this body evaluation.
+        // The UI never reconstructs meeting-intelligence state in AppModel.
+        let meetingIntelligenceSnapshot = meetingIntelligenceFeature.snapshot
         let toolbarPresentation = RecordingsToolbarPresentation.make(
-            isTranscribing: model.transcribingSessionID != nil
+            isTranscribing: transcription.transcribingSessionID != nil
         )
 
         SessionListView(
             sessions: visibleSessions,
-            allSessions: model.sessions,
+            allSessions: librarySessions,
             query: query,
-            transcribingSessionID: model.transcribingSessionID,
-            transcriptionStatus: model.transcriptionStatus,
-            lastTranscriptionSessionID: model.lastTranscriptionSessionID,
-            lastTranscriptionStatus: model.lastTranscriptionStatus,
-            lastTranscriptionDidFail: model.lastTranscriptionDidFail,
+            transcribingSessionID: transcription.transcribingSessionID,
+            transcriptionStatus: transcription.transcriptionStatus,
+            lastTranscriptionSessionID: transcription.lastTranscriptionSessionID,
+            lastTranscriptionStatus: transcription.lastTranscriptionStatus,
+            lastTranscriptionDidFail: transcription.lastTranscriptionDidFail,
             hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
-            transcriptionStatesBySessionID: model.transcriptionStatesBySessionID,
+            transcriptionStatesBySessionID: transcription.transcriptionStatesBySessionID,
             play: model.play,
             open: model.open,
             transcribe: model.transcribe,
@@ -36,7 +55,20 @@ struct RecordingsLibraryView: View {
             saveTranscript: model.saveTranscript,
             exportTranscript: model.exportTranscript,
             copyTranscript: model.copyTranscript,
-            meetingIntelligencePresentation: model.meetingIntelligencePresentation,
+            meetingIntelligencePresentation: { session in
+                meetingIntelligenceSnapshot.presentation(for: session)?.presentation ?? .empty
+            },
+            meetingIntelligenceObservedSnapshot: { session in
+                guard let sessionPresentation = meetingIntelligenceSnapshot.presentation(for: session) else {
+                    return nil
+                }
+                return MeetingIntelligenceObservedSnapshotAdapter.make(
+                    featureRevision: meetingIntelligenceSnapshot.revision,
+                    sessionPresentation: sessionPresentation,
+                    canonicalSession: session,
+                    titleIsProtected: session.metadata.titleOrigin == .manual
+                )
+            },
             checkMeetingIntelligenceAvailability: model.checkMeetingIntelligenceAvailability,
             generateMeetingIntelligence: model.generateMeetingIntelligence,
             regenerateMeetingIntelligence: model.regenerateMeetingIntelligence,
@@ -108,18 +140,19 @@ private struct SessionListView: View {
     let openTranscript: (RecordingSession) -> Void
     let openTranscriptLog: (RecordingSession) -> Void
     let transcriptText: (RecordingSession) -> String
-    let saveTranscript: (String, RecordingSession) -> Void
+    let saveTranscript: (String, RecordingSession) async -> LibrarySaveOutcome
     let exportTranscript: (RecordingSession) -> Void
     let copyTranscript: (RecordingSession) -> Void
     let meetingIntelligencePresentation: (RecordingSession) -> MeetingIntelligencePresentation
+    let meetingIntelligenceObservedSnapshot: (RecordingSession) -> RecorderObservedSnapshot?
     let checkMeetingIntelligenceAvailability: (RecordingSession) -> Void
     let generateMeetingIntelligence: (RecordingSession) -> Void
     let regenerateMeetingIntelligence: (RecordingSession) -> Void
     let retryMeetingIntelligenceGeneration: (RecordingSession) -> Void
     let cancelMeetingIntelligence: (RecordingSession) -> Void
     let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
-    let saveMetadata: (String, String, Bool, RecordingSession) -> Void
-    let moveToTrash: (RecordingSession) -> Void
+    let saveMetadata: (String, String, Bool, RecordingSession) async -> LibrarySaveOutcome
+    let moveToTrash: (RecordingSession) async -> Void
 
     @State private var transcriptSession: RecordingSession?
     @State private var metadataSession: RecordingSession?
@@ -249,6 +282,12 @@ private struct SessionListView: View {
                             }
                             .padding(10)
                             .background(RecorderVisualStyle.cardSurface, in: RoundedRectangle(cornerRadius: 6))
+                            .background(
+                                RecorderDestinationAccessibilityMarker(
+                                    identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)",
+                                    label: statusText(for: session)
+                                )
+                            )
                         }
                     }
                     .padding(.vertical, 6)
@@ -261,13 +300,14 @@ private struct SessionListView: View {
                 openedSession: session,
                 allSessions: allSessions,
                 load: { transcriptText(session) },
-                save: { saveTranscript($0, session) },
+                save: { await saveTranscript($0, session) },
                 openFolder: { open(session) },
                 play: { play(session) },
                 export: { exportTranscript(session) },
                 copy: { copyTranscript(session) },
                 editDetails: { metadataSession = $0 },
                 meetingIntelligencePresentation: meetingIntelligencePresentation,
+                meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
                 checkMeetingIntelligenceAvailability: checkMeetingIntelligenceAvailability,
                 generateMeetingIntelligence: generateMeetingIntelligence,
                 regenerateMeetingIntelligence: regenerateMeetingIntelligence,
@@ -278,8 +318,9 @@ private struct SessionListView: View {
         }
         .sheet(item: $metadataSession) { session in
             RecordingMetadataEditorView(session: session) { title, tags, favorite in
-                saveMetadata(title, tags, favorite, session)
+                await saveMetadata(title, tags, favorite, session)
             }
+            .id(session.id)
         }
         .confirmationDialog(
             "Move recording to Trash?",
@@ -287,7 +328,7 @@ private struct SessionListView: View {
             presenting: sessionPendingTrash
         ) { session in
             Button("Move to Trash", role: .destructive) {
-                moveToTrash(session)
+                Task { await moveToTrash(session) }
                 sessionPendingTrash = nil
             }
         } message: { session in
@@ -334,13 +375,14 @@ struct TranscriptDetailSheetView: View {
     let openedSession: RecordingSession
     let allSessions: [RecordingSession]
     let load: () -> String
-    let save: (String) -> Void
+    let save: (String) async -> LibrarySaveOutcome
     let openFolder: () -> Void
     let play: () -> Void
     let export: () -> Void
     let copy: () -> Void
     let editDetails: (RecordingSession) -> Void
     let meetingIntelligencePresentation: (RecordingSession) -> MeetingIntelligencePresentation
+    let meetingIntelligenceObservedSnapshot: (RecordingSession) -> RecorderObservedSnapshot?
     let checkMeetingIntelligenceAvailability: (RecordingSession) -> Void
     let generateMeetingIntelligence: (RecordingSession) -> Void
     let regenerateMeetingIntelligence: (RecordingSession) -> Void
@@ -362,6 +404,10 @@ struct TranscriptDetailSheetView: View {
             cancel: cancelMeetingIntelligence,
             applySuggestedTitle: applyMeetingIntelligenceSuggestedTitle
         )
+        let effectivePresentation = TranscriptDetailActionProjection.effectiveMeetingIntelligencePresentation(
+            meetingIntelligencePresentation(currentSession),
+            canonicalSession: currentSession
+        )
 
         return TranscriptEditorView(
             session: openedSession,
@@ -373,9 +419,11 @@ struct TranscriptDetailSheetView: View {
             export: export,
             copy: copy,
             editDetails: editDetails,
-            meetingIntelligencePresentation: meetingIntelligencePresentation,
+            meetingIntelligencePresentation: { _ in effectivePresentation },
+            meetingIntelligenceObservedSnapshot: meetingIntelligenceObservedSnapshot,
             meetingIntelligenceActions: { _ in actions }
         )
+        .id(openedSession.id)
     }
 }
 
@@ -388,6 +436,21 @@ enum TranscriptEditorDraft {
 }
 
 enum TranscriptDetailActionProjection {
+    static func effectiveMeetingIntelligencePresentation(
+        _ presentation: MeetingIntelligencePresentation,
+        canonicalSession: RecordingSession
+    ) -> MeetingIntelligencePresentation {
+        .init(
+            phase: presentation.phase,
+            summary: presentation.summary,
+            suggestedTitle: presentation.suggestedTitle,
+            statusMessage: presentation.statusMessage,
+            model: presentation.model,
+            titleIsProtected: canonicalSession.metadata.titleOrigin == .manual,
+            unavailableReason: presentation.unavailableReason
+        )
+    }
+
     static func current(
         opened: RecordingSession,
         allSessions: [RecordingSession]
@@ -432,7 +495,7 @@ struct TranscriptEditorView: View {
     /// and the editor draft, but render the current metadata projection.
     let resolvedSession: RecordingSession?
     let load: () -> String
-    let save: (String) -> Void
+    let save: (String) async -> LibrarySaveOutcome
     let openFolder: () -> Void
     /// Requests playback through the existing external presenter. This sheet
     /// never owns the playback view or player lifetime.
@@ -441,10 +504,12 @@ struct TranscriptEditorView: View {
     let copy: () -> Void
     let editDetails: (RecordingSession) -> Void
     private let meetingIntelligencePresentationForSession: (RecordingSession) -> MeetingIntelligencePresentation
+    private let meetingIntelligenceObservedSnapshotForSession: (RecordingSession) -> RecorderObservedSnapshot?
     private let meetingIntelligenceActionsForSession: (RecordingSession) -> MeetingIntelligenceActions
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @State private var hasLoadedDraft = false
+    @StateObject private var saveState = LibraryEditorSaveState()
 
     init(
         session: RecordingSession,
@@ -457,18 +522,23 @@ struct TranscriptEditorView: View {
         copy: @escaping () -> Void,
         editDetails: @escaping (RecordingSession) -> Void = { _ in },
         meetingIntelligencePresentation: MeetingIntelligencePresentation = .empty,
+        meetingIntelligenceObservedSnapshot: RecorderObservedSnapshot? = nil,
         meetingIntelligenceActions: MeetingIntelligenceActions = .init()
     ) {
         self.session = session
         self.resolvedSession = resolvedSession
         self.load = load
-        self.save = save
+        self.save = { text in
+            save(text)
+            return .saved(sessionID: session.id, .transcript)
+        }
         self.openFolder = openFolder
         self.play = play
         self.export = export
         self.copy = copy
         self.editDetails = editDetails
         meetingIntelligencePresentationForSession = { _ in meetingIntelligencePresentation }
+        meetingIntelligenceObservedSnapshotForSession = { _ in meetingIntelligenceObservedSnapshot }
         meetingIntelligenceActionsForSession = { _ in meetingIntelligenceActions }
     }
 
@@ -476,13 +546,14 @@ struct TranscriptEditorView: View {
         session: RecordingSession,
         resolvedSession: RecordingSession? = nil,
         load: @escaping () -> String,
-        save: @escaping (String) -> Void,
+        save: @escaping (String) async -> LibrarySaveOutcome,
         openFolder: @escaping () -> Void = {},
         play: @escaping () -> Void = {},
         export: @escaping () -> Void,
         copy: @escaping () -> Void,
         editDetails: @escaping (RecordingSession) -> Void = { _ in },
         meetingIntelligencePresentation: @escaping (RecordingSession) -> MeetingIntelligencePresentation,
+        meetingIntelligenceObservedSnapshot: @escaping (RecordingSession) -> RecorderObservedSnapshot? = { _ in nil },
         meetingIntelligenceActions: @escaping (RecordingSession) -> MeetingIntelligenceActions
     ) {
         self.session = session
@@ -495,6 +566,7 @@ struct TranscriptEditorView: View {
         self.copy = copy
         self.editDetails = editDetails
         meetingIntelligencePresentationForSession = meetingIntelligencePresentation
+        meetingIntelligenceObservedSnapshotForSession = meetingIntelligenceObservedSnapshot
         meetingIntelligenceActionsForSession = meetingIntelligenceActions
     }
 
@@ -507,6 +579,7 @@ struct TranscriptEditorView: View {
                     playbackControls
                     MeetingIntelligenceSectionView(
                         presentation: meetingIntelligencePresentationForSession(displayedSession),
+                        observedSnapshot: meetingIntelligenceObservedSnapshotForSession(displayedSession),
                         actions: meetingIntelligenceActionsForSession(displayedSession)
                     )
                     transcriptEditor
@@ -538,6 +611,7 @@ struct TranscriptEditorView: View {
             )
             hasLoadedDraft = true
         }
+        .onDisappear { saveState.invalidate() }
     }
 
     private var header: some View {
@@ -547,6 +621,8 @@ struct TranscriptEditorView: View {
             }
             .buttonStyle(.borderless)
             .help("Back")
+            .disabled(isSaving)
+            .accessibilityIdentifier(RecorderActionID.transcriptBack)
             Text(displayedSession.displayName)
                 .font(.headline)
                 .lineLimit(1)
@@ -631,44 +707,143 @@ struct TranscriptEditorView: View {
 
     private var footer: some View {
         HStack {
+            LibraryEditorSaveFeedback(
+                state: saveState.state,
+                inFlightIdentifier: RecorderActionID.transcriptSaveInFlight,
+                errorIdentifier: RecorderActionID.transcriptSaveError
+            )
             Spacer()
             Button("Cancel") { dismiss() }
-            Button("Save") { save(text); dismiss() }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier(RecorderActionID.saveTranscript)
-                .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.saveTranscript))
+                .disabled(isSaving)
+                .accessibilityIdentifier(RecorderActionID.transcriptCancel)
+            LibraryEditorSaveButton(
+                identifier: RecorderActionID.saveTranscript,
+                isSaving: isSaving
+            ) {
+                guard let attempt = saveState.begin(sessionID: session.id, artifact: .transcript) else {
+                    return
+                }
+                let draft = text
+                Task {
+                    let outcome = await save(draft)
+                    if saveState.complete(attempt, outcome: outcome) == .dismiss { dismiss() }
+                }
+            }
         }
         .padding(.horizontal, 20)
         .frame(height: 60)
     }
+
+    private var isSaving: Bool {
+        saveState.state == .saving
+    }
 }
 
-private struct RecordingMetadataEditorView: View {
+struct RecordingMetadataEditorView: View {
     let session: RecordingSession
-    let save: (String, String, Bool) -> Void
+    let save: (String, String, Bool) async -> LibrarySaveOutcome
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var tags = ""
     @State private var isFavorite = false
+    @State private var hasLoadedDraft = false
+    @StateObject private var saveState = LibraryEditorSaveState()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Recording Details").font(.headline)
             TextField("Title", text: $title)
+                .accessibilityIdentifier(RecorderActionID.metadataTitle)
             TextField("Tags, separated by commas", text: $tags)
+                .accessibilityIdentifier(RecorderActionID.metadataTags)
             Toggle("Favorite", isOn: $isFavorite)
+                .accessibilityIdentifier(RecorderActionID.metadataFavorite)
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: RecorderActionID.metadataFavorite
+                    )
+                )
+            LibraryEditorSaveFeedback(
+                state: saveState.state,
+                inFlightIdentifier: RecorderActionID.metadataSaveInFlight,
+                errorIdentifier: RecorderActionID.metadataSaveError
+            )
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Save") { save(title, tags, isFavorite); dismiss() }.buttonStyle(.borderedProminent)
+                    .disabled(isSaving)
+                    .accessibilityIdentifier(RecorderActionID.metadataCancel)
+                LibraryEditorSaveButton(
+                    identifier: RecorderActionID.saveMetadata,
+                    isSaving: isSaving
+                ) {
+                    guard let attempt = saveState.begin(sessionID: session.id, artifact: .metadata) else {
+                        return
+                    }
+                    let draft = (title, tags, isFavorite)
+                    Task {
+                        let outcome = await save(draft.0, draft.1, draft.2)
+                        if saveState.complete(attempt, outcome: outcome) == .dismiss { dismiss() }
+                    }
+                }
             }
         }
         .padding(20)
         .frame(width: 440)
         .onAppear {
+            guard !hasLoadedDraft else { return }
             title = session.metadata.title ?? ""
             tags = session.tags.joined(separator: ", ")
             isFavorite = session.isFavorite
+            hasLoadedDraft = true
+        }
+        .onDisappear { saveState.invalidate() }
+    }
+
+    private var isSaving: Bool {
+        saveState.state == .saving
+    }
+}
+
+struct LibraryEditorSaveButton: View {
+    let identifier: String
+    let isSaving: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button("Save", action: action)
+            .buttonStyle(.borderedProminent)
+            .disabled(isSaving)
+            .accessibilityIdentifier(identifier)
+            .background(RecorderDestinationAccessibilityMarker(identifier: identifier))
+    }
+}
+
+private struct LibraryEditorSaveFeedback: View {
+    let state: LibraryEditorSaveStateValue
+    let inFlightIdentifier: String
+    let errorIdentifier: String
+
+    var body: some View {
+        switch state {
+        case .idle:
+            EmptyView()
+        case .saving:
+            Text("Saving…")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(inFlightIdentifier)
+                .background(RecorderDestinationAccessibilityMarker(identifier: inFlightIdentifier))
+        case let .failed(failure):
+            Text(failure.userMessage)
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(errorIdentifier)
+                .accessibilityLabel(failure.userMessage)
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: errorIdentifier,
+                        label: failure.userMessage
+                    )
+                )
         }
     }
 }

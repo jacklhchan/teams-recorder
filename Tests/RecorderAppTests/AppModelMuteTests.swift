@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class AppModelMuteTests: XCTestCase {
-    func testSaveMetadataPreservesMediaAndRecoveryFields() throws {
+    func testSaveMetadataPreservesMediaAndRecoveryFields() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let folder = root.appendingPathComponent("meeting-metadata", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -28,8 +28,10 @@ final class AppModelMuteTests: XCTestCase {
             metadata: original
         )
         let model = AppModel(inputDevices: { [] }, defaultInputDeviceID: { nil }, performStartupWork: false)
+        model.setOutputFolder(folder)
+        model.seedLibrarySessionsForTesting([session])
 
-        model.saveMetadata(title: "New", tags: "one, two", isFavorite: true, for: session)
+        _ = await model.saveMetadata(title: "New", tags: "one, two", isFavorite: true, for: session)
 
         let saved = RecordingSessionMetadataStore.load(in: folder)
         XCTAssertEqual(saved.title, "New")
@@ -76,11 +78,13 @@ final class AppModelMuteTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            initialOutputFolder: URL(fileURLWithPath: "/tmp", isDirectory: true),
             recordingSessionLoader: { _ in
                 XCTAssertFalse(Thread.isMainThread)
                 loaderCalled.fulfill()
                 return []
-            }
+            },
+            recordingSessionRecovery: { _ in }
         )
 
         model.refreshSessions()
@@ -88,7 +92,7 @@ final class AppModelMuteTests: XCTestCase {
         await fulfillment(of: [loaderCalled], timeout: 1)
     }
 
-    func testRefreshSessionsCannotInterruptTranscriptionStartedWhileLoadIsInFlight() async throws {
+    func testRefreshSessionsProjectsPersistedInFlightTranscriptionAsInterrupted() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let folder = root.appendingPathComponent("manual-race", isDirectory: true)
@@ -111,11 +115,13 @@ final class AppModelMuteTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            initialOutputFolder: root,
             recordingSessionLoader: { _ in
                 loaderCalled.fulfill()
                 releaseLoader.wait()
                 return [session]
-            }
+            },
+            recordingSessionRecovery: { _ in }
         )
 
         model.refreshSessions()
@@ -126,14 +132,15 @@ final class AppModelMuteTests: XCTestCase {
             message: "Uploading audio",
             startedAt: Date()
         )
-        model.transcribingSessionID = session.id
-        model.transcriptionStatesBySessionID[session.id] = activeState
         try TranscriptionStateStore.save(activeState, in: session.folderURL)
         releaseLoader.signal()
 
         await waitUntil { model.sessions == [session] }
 
-        XCTAssertEqual(model.transcriptionStatesBySessionID[session.id], activeState)
+        XCTAssertEqual(
+            model.transcriptionStatesBySessionID[session.id]?.phase,
+            .interrupted
+        )
         XCTAssertEqual(
             try TranscriptionStateStore.load(in: session.folderURL)?.phase,
             .uploading
@@ -166,7 +173,9 @@ final class AppModelMuteTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
-            recordingSessionLoader: { _ in [session] }
+            initialOutputFolder: root,
+            recordingSessionLoader: { _ in [session] },
+            recordingSessionRecovery: { _ in }
         )
 
         model.refreshSessions()
@@ -203,13 +212,15 @@ final class AppModelMuteTests: XCTestCase {
                 return []
             }
         )
-        model.sessions = [oldSession]
-        model.transcriptionStatesBySessionID[oldSession.id] = .init(
-            phase: .completed,
-            message: "Done",
-            startedAt: Date(),
-            finishedAt: Date()
-        )
+        model.seedLibrarySessionsForTesting([oldSession])
+        model.transcriptionFeature.replaceLoadedStates([
+            oldSession.id: .init(
+                phase: .completed,
+                message: "Done",
+                startedAt: Date(),
+                finishedAt: Date()
+            )
+        ])
 
         model.setOutputFolder(URL(fileURLWithPath: "/tmp/recordings-new", isDirectory: true))
 
@@ -231,6 +242,7 @@ final class AppModelMuteTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            initialOutputFolder: URL(fileURLWithPath: "/tmp", isDirectory: true),
             recordingSessionLoader: { _ in
                 let currentCall = callCounter.next()
                 if currentCall == 1 {
@@ -239,7 +251,8 @@ final class AppModelMuteTests: XCTestCase {
                     return [oldSession]
                 }
                 return [newSession]
-            }
+            },
+            recordingSessionRecovery: { _ in }
         )
 
         model.refreshSessions()

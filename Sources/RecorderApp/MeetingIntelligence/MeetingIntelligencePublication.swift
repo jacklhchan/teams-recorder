@@ -1,11 +1,24 @@
 import Foundation
 
+struct MeetingIntelligenceEditableContent: Equatable, Sendable {
+    let artifact: MeetingIntelligenceArtifact
+}
+
+enum MeetingIntelligenceEditSaveOutcome: Equatable, Sendable {
+    case saved(MeetingIntelligenceArtifact)
+    case invalidSummary(String)
+    case invalidSuggestedTitle(String)
+    case conflict(String)
+    case failed(String)
+}
+
 /// The durable semantic outcomes that can require one targeted Library refresh.
 /// An artifact generation and its automatic-title decision are deliberately one
 /// outcome so a protected title never produces a second, ambiguous callback.
 enum MeetingIntelligencePublicationKind: Hashable, Sendable {
     case artifactAndAutomaticTitle
     case explicitSuggestedTitle
+    case editedArtifact
 }
 
 enum MeetingIntelligenceTitleOutcome: Equatable, Sendable {

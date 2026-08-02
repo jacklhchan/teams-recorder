@@ -5,6 +5,100 @@ import XCTest
 
 @MainActor
 final class MeetingIntelligenceFeatureModelTests: XCTestCase {
+    func testEditedPublicationValueCarriesArtifactAndPreservedTitleOutcome() throws {
+        let fixture = try FeatureFixture()
+        let artifact = testArtifact()
+        let publication = MeetingIntelligencePublished(
+            identity: .init(
+                coordinatorInstanceID: UUID(),
+                sessionID: fixture.session.id,
+                normalizedSessionFolder: fixture.session.folderURL,
+                generation: 1,
+                attemptID: UUID(),
+                transcriptRevision: .init(sha256: artifact.sourceTranscriptSHA256, byteCount: artifact.sourceTranscriptByteCount),
+                workspaceFence: .initial,
+                kind: .editedArtifact
+            ),
+            canonicalSession: fixture.session,
+            artifact: artifact,
+            titleOutcome: .preserved
+        )
+
+        XCTAssertEqual(publication.identity.kind, .editedArtifact)
+        XCTAssertEqual(publication.artifact, artifact)
+        XCTAssertEqual(publication.titleOutcome, .preserved)
+        XCTAssertEqual(MeetingIntelligenceEditableContent(artifact: artifact).artifact, artifact)
+        XCTAssertEqual(MeetingIntelligenceEditSaveOutcome.saved(artifact), .saved(artifact))
+        XCTAssertEqual(MeetingIntelligenceEditSaveOutcome.invalidSummary("summary"), .invalidSummary("summary"))
+        XCTAssertEqual(MeetingIntelligenceEditSaveOutcome.invalidSuggestedTitle("title"), .invalidSuggestedTitle("title"))
+        XCTAssertEqual(MeetingIntelligenceEditSaveOutcome.conflict("conflict"), .conflict("conflict"))
+        XCTAssertEqual(MeetingIntelligenceEditSaveOutcome.failed("failure"), .failed("failure"))
+    }
+
+    func testPresentationWithoutLoadedArtifactNeverExposesEditableContent() {
+        let presentations = [
+            MeetingIntelligencePresentation.empty,
+            .init(phase: .notGenerated, summary: nil, suggestedTitle: nil, statusMessage: "Unavailable.", model: nil, titleIsProtected: false, unavailableReason: .discoveryUnsupported),
+            .init(phase: .checkingAvailability, summary: nil, suggestedTitle: nil, statusMessage: "Checking.", model: "gpt-test", titleIsProtected: false, unavailableReason: nil),
+            .init(phase: .generating(.init(stage: .generatingFinal, current: 0, total: 0)), summary: nil, suggestedTitle: nil, statusMessage: "Working.", model: "gpt-test", titleIsProtected: false, unavailableReason: nil),
+            .init(phase: .ready, summary: nil, suggestedTitle: nil, statusMessage: "Needs attention.", model: nil, titleIsProtected: false, unavailableReason: nil),
+            .init(phase: .stale, summary: nil, suggestedTitle: nil, statusMessage: "Needs attention.", model: nil, titleIsProtected: false, unavailableReason: nil),
+            .init(phase: .failed, summary: nil, suggestedTitle: nil, statusMessage: "Needs attention.", model: nil, titleIsProtected: false, unavailableReason: nil),
+            .init(phase: .cancelled, summary: nil, suggestedTitle: nil, statusMessage: "Cancelled.", model: nil, titleIsProtected: false, unavailableReason: nil),
+            .init(phase: .interrupted, summary: nil, suggestedTitle: nil, statusMessage: "Interrupted.", model: nil, titleIsProtected: false, unavailableReason: nil)
+        ]
+
+        XCTAssertTrue(presentations.allSatisfy { $0.editableContent == nil })
+    }
+
+    func testLoadedArtifactProjectionCarriesExactEditableContentThroughReadyStaleAndReload() async throws {
+        let fixture = try FeatureFixture()
+        let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
+
+        XCTAssertNil(feature.presentation(for: fixture.session).editableContent)
+
+        feature.generate(for: fixture.session)
+        await fixture.waitForIdle()
+        let artifact = try XCTUnwrap(fixture.artifacts.artifact)
+        XCTAssertEqual(feature.presentation(for: fixture.session).phase, .ready)
+        XCTAssertEqual(feature.presentation(for: fixture.session).editableContent?.artifact, artifact)
+
+        fixture.replaceTranscriptForEdit()
+        feature.transcriptDidSave(fixture.session)
+        await fixture.waitForIdle()
+        XCTAssertEqual(feature.presentation(for: fixture.session).phase, .stale)
+        XCTAssertEqual(feature.presentation(for: fixture.session).editableContent?.artifact, artifact)
+
+        feature.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+        XCTAssertEqual(feature.presentation(for: fixture.session).phase, .stale)
+        XCTAssertEqual(feature.presentation(for: fixture.session).editableContent?.artifact, artifact)
+    }
+
+    func testInvalidLoadedArtifactDoesNotExposeEditableContent() async throws {
+        let fixture = try FeatureFixture()
+        let artifact = testArtifact()
+        fixture.artifacts.artifact = .init(
+            schemaVersion: artifact.schemaVersion,
+            summary: " ",
+            suggestedTitle: artifact.suggestedTitle,
+            sourceTranscriptSHA256: fixture.event(generation: 1).revision.sha256,
+            sourceTranscriptByteCount: fixture.event(generation: 1).revision.byteCount,
+            model: artifact.model,
+            generatedAt: artifact.generatedAt,
+            intent: artifact.intent,
+            contentOrigin: artifact.contentOrigin,
+            editedAt: artifact.editedAt
+        )
+        let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
+
+        feature.transcriptDidSave(fixture.session)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(feature.presentation(for: fixture.session).phase, .ready)
+        XCTAssertNil(feature.presentation(for: fixture.session).editableContent)
+    }
+
     func testPublicationObserverTokenCannotRemoveReplacementAndShutdownClearsIt() async throws {
         let fixture = try FeatureFixture()
         let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
@@ -268,6 +362,21 @@ final class MeetingIntelligenceFeatureModelTests: XCTestCase {
         XCTAssertFalse(host.containsView(named: "AVPlayerView"))
         XCTAssertFalse(host.containsView(named: "RecordingPlaybackView"))
     }
+}
+
+private func testArtifact() -> MeetingIntelligenceArtifact {
+    .init(
+        schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+        summary: "Editable summary",
+        suggestedTitle: "Editable title",
+        sourceTranscriptSHA256: "sha256:" + String(repeating: "c", count: 64),
+        sourceTranscriptByteCount: 42,
+        model: "gpt-test",
+        generatedAt: Date(timeIntervalSince1970: 1),
+        intent: .generate,
+        contentOrigin: .generated,
+        editedAt: nil
+    )
 }
 
 @MainActor

@@ -20,6 +20,27 @@ struct MeetingIntelligencePresentation: Equatable, Sendable {
     let model: String?
     let titleIsProtected: Bool
     let unavailableReason: MeetingIntelligenceUnavailableReason?
+    let editableContent: MeetingIntelligenceEditableContent?
+
+    init(
+        phase: Phase,
+        summary: String?,
+        suggestedTitle: String?,
+        statusMessage: String,
+        model: String?,
+        titleIsProtected: Bool,
+        unavailableReason: MeetingIntelligenceUnavailableReason?,
+        editableContent: MeetingIntelligenceEditableContent? = nil
+    ) {
+        self.phase = phase
+        self.summary = summary
+        self.suggestedTitle = suggestedTitle
+        self.statusMessage = statusMessage
+        self.model = model
+        self.titleIsProtected = titleIsProtected
+        self.unavailableReason = unavailableReason
+        self.editableContent = editableContent
+    }
 
     static let empty = Self(
         phase: .notGenerated,
@@ -709,8 +730,18 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     private func setPresentation(from artifact: MeetingIntelligenceArtifact, phase: MeetingIntelligencePresentation.Phase, message: String, session: RecordingSession) {
+        let editableContent: MeetingIntelligenceEditableContent?
+        switch phase {
+        case .ready, .stale:
+            editableContent = MeetingIntelligenceArtifactValidator.isValid(artifact)
+                ? .init(artifact: artifact)
+                : nil
+        default:
+            editableContent = nil
+        }
         setPresentation(.init(phase: phase, summary: artifact.summary, suggestedTitle: artifact.suggestedTitle,
-                              statusMessage: message, model: artifact.model, titleIsProtected: titleIsProtected(session), unavailableReason: nil), for: session)
+                              statusMessage: message, model: artifact.model, titleIsProtected: titleIsProtected(session), unavailableReason: nil,
+                              editableContent: editableContent), for: session)
     }
 
     private func setFailed(_ message: String, for session: RecordingSession) {

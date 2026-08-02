@@ -190,6 +190,13 @@ final class MeetingIntelligenceFeatureModelTests: XCTestCase {
         XCTAssertEqual(outcome, .saved(edited))
         XCTAssertEqual(fixture.artifactEditor.requests.count, 1)
         XCTAssertEqual(fixture.artifactEditor.requests.first?.capturedArtifact, captured)
+        XCTAssertEqual(
+            fixture.artifactEditor.requests.first?.capturedTranscriptRevision,
+            .init(
+                sha256: captured.sourceTranscriptSHA256,
+                byteCount: captured.sourceTranscriptByteCount
+            )
+        )
         XCTAssertEqual(fixture.artifactEditor.requests.first?.proposedSummary, "Feature edited summary")
         XCTAssertEqual(fixture.artifactEditor.requests.first?.proposedSuggestedTitle, "Feature edited title")
         XCTAssertEqual(fixture.artifactEditor.requests.first?.editedAt, editedAt)

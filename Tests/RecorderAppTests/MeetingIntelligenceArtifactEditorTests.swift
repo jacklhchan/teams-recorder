@@ -247,6 +247,56 @@ final class MeetingIntelligenceArtifactEditorTests: XCTestCase {
         XCTAssertTrue(try fixture.stageFiles().isEmpty)
     }
 
+    func testSavesStaleArtifactWhenCurrentTranscriptMatchesEditStartFence() async throws {
+        let fixture = try ArtifactEditorFixture()
+        defer { fixture.remove() }
+        let staleRevision = TranscriptDocumentRevision(
+            sha256: "sha256:" + String(repeating: "b", count: 64),
+            byteCount: 99
+        )
+        fixture.reader.revision = staleRevision
+
+        let result = try await fixture.editor.save(
+            fixture.request(
+                summary: "Edited stale summary",
+                title: "Edited stale title",
+                capturedTranscriptRevision: staleRevision
+            )
+        )
+
+        XCTAssertEqual(result.summary, "Edited stale summary")
+        XCTAssertEqual(result.suggestedTitle, "Edited stale title")
+        XCTAssertEqual(result.sourceTranscriptSHA256, fixture.capturedArtifact.sourceTranscriptSHA256)
+        XCTAssertEqual(result.sourceTranscriptByteCount, fixture.capturedArtifact.sourceTranscriptByteCount)
+        XCTAssertEqual(result, try fixture.store.load(in: fixture.folder))
+    }
+
+    func testRejectsTranscriptRevisionChangedAfterEditFenceWasCaptured() async throws {
+        let fixture = try ArtifactEditorFixture()
+        defer { fixture.remove() }
+        let editFence = fixture.reader.revision
+        let changedRevision = TranscriptDocumentRevision(
+            sha256: "sha256:" + String(repeating: "c", count: 64),
+            byteCount: 101
+        )
+        fixture.reader.revision = changedRevision
+        let beforeMetadata = try fixture.metadataBytes()
+
+        await assertError(.transcriptChanged) {
+            return try await fixture.editor.save(
+                fixture.request(
+                    summary: "Changed after edit began",
+                    title: "Changed after edit began title",
+                    capturedTranscriptRevision: editFence
+                )
+            )
+        }
+
+        XCTAssertEqual(try fixture.store.load(in: fixture.folder), fixture.capturedArtifact)
+        try fixture.assertMetadataUnchanged(beforeMetadata)
+        XCTAssertTrue(try fixture.stageFiles().isEmpty)
+    }
+
     func testInvalidLeaseBeforeSaveDoesNotStage() async throws {
         let fixture = try ArtifactEditorFixture(useSpyStore: true)
         defer { fixture.remove() }
@@ -622,7 +672,7 @@ private final class ArtifactEditorFixture: @unchecked Sendable {
         intent: MeetingIntelligenceIntent,
         generatedAt: Date
     ) -> MeetingIntelligenceArtifact {
-        .init(
+        return .init(
             schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
             summary: summary,
             suggestedTitle: title,
@@ -642,11 +692,17 @@ private final class ArtifactEditorFixture: @unchecked Sendable {
         summary: String = "Edited summary",
         title: String = "Edited title",
         editedAt: Date = Date(timeIntervalSince1970: 1_775_000_001),
-        lease: MeetingIntelligenceAttemptLease? = nil
+        lease: MeetingIntelligenceAttemptLease? = nil,
+        capturedTranscriptRevision: TranscriptDocumentRevision? = nil
     ) -> MeetingIntelligenceArtifactEditRequest {
-        .init(
+        let artifact = capturedArtifact ?? self.capturedArtifact
+        return .init(
             session: session ?? self.session,
-            capturedArtifact: capturedArtifact ?? self.capturedArtifact,
+            capturedArtifact: artifact,
+            capturedTranscriptRevision: capturedTranscriptRevision ?? .init(
+                sha256: artifact.sourceTranscriptSHA256,
+                byteCount: artifact.sourceTranscriptByteCount
+            ),
             proposedSummary: summary,
             proposedSuggestedTitle: title,
             editedAt: editedAt,

@@ -3,6 +3,7 @@ import Foundation
 struct MeetingIntelligenceArtifactEditRequest: Sendable {
     let session: RecordingSession
     let capturedArtifact: MeetingIntelligenceArtifact
+    let capturedTranscriptRevision: TranscriptDocumentRevision
     let proposedSummary: String
     let proposedSuggestedTitle: String
     let editedAt: Date
@@ -133,8 +134,7 @@ struct MeetingIntelligenceArtifactEditor: MeetingIntelligenceArtifactEditing, @u
                 } catch {
                     throw MeetingIntelligenceArtifactEditError.storageFailure
                 }
-                guard transcript.revision.sha256 == request.capturedArtifact.sourceTranscriptSHA256,
-                      transcript.revision.byteCount == request.capturedArtifact.sourceTranscriptByteCount else {
+                guard transcript.revision == request.capturedTranscriptRevision else {
                     throw MeetingIntelligenceArtifactEditError.transcriptChanged
                 }
 

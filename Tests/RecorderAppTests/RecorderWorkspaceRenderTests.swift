@@ -1151,12 +1151,17 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             requestedSession: openedAlias,
             admission: admission,
             capturedArtifact: artifact,
+            capturedTranscriptRevision: .init(
+                sha256: artifact.sourceTranscriptSHA256,
+                byteCount: artifact.sourceTranscriptByteCount
+            ),
             summary: "Edited summary",
             suggestedTitle: "Edited suggested title",
-            save: { session, artifact, summary, suggestedTitle in
+            save: { session, artifact, transcriptRevision, summary, suggestedTitle in
                 await capture.save(
                     session: session,
                     artifact: artifact,
+                    transcriptRevision: transcriptRevision,
                     summary: summary,
                     suggestedTitle: suggestedTitle
                 )
@@ -1170,6 +1175,10 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
                 .init(
                     session: canonical,
                     artifact: artifact,
+                    transcriptRevision: .init(
+                        sha256: artifact.sourceTranscriptSHA256,
+                        byteCount: artifact.sourceTranscriptByteCount
+                    ),
                     summary: "Edited summary",
                     suggestedTitle: "Edited suggested title"
                 )
@@ -1181,12 +1190,17 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             requestedSession: openedAlias,
             admission: admission,
             capturedArtifact: artifact,
+            capturedTranscriptRevision: .init(
+                sha256: artifact.sourceTranscriptSHA256,
+                byteCount: artifact.sourceTranscriptByteCount
+            ),
             summary: "Should be rejected",
             suggestedTitle: "Should be rejected",
-            save: { session, artifact, summary, suggestedTitle in
+            save: { session, artifact, transcriptRevision, summary, suggestedTitle in
                 await capture.save(
                     session: session,
                     artifact: artifact,
+                    transcriptRevision: transcriptRevision,
                     summary: summary,
                     suggestedTitle: suggestedTitle
                 )
@@ -1203,12 +1217,17 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             requestedSession: forgedSession,
             admission: admission,
             capturedArtifact: artifact,
+            capturedTranscriptRevision: .init(
+                sha256: artifact.sourceTranscriptSHA256,
+                byteCount: artifact.sourceTranscriptByteCount
+            ),
             summary: "Forged summary",
             suggestedTitle: "Forged title",
-            save: { session, artifact, summary, suggestedTitle in
+            save: { session, artifact, transcriptRevision, summary, suggestedTitle in
                 await capture.save(
                     session: session,
                     artifact: artifact,
+                    transcriptRevision: transcriptRevision,
                     summary: summary,
                     suggestedTitle: suggestedTitle
                 )
@@ -1362,6 +1381,13 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 
         XCTAssertEqual(editor.requests.count, 1)
         XCTAssertEqual(editor.requests[0].capturedArtifact, capturedArtifact)
+        XCTAssertEqual(
+            editor.requests[0].capturedTranscriptRevision,
+            .init(
+                sha256: capturedArtifact.sourceTranscriptSHA256,
+                byteCount: capturedArtifact.sourceTranscriptByteCount
+            )
+        )
         XCTAssertEqual(editor.requests[0].summary, "Production UI edited summary")
         XCTAssertEqual(editor.requests[0].suggestedTitle, "Production UI edited title")
 
@@ -2703,6 +2729,7 @@ private final class WorkspaceMeetingIntelligenceSaveCapture {
     struct Request: Equatable {
         let session: RecordingSession
         let artifact: MeetingIntelligenceArtifact
+        let transcriptRevision: TranscriptDocumentRevision
         let summary: String
         let suggestedTitle: String
     }
@@ -2712,12 +2739,14 @@ private final class WorkspaceMeetingIntelligenceSaveCapture {
     func save(
         session: RecordingSession,
         artifact: MeetingIntelligenceArtifact,
+        transcriptRevision: TranscriptDocumentRevision,
         summary: String,
         suggestedTitle: String
     ) async -> MeetingIntelligenceEditSaveOutcome {
         requests.append(.init(
             session: session,
             artifact: artifact,
+            transcriptRevision: transcriptRevision,
             summary: summary,
             suggestedTitle: suggestedTitle
         ))
@@ -2741,6 +2770,7 @@ private actor RenderMeetingIntelligenceEditGate {
 private final class RenderMeetingIntelligenceEditSpy: MeetingIntelligenceArtifactEditing, @unchecked Sendable {
     struct Request: Equatable {
         let capturedArtifact: MeetingIntelligenceArtifact
+        let capturedTranscriptRevision: TranscriptDocumentRevision
         let summary: String
         let suggestedTitle: String
     }
@@ -2764,6 +2794,7 @@ private final class RenderMeetingIntelligenceEditSpy: MeetingIntelligenceArtifac
         lock.withLock {
             storedRequests.append(.init(
                 capturedArtifact: request.capturedArtifact,
+                capturedTranscriptRevision: request.capturedTranscriptRevision,
                 summary: request.proposedSummary,
                 suggestedTitle: request.proposedSuggestedTitle
             ))

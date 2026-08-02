@@ -26,6 +26,7 @@ struct TranscriptDetailView: View {
     let saveMeetingIntelligenceEdit: (
         RecordingSession,
         MeetingIntelligenceArtifact,
+        TranscriptDocumentRevision,
         String,
         String
     ) async -> MeetingIntelligenceEditSaveOutcome
@@ -45,10 +46,11 @@ struct TranscriptDetailView: View {
             retryGeneration: retryMeetingIntelligenceGeneration,
             cancel: cancelMeetingIntelligence,
             applySuggestedTitle: applyMeetingIntelligenceSuggestedTitle,
-            saveEdit: { artifact, summary, suggestedTitle in
+            saveEdit: { artifact, transcriptRevision, summary, suggestedTitle in
                 await saveMeetingIntelligenceEdit(
                     currentSession,
                     artifact,
+                    transcriptRevision,
                     summary,
                     suggestedTitle
                 )
@@ -169,9 +171,10 @@ enum TranscriptDetailActionProjection {
         applySuggestedTitle: @escaping (RecordingSession) -> Void,
         saveEdit: @escaping (
             MeetingIntelligenceArtifact,
+            TranscriptDocumentRevision,
             String,
             String
-        ) async -> MeetingIntelligenceEditSaveOutcome = { _, _, _ in
+        ) async -> MeetingIntelligenceEditSaveOutcome = { _, _, _, _ in
             .failed("Meeting intelligence edits are unavailable.")
         }
     ) -> MeetingIntelligenceActions {
@@ -182,8 +185,8 @@ enum TranscriptDetailActionProjection {
             retryGeneration: { retryGeneration(session) },
             cancel: { cancel(session) },
             applySuggestedTitle: { applySuggestedTitle(session) },
-            saveEdit: { artifact, summary, suggestedTitle in
-                await saveEdit(artifact, summary, suggestedTitle)
+            saveEdit: { artifact, transcriptRevision, summary, suggestedTitle in
+                await saveEdit(artifact, transcriptRevision, summary, suggestedTitle)
             }
         )
     }

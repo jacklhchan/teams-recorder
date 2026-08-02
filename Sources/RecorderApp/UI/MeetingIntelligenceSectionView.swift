@@ -124,9 +124,10 @@ struct MeetingIntelligenceActions {
     var applySuggestedTitle: () -> Void = {}
     var saveEdit: (
         MeetingIntelligenceArtifact,
+        TranscriptDocumentRevision,
         String,
         String
-    ) async -> MeetingIntelligenceEditSaveOutcome = { _, _, _ in
+    ) async -> MeetingIntelligenceEditSaveOutcome = { _, _, _, _ in
         .failed("Meeting intelligence edits are unavailable.")
     }
 }
@@ -139,6 +140,7 @@ final class MeetingIntelligenceEditController: ObservableObject {
     struct Submission: Equatable, Sendable {
         let attemptID: UUID
         let artifact: MeetingIntelligenceArtifact
+        let capturedTranscriptRevision: TranscriptDocumentRevision
         let summary: String
         let suggestedTitle: String
     }
@@ -150,6 +152,7 @@ final class MeetingIntelligenceEditController: ObservableObject {
     @Published private(set) var editStatus: String?
 
     private var capturedArtifact: MeetingIntelligenceArtifact?
+    private var capturedTranscriptRevision: TranscriptDocumentRevision?
     private var capturedPhase: MeetingIntelligencePresentation.Phase?
     private var capturedIdentity: MeetingIntelligenceSessionPresentationIdentity?
     private var observedProjection: MeetingIntelligencePresentation?
@@ -157,6 +160,7 @@ final class MeetingIntelligenceEditController: ObservableObject {
     private var activeAttemptID: UUID?
     private var pendingSavedArtifact: MeetingIntelligenceArtifact?
     private var conflictArtifact: MeetingIntelligenceArtifact?
+    private var conflictTranscriptRevision: TranscriptDocumentRevision?
     private var conflictPhase: MeetingIntelligencePresentation.Phase?
     private var conflictIdentity: MeetingIntelligenceSessionPresentationIdentity?
     private var requiresFreshEdit = false
@@ -191,13 +195,15 @@ final class MeetingIntelligenceEditController: ObservableObject {
     ) {
         guard !isEditing,
               projection.phase == .ready || projection.phase == .stale,
-              let artifact = projection.editableContent?.artifact,
-              MeetingIntelligenceArtifactValidator.isValid(artifact)
+              let editableContent = projection.editableContent,
+              MeetingIntelligenceArtifactValidator.isValid(editableContent.artifact)
         else { return }
+        let artifact = editableContent.artifact
 
         observedProjection = projection
         observedIdentity = identity
         capturedArtifact = artifact
+        capturedTranscriptRevision = editableContent.transcriptRevision
         capturedPhase = projection.phase
         capturedIdentity = identity
         draftSummary = projection.summary ?? artifact.summary
@@ -237,6 +243,10 @@ final class MeetingIntelligenceEditController: ObservableObject {
         let submission = Submission(
             attemptID: UUID(),
             artifact: artifact,
+            capturedTranscriptRevision: capturedTranscriptRevision ?? .init(
+                sha256: artifact.sourceTranscriptSHA256,
+                byteCount: artifact.sourceTranscriptByteCount
+            ),
             summary: draftSummary,
             suggestedTitle: draftSuggestedTitle
         )
@@ -318,9 +328,11 @@ final class MeetingIntelligenceEditController: ObservableObject {
         }
 
         guard let capturedArtifact,
+              let capturedTranscriptRevision,
               let capturedPhase,
               projection.phase == capturedPhase,
               projection.editableContent?.artifact == capturedArtifact,
+              projection.editableContent?.transcriptRevision == capturedTranscriptRevision,
               projection.summary == capturedArtifact.summary,
               projection.suggestedTitle == capturedArtifact.suggestedTitle
         else {
@@ -336,10 +348,14 @@ final class MeetingIntelligenceEditController: ObservableObject {
     }
 
     private var currentProjectionMatchesCapture: Bool {
-        guard let observedProjection, let capturedArtifact, let capturedPhase else { return false }
+        guard let observedProjection,
+              let capturedArtifact,
+              let capturedTranscriptRevision,
+              let capturedPhase else { return false }
         guard !isIdentityMismatch,
               observedProjection.phase == capturedPhase,
               observedProjection.editableContent?.artifact == capturedArtifact,
+              observedProjection.editableContent?.transcriptRevision == capturedTranscriptRevision,
               observedProjection.summary == capturedArtifact.summary,
               observedProjection.suggestedTitle == capturedArtifact.suggestedTitle
         else { return false }
@@ -363,6 +379,7 @@ final class MeetingIntelligenceEditController: ObservableObject {
         guard isEditing else { return }
 
         let sourceArtifact = capturedArtifact
+        let sourceTranscriptRevision = capturedTranscriptRevision
         let sourcePhase = capturedPhase
         let sourceIdentity = capturedIdentity
 
@@ -373,10 +390,11 @@ final class MeetingIntelligenceEditController: ObservableObject {
         draftSummary = ""
         draftSuggestedTitle = ""
         capturedArtifact = nil
+        capturedTranscriptRevision = nil
         capturedPhase = nil
         capturedIdentity = nil
 
-        guard let sourceArtifact, let sourcePhase else {
+        guard let sourceArtifact, let sourceTranscriptRevision, let sourcePhase else {
             clearConflictState()
             requiresFreshEdit = false
             editStatus = Self.conflictReloadingStatus
@@ -384,6 +402,7 @@ final class MeetingIntelligenceEditController: ObservableObject {
         }
 
         conflictArtifact = sourceArtifact
+        conflictTranscriptRevision = sourceTranscriptRevision
         conflictPhase = sourcePhase
         conflictIdentity = sourceIdentity
         requiresFreshEdit = true
@@ -401,9 +420,11 @@ final class MeetingIntelligenceEditController: ObservableObject {
 
     private func conflictProjectionMatchesSource(_ projection: MeetingIntelligencePresentation) -> Bool {
         guard let conflictArtifact,
+              let conflictTranscriptRevision,
               let conflictPhase,
               projection.phase == conflictPhase,
               projection.editableContent?.artifact == conflictArtifact,
+              projection.editableContent?.transcriptRevision == conflictTranscriptRevision,
               projection.summary == conflictArtifact.summary,
               projection.suggestedTitle == conflictArtifact.suggestedTitle
         else { return false }
@@ -412,6 +433,7 @@ final class MeetingIntelligenceEditController: ObservableObject {
 
     private func clearConflictState() {
         conflictArtifact = nil
+        conflictTranscriptRevision = nil
         conflictPhase = nil
         conflictIdentity = nil
     }
@@ -427,6 +449,7 @@ final class MeetingIntelligenceEditController: ObservableObject {
         draftSummary = ""
         draftSuggestedTitle = ""
         capturedArtifact = nil
+        capturedTranscriptRevision = nil
         capturedPhase = nil
         capturedIdentity = nil
         pendingSavedArtifact = nil
@@ -717,6 +740,7 @@ struct MeetingIntelligenceSectionView: View {
         Task { @MainActor in
             let outcome = await saveEdit(
                 submission.artifact,
+                submission.capturedTranscriptRevision,
                 submission.summary,
                 submission.suggestedTitle
             )

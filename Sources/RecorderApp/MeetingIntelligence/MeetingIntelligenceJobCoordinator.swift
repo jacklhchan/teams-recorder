@@ -391,16 +391,19 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         capturedArtifact: MeetingIntelligenceArtifact,
         summary: String,
         suggestedTitle: String,
+        capturedTranscriptRevision: TranscriptDocumentRevision? = nil,
         workspaceFence: WorkspacePublicationFence = .initial
     ) async -> MeetingIntelligenceEditSaveOutcome {
         guard !isShutDown,
               let canonicalSession = retainedCanonicalSession(for: session),
               tasksBySessionID[canonicalSession.id] == nil,
               editTasksBySessionID[canonicalSession.id] == nil,
-              presentation(for: canonicalSession).editableContent?.artifact == capturedArtifact
+              let editableContent = presentation(for: canonicalSession).editableContent,
+              editableContent.artifact == capturedArtifact
         else {
             return .conflict(editMessage(for: .conflict))
         }
+        let editTranscriptRevision = capturedTranscriptRevision ?? editableContent.transcriptRevision
 
         let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
         let capturedPublicationDelivery = onPublication
@@ -413,6 +416,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             return await self.saveEditOwned(
                 session: canonicalSession,
                 capturedArtifact: capturedArtifact,
+                capturedTranscriptRevision: editTranscriptRevision,
                 summary: summary,
                 suggestedTitle: suggestedTitle,
                 ticket: ticket,
@@ -472,9 +476,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                 guard self.owns(ticket, for: canonicalSession) else { return }
                 if let existing, existing.sourceTranscriptSHA256 == current.revision.sha256,
                    existing.sourceTranscriptByteCount == current.revision.byteCount {
-                    self.setPresentation(from: existing, phase: .ready, message: "Ready.", session: canonicalSession)
+                    self.setPresentation(from: existing, phase: .ready, message: "Ready.", transcriptRevision: current.revision, session: canonicalSession)
                 } else if let existing {
-                    self.setPresentation(from: existing, phase: .stale, message: "Transcript changed. Regenerate to update.", session: canonicalSession)
+                    self.setPresentation(from: existing, phase: .stale, message: "Transcript changed. Regenerate to update.", transcriptRevision: current.revision, session: canonicalSession)
                 } else { self.setPresentation(.empty, for: canonicalSession) }
                 self.clearTaskIfOwned(ticket, for: canonicalSession)
             } catch {
@@ -622,7 +626,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
            artifact.sourceTranscriptSHA256 == transcript.revision.sha256,
            artifact.sourceTranscriptByteCount == transcript.revision.byteCount {
             guard owns(ticket, for: session) else { return }
-            setPresentation(from: artifact, phase: .ready, message: "Ready.", session: session)
+            setPresentation(from: artifact, phase: .ready, message: "Ready.", transcriptRevision: transcript.revision, session: session)
             clearTaskIfOwned(ticket, for: session)
             return
         }
@@ -711,7 +715,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             await deliverDurablePublication(publication)
             guard owns(ticket, for: session), !Task.isCancelled else { return }
             setPresentation(from: outcome.artifact, phase: .ready,
-                            message: outcome.titleWarning ?? "Ready.", session: session)
+                            message: outcome.titleWarning ?? "Ready.",
+                            transcriptRevision: transcript.revision,
+                            session: session)
             // Publication is the semantic success boundary. State persistence
             // is recovery-only and may be delayed/cancelled without changing
             // the one successful library/search refresh callback.
@@ -732,6 +738,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private func saveEditOwned(
         session: RecordingSession,
         capturedArtifact: MeetingIntelligenceArtifact,
+        capturedTranscriptRevision: TranscriptDocumentRevision,
         summary: String,
         suggestedTitle: String,
         ticket: Ticket,
@@ -744,6 +751,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         let request = MeetingIntelligenceArtifactEditRequest(
             session: session,
             capturedArtifact: capturedArtifact,
+            capturedTranscriptRevision: capturedTranscriptRevision,
             proposedSummary: summary,
             proposedSuggestedTitle: suggestedTitle,
             editedAt: now(),
@@ -775,7 +783,11 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             guard acceptsEditProjection(ticket, for: session) else {
                 return editProjectionFailure(for: session)
             }
-            let projection = await editProjection(for: editedArtifact, session: session)
+            let projection = await editProjection(
+                for: editedArtifact,
+                session: session,
+                fallbackRevision: capturedTranscriptRevision
+            )
             guard acceptsEditProjection(ticket, for: session) else {
                 return editProjectionFailure(for: session)
             }
@@ -783,6 +795,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                 from: editedArtifact,
                 phase: projection.phase,
                 message: projection.message,
+                transcriptRevision: projection.transcriptRevision,
                 session: session
             ) else {
                 return editProjectionFailure(for: session)
@@ -797,20 +810,26 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     private func editProjection(
         for artifact: MeetingIntelligenceArtifact,
-        session: RecordingSession
-    ) async -> (phase: MeetingIntelligencePresentation.Phase, message: String) {
+        session: RecordingSession,
+        fallbackRevision: TranscriptDocumentRevision
+    ) async -> (
+        phase: MeetingIntelligencePresentation.Phase,
+        message: String,
+        transcriptRevision: TranscriptDocumentRevision
+    ) {
         do {
             let transcript = try await io.transcript(in: session.folderURL)
             guard transcript.revision.sha256 == artifact.sourceTranscriptSHA256,
                   transcript.revision.byteCount == artifact.sourceTranscriptByteCount else {
-                return (.stale, "Transcript changed. Regenerate to update.")
+                return (.stale, "Transcript changed. Regenerate to update.", transcript.revision)
             }
+            return (.ready, "Ready.", transcript.revision)
         } catch {
             // The editor already validated the transcript before durable
             // promotion. A later observational read must not turn that durable
             // success into a user-visible failure.
+            return (.ready, "Ready.", fallbackRevision)
         }
-        return (.ready, "Ready.")
     }
 
     private func snapshotIfUsable(for session: RecordingSession, ticket: Ticket) async -> OpenAICompatibleProviderSnapshot? {
@@ -887,7 +906,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                           self.tasksBySessionID[session.id] == nil,
                           self.editTasksBySessionID[session.id] == nil else { return }
                     let phase: MeetingIntelligencePresentation.Phase = existing.sourceTranscriptSHA256 == source.revision.sha256 && existing.sourceTranscriptByteCount == source.revision.byteCount ? .ready : .stale
-                    self.setPresentation(from: existing, phase: phase, message: phase == .ready ? "Ready." : "Transcript changed. Regenerate to update.", session: session)
+                    self.setPresentation(from: existing, phase: phase, message: phase == .ready ? "Ready." : "Transcript changed. Regenerate to update.", transcriptRevision: source.revision, session: session)
                 } else if let recovered,
                           [.interrupted, .checkingAvailability, .generating].contains(recovered.phase) {
                     self.setPresentation(.init(phase: .interrupted, summary: nil, suggestedTitle: nil,
@@ -906,12 +925,18 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     @discardableResult
-    private func setPresentation(from artifact: MeetingIntelligenceArtifact, phase: MeetingIntelligencePresentation.Phase, message: String, session: RecordingSession) -> Bool {
+    private func setPresentation(
+        from artifact: MeetingIntelligenceArtifact,
+        phase: MeetingIntelligencePresentation.Phase,
+        message: String,
+        transcriptRevision: TranscriptDocumentRevision,
+        session: RecordingSession
+    ) -> Bool {
         let editableContent: MeetingIntelligenceEditableContent?
         switch phase {
         case .ready, .stale:
             editableContent = MeetingIntelligenceArtifactValidator.isValid(artifact)
-                ? .init(artifact: artifact)
+                ? .init(artifact: artifact, transcriptRevision: transcriptRevision)
                 : nil
         default:
             editableContent = nil

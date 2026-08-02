@@ -678,6 +678,7 @@ final class AppModel: ObservableObject {
     func saveMeetingIntelligenceEdit(
         for session: RecordingSession,
         capturedArtifact: MeetingIntelligenceArtifact,
+        capturedTranscriptRevision: TranscriptDocumentRevision,
         summary: String,
         suggestedTitle: String
     ) async -> MeetingIntelligenceEditSaveOutcome {
@@ -687,6 +688,7 @@ final class AppModel: ObservableObject {
             capturedArtifact: capturedArtifact,
             summary: summary,
             suggestedTitle: suggestedTitle,
+            capturedTranscriptRevision: capturedTranscriptRevision,
             workspaceFence: fence
         )
         if case .conflict = outcome {

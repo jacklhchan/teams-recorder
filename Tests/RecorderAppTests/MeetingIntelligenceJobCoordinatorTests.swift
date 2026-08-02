@@ -41,6 +41,7 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.artifactEditor.requests.count, 1)
         XCTAssertEqual(fixture.artifactEditor.requests.first?.session, fixture.session)
         XCTAssertEqual(fixture.artifactEditor.requests.first?.capturedArtifact, captured)
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.capturedTranscriptRevision, fixture.reader.snapshot.revision)
         XCTAssertEqual(fixture.artifactEditor.requests.first?.proposedSummary, "Edited summary")
         XCTAssertEqual(fixture.artifactEditor.requests.first?.proposedSuggestedTitle, "Edited suggested title")
         XCTAssertEqual(fixture.artifactEditor.requests.first?.editedAt, editedAt)
@@ -56,6 +57,50 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact, edited)
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).summary, "Edited summary")
         XCTAssertEqual(edited.contentOrigin, .edited)
+    }
+
+    func testSaveEditForwardsCurrentTranscriptRevisionForStaleArtifact() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let originalRevision = fixture.reader.snapshot.revision
+        let currentRevision = TranscriptDocumentRevision(
+            sha256: "sha256:" + String(repeating: "b", count: 64),
+            byteCount: 84
+        )
+        fixture.reader.snapshot = .init(
+            url: fixture.reader.snapshot.url,
+            data: fixture.reader.snapshot.data,
+            revision: currentRevision
+        )
+        let staleArtifact = fixture.artifact(revision: originalRevision)
+        fixture.artifactStore.loaded = staleArtifact
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+
+        let captured = try XCTUnwrap(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .stale)
+        let edited = fixture.editedArtifact(
+            from: captured,
+            summary: "Edited stale summary",
+            title: "Edited stale title",
+            editedAt: Date(timeIntervalSince1970: 456)
+        )
+        fixture.artifactEditor.result = edited
+
+        let outcome = await fixture.coordinator.saveEdit(
+            for: fixture.session,
+            capturedArtifact: captured,
+            summary: edited.summary,
+            suggestedTitle: edited.suggestedTitle
+        )
+
+        XCTAssertEqual(outcome, .saved(edited))
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.capturedTranscriptRevision, currentRevision)
+        XCTAssertNotEqual(fixture.artifactEditor.requests.first?.capturedTranscriptRevision, .init(
+            sha256: captured.sourceTranscriptSHA256,
+            byteCount: captured.sourceTranscriptByteCount
+        ))
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .stale)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact, edited)
     }
 
     func testDuplicateSaveEditIsRejectedBeforeSecondEditorCall() async throws {

@@ -179,6 +179,7 @@ private struct SessionListView: View {
     let saveMeetingIntelligenceEdit: (
         RecordingSession,
         MeetingIntelligenceArtifact,
+        TranscriptDocumentRevision,
         String,
         String
     ) async -> MeetingIntelligenceEditSaveOutcome
@@ -347,11 +348,12 @@ private struct SessionListView: View {
                 applyMeetingIntelligenceSuggestedTitle: { requested in
                     _ = admission.perform(sessionID: requested.id, action: applyMeetingIntelligenceSuggestedTitle)
                 },
-                saveMeetingIntelligenceEdit: { requested, artifact, summary, suggestedTitle in
+                saveMeetingIntelligenceEdit: { requested, artifact, transcriptRevision, summary, suggestedTitle in
                     await RecordingsLibraryMeetingIntelligenceRouting.saveEdit(
                         requestedSession: requested,
                         admission: admission,
                         capturedArtifact: artifact,
+                        capturedTranscriptRevision: transcriptRevision,
                         summary: summary,
                         suggestedTitle: suggestedTitle,
                         save: saveMeetingIntelligenceEdit
@@ -537,11 +539,13 @@ enum RecordingsLibraryMeetingIntelligenceRouting {
         requestedSession: RecordingSession,
         admission: RecordingsCanonicalActionAdmission,
         capturedArtifact: MeetingIntelligenceArtifact,
+        capturedTranscriptRevision: TranscriptDocumentRevision,
         summary: String,
         suggestedTitle: String,
         save: (
             RecordingSession,
             MeetingIntelligenceArtifact,
+            TranscriptDocumentRevision,
             String,
             String
         ) async -> MeetingIntelligenceEditSaveOutcome
@@ -552,6 +556,7 @@ enum RecordingsLibraryMeetingIntelligenceRouting {
         return await save(
             canonicalSession,
             capturedArtifact,
+            capturedTranscriptRevision,
             summary,
             suggestedTitle
         )

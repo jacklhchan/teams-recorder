@@ -205,6 +205,10 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let outcome = await model.saveMeetingIntelligenceEdit(
             for: session,
             capturedArtifact: generatedArtifact,
+            capturedTranscriptRevision: .init(
+                sha256: generatedArtifact.sourceTranscriptSHA256,
+                byteCount: generatedArtifact.sourceTranscriptByteCount
+            ),
             summary: "Edited summary",
             suggestedTitle: "Edited suggestion"
         )
@@ -294,6 +298,10 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let outcome = await model.saveMeetingIntelligenceEdit(
             for: session,
             capturedArtifact: original,
+            capturedTranscriptRevision: .init(
+                sha256: original.sourceTranscriptSHA256,
+                byteCount: original.sourceTranscriptByteCount
+            ),
             summary: "Stale edit",
             suggestedTitle: "Stale title"
         )

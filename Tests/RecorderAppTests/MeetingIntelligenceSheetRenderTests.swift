@@ -64,7 +64,7 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
                 retryMeetingIntelligenceGeneration: { _ in },
                 cancelMeetingIntelligence: { _ in },
                 applyMeetingIntelligenceSuggestedTitle: { _ in },
-                saveMeetingIntelligenceEdit: { _, _, _, _ in
+                saveMeetingIntelligenceEdit: { _, _, _, _, _ in
                     .failed("unused")
                 }
             )
@@ -91,9 +91,10 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
             retryGeneration: { _ in },
             cancel: { _ in },
             applySuggestedTitle: { _ in },
-            saveEdit: { artifact, summary, suggestedTitle in
+            saveEdit: { artifact, transcriptRevision, summary, suggestedTitle in
                 await capture.save(
                     artifact: artifact,
+                    transcriptRevision: transcriptRevision,
                     summary: summary,
                     suggestedTitle: suggestedTitle
                 )
@@ -102,6 +103,10 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
 
         let outcome = await actions.saveEdit(
             capturedArtifact,
+            .init(
+                sha256: capturedArtifact.sourceTranscriptSHA256,
+                byteCount: capturedArtifact.sourceTranscriptByteCount
+            ),
             "Edited summary",
             "Edited suggested title"
         )
@@ -112,6 +117,10 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
             [
                 .init(
                     artifact: capturedArtifact,
+                    transcriptRevision: .init(
+                        sha256: capturedArtifact.sourceTranscriptSHA256,
+                        byteCount: capturedArtifact.sourceTranscriptByteCount
+                    ),
                     summary: "Edited summary",
                     suggestedTitle: "Edited suggested title"
                 )
@@ -158,7 +167,7 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
                     retryMeetingIntelligenceGeneration: { _ in },
                     cancelMeetingIntelligence: { _ in },
                     applyMeetingIntelligenceSuggestedTitle: { _ in },
-                    saveMeetingIntelligenceEdit: { _, _, _, _ in
+                saveMeetingIntelligenceEdit: { _, _, _, _, _ in
                         .failed("unused")
                     }
                 )
@@ -810,6 +819,7 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
 private final class MeetingIntelligenceSaveCapture {
     struct Request: Equatable {
         let artifact: MeetingIntelligenceArtifact
+        let transcriptRevision: TranscriptDocumentRevision
         let summary: String
         let suggestedTitle: String
     }
@@ -818,11 +828,13 @@ private final class MeetingIntelligenceSaveCapture {
 
     func save(
         artifact: MeetingIntelligenceArtifact,
+        transcriptRevision: TranscriptDocumentRevision,
         summary: String,
         suggestedTitle: String
     ) async -> MeetingIntelligenceEditSaveOutcome {
         requests.append(.init(
             artifact: artifact,
+            transcriptRevision: transcriptRevision,
             summary: summary,
             suggestedTitle: suggestedTitle
         ))
@@ -1131,7 +1143,7 @@ private struct TranscriptDetailLifecycleRoot: View {
                 retryMeetingIntelligenceGeneration: { state.record("retryGeneration", session: $0) },
                 cancelMeetingIntelligence: { state.record("cancel", session: $0) },
                 applyMeetingIntelligenceSuggestedTitle: { state.record("applySuggestedTitle", session: $0) },
-                saveMeetingIntelligenceEdit: { _, _, _, _ in
+                    saveMeetingIntelligenceEdit: { _, _, _, _, _ in
                     .failed("unused")
                 }
             )

@@ -131,6 +131,10 @@ final class MeetingIntelligencePresentationTests: XCTestCase {
     func testDefaultEditSaveActionIsSafeAndDoesNotPretendToPersist() async {
         let outcome = await MeetingIntelligenceActions().saveEdit(
             editableArtifact(),
+            .init(
+                sha256: editableArtifact().sourceTranscriptSHA256,
+                byteCount: editableArtifact().sourceTranscriptByteCount
+            ),
             "Draft summary",
             "Draft title"
         )

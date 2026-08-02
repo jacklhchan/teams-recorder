@@ -48,6 +48,41 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
         XCTAssertNil(duplicate)
     }
 
+    func testEditControllerSubmissionCapturesCurrentTranscriptFenceForStaleArtifact() throws {
+        let artifact = MeetingIntelligenceArtifact(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: "Older summary",
+            suggestedTitle: "Older title",
+            sourceTranscriptSHA256: "sha256:" + String(repeating: "a", count: 64),
+            sourceTranscriptByteCount: 42,
+            model: "gpt-test",
+            generatedAt: Date(timeIntervalSince1970: 1),
+            intent: .generate,
+            contentOrigin: .generated,
+            editedAt: nil
+        )
+        let currentTranscriptRevision = TranscriptDocumentRevision(
+            sha256: "sha256:" + String(repeating: "b", count: 64),
+            byteCount: 84
+        )
+        let controller = MeetingIntelligenceEditController()
+        controller.begin(
+            projection: editablePresentation(
+                for: artifact,
+                phase: .stale,
+                transcriptRevision: currentTranscriptRevision
+            ),
+            identity: snapshot(1, phase: .ready, title: "Current title").identity
+        )
+        controller.edit(summary: "Draft summary", suggestedTitle: "Draft title")
+
+        let submission = try XCTUnwrap(controller.submit())
+
+        XCTAssertEqual(submission.capturedTranscriptRevision, currentTranscriptRevision)
+        XCTAssertNotEqual(submission.capturedTranscriptRevision.sha256, submission.artifact.sourceTranscriptSHA256)
+        XCTAssertNotEqual(submission.capturedTranscriptRevision.byteCount, submission.artifact.sourceTranscriptByteCount)
+    }
+
     func testEditControllerValidationAndStorageFailuresKeepDrafts() {
         let controller = MeetingIntelligenceEditController()
         controller.begin(
@@ -427,16 +462,23 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
         ))
     }
 
-    private func editablePresentation(for artifact: MeetingIntelligenceArtifact) -> MeetingIntelligencePresentation {
+    private func editablePresentation(
+        for artifact: MeetingIntelligenceArtifact,
+        phase: MeetingIntelligencePresentation.Phase = .ready,
+        transcriptRevision: TranscriptDocumentRevision? = nil
+    ) -> MeetingIntelligencePresentation {
         .init(
-            phase: .ready,
+            phase: phase,
             summary: artifact.summary,
             suggestedTitle: artifact.suggestedTitle,
             statusMessage: "Ready.",
             model: artifact.model,
             titleIsProtected: true,
             unavailableReason: nil,
-            editableContent: .init(artifact: artifact)
+            editableContent: .init(
+                artifact: artifact,
+                transcriptRevision: transcriptRevision
+            )
         )
     }
 

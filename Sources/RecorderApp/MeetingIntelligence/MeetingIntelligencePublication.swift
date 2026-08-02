@@ -2,6 +2,22 @@ import Foundation
 
 struct MeetingIntelligenceEditableContent: Equatable, Sendable {
     let artifact: MeetingIntelligenceArtifact
+    let transcriptRevision: TranscriptDocumentRevision
+
+    init(
+        artifact: MeetingIntelligenceArtifact,
+        transcriptRevision: TranscriptDocumentRevision? = nil
+    ) {
+        self.artifact = artifact
+        self.transcriptRevision = transcriptRevision ?? .init(
+            sha256: artifact.sourceTranscriptSHA256,
+            byteCount: artifact.sourceTranscriptByteCount
+        )
+    }
+
+    init(artifact: MeetingIntelligenceArtifact) {
+        self.init(artifact: artifact, transcriptRevision: nil)
+    }
 }
 
 enum MeetingIntelligenceEditSaveOutcome: Equatable, Sendable {

@@ -83,6 +83,7 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
         capturedArtifact: MeetingIntelligenceArtifact,
         summary: String,
         suggestedTitle: String,
+        capturedTranscriptRevision: TranscriptDocumentRevision? = nil,
         workspaceFence: WorkspacePublicationFence = .initial
     ) async -> MeetingIntelligenceEditSaveOutcome {
         guard !isShutdown else {
@@ -93,6 +94,7 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
             capturedArtifact: capturedArtifact,
             summary: summary,
             suggestedTitle: suggestedTitle,
+            capturedTranscriptRevision: capturedTranscriptRevision,
             workspaceFence: workspaceFence
         )
     }

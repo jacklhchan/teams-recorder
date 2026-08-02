@@ -443,7 +443,8 @@ private final class FeaturePublisher: MeetingIntelligencePublishing, @unchecked 
             schemaVersion: 1, summary: "Generated summary", suggestedTitle: "Generated title",
             sourceTranscriptSHA256: request.sourceRevision.sha256,
             sourceTranscriptByteCount: request.sourceRevision.byteCount,
-            model: request.snapshot.profile.llmModel, generatedAt: .distantPast, intent: request.intent
+            model: request.snapshot.profile.llmModel, generatedAt: .distantPast, intent: request.intent,
+            contentOrigin: .generated, editedAt: nil
         )
         artifacts.artifact = artifact
         return .init(artifact: artifact, titleOutcome: .applied)

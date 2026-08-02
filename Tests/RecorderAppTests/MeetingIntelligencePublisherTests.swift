@@ -75,6 +75,7 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertEqual(fixture.artifactStore.promotions, 1)
         XCTAssertEqual(fixture.artifactStore.cleanups, 0)
         XCTAssertEqual(fixture.artifactStore.visibleArtifact?.summary, "Decision summary")
+        try assertGeneratedV2(outcome.artifact)
     }
 
     func testMeetingIntelligenceOwnedTitleIsReplacedByNextCapturedMeetingIntelligenceTitle() async throws {
@@ -93,6 +94,8 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertTrue(second.titleWasApplied)
         XCTAssertEqual(fixture.metadata.title, "Follow-up decision")
         XCTAssertEqual(fixture.metadata.titleOrigin, .meetingIntelligence)
+        try assertGeneratedV2(first.artifact)
+        try assertGeneratedV2(second.artifact)
     }
 
     func testManualTitleAndManualClearStoreSuggestionWithoutOverwriting() async throws {
@@ -251,6 +254,14 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? MeetingIntelligenceStoreError, expected)
         }
+    }
+
+    private func assertGeneratedV2(_ artifact: MeetingIntelligenceArtifact) throws {
+        let data = try JSONEncoder().encode(artifact)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(object["contentOrigin"] as? String, "generated")
+        XCTAssertNil(object["editedAt"])
     }
 }
 

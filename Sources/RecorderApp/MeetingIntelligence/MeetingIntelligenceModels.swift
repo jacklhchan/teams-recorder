@@ -1,7 +1,12 @@
 import Foundation
 
+enum MeetingIntelligenceContentOrigin: String, Codable, Equatable, Sendable {
+    case generated
+    case edited
+}
+
 struct MeetingIntelligenceArtifact: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     let schemaVersion: Int
     let summary: String
@@ -11,6 +16,89 @@ struct MeetingIntelligenceArtifact: Codable, Equatable, Sendable {
     let model: String
     let generatedAt: Date
     let intent: MeetingIntelligenceIntent
+    let contentOrigin: MeetingIntelligenceContentOrigin
+    let editedAt: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case summary
+        case suggestedTitle
+        case sourceTranscriptSHA256
+        case sourceTranscriptByteCount
+        case model
+        case generatedAt
+        case intent
+        case contentOrigin
+        case editedAt
+    }
+
+    init(
+        schemaVersion: Int,
+        summary: String,
+        suggestedTitle: String,
+        sourceTranscriptSHA256: String,
+        sourceTranscriptByteCount: Int,
+        model: String,
+        generatedAt: Date,
+        intent: MeetingIntelligenceIntent,
+        contentOrigin: MeetingIntelligenceContentOrigin,
+        editedAt: Date?
+    ) {
+        self.schemaVersion = schemaVersion
+        self.summary = summary
+        self.suggestedTitle = suggestedTitle
+        self.sourceTranscriptSHA256 = sourceTranscriptSHA256
+        self.sourceTranscriptByteCount = sourceTranscriptByteCount
+        self.model = model
+        self.generatedAt = generatedAt
+        self.intent = intent
+        self.contentOrigin = contentOrigin
+        self.editedAt = editedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        guard schemaVersion == 1 || schemaVersion == Self.currentSchemaVersion else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "Unsupported meeting intelligence artifact schema version."
+            )
+        }
+
+        self.schemaVersion = schemaVersion
+        self.summary = try container.decode(String.self, forKey: .summary)
+        self.suggestedTitle = try container.decode(String.self, forKey: .suggestedTitle)
+        self.sourceTranscriptSHA256 = try container.decode(String.self, forKey: .sourceTranscriptSHA256)
+        self.sourceTranscriptByteCount = try container.decode(Int.self, forKey: .sourceTranscriptByteCount)
+        self.model = try container.decode(String.self, forKey: .model)
+        self.generatedAt = try container.decode(Date.self, forKey: .generatedAt)
+        self.intent = try container.decode(MeetingIntelligenceIntent.self, forKey: .intent)
+
+        if schemaVersion == 1 {
+            self.contentOrigin = .generated
+            self.editedAt = nil
+        } else {
+            let contentOrigin = try container.decode(
+                MeetingIntelligenceContentOrigin.self,
+                forKey: .contentOrigin
+            )
+            let editedAt = try container.decodeIfPresent(Date.self, forKey: .editedAt)
+            guard MeetingIntelligenceArtifactValidator.isValidProvenance(
+                contentOrigin: contentOrigin,
+                editedAt: editedAt
+            ) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .contentOrigin,
+                    in: container,
+                    debugDescription: "Invalid meeting intelligence content provenance."
+                )
+            }
+            self.contentOrigin = contentOrigin
+            self.editedAt = editedAt
+        }
+    }
 }
 
 enum MeetingIntelligenceIntent: String, Codable, Equatable, Sendable {
@@ -20,7 +108,7 @@ enum MeetingIntelligenceIntent: String, Codable, Equatable, Sendable {
     case retryGeneration
 }
 
-/// The canonical validation boundary for provider output and persisted v1 artifacts.
+/// The canonical validation boundary for provider output and persisted artifacts.
 enum MeetingIntelligenceArtifactValidator {
     static let maximumSummaryBytes = 48 * 1_024
     static let maximumTitleGraphemes = 120
@@ -53,12 +141,22 @@ enum MeetingIntelligenceArtifactValidator {
     }
 
     static func isValid(_ artifact: MeetingIntelligenceArtifact) -> Bool {
-        artifact.schemaVersion == MeetingIntelligenceArtifact.currentSchemaVersion &&
+        (artifact.schemaVersion == 1 || artifact.schemaVersion == MeetingIntelligenceArtifact.currentSchemaVersion) &&
             summary(artifact.summary) == artifact.summary &&
             title(artifact.suggestedTitle) == artifact.suggestedTitle &&
             isSHA256(artifact.sourceTranscriptSHA256) &&
             (0...maximumTranscriptBytes).contains(artifact.sourceTranscriptByteCount) &&
-            isModel(artifact.model) && artifact.generatedAt.timeIntervalSinceReferenceDate.isFinite
+            isModel(artifact.model) && artifact.generatedAt.timeIntervalSinceReferenceDate.isFinite &&
+            isValidProvenance(contentOrigin: artifact.contentOrigin, editedAt: artifact.editedAt)
+    }
+
+    static func isValidProvenance(
+        contentOrigin: MeetingIntelligenceContentOrigin,
+        editedAt: Date?
+    ) -> Bool {
+        contentOrigin == .generated
+            ? editedAt == nil
+            : editedAt?.timeIntervalSinceReferenceDate.isFinite == true
     }
 
     private static func isSHA256(_ value: String) -> Bool {

@@ -94,7 +94,8 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
             session: session,
             artifact: .init(schemaVersion: 1, summary: "Summary", suggestedTitle: "Generated title",
                             sourceTranscriptSHA256: revision.sha256, sourceTranscriptByteCount: revision.byteCount,
-                            model: "model", generatedAt: .distantPast, intent: .generate),
+                            model: "model", generatedAt: .distantPast, intent: .generate,
+                            contentOrigin: .generated, editedAt: nil),
             sourceRevision: revision, capturedTitle: "Customer supplied", capturedTitleOrigin: .manual,
             lease: .init()
         )
@@ -165,7 +166,8 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
             session: session,
             artifact: .init(schemaVersion: 1, summary: "Summary", suggestedTitle: "Customer planning review",
                             sourceTranscriptSHA256: revision.sha256, sourceTranscriptByteCount: revision.byteCount,
-                            model: "model", generatedAt: .distantPast, intent: .generate),
+                            model: "model", generatedAt: .distantPast, intent: .generate,
+                            contentOrigin: .generated, editedAt: nil),
             sourceRevision: revision,
             capturedTitle: "Customer planning review",
             capturedTitleOrigin: .meetingIntelligence,
@@ -271,7 +273,8 @@ final class MeetingIntelligenceSuggestedTitleApplierTests: XCTestCase {
         .init(session: session,
               artifact: .init(schemaVersion: 1, summary: "Summary", suggestedTitle: "Customer planning review",
                               sourceTranscriptSHA256: revision.sha256, sourceTranscriptByteCount: revision.byteCount,
-                              model: "model", generatedAt: .distantPast, intent: .generate),
+                              model: "model", generatedAt: .distantPast, intent: .generate,
+                              contentOrigin: .generated, editedAt: nil),
               sourceRevision: revision, capturedTitle: "Old", capturedTitleOrigin: .meetingIntelligence, lease: lease)
     }
 

@@ -1843,7 +1843,9 @@ private struct RenderMeetingIntelligencePublisher: MeetingIntelligencePublishing
                 sourceTranscriptByteCount: request.sourceRevision.byteCount,
                 model: request.snapshot.profile.llmModel,
                 generatedAt: .distantPast,
-                intent: request.intent
+                intent: request.intent,
+                contentOrigin: .generated,
+                editedAt: nil
             ),
             titleOutcome: .applied
         )

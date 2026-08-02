@@ -36,9 +36,7 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactSecureStorin
             return nil
         }
         let version = try schemaVersion(in: data)
-        guard version == MeetingIntelligenceArtifact.currentSchemaVersion else {
-            throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
-        }
+        try validateSupportedArtifactSchemaVersion(version)
         do {
             let artifact = try JSONDecoder.meetingIntelligence.decode(
                 MeetingIntelligenceArtifact.self,
@@ -114,7 +112,10 @@ struct MeetingIntelligenceArtifactStore: MeetingIntelligenceArtifactSecureStorin
             guard let stagedSnapshot = try fileAccess.snapshot(
                 named: staged.lastPathComponent, in: normalizedFolder, maximumBytes: Self.maximumBytes
             ) else { throw MeetingIntelligenceStoreError.missing }
-            try validateArtifactData(stagedSnapshot.data)
+            try validateArtifactData(
+                stagedSnapshot.data,
+                expectedVersion: MeetingIntelligenceArtifact.currentSchemaVersion
+            )
             let destination = try fileAccess.snapshot(
                 named: Self.fileName, in: normalizedFolder, maximumBytes: Self.maximumBytes
             )
@@ -265,8 +266,21 @@ private func validateCurrentSchema(_ data: Data, expected: Int) throws {
     }
 }
 
-private func validateArtifactData(_ data: Data) throws {
-    try validateCurrentSchema(data, expected: MeetingIntelligenceArtifact.currentSchemaVersion)
+private func validateSupportedArtifactSchemaVersion(_ version: Int) throws {
+    guard version == 1 || version == MeetingIntelligenceArtifact.currentSchemaVersion else {
+        throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
+    }
+}
+
+private func validateArtifactData(_ data: Data, expectedVersion: Int? = nil) throws {
+    let version = try schemaVersion(in: data)
+    if let expectedVersion {
+        guard version == expectedVersion else {
+            throw MeetingIntelligenceStoreError.unsupportedSchemaVersion(version)
+        }
+    } else {
+        try validateSupportedArtifactSchemaVersion(version)
+    }
     do {
         let artifact = try JSONDecoder.meetingIntelligence.decode(MeetingIntelligenceArtifact.self, from: data)
         guard MeetingIntelligenceArtifactValidator.isValid(artifact) else {

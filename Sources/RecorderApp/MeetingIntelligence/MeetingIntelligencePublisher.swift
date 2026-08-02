@@ -285,7 +285,9 @@ struct MeetingIntelligencePublisher: MeetingIntelligencePublishing, @unchecked S
             sourceTranscriptByteCount: request.sourceRevision.byteCount,
             model: request.snapshot.profile.llmModel,
             generatedAt: request.generatedAt,
-            intent: request.intent
+            intent: request.intent,
+            contentOrigin: .generated,
+            editedAt: nil
         )
         let staged: URL
         if let secure = artifactStore as? any MeetingIntelligenceArtifactSecureStoring,

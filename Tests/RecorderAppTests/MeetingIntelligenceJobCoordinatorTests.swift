@@ -1067,7 +1067,8 @@ private final class CoordinatorFixture {
     func snapshot(llmModel: String) throws -> OpenAICompatibleProviderSnapshot { try Self.makeSnapshot(llmModel: llmModel) }
     func artifact(revision: TranscriptDocumentRevision) -> MeetingIntelligenceArtifact {
         .init(schemaVersion: 1, summary: "Old", suggestedTitle: "Old title", sourceTranscriptSHA256: revision.sha256,
-              sourceTranscriptByteCount: revision.byteCount, model: "llm", generatedAt: .distantPast, intent: .generate)
+              sourceTranscriptByteCount: revision.byteCount, model: "llm", generatedAt: .distantPast, intent: .generate,
+              contentOrigin: .generated, editedAt: nil)
     }
 
     func waitForIdle() async {
@@ -1135,7 +1136,8 @@ private final class BlockingPublisher: MeetingIntelligencePublishing, @unchecked
         return .init(artifact: .init(schemaVersion: 1, summary: request.content.summary, suggestedTitle: request.content.title,
                                      sourceTranscriptSHA256: request.sourceRevision.sha256,
                                      sourceTranscriptByteCount: request.sourceRevision.byteCount,
-                                     model: request.snapshot.profile.llmModel, generatedAt: request.generatedAt, intent: request.intent),
+                                     model: request.snapshot.profile.llmModel, generatedAt: request.generatedAt, intent: request.intent,
+                                     contentOrigin: .generated, editedAt: nil),
                      titleWasApplied: false, titleWarning: nil)
     }
 }
@@ -1168,7 +1170,8 @@ private final class FirstCallBlockingPublisher: MeetingIntelligencePublishing, @
         return .init(artifact: .init(schemaVersion: 1, summary: request.content.summary, suggestedTitle: request.content.title,
                                      sourceTranscriptSHA256: request.sourceRevision.sha256,
                                      sourceTranscriptByteCount: request.sourceRevision.byteCount,
-                                     model: request.snapshot.profile.llmModel, generatedAt: request.generatedAt, intent: request.intent),
+                                     model: request.snapshot.profile.llmModel, generatedAt: request.generatedAt, intent: request.intent,
+                                     contentOrigin: .generated, editedAt: nil),
                      titleWasApplied: false, titleWarning: nil)
     }
 }
@@ -1321,7 +1324,8 @@ private final class CoordinatorPublisher: MeetingIntelligencePublishing, @unchec
         capturedModels.append(request.snapshot.profile.llmModel)
         return .init(artifact: .init(schemaVersion: 1, summary: request.content.summary, suggestedTitle: request.content.title,
                                      sourceTranscriptSHA256: request.sourceRevision.sha256, sourceTranscriptByteCount: request.sourceRevision.byteCount,
-                                     model: request.snapshot.profile.llmModel, generatedAt: request.generatedAt, intent: request.intent),
+                                     model: request.snapshot.profile.llmModel, generatedAt: request.generatedAt, intent: request.intent,
+                                     contentOrigin: .generated, editedAt: nil),
                      titleWasApplied: false, titleWarning: nil)
     }
 }

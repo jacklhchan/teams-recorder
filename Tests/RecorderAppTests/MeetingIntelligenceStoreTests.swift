@@ -5,7 +5,7 @@ import XCTest
 final class MeetingIntelligenceStoreTests: XCTestCase {
     private let gate = RecordingSessionMutationGate()
 
-    func testStagesAndPromotesValidV1Artifact() throws {
+    func testStagesAndPromotesValidArtifact() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
         let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
         let artifact = fixture.artifact(summary: "Customer migration")
@@ -60,9 +60,70 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         )
     }
 
+    func testExactV1ArtifactLoadsAsGeneratedWithoutRewritingBytes() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let original = Data(#"{"schemaVersion":1,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate"}"#.utf8)
+        try original.write(to: fixture.artifactURL)
+
+        let artifact = try XCTUnwrap(
+            try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)
+        )
+        XCTAssertEqual(artifact.schemaVersion, 1)
+        let encoded = try JSONEncoder.meetingIntelligence.encode(artifact)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(object["contentOrigin"] as? String, "generated")
+        XCTAssertNil(object["editedAt"])
+        XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), original)
+    }
+
+    func testValidV2GeneratedAndEditedArtifactsRoundTripProvenance() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let cases = [
+            Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","contentOrigin":"generated"}"#.utf8),
+            Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"regenerate","contentOrigin":"edited","editedAt":"2026-07-31T01:02:03Z"}"#.utf8)
+        ]
+
+        for original in cases {
+            try original.write(to: fixture.artifactURL)
+            let artifact = try XCTUnwrap(
+                try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)
+            )
+            let encoded = try JSONEncoder.meetingIntelligence.encode(artifact)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            XCTAssertEqual(object["schemaVersion"] as? Int, 2)
+            XCTAssertNotNil(object["contentOrigin"] as? String)
+            if (object["contentOrigin"] as? String) == "edited" {
+                XCTAssertNotNil(object["editedAt"] as? String)
+            } else {
+                XCTAssertNil(object["editedAt"])
+            }
+        }
+    }
+
+    func testInvalidV2ProvenanceIsRejected() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let invalid: [(String, Data)] = [
+            ("generated with an edit date", Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","contentOrigin":"generated","editedAt":"2026-07-31T01:02:03Z"}"#.utf8)),
+            ("edited without an edit date", Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","contentOrigin":"edited"}"#.utf8)),
+            ("unknown origin", Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","contentOrigin":"unknown"}"#.utf8)),
+            ("malformed edit date", Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","contentOrigin":"edited","editedAt":"not-a-date"}"#.utf8))
+        ]
+
+        for (name, data) in invalid {
+            try data.write(to: fixture.artifactURL)
+            XCTAssertThrowsError(
+                try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder),
+                name
+            ) {
+                XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .malformed)
+            }
+            XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), data)
+        }
+    }
+
     func testFutureArtifactIsPreservedAndNotDecodedAsCurrent() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
-        let future = Data(#"{"schemaVersion":2,"summary":"future"}"#.utf8)
+        let future = Data(#"{"schemaVersion":3,"summary":"future"}"#.utf8)
         try future.write(to: fixture.artifactURL)
 
         XCTAssertThrowsError(
@@ -70,7 +131,7 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         ) {
             XCTAssertEqual(
                 $0 as? MeetingIntelligenceStoreError,
-                .unsupportedSchemaVersion(2)
+                .unsupportedSchemaVersion(3)
             )
         }
         XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), future)
@@ -129,12 +190,12 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
 
     func testPromotionRejectsFutureDestinationWithoutChangingBytes() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
-        let future = Data(#"{"schemaVersion":2,"summary":"future"}"#.utf8)
+        let future = Data(#"{"schemaVersion":3,"summary":"future"}"#.utf8)
         try future.write(to: fixture.artifactURL)
         let staged = try MeetingIntelligenceArtifactStore(mutationGate: gate).stage(fixture.artifact(), in: fixture.folder)
 
         XCTAssertThrowsError(try MeetingIntelligenceArtifactStore(mutationGate: gate).promoteStaged(staged, in: fixture.folder)) {
-            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(3))
         }
         XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), future)
     }
@@ -447,17 +508,27 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         }
 
         let unsupported = MeetingIntelligenceArtifact(
-            schemaVersion: 2,
+            schemaVersion: 3,
             summary: base.summary,
             suggestedTitle: base.suggestedTitle,
             sourceTranscriptSHA256: base.sourceTranscriptSHA256,
             sourceTranscriptByteCount: base.sourceTranscriptByteCount,
             model: base.model,
             generatedAt: base.generatedAt,
-            intent: base.intent
+            intent: base.intent,
+            contentOrigin: base.contentOrigin,
+            editedAt: base.editedAt
         )
         XCTAssertThrowsError(try store.stage(unsupported, in: fixture.folder)) {
-            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(2))
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(3))
+        }
+
+        do {
+            let staged = try store.stage(fixture.artifact(schemaVersion: 1), in: fixture.folder)
+            try? store.removeStaged(staged, in: fixture.folder)
+            XCTFail("A v1 artifact must not be staged")
+        } catch {
+            XCTAssertEqual(error as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(1))
         }
     }
 
@@ -542,22 +613,27 @@ private final class MeetingIntelligenceStoreFixture {
     }
 
     func artifact(
+        schemaVersion: Int = MeetingIntelligenceArtifact.currentSchemaVersion,
         summary: String = "Summary",
         title: String = "Title",
         hash: String = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         byteCount: Int = 3,
         model: String = "model",
-        generatedAt: Date = Date(timeIntervalSince1970: 1_785_427_200)
+        generatedAt: Date = Date(timeIntervalSince1970: 1_785_427_200),
+        contentOrigin: MeetingIntelligenceContentOrigin = .generated,
+        editedAt: Date? = nil
     ) -> MeetingIntelligenceArtifact {
         .init(
-            schemaVersion: 1,
+            schemaVersion: schemaVersion,
             summary: summary,
             suggestedTitle: title,
             sourceTranscriptSHA256: hash,
             sourceTranscriptByteCount: byteCount,
             model: model,
             generatedAt: generatedAt,
-            intent: .generate
+            intent: .generate,
+            contentOrigin: contentOrigin,
+            editedAt: editedAt
         )
     }
 

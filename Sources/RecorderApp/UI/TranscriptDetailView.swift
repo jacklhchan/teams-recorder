@@ -23,6 +23,12 @@ struct TranscriptDetailView: View {
     let retryMeetingIntelligenceGeneration: (RecordingSession) -> Void
     let cancelMeetingIntelligence: (RecordingSession) -> Void
     let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
+    let saveMeetingIntelligenceEdit: (
+        RecordingSession,
+        MeetingIntelligenceArtifact,
+        String,
+        String
+    ) async -> MeetingIntelligenceEditSaveOutcome
 
     var body: some View {
         let palette = TranscriptDetailPalette(colorScheme: colorScheme)
@@ -38,7 +44,15 @@ struct TranscriptDetailView: View {
             regenerate: regenerateMeetingIntelligence,
             retryGeneration: retryMeetingIntelligenceGeneration,
             cancel: cancelMeetingIntelligence,
-            applySuggestedTitle: applyMeetingIntelligenceSuggestedTitle
+            applySuggestedTitle: applyMeetingIntelligenceSuggestedTitle,
+            saveEdit: { artifact, summary, suggestedTitle in
+                await saveMeetingIntelligenceEdit(
+                    currentSession,
+                    artifact,
+                    summary,
+                    suggestedTitle
+                )
+            }
         )
         let effectivePresentation = TranscriptDetailActionProjection.effectiveMeetingIntelligencePresentation(
             meetingIntelligencePresentation(currentSession),
@@ -123,7 +137,8 @@ enum TranscriptDetailActionProjection {
             statusMessage: presentation.statusMessage,
             model: presentation.model,
             titleIsProtected: canonicalSession.metadata.titleOrigin == .manual,
-            unavailableReason: presentation.unavailableReason
+            unavailableReason: presentation.unavailableReason,
+            editableContent: presentation.editableContent
         )
     }
 
@@ -151,7 +166,14 @@ enum TranscriptDetailActionProjection {
         regenerate: @escaping (RecordingSession) -> Void,
         retryGeneration: @escaping (RecordingSession) -> Void,
         cancel: @escaping (RecordingSession) -> Void,
-        applySuggestedTitle: @escaping (RecordingSession) -> Void
+        applySuggestedTitle: @escaping (RecordingSession) -> Void,
+        saveEdit: @escaping (
+            MeetingIntelligenceArtifact,
+            String,
+            String
+        ) async -> MeetingIntelligenceEditSaveOutcome = { _, _, _ in
+            .failed("Meeting intelligence edits are unavailable.")
+        }
     ) -> MeetingIntelligenceActions {
         .init(
             generate: { generate(session) },
@@ -159,7 +181,10 @@ enum TranscriptDetailActionProjection {
             checkAgain: { checkAgain(session) },
             retryGeneration: { retryGeneration(session) },
             cancel: { cancel(session) },
-            applySuggestedTitle: { applySuggestedTitle(session) }
+            applySuggestedTitle: { applySuggestedTitle(session) },
+            saveEdit: { artifact, summary, suggestedTitle in
+                await saveEdit(artifact, summary, suggestedTitle)
+            }
         )
     }
 }

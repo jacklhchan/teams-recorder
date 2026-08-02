@@ -24,6 +24,101 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
         }
     }
 
+    func testProductionTranscriptDetailKeepsTypedEditableContentAndShowsEditAction() throws {
+        let opened = session(title: "Production routing")
+        let artifact = editableArtifact()
+        let presentation = MeetingIntelligencePresentation(
+            phase: .ready,
+            summary: artifact.summary,
+            suggestedTitle: artifact.suggestedTitle,
+            statusMessage: "Ready.",
+            model: artifact.model,
+            titleIsProtected: false,
+            unavailableReason: nil,
+            editableContent: .init(artifact: artifact)
+        )
+        let projected = TranscriptDetailActionProjection.effectiveMeetingIntelligencePresentation(
+            presentation,
+            canonicalSession: opened
+        )
+
+        XCTAssertEqual(projected.editableContent?.artifact, artifact)
+
+        let host = try SheetRenderHost(size: .init(width: 860, height: 680)) {
+            TranscriptDetailView(
+                openedSession: opened,
+                allSessions: [opened],
+                close: {},
+                load: { "Transcript" },
+                save: { _ in .saved(sessionID: opened.id, .transcript) },
+                openFolder: {},
+                play: {},
+                export: {},
+                copy: {},
+                editDetails: { _ in },
+                meetingIntelligencePresentation: { _ in presentation },
+                meetingIntelligenceObservedSnapshot: { _ in nil },
+                checkMeetingIntelligenceAvailability: { _ in },
+                generateMeetingIntelligence: { _ in },
+                regenerateMeetingIntelligence: { _ in },
+                retryMeetingIntelligenceGeneration: { _ in },
+                cancelMeetingIntelligence: { _ in },
+                applyMeetingIntelligenceSuggestedTitle: { _ in },
+                saveMeetingIntelligenceEdit: { _, _, _, _ in
+                    .failed("unused")
+                }
+            )
+        }
+        defer { host.close() }
+
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceEdit))
+        XCTAssertTrue(
+            host.windowContentRect.contains(
+                try XCTUnwrap(host.frame(for: RecorderActionID.meetingIntelligenceEdit))
+            )
+        )
+    }
+
+    func testTranscriptDetailProjectionRoutesExactSavePayloadOnce() async throws {
+        let session = session(title: "Save routing")
+        let capturedArtifact = editableArtifact()
+        let capture = MeetingIntelligenceSaveCapture()
+        let actions = TranscriptDetailActionProjection.meetingIntelligenceActions(
+            for: session,
+            checkAgain: { _ in },
+            generate: { _ in },
+            regenerate: { _ in },
+            retryGeneration: { _ in },
+            cancel: { _ in },
+            applySuggestedTitle: { _ in },
+            saveEdit: { artifact, summary, suggestedTitle in
+                await capture.save(
+                    artifact: artifact,
+                    summary: summary,
+                    suggestedTitle: suggestedTitle
+                )
+            }
+        )
+
+        let outcome = await actions.saveEdit(
+            capturedArtifact,
+            "Edited summary",
+            "Edited suggested title"
+        )
+
+        XCTAssertEqual(outcome, .saved(capturedArtifact))
+        XCTAssertEqual(
+            capture.requests,
+            [
+                .init(
+                    artifact: capturedArtifact,
+                    summary: "Edited summary",
+                    suggestedTitle: "Edited suggested title"
+                )
+            ]
+        )
+    }
+
     func testTranscriptDetailUsesSystemAppearanceAndKeepsHeaderFooterAtBothSupportedSizes() throws {
         let sizes = [
             CGSize(width: 860, height: 680),
@@ -62,7 +157,10 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
                     regenerateMeetingIntelligence: { _ in },
                     retryMeetingIntelligenceGeneration: { _ in },
                     cancelMeetingIntelligence: { _ in },
-                    applyMeetingIntelligenceSuggestedTitle: { _ in }
+                    applyMeetingIntelligenceSuggestedTitle: { _ in },
+                    saveMeetingIntelligenceEdit: { _, _, _, _ in
+                        .failed("unused")
+                    }
                 )
                 .environment(\.colorScheme, scheme)
                 let host = try SheetRenderHost(size: size, root: root)
@@ -691,6 +789,45 @@ final class MeetingIntelligenceSheetRenderTests: XCTestCase {
             metadata: .init(title: title, titleOrigin: titleOrigin, isFavorite: favorite)
         )
     }
+
+    private func editableArtifact() -> MeetingIntelligenceArtifact {
+        .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: "Editable production summary",
+            suggestedTitle: "Editable production title",
+            sourceTranscriptSHA256: "sha256:" + String(repeating: "e", count: 64),
+            sourceTranscriptByteCount: 10,
+            model: "test-model",
+            generatedAt: Date(timeIntervalSince1970: 1),
+            intent: .generate,
+            contentOrigin: .generated,
+            editedAt: nil
+        )
+    }
+}
+
+@MainActor
+private final class MeetingIntelligenceSaveCapture {
+    struct Request: Equatable {
+        let artifact: MeetingIntelligenceArtifact
+        let summary: String
+        let suggestedTitle: String
+    }
+
+    private(set) var requests: [Request] = []
+
+    func save(
+        artifact: MeetingIntelligenceArtifact,
+        summary: String,
+        suggestedTitle: String
+    ) async -> MeetingIntelligenceEditSaveOutcome {
+        requests.append(.init(
+            artifact: artifact,
+            summary: summary,
+            suggestedTitle: suggestedTitle
+        ))
+        return .saved(artifact)
+    }
 }
 
 @MainActor
@@ -993,7 +1130,10 @@ private struct TranscriptDetailLifecycleRoot: View {
                 regenerateMeetingIntelligence: { state.record("regenerate", session: $0) },
                 retryMeetingIntelligenceGeneration: { state.record("retryGeneration", session: $0) },
                 cancelMeetingIntelligence: { state.record("cancel", session: $0) },
-                applyMeetingIntelligenceSuggestedTitle: { state.record("applySuggestedTitle", session: $0) }
+                applyMeetingIntelligenceSuggestedTitle: { state.record("applySuggestedTitle", session: $0) },
+                saveMeetingIntelligenceEdit: { _, _, _, _ in
+                    .failed("unused")
+                }
             )
         }
     }

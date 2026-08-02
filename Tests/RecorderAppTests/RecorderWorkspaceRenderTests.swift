@@ -1105,6 +1105,123 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(current.isFavorite)
     }
 
+    func testMeetingIntelligenceEditRouteUsesCurrentCanonicalSessionAndRejectsStaleOrForgedRequests() async {
+        func makeSession(folder: URL, title: String) -> RecordingSession {
+            .init(
+                id: folder,
+                folderURL: folder,
+                recordingURL: folder.appendingPathComponent("recording.m4a"),
+                createdAt: .distantPast,
+                duration: 1,
+                fileSize: 1,
+                metadata: .init(title: title)
+            )
+        }
+
+        let folder = URL(fileURLWithPath: "/tmp/mi-edit-route-\(UUID().uuidString)")
+        let openedAlias = makeSession(folder: folder, title: "Old captured title")
+        let canonical = makeSession(folder: folder, title: "Current canonical title")
+        let switchedSession = makeSession(
+            folder: URL(fileURLWithPath: "/tmp/mi-edit-route-switched-\(UUID().uuidString)"),
+            title: "Switched session"
+        )
+        let forgedSession = makeSession(
+            folder: URL(fileURLWithPath: "/tmp/mi-edit-route-forged-\(UUID().uuidString)"),
+            title: "Forged session"
+        )
+        let artifact = MeetingIntelligenceArtifact(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: "Captured summary",
+            suggestedTitle: "Captured suggested title",
+            sourceTranscriptSHA256: "sha256:" + String(repeating: "f", count: 64),
+            sourceTranscriptByteCount: 12,
+            model: "test-model",
+            generatedAt: Date(timeIntervalSince1970: 1),
+            intent: .generate,
+            contentOrigin: .generated,
+            editedAt: nil
+        )
+        var currentSessions = [canonical]
+        let admission = RecordingsCanonicalActionAdmission {
+            currentSessions
+        }
+        let capture = WorkspaceMeetingIntelligenceSaveCapture()
+
+        let accepted = await RecordingsLibraryMeetingIntelligenceRouting.saveEdit(
+            requestedSession: openedAlias,
+            admission: admission,
+            capturedArtifact: artifact,
+            summary: "Edited summary",
+            suggestedTitle: "Edited suggested title",
+            save: { session, artifact, summary, suggestedTitle in
+                await capture.save(
+                    session: session,
+                    artifact: artifact,
+                    summary: summary,
+                    suggestedTitle: suggestedTitle
+                )
+            }
+        )
+
+        XCTAssertEqual(accepted, .saved(artifact))
+        XCTAssertEqual(
+            capture.requests,
+            [
+                .init(
+                    session: canonical,
+                    artifact: artifact,
+                    summary: "Edited summary",
+                    suggestedTitle: "Edited suggested title"
+                )
+            ]
+        )
+
+        currentSessions = [switchedSession]
+        let switched = await RecordingsLibraryMeetingIntelligenceRouting.saveEdit(
+            requestedSession: openedAlias,
+            admission: admission,
+            capturedArtifact: artifact,
+            summary: "Should be rejected",
+            suggestedTitle: "Should be rejected",
+            save: { session, artifact, summary, suggestedTitle in
+                await capture.save(
+                    session: session,
+                    artifact: artifact,
+                    summary: summary,
+                    suggestedTitle: suggestedTitle
+                )
+            }
+        )
+        if case .conflict("The recording is no longer available.") = switched {
+            // Expected: the old detail callback cannot cross a session switch.
+        } else {
+            XCTFail("A session-switched edit must be rejected before the AppModel wrapper.")
+        }
+
+        currentSessions = [canonical]
+        let forged = await RecordingsLibraryMeetingIntelligenceRouting.saveEdit(
+            requestedSession: forgedSession,
+            admission: admission,
+            capturedArtifact: artifact,
+            summary: "Forged summary",
+            suggestedTitle: "Forged title",
+            save: { session, artifact, summary, suggestedTitle in
+                await capture.save(
+                    session: session,
+                    artifact: artifact,
+                    summary: summary,
+                    suggestedTitle: suggestedTitle
+                )
+            }
+        )
+        if case .conflict("The recording is no longer available.") = forged {
+            // Expected: forged IDs never reach AppModel.saveMeetingIntelligenceEdit.
+        } else {
+            XCTFail("A forged session must be rejected before the AppModel wrapper.")
+        }
+        XCTAssertEqual(capture.requests.count, 1)
+    }
+
     func testRecordingsSheetObservesMeetingIntelligenceFeatureSnapshotWithoutAppModelRelay() async throws {
         let fixture = try RecordingsMeetingIntelligenceRenderFixture()
         defer { fixture.remove() }
@@ -2428,4 +2545,31 @@ private final class RenderMeetingIntelligenceStateStore: MeetingIntelligenceStat
     func load(in _: URL) throws -> MeetingIntelligenceState? { nil }
     func save(_: MeetingIntelligenceState, in _: URL) throws {}
     func remove(in _: URL) throws {}
+}
+
+@MainActor
+private final class WorkspaceMeetingIntelligenceSaveCapture {
+    struct Request: Equatable {
+        let session: RecordingSession
+        let artifact: MeetingIntelligenceArtifact
+        let summary: String
+        let suggestedTitle: String
+    }
+
+    private(set) var requests: [Request] = []
+
+    func save(
+        session: RecordingSession,
+        artifact: MeetingIntelligenceArtifact,
+        summary: String,
+        suggestedTitle: String
+    ) async -> MeetingIntelligenceEditSaveOutcome {
+        requests.append(.init(
+            session: session,
+            artifact: artifact,
+            summary: summary,
+            suggestedTitle: suggestedTitle
+        ))
+        return .saved(artifact)
+    }
 }

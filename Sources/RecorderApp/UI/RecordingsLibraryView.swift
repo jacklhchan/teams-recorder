@@ -85,6 +85,7 @@ struct RecordingsLibraryView: View {
             retryMeetingIntelligenceGeneration: model.retryMeetingIntelligenceGeneration,
             cancelMeetingIntelligence: model.cancelMeetingIntelligence,
             applyMeetingIntelligenceSuggestedTitle: model.applyMeetingIntelligenceSuggestedTitle,
+            saveMeetingIntelligenceEdit: model.saveMeetingIntelligenceEdit,
             saveMetadata: model.saveMetadata,
             moveToTrash: model.moveSessionToTrash,
             route: $route,
@@ -175,6 +176,12 @@ private struct SessionListView: View {
     let retryMeetingIntelligenceGeneration: (RecordingSession) -> Void
     let cancelMeetingIntelligence: (RecordingSession) -> Void
     let applyMeetingIntelligenceSuggestedTitle: (RecordingSession) -> Void
+    let saveMeetingIntelligenceEdit: (
+        RecordingSession,
+        MeetingIntelligenceArtifact,
+        String,
+        String
+    ) async -> MeetingIntelligenceEditSaveOutcome
     let saveMetadata: (String, String, Bool, RecordingSession) async -> LibrarySaveOutcome
     let moveToTrash: (RecordingSession) async -> Void
     @Binding var route: RecordingsPresentationRoute
@@ -339,6 +346,16 @@ private struct SessionListView: View {
                 },
                 applyMeetingIntelligenceSuggestedTitle: { requested in
                     _ = admission.perform(sessionID: requested.id, action: applyMeetingIntelligenceSuggestedTitle)
+                },
+                saveMeetingIntelligenceEdit: { requested, artifact, summary, suggestedTitle in
+                    await RecordingsLibraryMeetingIntelligenceRouting.saveEdit(
+                        requestedSession: requested,
+                        admission: admission,
+                        capturedArtifact: artifact,
+                        summary: summary,
+                        suggestedTitle: suggestedTitle,
+                        save: saveMeetingIntelligenceEdit
+                    )
                 }
             )
             .environment(\.colorScheme, systemColorScheme)
@@ -511,6 +528,33 @@ private struct SessionListView: View {
         case .cancelled, .interrupted: .secondary
         default: lastTranscriptionDidFail ? .orange : .green
         }
+    }
+}
+
+@MainActor
+enum RecordingsLibraryMeetingIntelligenceRouting {
+    static func saveEdit(
+        requestedSession: RecordingSession,
+        admission: RecordingsCanonicalActionAdmission,
+        capturedArtifact: MeetingIntelligenceArtifact,
+        summary: String,
+        suggestedTitle: String,
+        save: (
+            RecordingSession,
+            MeetingIntelligenceArtifact,
+            String,
+            String
+        ) async -> MeetingIntelligenceEditSaveOutcome
+    ) async -> MeetingIntelligenceEditSaveOutcome {
+        guard let canonicalSession = admission.canonicalSession(for: requestedSession.id) else {
+            return .conflict("The recording is no longer available.")
+        }
+        return await save(
+            canonicalSession,
+            capturedArtifact,
+            summary,
+            suggestedTitle
+        )
     }
 }
 

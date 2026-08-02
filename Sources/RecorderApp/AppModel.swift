@@ -603,28 +603,39 @@ final class AppModel: ObservableObject {
         mutationGate: RecordingSessionMutationGate
     ) -> MeetingIntelligenceJobCoordinator {
         let client = OpenAICompatibleMeetingIntelligenceClient()
+        let transcriptReader = SecureTranscriptDocumentReader()
         let artifactStore = MeetingIntelligenceArtifactStore(
             mutationGate: mutationGate
+        )
+        let publisher = MeetingIntelligencePublisher(
+            mutationGate: mutationGate,
+            transcriptReader: transcriptReader,
+            artifactStore: artifactStore
+        )
+        let artifactEditor = MeetingIntelligenceArtifactEditor(
+            mutationGate: mutationGate,
+            transcriptReader: transcriptReader,
+            artifactStore: artifactStore
         )
         return MeetingIntelligenceJobCoordinator(
             providerRepository: repository,
             expectedPublicationSourceID: expectedPublicationSourceID,
             mutationGate: mutationGate,
+            transcriptReader: transcriptReader,
             availabilityChecker:
                 OpenAICompatibleMeetingIntelligenceAvailabilityChecker(
                     client: OpenAICompatibleProviderClient()
                 ),
             generator: MeetingIntelligencePipeline(client: client),
-            publisher: MeetingIntelligencePublisher(
-                mutationGate: mutationGate,
-                artifactStore: artifactStore
-            ),
+            publisher: publisher,
             artifactStore: artifactStore,
             stateStore: MeetingIntelligenceStateStore(
                 mutationGate: mutationGate
             ),
+            artifactEditor: artifactEditor,
             titleApplier: MeetingIntelligenceSuggestedTitleApplier(
-                mutationGate: mutationGate
+                mutationGate: mutationGate,
+                transcriptReader: transcriptReader
             )
         )
     }
@@ -660,6 +671,23 @@ final class AppModel: ObservableObject {
         meetingIntelligenceFeature.retryGeneration(
             for: session,
             workspaceFence: workspacePublicationFence
+        )
+    }
+
+    @discardableResult
+    func saveMeetingIntelligenceEdit(
+        for session: RecordingSession,
+        capturedArtifact: MeetingIntelligenceArtifact,
+        summary: String,
+        suggestedTitle: String
+    ) async -> MeetingIntelligenceEditSaveOutcome {
+        let fence = workspacePublicationFence
+        return await meetingIntelligenceFeature.saveEdit(
+            for: session,
+            capturedArtifact: capturedArtifact,
+            summary: summary,
+            suggestedTitle: suggestedTitle,
+            workspaceFence: fence
         )
     }
 

@@ -132,6 +132,108 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         )
     }
 
+    func testDefaultAppModelCompositionRoutesEditedArtifactWithCurrentFenceAndPreservesMetadataTitle() async throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+
+        let metadata = RecordingSessionMetadata(
+            title: "Keep this recording title",
+            titleOrigin: .manual,
+            tags: ["keep"],
+            isFavorite: true,
+            meetingType: "planning"
+        )
+        try RecordingSessionMetadataStore.save(metadata, in: fixture.folder)
+        let session = fixture.session(with: metadata)
+        let transcript = try SecureTranscriptDocumentReader().readCanonical(
+            in: fixture.folder,
+            allowLegacy: false
+        )
+        let generatedArtifact = MeetingIntelligenceArtifact(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: "Generated summary",
+            suggestedTitle: "Generated suggestion",
+            sourceTranscriptSHA256: transcript.revision.sha256,
+            sourceTranscriptByteCount: transcript.revision.byteCount,
+            model: "meeting-model",
+            generatedAt: Date(timeIntervalSince1970: 1_775_000_000),
+            intent: .generate,
+            contentOrigin: .generated,
+            editedAt: nil
+        )
+        let setupStore = MeetingIntelligenceArtifactStore(
+            mutationGate: RecordingSessionMutationGate()
+        )
+        let staged = try setupStore.stage(generatedArtifact, in: fixture.folder)
+        try setupStore.promoteStaged(staged, in: fixture.folder)
+        let metadataURL = fixture.folder.appendingPathComponent(
+            RecordingSessionMetadataStore.fileName
+        )
+        let beforeMetadata = try Data(contentsOf: metadataURL)
+
+        let initialWorkspace = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: initialWorkspace) }
+        let reloader = IntegrationEditReloadCounter()
+        let model = AppModel(
+            providerRepository: IntegrationRepository(),
+            performStartupWork: false,
+            initialOutputFolder: initialWorkspace,
+            recordingSessionLoader: { folder in
+                RecordingLibraryURLIdentity.normalized(folder)
+                    == RecordingLibraryURLIdentity.normalized(fixture.workspace)
+                    ? [session]
+                    : []
+            },
+            recordingSessionReloader: { [reloader] session in
+                reloader.reload(session)
+            }
+        )
+        defer { model.shutdown() }
+
+        // Advance the AppModel-owned fence. The wrapper must capture this value;
+        // UI callers do not get to provide a fence themselves.
+        model.setOutputFolder(fixture.workspace)
+        model.seedLibrarySessionsForTesting([session])
+        model.meetingIntelligenceFeature.reload(sessions: [session])
+        let loaded = await eventually {
+            model.meetingIntelligencePresentation(for: session)
+                .editableContent?.artifact == generatedArtifact
+        }
+        XCTAssertTrue(loaded)
+        let reloadsBeforeSave = reloader.callCount
+
+        let outcome = await model.saveMeetingIntelligenceEdit(
+            for: session,
+            capturedArtifact: generatedArtifact,
+            summary: "Edited summary",
+            suggestedTitle: "Edited suggestion"
+        )
+        guard case .saved(let savedArtifact) = outcome else {
+            return XCTFail("Expected the AppModel edit wrapper to save the artifact: \(outcome)")
+        }
+        XCTAssertEqual(savedArtifact.schemaVersion, MeetingIntelligenceArtifact.currentSchemaVersion)
+        XCTAssertEqual(savedArtifact.summary, "Edited summary")
+        XCTAssertEqual(savedArtifact.suggestedTitle, "Edited suggestion")
+        XCTAssertEqual(savedArtifact.contentOrigin, .edited)
+
+        let bridgeAcceptedCurrentFence = await eventually {
+            reloader.callCount > reloadsBeforeSave
+        }
+        XCTAssertTrue(bridgeAcceptedCurrentFence)
+
+        let persisted = try XCTUnwrap(
+            try MeetingIntelligenceArtifactStore(
+                mutationGate: RecordingSessionMutationGate()
+            ).load(in: fixture.folder)
+        )
+        XCTAssertEqual(persisted, savedArtifact)
+        XCTAssertEqual(persisted.schemaVersion, MeetingIntelligenceArtifact.currentSchemaVersion)
+        XCTAssertEqual(try Data(contentsOf: metadataURL), beforeMetadata)
+        let savedMetadata = RecordingSessionMetadataStore.load(in: fixture.folder)
+        XCTAssertEqual(savedMetadata.title, metadata.title)
+        XCTAssertEqual(savedMetadata.titleOrigin, metadata.titleOrigin)
+    }
+
     func testAppModelRetainsInjectedMeetingIntelligenceFeatureWithoutRelayingItsChanges() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
@@ -772,6 +874,18 @@ private final class SessionReloader: @unchecked Sendable {
         wasCalledOnMain = Thread.isMainThread
         called.fulfill()
         return result
+    }
+}
+
+private final class IntegrationEditReloadCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var callCount: Int { lock.withLock { count } }
+
+    func reload(_ session: RecordingSession) -> RecordingSession {
+        lock.withLock { count += 1 }
+        return session
     }
 }
 

@@ -80,6 +80,52 @@ final class PRBFeatureBridgeTests: XCTestCase {
         XCTAssertTrue(route.transcriptionStarts.isEmpty)
     }
 
+    func testEditedArtifactAdmissionRequiresCurrentSourceFenceAndCanonicalIdentityExactlyOnce() {
+        let (bridge, route) = makeSUT(); bridge.start()
+        let accepted = miPublication("edited", kind: .editedArtifact)
+        route.emitMeetingIntelligence(accepted)
+        route.emitMeetingIntelligence(accepted)
+        route.emitMeetingIntelligence(
+            miPublication("foreign", sourceID: UUID(), kind: .editedArtifact)
+        )
+        route.emitMeetingIntelligence(
+            miPublication(
+                "old-fence",
+                fence: .init(revision: currentFence.revision - 1),
+                kind: .editedArtifact
+            )
+        )
+
+        let forgedFolder = workspace.appendingPathComponent("forged")
+        let forgedSession = RecordingSession(
+            id: session.id,
+            folderURL: forgedFolder,
+            recordingURL: forgedFolder.appendingPathComponent("recording.m4a"),
+            createdAt: session.createdAt,
+            duration: session.duration,
+            fileSize: session.fileSize,
+            metadata: session.metadata
+        )
+        route.emitMeetingIntelligence(
+            miPublication(
+                "forged-folder",
+                publishedSession: forgedSession,
+                kind: .editedArtifact
+            )
+        )
+
+        route.currentWorkspace = .init(
+            folder: outsideWorkspace,
+            fence: currentFence.advanced()
+        )
+        bridge.workspaceDidChange(.init(workspace: route.currentWorkspace))
+        route.emitMeetingIntelligence(accepted)
+
+        XCTAssertEqual(route.miRefreshes.map(\.0), [session.id])
+        XCTAssertEqual(route.miRefreshes.map(\.1), [currentFence])
+        XCTAssertTrue(route.transcriptionStarts.isEmpty)
+    }
+
     func testEligibleAndIneligibleImportsRetainBothButStartOnlyEligibleASR() {
         let (bridge, route) = makeSUT(); bridge.start()
         route.transcriptionProviderConfigured = true
@@ -305,8 +351,30 @@ private func edited(_ name: String) -> TranscriptEdited {
     .init(identity: libraryIdentity(name, session: session), canonicalSession: session)
 }
 
-private func miPublication(_ name: String) -> MeetingIntelligencePublished {
-    .init(identity: .init(coordinatorInstanceID: miSourceID, sessionID: session.id, normalizedSessionFolder: RecordingLibraryURLIdentity.normalized(session.folderURL), generation: 1, attemptID: UUID(), transcriptRevision: .init(sha256: name, byteCount: 1), workspaceFence: currentFence, kind: .artifactAndAutomaticTitle), canonicalSession: session, artifact: nil, titleOutcome: .preserved)
+private func miPublication(
+    _ name: String,
+    sourceID: UUID = miSourceID,
+    fence: WorkspacePublicationFence = currentFence,
+    publishedSession: RecordingSession = session,
+    kind: MeetingIntelligencePublicationKind = .artifactAndAutomaticTitle
+) -> MeetingIntelligencePublished {
+    .init(
+        identity: .init(
+            coordinatorInstanceID: sourceID,
+            sessionID: publishedSession.id,
+            normalizedSessionFolder: RecordingLibraryURLIdentity.normalized(
+                publishedSession.folderURL
+            ),
+            generation: 1,
+            attemptID: UUID(),
+            transcriptRevision: .init(sha256: name, byteCount: 1),
+            workspaceFence: fence,
+            kind: kind
+        ),
+        canonicalSession: publishedSession,
+        artifact: nil,
+        titleOutcome: .preserved
+    )
 }
 
 private func finalization(folder: URL, fence: WorkspacePublicationFence, metadata: RecordingSourceMetadataPublicationOutcome) -> RecordingFinalizationOutcome {

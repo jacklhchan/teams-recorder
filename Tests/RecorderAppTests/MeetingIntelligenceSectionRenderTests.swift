@@ -111,12 +111,48 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
 
         XCTAssertFalse(controller.isEditing)
         XCTAssertFalse(controller.isSaving)
-        XCTAssertEqual(controller.editStatus, "Edit conflict: showing the latest content.")
+        XCTAssertEqual(controller.editStatus, "Edit conflict: latest content loaded.")
 
         controller.receiveOutcome(.saved(replacement), for: request.attemptID)
 
         XCTAssertFalse(controller.isEditing)
-        XCTAssertEqual(controller.editStatus, "Edit conflict: showing the latest content.")
+        XCTAssertEqual(controller.editStatus, "Edit conflict: latest content loaded.")
+    }
+
+    func testEditControllerConflictFirstShowsReloadingUntilCanonicalReplacement() throws {
+        let original = editableReadyPresentation()
+        let identity = snapshot(1, phase: .ready, title: "Current title").identity
+        let controller = MeetingIntelligenceEditController()
+        controller.begin(projection: original, identity: identity)
+        controller.edit(summary: "Old draft", suggestedTitle: "Old title")
+        let request = try XCTUnwrap(controller.submit())
+        let replacement = artifact(
+            from: try XCTUnwrap(original.editableContent?.artifact),
+            summary: "Canonical summary",
+            title: "Canonical title"
+        )
+
+        controller.receiveOutcome(.conflict("stale"), for: request.attemptID)
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertFalse(controller.isSaving)
+        XCTAssertTrue(controller.editStatus?.localizedCaseInsensitiveContains("reloading") == true)
+        XCTAssertFalse(controller.editStatus?.localizedCaseInsensitiveContains("latest") == true)
+
+        controller.observeProjection(original, identity: identity)
+
+        XCTAssertTrue(controller.editStatus?.localizedCaseInsensitiveContains("reloading") == true)
+        XCTAssertFalse(controller.editStatus?.localizedCaseInsensitiveContains("latest") == true)
+
+        controller.observeProjection(editablePresentation(for: replacement), identity: identity)
+
+        XCTAssertEqual(controller.editStatus, "Edit conflict: latest content loaded.")
+        controller.receiveOutcome(.saved(replacement), for: request.attemptID)
+        XCTAssertEqual(controller.editStatus, "Edit conflict: latest content loaded.")
+        controller.begin(projection: editablePresentation(for: replacement), identity: identity)
+        XCTAssertTrue(controller.isEditing)
+        XCTAssertEqual(controller.draftSummary, "Canonical summary")
+        XCTAssertEqual(controller.draftSuggestedTitle, "Canonical title")
     }
 
     func testEditControllerIdentityMismatchGuardsAndInvalidatesSubmit() throws {
@@ -130,14 +166,20 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
         let newIdentity = snapshot(2, sessionID: "session-2", phase: .ready, title: "Other title").identity
         let request = try XCTUnwrap(controller.submit())
 
-        controller.observeProjection(editableReadyPresentation(), identity: newIdentity)
+        let newProjection = editableReadyPresentation()
+        controller.observeProjection(newProjection, identity: newIdentity)
 
         XCTAssertFalse(controller.isEditing)
         XCTAssertFalse(controller.isSaving)
         XCTAssertNotEqual(oldIdentity, newIdentity)
         XCTAssertNil(controller.submit())
         controller.receiveOutcome(.saved(request.artifact), for: request.attemptID)
-        XCTAssertEqual(controller.editStatus, "Edit conflict: showing the latest content.")
+        XCTAssertNil(controller.editStatus)
+
+        controller.begin(projection: newProjection, identity: newIdentity)
+        XCTAssertTrue(controller.isEditing)
+        XCTAssertEqual(controller.draftSummary, "Summary")
+        XCTAssertEqual(controller.draftSuggestedTitle, "Suggested title")
     }
 
     func testEditControllerOnDisappearRejectsLateResponse() throws {

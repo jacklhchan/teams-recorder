@@ -150,12 +150,19 @@ final class MeetingIntelligenceEditController: ObservableObject {
     @Published private(set) var editStatus: String?
 
     private var capturedArtifact: MeetingIntelligenceArtifact?
+    private var capturedPhase: MeetingIntelligencePresentation.Phase?
     private var capturedIdentity: MeetingIntelligenceSessionPresentationIdentity?
     private var observedProjection: MeetingIntelligencePresentation?
     private var observedIdentity: MeetingIntelligenceSessionPresentationIdentity?
     private var activeAttemptID: UUID?
     private var pendingSavedArtifact: MeetingIntelligenceArtifact?
+    private var conflictArtifact: MeetingIntelligenceArtifact?
+    private var conflictPhase: MeetingIntelligencePresentation.Phase?
+    private var conflictIdentity: MeetingIntelligenceSessionPresentationIdentity?
     private var requiresFreshEdit = false
+
+    private static let conflictReloadingStatus = "Edit conflict: content changed. Reloading canonical content…"
+    private static let conflictLoadedStatus = "Edit conflict: latest content loaded."
 
     var isDirty: Bool {
         guard let capturedArtifact else { return false }
@@ -191,11 +198,13 @@ final class MeetingIntelligenceEditController: ObservableObject {
         observedProjection = projection
         observedIdentity = identity
         capturedArtifact = artifact
+        capturedPhase = projection.phase
         capturedIdentity = identity
         draftSummary = projection.summary ?? artifact.summary
         draftSuggestedTitle = projection.suggestedTitle ?? artifact.suggestedTitle
         activeAttemptID = nil
         pendingSavedArtifact = nil
+        clearConflictState()
         requiresFreshEdit = false
         editStatus = nil
         isSaving = false
@@ -278,10 +287,27 @@ final class MeetingIntelligenceEditController: ObservableObject {
     ) {
         observedProjection = projection
         observedIdentity = identity
+
+        if conflictArtifact != nil {
+            guard identity == conflictIdentity else {
+                invalidateEdit()
+                return
+            }
+
+            if conflictProjectionMatchesSource(projection) {
+                editStatus = Self.conflictReloadingStatus
+            } else {
+                clearConflictState()
+                requiresFreshEdit = false
+                editStatus = Self.conflictLoadedStatus
+            }
+            return
+        }
+
         guard isEditing else { return }
 
         guard !isIdentityMismatch else {
-            markConflict()
+            invalidateEdit()
             return
         }
 
@@ -292,12 +318,13 @@ final class MeetingIntelligenceEditController: ObservableObject {
         }
 
         guard let capturedArtifact,
-              projection.phase == .ready || projection.phase == .stale,
+              let capturedPhase,
+              projection.phase == capturedPhase,
               projection.editableContent?.artifact == capturedArtifact,
               projection.summary == capturedArtifact.summary,
               projection.suggestedTitle == capturedArtifact.suggestedTitle
         else {
-            markConflict()
+            markConflict(observedProjection: projection, observedIdentity: identity)
             return
         }
     }
@@ -309,9 +336,9 @@ final class MeetingIntelligenceEditController: ObservableObject {
     }
 
     private var currentProjectionMatchesCapture: Bool {
-        guard let observedProjection, let capturedArtifact else { return false }
+        guard let observedProjection, let capturedArtifact, let capturedPhase else { return false }
         guard !isIdentityMismatch,
-              observedProjection.phase == .ready || observedProjection.phase == .stale,
+              observedProjection.phase == capturedPhase,
               observedProjection.editableContent?.artifact == capturedArtifact,
               observedProjection.summary == capturedArtifact.summary,
               observedProjection.suggestedTitle == capturedArtifact.suggestedTitle
@@ -329,18 +356,64 @@ final class MeetingIntelligenceEditController: ObservableObject {
             projection.suggestedTitle == artifact.suggestedTitle
     }
 
-    private func markConflict() {
+    private func markConflict(
+        observedProjection: MeetingIntelligencePresentation? = nil,
+        observedIdentity: MeetingIntelligenceSessionPresentationIdentity? = nil
+    ) {
         guard isEditing else { return }
+
+        let sourceArtifact = capturedArtifact
+        let sourcePhase = capturedPhase
+        let sourceIdentity = capturedIdentity
+
         activeAttemptID = nil
         isSaving = false
         pendingSavedArtifact = nil
-        requiresFreshEdit = true
-        editStatus = "Edit conflict: showing the latest content."
         isEditing = false
         draftSummary = ""
         draftSuggestedTitle = ""
         capturedArtifact = nil
+        capturedPhase = nil
         capturedIdentity = nil
+
+        guard let sourceArtifact, let sourcePhase else {
+            clearConflictState()
+            requiresFreshEdit = false
+            editStatus = Self.conflictReloadingStatus
+            return
+        }
+
+        conflictArtifact = sourceArtifact
+        conflictPhase = sourcePhase
+        conflictIdentity = sourceIdentity
+        requiresFreshEdit = true
+
+        if let observedProjection,
+           observedIdentity == sourceIdentity,
+           !conflictProjectionMatchesSource(observedProjection) {
+            clearConflictState()
+            requiresFreshEdit = false
+            editStatus = Self.conflictLoadedStatus
+        } else {
+            editStatus = Self.conflictReloadingStatus
+        }
+    }
+
+    private func conflictProjectionMatchesSource(_ projection: MeetingIntelligencePresentation) -> Bool {
+        guard let conflictArtifact,
+              let conflictPhase,
+              projection.phase == conflictPhase,
+              projection.editableContent?.artifact == conflictArtifact,
+              projection.summary == conflictArtifact.summary,
+              projection.suggestedTitle == conflictArtifact.suggestedTitle
+        else { return false }
+        return true
+    }
+
+    private func clearConflictState() {
+        conflictArtifact = nil
+        conflictPhase = nil
+        conflictIdentity = nil
     }
 
     private func finishEditing() {
@@ -354,8 +427,10 @@ final class MeetingIntelligenceEditController: ObservableObject {
         draftSummary = ""
         draftSuggestedTitle = ""
         capturedArtifact = nil
+        capturedPhase = nil
         capturedIdentity = nil
         pendingSavedArtifact = nil
+        clearConflictState()
         requiresFreshEdit = false
         editStatus = nil
     }

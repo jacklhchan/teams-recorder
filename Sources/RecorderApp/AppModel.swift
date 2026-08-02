@@ -682,13 +682,20 @@ final class AppModel: ObservableObject {
         suggestedTitle: String
     ) async -> MeetingIntelligenceEditSaveOutcome {
         let fence = workspacePublicationFence
-        return await meetingIntelligenceFeature.saveEdit(
+        let outcome = await meetingIntelligenceFeature.saveEdit(
             for: session,
             capturedArtifact: capturedArtifact,
             summary: summary,
             suggestedTitle: suggestedTitle,
             workspaceFence: fence
         )
+        if case .conflict = outcome {
+            let currentSessions = libraryFeature.sessions.filter {
+                $0.id == session.id
+            }
+            meetingIntelligenceFeature.reload(sessions: currentSessions)
+        }
+        return outcome
     }
 
     func cancelMeetingIntelligence(for session: RecordingSession) {

@@ -234,6 +234,81 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         XCTAssertEqual(savedMetadata.titleOrigin, metadata.titleOrigin)
     }
 
+    func testConflictSaveReloadsCurrentCanonicalMeetingIntelligenceProjection() async throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+
+        let session = fixture.session()
+        let transcript = try SecureTranscriptDocumentReader().readCanonical(
+            in: fixture.folder,
+            allowLegacy: false
+        )
+        let original = MeetingIntelligenceArtifact(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: "Original summary",
+            suggestedTitle: "Original title",
+            sourceTranscriptSHA256: transcript.revision.sha256,
+            sourceTranscriptByteCount: transcript.revision.byteCount,
+            model: "meeting-model",
+            generatedAt: Date(timeIntervalSince1970: 1_775_000_000),
+            intent: .generate,
+            contentOrigin: .generated,
+            editedAt: nil
+        )
+        let current = MeetingIntelligenceArtifact(
+            schemaVersion: original.schemaVersion,
+            summary: "Current canonical summary",
+            suggestedTitle: "Current canonical title",
+            sourceTranscriptSHA256: original.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: original.sourceTranscriptByteCount,
+            model: original.model,
+            generatedAt: original.generatedAt,
+            intent: original.intent,
+            contentOrigin: .edited,
+            editedAt: Date(timeIntervalSince1970: 1_775_000_001)
+        )
+        let store = MeetingIntelligenceArtifactStore(
+            mutationGate: RecordingSessionMutationGate()
+        )
+        let originalStage = try store.stage(original, in: fixture.folder)
+        try store.promoteStaged(originalStage, in: fixture.folder)
+
+        let model = AppModel(
+            providerRepository: IntegrationRepository(),
+            performStartupWork: false,
+            initialOutputFolder: fixture.workspace
+        )
+        defer { model.shutdown() }
+
+        model.seedLibrarySessionsForTesting([session])
+        model.meetingIntelligenceFeature.reload(sessions: [session])
+        let loaded = await eventually {
+            model.meetingIntelligencePresentation(for: session)
+                .editableContent?.artifact == original
+        }
+        XCTAssertTrue(loaded)
+
+        let currentStage = try store.stage(current, in: fixture.folder)
+        try store.promoteStaged(currentStage, in: fixture.folder)
+
+        let outcome = await model.saveMeetingIntelligenceEdit(
+            for: session,
+            capturedArtifact: original,
+            summary: "Stale edit",
+            suggestedTitle: "Stale title"
+        )
+
+        XCTAssertEqual(
+            outcome,
+            .conflict(MeetingIntelligenceArtifactEditError.conflict.errorDescription!)
+        )
+        let reloaded = await eventually {
+            model.meetingIntelligencePresentation(for: session)
+                .editableContent?.artifact == current
+        }
+        XCTAssertTrue(reloaded)
+    }
+
     func testAppModelRetainsInjectedMeetingIntelligenceFeatureWithoutRelayingItsChanges() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }

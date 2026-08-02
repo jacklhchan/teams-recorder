@@ -29,7 +29,7 @@
 
 ## Execution Ledger and Review Protocol
 
-- Create `.superpowers/sdd/ledger.md` in the implementation worktree using the subagent-driven-development tooling. Record task status, implementation agent ID, implementation commit, Sol verdict, fix commit, and controller verification.
+- Append a new plan section to `.superpowers/sdd/progress.md` in the implementation worktree using the subagent-driven-development tooling. Preserve prior-plan entries and record task status, implementation agent ID, implementation commit, Sol verdict, fix commit, and controller verification.
 - One fresh Luna agent implements one numbered task. Do not ask an agent to implement two tasks in one context.
 - After each task commit, create a scoped diff package from the previous accepted task commit through the new commit. A fresh Sol agent performs both specification-compliance and code-quality review.
 - Sol findings use exactly `Critical`, `Important`, or `Minor`. Critical/Important findings block the next task. Minor findings are fixed when low risk or entered explicitly in the ledger with rationale.

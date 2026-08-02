@@ -87,13 +87,13 @@ struct MeetingIntelligenceArtifactEditor: MeetingIntelligenceArtifactEditing, @u
 
         let folder = try secureFolder(for: request.session)
         let directoryIdentity = try captureDirectoryIdentity(in: folder)
-        guard let secureArtifactStore = artifactStore as? any MeetingIntelligenceArtifactSecureStoring else {
+        guard let identityBoundArtifactStore = artifactStore as? any MeetingIntelligenceArtifactIdentityBoundStoring else {
             throw MeetingIntelligenceArtifactEditError.storageFailure
         }
 
-        let staged: URL
+        let staged: MeetingIntelligenceArtifactStageToken
         do {
-            staged = try secureArtifactStore.stage(
+            staged = try identityBoundArtifactStore.stageIdentityBound(
                 editedArtifact,
                 in: folder,
                 expectedDirectory: directoryIdentity
@@ -109,8 +109,7 @@ struct MeetingIntelligenceArtifactEditor: MeetingIntelligenceArtifactEditing, @u
             if !promoted {
                 removeStagedSafely(
                     staged,
-                    in: folder,
-                    expectedDirectory: directoryIdentity
+                    in: folder
                 )
             }
         }
@@ -147,7 +146,7 @@ struct MeetingIntelligenceArtifactEditor: MeetingIntelligenceArtifactEditing, @u
                 defer { reservation.finish() }
 
                 do {
-                    try artifactStore.promoteStaged(staged, in: folder)
+                    try identityBoundArtifactStore.promoteStaged(staged, in: folder)
                 } catch let error as MeetingIntelligenceArtifactEditError {
                     throw error
                 } catch {
@@ -194,14 +193,19 @@ struct MeetingIntelligenceArtifactEditor: MeetingIntelligenceArtifactEditing, @u
     }
 
     private func removeStagedSafely(
-        _ staged: URL,
-        in folder: URL,
-        expectedDirectory: MeetingIntelligenceStoreDirectoryIdentity
+        _ staged: MeetingIntelligenceArtifactStageToken,
+        in folder: URL
     ) {
-        guard (try? MeetingIntelligenceStoreFileIO.verifyFolder(folder, matches: expectedDirectory)) != nil else {
+        guard (try? MeetingIntelligenceStoreFileIO.verifyFolder(
+            folder,
+            matches: staged.directoryIdentity
+        )) != nil else {
             return
         }
-        try? artifactStore.removeStaged(staged, in: folder)
+        guard let identityBoundArtifactStore = artifactStore as? any MeetingIntelligenceArtifactIdentityBoundStoring else {
+            return
+        }
+        try? identityBoundArtifactStore.removeStaged(staged, in: folder)
     }
 
     private func mapStagingError(_ error: Error) -> MeetingIntelligenceArtifactEditError {

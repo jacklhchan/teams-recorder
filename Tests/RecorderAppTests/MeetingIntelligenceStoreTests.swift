@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -45,6 +46,82 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         }
         XCTAssertEqual(try Data(contentsOf: staged), replacement)
         XCTAssertEqual(access.removeCalls, 0)
+    }
+
+    func testIdentityBoundCleanupPreservesReplacementPlacedBeforeCleanup() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let directoryIdentity = try MeetingIntelligenceStoreFileIO.folderIdentity(in: fixture.folder)
+        let staged = try store.stageIdentityBound(
+            fixture.artifact(),
+            in: fixture.folder,
+            expectedDirectory: directoryIdentity
+        )
+        let replacement = Data("replacement-before-cleanup".utf8)
+        try FileManager.default.removeItem(at: staged.stagedURL)
+        try replacement.write(to: staged.stagedURL)
+
+        XCTAssertThrowsError(try store.removeStaged(staged, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
+        }
+        XCTAssertEqual(try Data(contentsOf: staged.stagedURL), replacement)
+    }
+
+    func testIdentityBoundCleanupPreservesSwapAtPreviousCheckToUnlinkBoundary() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let replacement = Data("replacement-during-cleanup".utf8)
+        let access = DarwinMeetingIntelligenceStoreFileAccess(
+            beforeIdentityBoundRemove: { stagedURL in
+                try FileManager.default.removeItem(at: stagedURL)
+                try replacement.write(to: stagedURL)
+            }
+        )
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate, fileAccess: access)
+        let directoryIdentity = try MeetingIntelligenceStoreFileIO.folderIdentity(in: fixture.folder)
+        let staged = try store.stageIdentityBound(
+            fixture.artifact(),
+            in: fixture.folder,
+            expectedDirectory: directoryIdentity
+        )
+
+        XCTAssertThrowsError(try store.removeStaged(staged, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .identityChanged)
+        }
+        XCTAssertEqual(try Data(contentsOf: staged.stagedURL), replacement)
+    }
+
+    func testIdentityBoundStageRemovesPartialFileWhenInjectedWriteFails() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let partial = Data("partial-stage".utf8)
+        let access = DarwinMeetingIntelligenceStoreFileAccess(
+            writeOperation: { _, descriptor in
+                let written = partial.withUnsafeBytes { bytes -> Int in
+                    guard let address = bytes.baseAddress else { return 0 }
+                    return Darwin.write(descriptor, address, partial.count)
+                }
+                guard written == partial.count else {
+                    throw MeetingIntelligenceStoreError.unsafeFile
+                }
+                throw PartialStageWriteError.injected
+            }
+        )
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate, fileAccess: access)
+        let directoryIdentity = try MeetingIntelligenceStoreFileIO.folderIdentity(in: fixture.folder)
+
+        XCTAssertThrowsError(
+            try store.stageIdentityBound(
+                fixture.artifact(),
+                in: fixture.folder,
+                expectedDirectory: directoryIdentity
+            )
+        ) {
+            XCTAssertTrue($0 is PartialStageWriteError)
+        }
+        let stages = try FileManager.default.contentsOfDirectory(
+            at: fixture.folder,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(".meeting-intelligence-stage-") }
+        XCTAssertTrue(stages.isEmpty)
     }
 
     func testV1ArtifactIgnoresUnknownFields() throws {
@@ -112,6 +189,77 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
             XCTAssertEqual(roundTripped.editedAt, expectedEditedAt)
             XCTAssertEqual(roundTripped, artifact)
         }
+    }
+
+    func testFractionalArtifactAndStateDatesRoundTripExactlyWithNumericEncoding() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let artifactStore = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let generatedAt = Date(timeIntervalSinceReferenceDate: 812_345_678.123_456_7)
+        let editedAt = Date(timeIntervalSinceReferenceDate: 812_345_679.234_567_8)
+        let artifact = fixture.artifact(
+            generatedAt: generatedAt,
+            contentOrigin: .edited,
+            editedAt: editedAt
+        )
+
+        let staged = try artifactStore.stage(artifact, in: fixture.folder)
+        try artifactStore.promoteStaged(staged, in: fixture.folder)
+
+        XCTAssertEqual(try artifactStore.load(in: fixture.folder), artifact)
+        let artifactObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: fixture.artifactURL)) as? [String: Any]
+        )
+        XCTAssertTrue(artifactObject["generatedAt"] is NSNumber)
+        XCTAssertTrue(artifactObject["editedAt"] is NSNumber)
+
+        let stateStore = MeetingIntelligenceStateStore(mutationGate: gate)
+        let state = MeetingIntelligenceState(
+            schemaVersion: MeetingIntelligenceState.currentSchemaVersion,
+            phase: .completed,
+            message: "Completed",
+            sourceTranscriptSHA256: nil,
+            startedAt: Date(timeIntervalSinceReferenceDate: 812_345_680.345_678_9),
+            finishedAt: Date(timeIntervalSinceReferenceDate: 812_345_681.456_789)
+        )
+        try stateStore.save(state, in: fixture.folder)
+
+        XCTAssertEqual(try stateStore.load(in: fixture.folder), state)
+        let stateObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: fixture.stateURL)) as? [String: Any]
+        )
+        XCTAssertTrue(stateObject["startedAt"] is NSNumber)
+        XCTAssertTrue(stateObject["finishedAt"] is NSNumber)
+    }
+
+    func testLegacyISO8601ArtifactAndStateDatesStillDecode() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let artifactData = Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","contentOrigin":"edited","editedAt":"2026-07-31T01:02:03Z"}"#.utf8)
+        try artifactData.write(to: fixture.artifactURL)
+        let artifact = try XCTUnwrap(
+            try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)
+        )
+        XCTAssertEqual(
+            artifact.generatedAt,
+            ISO8601DateFormatter().date(from: "2026-07-31T00:00:00Z")
+        )
+        XCTAssertEqual(
+            artifact.editedAt,
+            ISO8601DateFormatter().date(from: "2026-07-31T01:02:03Z")
+        )
+
+        let stateData = Data(#"{"schemaVersion":1,"phase":"completed","message":"Completed","startedAt":"2026-07-31T02:03:04Z","finishedAt":"2026-07-31T03:04:05Z"}"#.utf8)
+        try stateData.write(to: fixture.stateURL)
+        let state = try XCTUnwrap(
+            try MeetingIntelligenceStateStore(mutationGate: gate).load(in: fixture.folder)
+        )
+        XCTAssertEqual(
+            state.startedAt,
+            ISO8601DateFormatter().date(from: "2026-07-31T02:03:04Z")
+        )
+        XCTAssertEqual(
+            state.finishedAt,
+            ISO8601DateFormatter().date(from: "2026-07-31T03:04:05Z")
+        )
     }
 
     func testInvalidV2ProvenanceIsRejected() throws {
@@ -651,6 +799,10 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
     }
 }
 
+private enum PartialStageWriteError: Error {
+    case injected
+}
+
 private final class MeetingIntelligenceStoreFixture {
     let root: URL
     let folder: URL
@@ -866,7 +1018,22 @@ private extension JSONEncoder {
 private extension JSONDecoder {
     static var meetingIntelligenceForTests: JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            if let seconds = try? container.decode(Double.self) {
+                return Date(timeIntervalSinceReferenceDate: seconds)
+            }
+            let value = try container.decode(String.self)
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = formatter.date(from: value) { return date }
+            formatter.formatOptions = [.withInternetDateTime]
+            if let date = formatter.date(from: value) { return date }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Meeting intelligence date is malformed."
+            )
+        }
         return decoder
     }
 }

@@ -65,6 +65,44 @@ final class MeetingIntelligenceArtifactEditorTests: XCTestCase {
         try fixture.assertMetadataUnchanged(beforeMetadata)
     }
 
+    func testFractionalDatesRoundTripExactlyAndReloadedArtifactSupportsRepeatedEdit() async throws {
+        let generatedAt = Date(timeIntervalSinceReferenceDate: 812_345_678.123_456_7)
+        let firstEditedAt = Date(timeIntervalSinceReferenceDate: 812_345_679.234_567_8)
+        let secondEditedAt = Date(timeIntervalSinceReferenceDate: 812_345_680.345_678_9)
+        let fixture = try ArtifactEditorFixture(generatedAt: generatedAt)
+        defer { fixture.remove() }
+        let beforeMetadata = try fixture.metadataBytes()
+
+        let firstReturned = try await fixture.editor.save(
+            fixture.request(
+                summary: "Fractional first edit",
+                title: "Fractional first title",
+                editedAt: firstEditedAt
+            )
+        )
+        let firstReloaded = try XCTUnwrap(try fixture.store.load(in: fixture.folder))
+
+        XCTAssertEqual(firstReturned, firstReloaded)
+        XCTAssertEqual(firstReturned.generatedAt, generatedAt)
+        XCTAssertEqual(firstReturned.editedAt, firstEditedAt)
+
+        let secondReturned = try await fixture.editor.save(
+            fixture.request(
+                capturedArtifact: firstReloaded,
+                summary: "Fractional second edit",
+                title: "Fractional second title",
+                editedAt: secondEditedAt
+            )
+        )
+        let secondReloaded = try XCTUnwrap(try fixture.store.load(in: fixture.folder))
+
+        XCTAssertEqual(secondReturned, secondReloaded)
+        XCTAssertEqual(secondReturned.generatedAt, generatedAt)
+        XCTAssertEqual(secondReturned.editedAt, secondEditedAt)
+        try fixture.assertMetadataUnchanged(beforeMetadata)
+        XCTAssertTrue(try fixture.stageFiles().isEmpty)
+    }
+
     func testNormalizesSummaryAndTitleWithCanonicalValidator() async throws {
         let fixture = try ArtifactEditorFixture()
         defer { fixture.remove() }
@@ -388,17 +426,66 @@ final class MeetingIntelligenceArtifactEditorTests: XCTestCase {
         try fixture.assertMetadataUnchanged(beforeMetadata)
     }
 
-    func testVisibleArtifactIsAlwaysOldOrNewAndNeverMetadataTitle() async throws {
-        let fixture = try ArtifactEditorFixture(useSpyStore: true)
+    func testRealStoreLoadsObserveOnlyOldOrNewAcrossAtomicPromotion() async throws {
+        let fixture = try ArtifactEditorFixture()
         defer { fixture.remove() }
         let beforeMetadata = try fixture.metadataBytes()
         let old = fixture.capturedArtifact
-        let new = try await fixture.editor.save(
-            fixture.request(summary: "Atomic new summary", title: "Atomic new title")
+        let promotionEntered = DispatchSemaphore(value: 0)
+        let releasePromotion = DispatchSemaphore(value: 0)
+        let observations = EditorArtifactObservationLog()
+        let barrierAccess = DarwinMeetingIntelligenceStoreFileAccess(beforeRename: {
+            promotionEntered.signal()
+            _ = releasePromotion.wait(timeout: .now() + 5)
+        })
+        let barrierStore = MeetingIntelligenceArtifactStore(
+            mutationGate: fixture.gate,
+            fileAccess: barrierAccess
         )
+        let editor = MeetingIntelligenceArtifactEditor(
+            mutationGate: fixture.gate,
+            transcriptReader: fixture.reader,
+            artifactStore: barrierStore
+        )
+        let request = fixture.request(summary: "Atomic new summary", title: "Atomic new title")
+        let saveTask = Task.detached {
+            try await editor.save(request)
+        }
 
-        XCTAssertTrue(fixture.spyStore?.observedArtifacts.allSatisfy { $0 == old || $0 == new } == true)
-        XCTAssertEqual(fixture.spyStore?.visibleArtifact, new)
+        XCTAssertEqual(promotionEntered.wait(timeout: .now() + 2), .success)
+
+        let firstRead = DispatchSemaphore(value: 0)
+        let readerTask = Task.detached {
+            var signalledFirstRead = false
+            while !observations.shouldStop {
+                do {
+                    if let artifact = try barrierStore.load(in: fixture.folder) {
+                        observations.append(artifact)
+                        if !signalledFirstRead {
+                            signalledFirstRead = true
+                            firstRead.signal()
+                        }
+                    }
+                } catch {
+                    observations.append(error)
+                }
+            }
+        }
+
+        XCTAssertEqual(firstRead.wait(timeout: .now() + 2), .success)
+        releasePromotion.signal()
+        let new = try await saveTask.value
+        observations.stop()
+        await readerTask.value
+        let final = try XCTUnwrap(try barrierStore.load(in: fixture.folder))
+        observations.append(final)
+
+        XCTAssertTrue(observations.errors.isEmpty)
+        XCTAssertFalse(observations.artifacts.isEmpty)
+        XCTAssertTrue(observations.artifacts.allSatisfy { $0 == old || $0 == new })
+        XCTAssertTrue(observations.artifacts.contains(old))
+        XCTAssertTrue(observations.artifacts.contains(new))
+        XCTAssertEqual(final, new)
         try fixture.assertMetadataUnchanged(beforeMetadata)
     }
 
@@ -459,7 +546,10 @@ private final class ArtifactEditorFixture: @unchecked Sendable {
     var spyStore: EditorArtifactStore? = nil
     var leaseForCurrentRequest: MeetingIntelligenceAttemptLease?
 
-    init(useSpyStore: Bool = false) throws {
+    init(
+        useSpyStore: Bool = false,
+        generatedAt: Date = Date(timeIntervalSince1970: 1_775_000_000)
+    ) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "meeting-intelligence-editor-\(UUID().uuidString)", isDirectory: true
         )
@@ -484,7 +574,7 @@ private final class ArtifactEditorFixture: @unchecked Sendable {
             sourceTranscriptSHA256: revision.sha256,
             sourceTranscriptByteCount: revision.byteCount,
             model: "meeting-model",
-            generatedAt: Date(timeIntervalSince1970: 1_775_000_000),
+            generatedAt: generatedAt,
             intent: .regenerate,
             contentOrigin: .generated,
             editedAt: nil
@@ -603,7 +693,7 @@ private final class EditorTranscriptReader: TranscriptDocumentReading, @unchecke
 
 private enum EditorStorageTestError: Error { case failed }
 
-private final class EditorArtifactStore: MeetingIntelligenceArtifactSecureStoring, @unchecked Sendable {
+private final class EditorArtifactStore: MeetingIntelligenceArtifactIdentityBoundStoring, @unchecked Sendable {
     let folder: URL
     var visibleArtifact: MeetingIntelligenceArtifact?
     var stagedArtifact: MeetingIntelligenceArtifact?
@@ -614,7 +704,6 @@ private final class EditorArtifactStore: MeetingIntelligenceArtifactSecureStorin
     private(set) var stageCalls = 0
     private(set) var promoteCalls = 0
     private(set) var removeCalls = 0
-    private(set) var observedArtifacts: [MeetingIntelligenceArtifact?] = []
 
     init(folder: URL, visibleArtifact: MeetingIntelligenceArtifact) {
         self.folder = folder
@@ -625,23 +714,39 @@ private final class EditorArtifactStore: MeetingIntelligenceArtifactSecureStorin
         visibleArtifact
     }
 
-    func stage(
+    func stageIdentityBound(
         _ artifact: MeetingIntelligenceArtifact,
         in folder: URL,
         expectedDirectory: MeetingIntelligenceStoreDirectoryIdentity
-    ) throws -> URL {
+    ) throws -> MeetingIntelligenceArtifactStageToken {
         stageCalls += 1
         guard try MeetingIntelligenceStoreFileIO.folderIdentity(in: folder) == expectedDirectory else {
             throw MeetingIntelligenceStoreError.identityChanged
         }
         if let stageError { throw stageError }
         stagedArtifact = artifact
-        try Data("staged artifact".utf8).write(
-            to: folder.appendingPathComponent(".meeting-intelligence-stage-test")
+        let snapshot = try MeetingIntelligenceStoreFileIO.createSnapshot(
+            named: ".meeting-intelligence-stage-test",
+            data: Data("staged artifact".utf8),
+            in: folder,
+            expectedDirectory: expectedDirectory
         )
         onStage?()
         onStage = nil
-        return folder.appendingPathComponent(".meeting-intelligence-stage-test")
+        return MeetingIntelligenceArtifactStageToken(
+            stagedURL: folder.appendingPathComponent(snapshot.name),
+            snapshot: snapshot,
+            directoryIdentity: expectedDirectory
+        )
+    }
+
+    func stage(
+        _: MeetingIntelligenceArtifact,
+        in _: URL,
+        expectedDirectory _: MeetingIntelligenceStoreDirectoryIdentity
+    ) throws -> URL {
+        XCTFail("Editor must use identity-bound artifact staging")
+        throw EditorStorageTestError.failed
     }
 
     func stage(_: MeetingIntelligenceArtifact, in _: URL) throws -> URL {
@@ -649,20 +754,66 @@ private final class EditorArtifactStore: MeetingIntelligenceArtifactSecureStorin
         throw EditorStorageTestError.failed
     }
 
-    func promoteStaged(_: URL, in _: URL) throws {
+    func promoteStaged(_ staged: MeetingIntelligenceArtifactStageToken, in _: URL) throws {
         promoteCalls += 1
-        observedArtifacts.append(visibleArtifact)
         if let promoteError { throw promoteError }
         visibleArtifact = stagedArtifact
         stagedArtifact = nil
-        observedArtifacts.append(visibleArtifact)
+        try? FileManager.default.removeItem(at: staged.stagedURL)
         onPromote?()
         onPromote = nil
     }
 
-    func removeStaged(_: URL, in _: URL) throws {
+    func removeStaged(_ staged: MeetingIntelligenceArtifactStageToken, in folder: URL) throws {
+        try MeetingIntelligenceStoreFileIO.verifyFolder(folder, matches: staged.directoryIdentity)
+        try MeetingIntelligenceStoreFileIO.removeIdentityBound(
+            staged.snapshot,
+            in: folder,
+            expectedDirectory: staged.directoryIdentity
+        )
         removeCalls += 1
         stagedArtifact = nil
+    }
+
+    func promoteStaged(_: URL, in _: URL) throws {
+        XCTFail("Editor must promote with the identity-bound stage token")
+        throw EditorStorageTestError.failed
+    }
+
+    func removeStaged(_: URL, in _: URL) throws {
+        XCTFail("Editor must clean up with the identity-bound stage token")
+        throw EditorStorageTestError.failed
+    }
+}
+
+private final class EditorArtifactObservationLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedArtifacts: [MeetingIntelligenceArtifact] = []
+    private var storedErrors: [Error] = []
+    private var stopped = false
+
+    var artifacts: [MeetingIntelligenceArtifact] {
+        lock.withLock { storedArtifacts }
+    }
+
+    var errors: [Error] {
+        lock.withLock { storedErrors }
+    }
+
+    var shouldStop: Bool {
+        lock.withLock { stopped }
+    }
+
+    func append(_ artifact: MeetingIntelligenceArtifact) {
+        lock.withLock { storedArtifacts.append(artifact) }
+    }
+
+    func append(_ error: Error) {
+        lock.withLock { storedErrors.append(error) }
+    }
+
+    func stop() {
+        lock.withLock { stopped = true }
     }
 }
 

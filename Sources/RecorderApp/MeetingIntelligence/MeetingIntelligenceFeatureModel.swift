@@ -77,6 +77,26 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
         coordinator.retryGeneration(for: session, workspaceFence: workspaceFence)
     }
 
+    @discardableResult
+    func saveEdit(
+        for session: RecordingSession,
+        capturedArtifact: MeetingIntelligenceArtifact,
+        summary: String,
+        suggestedTitle: String,
+        workspaceFence: WorkspacePublicationFence = .initial
+    ) async -> MeetingIntelligenceEditSaveOutcome {
+        guard !isShutdown else {
+            return .conflict("The meeting intelligence edit was cancelled.")
+        }
+        return await coordinator.saveEdit(
+            for: session,
+            capturedArtifact: capturedArtifact,
+            summary: summary,
+            suggestedTitle: suggestedTitle,
+            workspaceFence: workspaceFence
+        )
+    }
+
     func cancel(sessionID: RecordingSession.ID) {
         guard !isShutdown else { return }
         coordinator.cancel(sessionID: sessionID)

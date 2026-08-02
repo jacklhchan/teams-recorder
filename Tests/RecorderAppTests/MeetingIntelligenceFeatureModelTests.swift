@@ -166,6 +166,41 @@ final class MeetingIntelligenceFeatureModelTests: XCTestCase {
         XCTAssertEqual(feature.presentation(for: fixture.session).phase, .cancelled)
     }
 
+    func testFeatureForwardsSaveEditOutcomeAndExactEditedPublication() async throws {
+        let editedAt = Date(timeIntervalSince1970: 321)
+        let fixture = try FeatureFixture(now: { editedAt })
+        let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
+        feature.generate(for: fixture.session)
+        await fixture.waitForIdle()
+        let captured = try XCTUnwrap(feature.presentation(for: fixture.session).editableContent?.artifact)
+        let edited = fixture.editedArtifact(from: captured, summary: "Feature edited summary", title: "Feature edited title", editedAt: editedAt)
+        fixture.artifactEditor.result = edited
+        let fence = WorkspacePublicationFence(revision: 808)
+        var publications: [MeetingIntelligencePublished] = []
+        feature.onPublished = { publications.append($0) }
+
+        let outcome = await feature.saveEdit(
+            for: fixture.session,
+            capturedArtifact: captured,
+            summary: "Feature edited summary",
+            suggestedTitle: "Feature edited title",
+            workspaceFence: fence
+        )
+
+        XCTAssertEqual(outcome, .saved(edited))
+        XCTAssertEqual(fixture.artifactEditor.requests.count, 1)
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.capturedArtifact, captured)
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.proposedSummary, "Feature edited summary")
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.proposedSuggestedTitle, "Feature edited title")
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.editedAt, editedAt)
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.kind, .editedArtifact)
+        XCTAssertEqual(publications.first?.identity.workspaceFence, fence)
+        XCTAssertEqual(publications.first?.artifact, edited)
+        XCTAssertEqual(publications.first?.titleOutcome, .preserved)
+        XCTAssertEqual(feature.presentation(for: fixture.session).editableContent?.artifact, edited)
+    }
+
     func testFeatureDeliversPublicationAlreadyDurableWhenShutdownClearsCallback() async throws {
         let delivery = FeatureBlockingPublicationDelivery()
         let fixture = try FeatureFixture(publicationDeliveryScheduler: delivery)
@@ -387,13 +422,16 @@ private final class FeatureFixture {
     let metadata = FeatureMetadataStore()
     let artifacts = FeatureArtifactStore()
     let states = FeatureStateStore()
+    let artifactEditor: FeatureArtifactEditor
     let publisher: FeaturePublisher
     private let reader: FeatureTranscriptReader
 
     init(
         providerRepository: (any OpenAICompatibleProviderManaging)? = nil,
         generator: (any MeetingIntelligenceGenerating)? = nil,
-        publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling = ImmediateMeetingIntelligencePublicationDeliveryScheduler()
+        publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling = ImmediateMeetingIntelligencePublicationDeliveryScheduler(),
+        artifactEditorOverride: (any MeetingIntelligenceArtifactEditing)? = nil,
+        now: @escaping MeetingIntelligenceJobCoordinator.DateNow = { Date() }
     ) throws {
         let folder = RecordingLibraryURLIdentity.normalized(
             FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -408,16 +446,19 @@ private final class FeatureFixture {
             url: TranscriptDocumentStore.editableURL(in: folder), data: data,
             revision: .init(sha256: "sha256:" + String(repeating: "a", count: 64), byteCount: data.count)
         ))
+        artifactEditor = artifactEditorOverride as? FeatureArtifactEditor ?? FeatureArtifactEditor()
         publisher = .init(artifacts: artifacts, counters: counters)
         coordinator = .init(
             providerRepository: providerRepository ?? FeatureProvider(), expectedPublicationSourceID: FeatureFixture.transcriptionSource,
             transcriptReader: reader, availabilityChecker: FeatureAvailability(counters: counters),
             generator: generator ?? FeatureGenerator(counters: counters), publisher: publisher,
             artifactStore: artifacts, stateStore: states,
+            artifactEditor: artifactEditorOverride ?? artifactEditor,
             titleApplier: MeetingIntelligenceSuggestedTitleApplier(
                 mutationGate: RecordingSessionMutationGate(), transcriptReader: reader, metadataStore: metadata
             ),
-            publicationDeliveryScheduler: publicationDeliveryScheduler
+            publicationDeliveryScheduler: publicationDeliveryScheduler,
+            now: now
         )
     }
 
@@ -440,6 +481,26 @@ private final class FeatureFixture {
         reader.snapshot = .init(
             url: reader.snapshot.url, data: data,
             revision: .init(sha256: "sha256:" + String(repeating: "b", count: 64), byteCount: data.count)
+        )
+    }
+
+    func editedArtifact(
+        from captured: MeetingIntelligenceArtifact,
+        summary: String,
+        title: String,
+        editedAt: Date
+    ) -> MeetingIntelligenceArtifact {
+        .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: summary,
+            suggestedTitle: title,
+            sourceTranscriptSHA256: captured.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: captured.sourceTranscriptByteCount,
+            model: captured.model,
+            generatedAt: captured.generatedAt,
+            intent: captured.intent,
+            contentOrigin: .edited,
+            editedAt: editedAt
         )
     }
 
@@ -477,6 +538,29 @@ private struct FeatureGenerator: MeetingIntelligenceGenerating {
                   onProgress _: @escaping @Sendable (MeetingIntelligenceProgress) -> Void) async throws -> MeetingIntelligenceGeneratedContent {
         counters.generation += 1
         return .init(title: "Generated title", summary: "Generated summary")
+    }
+}
+
+private final class FeatureArtifactEditor: MeetingIntelligenceArtifactEditing, @unchecked Sendable {
+    private(set) var requests: [MeetingIntelligenceArtifactEditRequest] = []
+    var result: MeetingIntelligenceArtifact?
+
+    func save(
+        _ request: MeetingIntelligenceArtifactEditRequest
+    ) async throws -> MeetingIntelligenceArtifact {
+        requests.append(request)
+        return result ?? .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: request.proposedSummary,
+            suggestedTitle: request.proposedSuggestedTitle,
+            sourceTranscriptSHA256: request.capturedArtifact.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: request.capturedArtifact.sourceTranscriptByteCount,
+            model: request.capturedArtifact.model,
+            generatedAt: request.capturedArtifact.generatedAt,
+            intent: request.capturedArtifact.intent,
+            contentOrigin: .edited,
+            editedAt: request.editedAt
+        )
     }
 }
 

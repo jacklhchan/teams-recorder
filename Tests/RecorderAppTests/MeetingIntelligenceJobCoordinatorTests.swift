@@ -5,6 +5,362 @@ import XCTest
 
 @MainActor
 final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
+    func testSaveEditPublishesExactlyOncePreservesMetadataAndUpdatesEditedProjection() async throws {
+        let editedAt = Date(timeIntervalSince1970: 123)
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            titleApplierOverride: true,
+            sessionMetadata: .init(title: "Manual recording title", titleOrigin: .manual),
+            now: { editedAt }
+        )
+        let original = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        fixture.artifactStore.loaded = original
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+        let captured = try XCTUnwrap(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact)
+        let edited = fixture.editedArtifact(
+            from: captured,
+            summary: "Edited summary",
+            title: "Edited suggested title",
+            editedAt: editedAt
+        )
+        fixture.artifactEditor.result = edited
+        let fence = WorkspacePublicationFence(revision: 71)
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+
+        let outcome = await fixture.coordinator.saveEdit(
+            for: fixture.session,
+            capturedArtifact: captured,
+            summary: "Edited summary",
+            suggestedTitle: "Edited suggested title",
+            workspaceFence: fence
+        )
+
+        XCTAssertEqual(outcome, .saved(edited))
+        XCTAssertEqual(fixture.artifactEditor.requests.count, 1)
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.session, fixture.session)
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.capturedArtifact, captured)
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.proposedSummary, "Edited summary")
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.proposedSuggestedTitle, "Edited suggested title")
+        XCTAssertEqual(fixture.artifactEditor.requests.first?.editedAt, editedAt)
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.kind, .editedArtifact)
+        XCTAssertEqual(publications.first?.identity.workspaceFence, fence)
+        XCTAssertEqual(publications.first?.canonicalSession, fixture.session)
+        XCTAssertEqual(publications.first?.artifact, edited)
+        XCTAssertEqual(publications.first?.titleOutcome, .preserved)
+        XCTAssertEqual(fixture.titleMetadataStore?.metadata, fixture.session.metadata)
+        XCTAssertEqual(fixture.titleMetadataStore?.saveCount, 0)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .ready)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact, edited)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).summary, "Edited summary")
+        XCTAssertEqual(edited.contentOrigin, .edited)
+    }
+
+    func testDuplicateSaveEditIsRejectedBeforeSecondEditorCall() async throws {
+        let entered = expectation(description: "first edit entered")
+        let gate = GenerationGate()
+        let editor = BlockingCoordinatorArtifactEditor(
+            entered: entered,
+            gate: gate,
+            mode: .precommit
+        )
+        let fixture = try CoordinatorFixture(availability: .confirmed, artifactEditorOverride: editor)
+        let captured = try await fixture.loadReadyArtifact()
+        let first = Task { @MainActor in
+            await fixture.coordinator.saveEdit(
+                for: fixture.session,
+                capturedArtifact: captured,
+                summary: "First summary",
+                suggestedTitle: "First title"
+            )
+        }
+        await fulfillment(of: [entered], timeout: 1)
+
+        let duplicate = await fixture.coordinator.saveEdit(
+            for: fixture.session,
+            capturedArtifact: captured,
+            summary: "Second summary",
+            suggestedTitle: "Second title"
+        )
+
+        XCTAssertEqual(duplicate, .conflict(MeetingIntelligenceArtifactEditError.conflict.errorDescription!))
+        XCTAssertEqual(editor.requests.count, 1)
+        await gate.release()
+        _ = await first.value
+    }
+
+    func testSaveEditDoesNotAdmitWhileGenerationOwnsSession() async throws {
+        let entered = expectation(description: "generation entered")
+        let gate = GenerationGate()
+        let generator = BlockingCoordinatorGenerator(entered: entered, gate: gate)
+        let fixture = try CoordinatorFixture(availability: .confirmed, generatorOverride: generator)
+        let captured = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        fixture.artifactStore.loaded = captured
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [entered], timeout: 1)
+        let outcome = await fixture.coordinator.saveEdit(
+            for: fixture.session,
+            capturedArtifact: captured,
+            summary: "Edited summary",
+            suggestedTitle: "Edited title"
+        )
+
+        XCTAssertEqual(outcome, .conflict(MeetingIntelligenceArtifactEditError.conflict.errorDescription!))
+        XCTAssertEqual(fixture.artifactEditor.requests.count, 0)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .generating(.init(stage: .generatingFinal, current: 0, total: 0)))
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        await gate.release()
+    }
+
+    func testReloadDoesNotStartWhileEditOwnsSession() async throws {
+        let entered = expectation(description: "edit entered")
+        let gate = GenerationGate()
+        let editor = BlockingCoordinatorArtifactEditor(entered: entered, gate: gate, mode: .precommit)
+        let fixture = try CoordinatorFixture(availability: .confirmed, artifactEditorOverride: editor)
+        let captured = try await fixture.loadReadyArtifact()
+        let save = Task { @MainActor in
+            await fixture.coordinator.saveEdit(
+                for: fixture.session,
+                capturedArtifact: captured,
+                summary: "Edited summary",
+                suggestedTitle: "Edited title"
+            )
+        }
+        await fulfillment(of: [entered], timeout: 1)
+
+        let reloadAttempted = expectation(description: "reload must not read during edit")
+        reloadAttempted.isInverted = true
+        fixture.artifactStore.loadEntered = reloadAttempted
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fulfillment(of: [reloadAttempted], timeout: 0.1)
+
+        await gate.release()
+        _ = await save.value
+    }
+
+    func testSaveEditRejectsStaleCapturedArtifactAndPreservesLatestPresentation() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let old = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        let newer = fixture.editedArtifact(from: old, summary: "Newer summary", title: "Newer title", editedAt: Date(timeIntervalSince1970: 456))
+        fixture.artifactStore.loaded = old
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+        fixture.artifactStore.loaded = newer
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+
+        let outcome = await fixture.coordinator.saveEdit(
+            for: fixture.session,
+            capturedArtifact: old,
+            summary: "Stale summary",
+            suggestedTitle: "Stale title"
+        )
+
+        XCTAssertEqual(outcome, .conflict(MeetingIntelligenceArtifactEditError.conflict.errorDescription!))
+        XCTAssertEqual(fixture.artifactEditor.requests.count, 0)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact, newer)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).summary, "Newer summary")
+    }
+
+    func testSaveEditMapsTypedEditorFailuresToRedactedOutcomesWithoutChangingProjection() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let captured = try await fixture.loadReadyArtifact()
+        let before = fixture.coordinator.presentation(for: fixture.session)
+        let failures: [(MeetingIntelligenceArtifactEditError, MeetingIntelligenceEditSaveOutcome)] = [
+            (.invalidSummary, .invalidSummary(MeetingIntelligenceArtifactEditError.invalidSummary.errorDescription!)),
+            (.invalidSuggestedTitle, .invalidSuggestedTitle(MeetingIntelligenceArtifactEditError.invalidSuggestedTitle.errorDescription!)),
+            (.conflict, .conflict(MeetingIntelligenceArtifactEditError.conflict.errorDescription!)),
+            (.transcriptChanged, .conflict(MeetingIntelligenceArtifactEditError.transcriptChanged.errorDescription!)),
+            (.leaseInvalid, .conflict(MeetingIntelligenceArtifactEditError.leaseInvalid.errorDescription!)),
+            (.storageFailure, .failed(MeetingIntelligenceArtifactEditError.storageFailure.errorDescription!))
+        ]
+
+        for (error, expected) in failures {
+            fixture.artifactEditor.error = error
+            let outcome = await fixture.coordinator.saveEdit(
+                for: fixture.session,
+                capturedArtifact: captured,
+                summary: "Edited summary",
+                suggestedTitle: "Edited title"
+            )
+            XCTAssertEqual(outcome, expected, "Unexpected mapping for \(error)")
+            XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session), before)
+        }
+    }
+
+    func testSaveEditInvalidatedBeforeCommitAfterWorkspaceResetEmitsNoPublication() async throws {
+        let entered = expectation(description: "edit entered")
+        let gate = GenerationGate()
+        let editor = BlockingCoordinatorArtifactEditor(entered: entered, gate: gate, mode: .precommit)
+        let fixture = try CoordinatorFixture(availability: .confirmed, artifactEditorOverride: editor)
+        let captured = try await fixture.loadReadyArtifact()
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+        let save = Task { @MainActor in
+            await fixture.coordinator.saveEdit(
+                for: fixture.session,
+                capturedArtifact: captured,
+                summary: "Edited summary",
+                suggestedTitle: "Edited title",
+                workspaceFence: WorkspacePublicationFence(revision: 12)
+            )
+        }
+        await fulfillment(of: [entered], timeout: 1)
+
+        fixture.coordinator.resetForWorkspaceChange()
+        await gate.release()
+
+        let outcome = await save.value
+        XCTAssertEqual(outcome, .conflict(MeetingIntelligenceArtifactEditError.leaseInvalid.errorDescription!))
+        XCTAssertTrue(publications.isEmpty)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session), MeetingIntelligencePresentation.empty)
+    }
+
+    func testSaveEditInvalidatedByRemoveAndShutdownEmitsNoPublication() async throws {
+        for action in ["remove", "shutdown"] {
+            let entered = expectation(description: "\(action) edit entered")
+            let gate = GenerationGate()
+            let editor = BlockingCoordinatorArtifactEditor(entered: entered, gate: gate, mode: .precommit)
+            let fixture = try CoordinatorFixture(availability: .confirmed, artifactEditorOverride: editor)
+            let captured = try await fixture.loadReadyArtifact()
+            var publications: [MeetingIntelligencePublished] = []
+            fixture.coordinator.onPublication = { publications.append($0) }
+            let save = Task { @MainActor in
+                await fixture.coordinator.saveEdit(
+                    for: fixture.session,
+                    capturedArtifact: captured,
+                    summary: "Edited summary",
+                    suggestedTitle: "Edited title"
+                )
+            }
+            await fulfillment(of: [entered], timeout: 1)
+            if action == "remove" {
+                fixture.coordinator.remove(sessionID: fixture.session.id)
+            } else {
+                fixture.coordinator.shutdown()
+            }
+            await gate.release()
+
+            let outcome = await save.value
+            XCTAssertEqual(outcome, .conflict(MeetingIntelligenceArtifactEditError.leaseInvalid.errorDescription!), action)
+            XCTAssertTrue(publications.isEmpty, action)
+        }
+    }
+
+    func testSaveEditAfterCommitReservationStillPublishesExactlyOnceAfterCancellation() async throws {
+        let entered = expectation(description: "edit commit reserved")
+        let gate = GenerationGate()
+        let editor = BlockingCoordinatorArtifactEditor(entered: entered, gate: gate, mode: .postReservation)
+        let delivery = FirstCallBlockingPublicationDelivery()
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            publicationDeliveryOverride: delivery,
+            artifactEditorOverride: editor
+        )
+        let captured = try await fixture.loadReadyArtifact()
+        let edited = fixture.editedArtifact(from: captured, summary: "Edited summary", title: "Edited title", editedAt: Date(timeIntervalSince1970: 789))
+        editor.result = edited
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+        let save = Task { @MainActor in
+            await fixture.coordinator.saveEdit(
+                for: fixture.session,
+                capturedArtifact: captured,
+                summary: "Edited summary",
+                suggestedTitle: "Edited title"
+            )
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        fixture.coordinator.cancel(sessionID: fixture.session.id)
+        await gate.release()
+        await fulfillment(of: [delivery.firstAdmitted], timeout: 1)
+        await delivery.release()
+
+        let outcome = await save.value
+        XCTAssertEqual(outcome, .conflict(MeetingIntelligenceArtifactEditError.leaseInvalid.errorDescription!))
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.kind, .editedArtifact)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .cancelled)
+    }
+
+    func testPostReservationCancellationMapsOutcomeBeforeCancelledProjectionRuns() async throws {
+        let entered = expectation(description: "edit commit reserved")
+        let gate = GenerationGate()
+        let editor = BlockingCoordinatorArtifactEditor(entered: entered, gate: gate, mode: .postReservation)
+        let fixture = try CoordinatorFixture(availability: .confirmed, artifactEditorOverride: editor)
+        let captured = try await fixture.loadReadyArtifact()
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = {
+            publications.append($0)
+            fixture.coordinator.cancel(sessionID: fixture.session.id)
+        }
+
+        let save = Task { @MainActor in
+            await fixture.coordinator.saveEdit(
+                for: fixture.session,
+                capturedArtifact: captured,
+                summary: "Edited summary",
+                suggestedTitle: "Edited title"
+            )
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        await gate.release()
+
+        let outcome = await save.value
+        XCTAssertEqual(outcome, .conflict(MeetingIntelligenceArtifactEditError.leaseInvalid.errorDescription!))
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.kind, .editedArtifact)
+    }
+
+    func testLateEditResultCannotOverwriteNewerReadyProjection() async throws {
+        let entered = expectation(description: "edit commit reserved")
+        let gate = GenerationGate()
+        let editor = BlockingCoordinatorArtifactEditor(entered: entered, gate: gate, mode: .postReservation)
+        let delivery = FirstCallBlockingPublicationDelivery()
+        let generator = SequencedCoordinatorGenerator(contents: [
+            .init(title: "Newer title", summary: "Newer summary")
+        ])
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            generatorOverride: generator,
+            publicationDeliveryOverride: delivery,
+            artifactEditorOverride: editor
+        )
+        let captured = try await fixture.loadReadyArtifact()
+        let edited = fixture.editedArtifact(from: captured, summary: "Late edited summary", title: "Late edited title", editedAt: Date(timeIntervalSince1970: 999))
+        editor.result = edited
+        var publications: [MeetingIntelligencePublished] = []
+        fixture.coordinator.onPublication = { publications.append($0) }
+        let save = Task { @MainActor in
+            await fixture.coordinator.saveEdit(
+                for: fixture.session,
+                capturedArtifact: captured,
+                summary: "Late edited summary",
+                suggestedTitle: "Late edited title"
+            )
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        await gate.release()
+        await fulfillment(of: [delivery.firstAdmitted], timeout: 1)
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fixture.waitForIdle()
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).summary, "Newer summary")
+
+        await delivery.release()
+        let outcome = await save.value
+
+        XCTAssertEqual(publications.map(\.identity.kind), [.artifactAndAutomaticTitle, .editedArtifact])
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).summary, "Newer summary")
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).suggestedTitle, "Newer title")
+        XCTAssertEqual(outcome, .conflict(MeetingIntelligenceArtifactEditError.conflict.errorDescription!))
+    }
+
     func testConfirmedPublicationRunsDiscoveryGenerationAndOnePublication() async throws {
         let fixture = try CoordinatorFixture(availability: .confirmed)
         let event = fixture.event(generation: 1)
@@ -1008,6 +1364,7 @@ private final class CoordinatorFixture {
     let generator = CoordinatorGenerator()
     let publisher = CoordinatorPublisher()
     let artifactStore = CoordinatorArtifactStore()
+    let artifactEditor: CoordinatorArtifactEditor
     let stateStore = CoordinatorStateStore()
     let titleMetadataStore: CoordinatorMetadataStore?
     let coordinator: MeetingIntelligenceJobCoordinator
@@ -1021,7 +1378,10 @@ private final class CoordinatorFixture {
          publisherOverride: (any MeetingIntelligencePublishing)? = nil,
          stateSaveSchedulerOverride: (any MeetingIntelligenceStateSaveScheduling)? = nil,
          titleApplierOverride: Bool = false,
-         publicationDeliveryOverride: (any MeetingIntelligencePublicationDeliveryScheduling)? = nil) throws {
+         publicationDeliveryOverride: (any MeetingIntelligencePublicationDeliveryScheduling)? = nil,
+         artifactEditorOverride: (any MeetingIntelligenceArtifactEditing)? = nil,
+         sessionMetadata: RecordingSessionMetadata = .init(),
+         now: @escaping MeetingIntelligenceJobCoordinator.DateNow = { .distantPast }) throws {
         root = RecordingLibraryURLIdentity.normalized(
             FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         )
@@ -1029,14 +1389,19 @@ private final class CoordinatorFixture {
         let transcriptURL = root.appendingPathComponent("transcript.txt")
         let data = Data("Original transcript".utf8)
         try data.write(to: transcriptURL)
-        let revision = TranscriptDocumentRevision(sha256: "sha256:original", byteCount: data.count)
+        let revision = TranscriptDocumentRevision(
+            sha256: "sha256:" + String(repeating: "a", count: 64),
+            byteCount: data.count
+        )
         reader = .init(snapshot: .init(url: transcriptURL, data: data, revision: revision))
         session = .init(id: root, folderURL: root, recordingURL: root.appendingPathComponent("recording.m4a"),
-                        createdAt: .distantPast, duration: 0, fileSize: 0, metadata: .init())
+                        createdAt: .distantPast, duration: 0, fileSize: 0, metadata: sessionMetadata)
         repository = .init(snapshotValue: try Self.makeSnapshot(llmModel: "llm"))
         self.availability = .init(value: availability)
         let titleMetadataStore = titleApplierOverride ? CoordinatorMetadataStore() : nil
         self.titleMetadataStore = titleMetadataStore
+        titleMetadataStore?.metadata = session.metadata
+        self.artifactEditor = artifactEditorOverride as? CoordinatorArtifactEditor ?? CoordinatorArtifactEditor()
         let titleApplier: MeetingIntelligenceSuggestedTitleApplier?
         if let titleMetadataStore {
             titleApplier = MeetingIntelligenceSuggestedTitleApplier(
@@ -1045,14 +1410,22 @@ private final class CoordinatorFixture {
                 metadataStore: titleMetadataStore
             )
         } else { titleApplier = nil }
+        let resolvedAvailability = availabilityOverride ?? self.availability
+        let resolvedGenerator = generatorOverride ?? generator
+        let resolvedPublisher = publisherOverride ?? publisher
+        let resolvedStateStore = stateStoreOverride ?? stateStore
+        let resolvedEditor: any MeetingIntelligenceArtifactEditing = artifactEditorOverride ?? self.artifactEditor
+        let resolvedStateSaveScheduler = stateSaveSchedulerOverride ?? ImmediateTestStateSaveScheduler()
+        let resolvedPublicationDelivery = publicationDeliveryOverride ?? ImmediateMeetingIntelligencePublicationDeliveryScheduler()
         coordinator = .init(providerRepository: repository, expectedPublicationSourceID: coordinatorInstanceID,
                             publicationSourceID: publicationSourceID, transcriptReader: reader,
-                            availabilityChecker: availabilityOverride ?? self.availability, generator: generatorOverride ?? generator,
-                            publisher: publisherOverride ?? publisher, artifactStore: artifactStore, stateStore: stateStoreOverride ?? stateStore,
+                            availabilityChecker: resolvedAvailability, generator: resolvedGenerator,
+                            publisher: resolvedPublisher, artifactStore: artifactStore, stateStore: resolvedStateStore,
+                            artifactEditor: resolvedEditor,
                             titleApplier: titleApplier,
-                            stateSaveScheduler: stateSaveSchedulerOverride ?? ImmediateTestStateSaveScheduler(),
-                            publicationDeliveryScheduler: publicationDeliveryOverride ?? ImmediateMeetingIntelligencePublicationDeliveryScheduler(),
-                            now: { .distantPast })
+                            stateSaveScheduler: resolvedStateSaveScheduler,
+                            publicationDeliveryScheduler: resolvedPublicationDelivery,
+                            now: now)
     }
 
     deinit { try? FileManager.default.removeItem(at: root) }
@@ -1073,6 +1446,34 @@ private final class CoordinatorFixture {
 
     func waitForIdle() async {
         await coordinator.waitUntilIdleForTesting(sessionID: session.id)
+    }
+
+    func loadReadyArtifact() async throws -> MeetingIntelligenceArtifact {
+        let artifact = artifact(revision: reader.snapshot.revision)
+        artifactStore.loaded = artifact
+        coordinator.reload(sessions: [session])
+        await waitForIdle()
+        return try XCTUnwrap(coordinator.presentation(for: session).editableContent?.artifact)
+    }
+
+    func editedArtifact(
+        from captured: MeetingIntelligenceArtifact,
+        summary: String,
+        title: String,
+        editedAt: Date
+    ) -> MeetingIntelligenceArtifact {
+        .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: summary,
+            suggestedTitle: title,
+            sourceTranscriptSHA256: captured.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: captured.sourceTranscriptByteCount,
+            model: captured.model,
+            generatedAt: captured.generatedAt,
+            intent: captured.intent,
+            contentOrigin: .edited,
+            editedAt: editedAt
+        )
     }
 
     private static func makeSnapshot(llmModel: String) throws -> OpenAICompatibleProviderSnapshot {
@@ -1316,6 +1717,100 @@ private final class SequencedCoordinatorGenerator: MeetingIntelligenceGenerating
     }
 }
 
+private final class CoordinatorArtifactEditor: MeetingIntelligenceArtifactEditing, @unchecked Sendable {
+    private(set) var requests: [MeetingIntelligenceArtifactEditRequest] = []
+    var error: MeetingIntelligenceArtifactEditError?
+    var result: MeetingIntelligenceArtifact?
+
+    func save(
+        _ request: MeetingIntelligenceArtifactEditRequest
+    ) async throws -> MeetingIntelligenceArtifact {
+        requests.append(request)
+        if let error { throw error }
+        return result ?? .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: request.proposedSummary,
+            suggestedTitle: request.proposedSuggestedTitle,
+            sourceTranscriptSHA256: request.capturedArtifact.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: request.capturedArtifact.sourceTranscriptByteCount,
+            model: request.capturedArtifact.model,
+            generatedAt: request.capturedArtifact.generatedAt,
+            intent: request.capturedArtifact.intent,
+            contentOrigin: .edited,
+            editedAt: request.editedAt
+        )
+    }
+}
+
+private final class BlockingCoordinatorArtifactEditor: MeetingIntelligenceArtifactEditing, @unchecked Sendable {
+    enum Mode { case precommit, postReservation }
+
+    let entered: XCTestExpectation
+    let gate: GenerationGate
+    let mode: Mode
+    private(set) var requests: [MeetingIntelligenceArtifactEditRequest] = []
+    var result: MeetingIntelligenceArtifact?
+
+    init(entered: XCTestExpectation, gate: GenerationGate, mode: Mode) {
+        self.entered = entered
+        self.gate = gate
+        self.mode = mode
+    }
+
+    func save(
+        _ request: MeetingIntelligenceArtifactEditRequest
+    ) async throws -> MeetingIntelligenceArtifact {
+        requests.append(request)
+        let reservation: MeetingIntelligenceAttemptLease.CommitReservation?
+        switch mode {
+        case .precommit:
+            reservation = nil
+        case .postReservation:
+            guard let commit = request.lease.beginCommit() else {
+                throw MeetingIntelligenceArtifactEditError.leaseInvalid
+            }
+            reservation = commit
+        }
+        entered.fulfill()
+        await gate.wait()
+        if let reservation { reservation.finish() }
+        guard request.lease.isValid || mode == .postReservation else {
+            throw MeetingIntelligenceArtifactEditError.leaseInvalid
+        }
+        return result ?? .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: request.proposedSummary,
+            suggestedTitle: request.proposedSuggestedTitle,
+            sourceTranscriptSHA256: request.capturedArtifact.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: request.capturedArtifact.sourceTranscriptByteCount,
+            model: request.capturedArtifact.model,
+            generatedAt: request.capturedArtifact.generatedAt,
+            intent: request.capturedArtifact.intent,
+            contentOrigin: .edited,
+            editedAt: request.editedAt
+        )
+    }
+}
+
+private final class FirstCallBlockingPublicationDelivery: MeetingIntelligencePublicationDeliveryScheduling, @unchecked Sendable {
+    let firstAdmitted = XCTestExpectation(description: "first publication delivery admitted")
+    private let gate = GenerationGate()
+    private let lock = NSLock()
+    private var calls = 0
+
+    func awaitDeliveryAdmission() async {
+        let call = lock.withLock {
+            calls += 1
+            return calls
+        }
+        guard call == 1 else { return }
+        firstAdmitted.fulfill()
+        await gate.wait()
+    }
+
+    func release() async { await gate.release() }
+}
+
 private final class CoordinatorPublisher: MeetingIntelligencePublishing, @unchecked Sendable {
     private(set) var requests = 0
     private(set) var capturedModels: [String] = []
@@ -1333,7 +1828,9 @@ private final class CoordinatorPublisher: MeetingIntelligencePublishing, @unchec
 private final class CoordinatorArtifactStore: MeetingIntelligenceArtifactStoring, @unchecked Sendable {
     var loaded: MeetingIntelligenceArtifact?
     var loadError: Error?
+    var loadEntered: XCTestExpectation?
     func load(in _: URL) throws -> MeetingIntelligenceArtifact? {
+        loadEntered?.fulfill()
         if let loadError { throw loadError }
         return loaded
     }

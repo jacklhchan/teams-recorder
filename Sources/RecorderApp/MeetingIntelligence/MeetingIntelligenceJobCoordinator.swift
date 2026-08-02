@@ -158,6 +158,7 @@ private actor MeetingIntelligenceIO {
     private let artifacts: any MeetingIntelligenceArtifactStoring
     private let states: any MeetingIntelligenceStateStoring
     private let publisher: any MeetingIntelligencePublishing
+    private let artifactEditor: any MeetingIntelligenceArtifactEditing
     private let stateSaveScheduler: any MeetingIntelligenceStateSaveScheduling
     private var latestWriteByFolder: [URL: WriteIdentity] = [:]
 
@@ -170,9 +171,10 @@ private actor MeetingIntelligenceIO {
     init(repository: any OpenAICompatibleProviderManaging, reader: any TranscriptDocumentReading,
          artifacts: any MeetingIntelligenceArtifactStoring, states: any MeetingIntelligenceStateStoring,
          publisher: any MeetingIntelligencePublishing,
+         artifactEditor: any MeetingIntelligenceArtifactEditing,
          stateSaveScheduler: any MeetingIntelligenceStateSaveScheduling) {
         self.repository = repository; self.reader = reader; self.artifacts = artifacts; self.states = states
-        self.publisher = publisher
+        self.publisher = publisher; self.artifactEditor = artifactEditor
         self.stateSaveScheduler = stateSaveScheduler
     }
     func snapshot() throws -> OpenAICompatibleProviderSnapshot { try repository.snapshot() }
@@ -210,6 +212,9 @@ private actor MeetingIntelligenceIO {
         guard !Task.isCancelled, request.lease.isValid else { throw CancellationError() }
         return try await publisher.publish(request)
     }
+    func edit(_ request: MeetingIntelligenceArtifactEditRequest) async throws -> MeetingIntelligenceArtifact {
+        try await artifactEditor.save(request)
+    }
 }
 
 @MainActor
@@ -238,6 +243,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private let now: DateNow
 
     private var tasksBySessionID: [RecordingSession.ID: Task<Void, Never>] = [:]
+    private var editTasksBySessionID: [RecordingSession.ID: Task<MeetingIntelligenceEditSaveOutcome, Never>] = [:]
     private var reloadTasksBySessionID: [RecordingSession.ID: Task<Void, Never>] = [:]
     private var reloadTokensBySessionID: [RecordingSession.ID: UUID] = [:]
     private var generationsBySessionID: [RecordingSession.ID: UInt64] = [:]
@@ -247,6 +253,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private var latestPublicationsBySessionID: [RecordingSession.ID: TranscriptPublicationIdentity] = [:]
     private var sessionsByID: [RecordingSession.ID: RecordingSession] = [:]
     private var removedSessionIDs = Set<RecordingSession.ID>()
+    private var cancelledSessionIDs = Set<RecordingSession.ID>()
     private var isShutDown = false
     @Published private(set) var snapshot = MeetingIntelligenceFeatureSnapshot.empty
 
@@ -261,6 +268,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         publisher: any MeetingIntelligencePublishing,
         artifactStore: any MeetingIntelligenceArtifactStoring,
         stateStore: any MeetingIntelligenceStateStoring,
+        artifactEditor: (any MeetingIntelligenceArtifactEditing)? = nil,
         titleApplier: MeetingIntelligenceSuggestedTitleApplier? = nil,
         stateSaveScheduler: any MeetingIntelligenceStateSaveScheduling = ImmediateMeetingIntelligenceStateSaveScheduler(),
         publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling = ImmediateMeetingIntelligencePublicationDeliveryScheduler(),
@@ -270,8 +278,14 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         self.publicationSourceID = publicationSourceID
         self.mutationGate = mutationGate
         providerRepositoryIdentity = providerRepository.compositionIdentity
+        let resolvedArtifactEditor: any MeetingIntelligenceArtifactEditing = artifactEditor ?? MeetingIntelligenceArtifactEditor(
+            mutationGate: mutationGate,
+            transcriptReader: transcriptReader,
+            artifactStore: artifactStore
+        )
         io = .init(repository: providerRepository, reader: transcriptReader,
                    artifacts: artifactStore, states: stateStore, publisher: publisher,
+                   artifactEditor: resolvedArtifactEditor,
                    stateSaveScheduler: stateSaveScheduler)
         self.availabilityChecker = availabilityChecker
         self.generator = generator
@@ -282,6 +296,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     deinit {
         tasksBySessionID.values.forEach { $0.cancel() }
+        editTasksBySessionID.values.forEach { $0.cancel() }
         reloadTasksBySessionID.values.forEach { $0.cancel() }
         leasesBySessionID.values.forEach { $0.invalidate() }
     }
@@ -293,8 +308,20 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     /// Test-only synchronization that awaits concrete task completion instead
     /// of timing/yield polling. It intentionally has no production callers.
     func waitUntilIdleForTesting(sessionID: RecordingSession.ID) async {
-        while let task = tasksBySessionID[sessionID] ?? reloadTasksBySessionID[sessionID] {
-            await task.value
+        while true {
+            if let task = tasksBySessionID[sessionID] {
+                await task.value
+                continue
+            }
+            if let task = editTasksBySessionID[sessionID] {
+                _ = await task.value
+                continue
+            }
+            if let task = reloadTasksBySessionID[sessionID] {
+                await task.value
+                continue
+            }
+            break
         }
     }
 
@@ -357,9 +384,42 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     func regenerate(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) { startManual(session: session, intent: .regenerate, workspaceFence: workspaceFence) }
     func retryGeneration(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) { startManual(session: session, intent: .retryGeneration, workspaceFence: workspaceFence) }
 
+    func saveEdit(
+        for session: RecordingSession,
+        capturedArtifact: MeetingIntelligenceArtifact,
+        summary: String,
+        suggestedTitle: String,
+        workspaceFence: WorkspacePublicationFence = .initial
+    ) async -> MeetingIntelligenceEditSaveOutcome {
+        guard !isShutDown,
+              let canonicalSession = retainedCanonicalSession(for: session),
+              tasksBySessionID[canonicalSession.id] == nil,
+              editTasksBySessionID[canonicalSession.id] == nil,
+              presentation(for: canonicalSession).editableContent?.artifact == capturedArtifact
+        else {
+            return .conflict(editMessage(for: .conflict))
+        }
+
+        let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
+        let task: Task<MeetingIntelligenceEditSaveOutcome, Never> = Task { @MainActor [weak self] in
+            guard let self else { return .conflict("The meeting intelligence edit was cancelled.") }
+            defer { self.clearEditTaskIfOwned(ticket, for: canonicalSession) }
+            return await self.saveEditOwned(
+                session: canonicalSession,
+                capturedArtifact: capturedArtifact,
+                summary: summary,
+                suggestedTitle: suggestedTitle,
+                ticket: ticket
+            )
+        }
+        editTasksBySessionID[canonicalSession.id] = task
+        return await task.value
+    }
+
     func cancel(sessionID: RecordingSession.ID) {
         guard let session = sessionsByID[sessionID], !isShutDown else { return }
         let ticket = replaceWork(for: session)
+        cancelledSessionIDs.insert(sessionID)
         tasksBySessionID[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: session) }
@@ -410,6 +470,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
               let identity = MeetingIntelligenceSessionPresentationIdentity(session: stored)
         else { return }
         removedSessionIDs.insert(sessionID)
+        cancelledSessionIDs.remove(sessionID)
         reloadTasksBySessionID.removeValue(forKey: sessionID)?.cancel()
         reloadTokensBySessionID.removeValue(forKey: sessionID)
         invalidateWork(for: sessionID)
@@ -473,12 +534,13 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         reloadTasksBySessionID.values.forEach { $0.cancel() }
         reloadTasksBySessionID.removeAll()
         reloadTokensBySessionID.removeAll()
-        for id in Array(tasksBySessionID.keys) {
+        for id in Set(tasksBySessionID.keys).union(editTasksBySessionID.keys) {
             invalidateWork(for: id)
         }
         tasksBySessionID.removeAll()
         attemptsBySessionID.removeAll()
         leasesBySessionID.removeAll()
+        cancelledSessionIDs.removeAll()
     }
 
     /// Explicit workspace-cutover boundary. Library reload is observational;
@@ -490,7 +552,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         reloadTasksBySessionID.values.forEach { $0.cancel() }
         reloadTasksBySessionID.removeAll()
         reloadTokensBySessionID.removeAll()
-        for id in Array(tasksBySessionID.keys) { invalidateWork(for: id) }
+        for id in Set(tasksBySessionID.keys).union(editTasksBySessionID.keys) {
+            invalidateWork(for: id)
+        }
         tasksBySessionID.removeAll()
         // Keep the counters across a workspace cutover. A user can later
         // switch back to the same folder, whose IO actor has already observed
@@ -502,6 +566,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         latestPublicationsBySessionID.removeAll()
         sessionsByID.removeAll()
         removedSessionIDs.removeAll()
+        cancelledSessionIDs.removeAll()
         // A workspace boundary is visible even where its prior projection was
         // already empty, so the consumer can invalidate a captured snapshot.
         replaceSnapshot(snapshot.resettingWorkspace())
@@ -641,6 +706,89 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         }
     }
 
+    private func saveEditOwned(
+        session: RecordingSession,
+        capturedArtifact: MeetingIntelligenceArtifact,
+        summary: String,
+        suggestedTitle: String,
+        ticket: Ticket
+    ) async -> MeetingIntelligenceEditSaveOutcome {
+        guard owns(ticket, for: session), !Task.isCancelled else {
+            return .conflict(editMessage(for: .leaseInvalid))
+        }
+
+        let request = MeetingIntelligenceArtifactEditRequest(
+            session: session,
+            capturedArtifact: capturedArtifact,
+            proposedSummary: summary,
+            proposedSuggestedTitle: suggestedTitle,
+            editedAt: now(),
+            lease: ticket.lease
+        )
+
+        do {
+            let editedArtifact = try await io.edit(request)
+            // A successful editor return is the durable semantic boundary. It
+            // remains one publication even when a competing command or
+            // lifecycle transition invalidates this ticket while delivery is
+            // delayed.
+            let publication = makePublication(
+                session: session,
+                ticket: ticket,
+                revision: .init(
+                    sha256: editedArtifact.sourceTranscriptSHA256,
+                    byteCount: editedArtifact.sourceTranscriptByteCount
+                ),
+                kind: .editedArtifact,
+                artifact: editedArtifact,
+                titleOutcome: .preserved
+            )
+            await deliverDurablePublication(publication)
+
+            // A newer generation/edit/remove owns the presentation now. The
+            // durable edit is still saved and published, but its late result
+            // must not overwrite that canonical latest projection.
+            guard owns(ticket, for: session), !Task.isCancelled else {
+                return editProjectionFailure(for: session)
+            }
+            let projection = await editProjection(for: editedArtifact, session: session)
+            guard owns(ticket, for: session), !Task.isCancelled else {
+                return editProjectionFailure(for: session)
+            }
+            guard setPresentation(
+                from: editedArtifact,
+                phase: projection.phase,
+                message: projection.message,
+                session: session
+            ) else {
+                return editProjectionFailure(for: session)
+            }
+            return .saved(editedArtifact)
+        } catch is CancellationError {
+            return .conflict(editMessage(for: .leaseInvalid))
+        } catch {
+            return editOutcome(for: error)
+        }
+    }
+
+    private func editProjection(
+        for artifact: MeetingIntelligenceArtifact,
+        session: RecordingSession
+    ) async -> (phase: MeetingIntelligencePresentation.Phase, message: String) {
+        do {
+            let transcript = try await io.transcript(in: session.folderURL)
+            guard transcript.revision.sha256 == artifact.sourceTranscriptSHA256,
+                  transcript.revision.byteCount == artifact.sourceTranscriptByteCount else {
+                return (.stale, "Transcript changed. Regenerate to update.")
+            }
+        } catch {
+            // The editor already validated the transcript before durable
+            // promotion. A later observational read must not turn that durable
+            // success into a user-visible failure.
+        }
+        return (.ready, "Ready.")
+    }
+
     private func snapshotIfUsable(for session: RecordingSession, ticket: Ticket) async -> OpenAICompatibleProviderSnapshot? {
         do {
             let snapshot = try await io.snapshot()
@@ -687,7 +835,8 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private func loadPresentation(for session: RecordingSession) {
         // Reload is observational only. It deliberately owns a distinct token
         // and never replaces/cancels an active generation.
-        guard tasksBySessionID[session.id] == nil else { return }
+        guard tasksBySessionID[session.id] == nil,
+              editTasksBySessionID[session.id] == nil else { return }
         reloadTasksBySessionID.removeValue(forKey: session.id)?.cancel()
         let token = UUID()
         reloadTokensBySessionID[session.id] = token
@@ -705,12 +854,14 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                 let (existing, recovered) = try await (artifact, state)
                 guard self.reloadTokensBySessionID[session.id] == token,
                       self.tasksBySessionID[session.id] == nil,
+                      self.editTasksBySessionID[session.id] == nil,
                       !self.isShutDown,
                       !self.removedSessionIDs.contains(session.id) else { return }
                 if let existing {
                     let source = try await self.io.transcript(in: session.folderURL)
                     guard self.reloadTokensBySessionID[session.id] == token,
-                          self.tasksBySessionID[session.id] == nil else { return }
+                          self.tasksBySessionID[session.id] == nil,
+                          self.editTasksBySessionID[session.id] == nil else { return }
                     let phase: MeetingIntelligencePresentation.Phase = existing.sourceTranscriptSHA256 == source.revision.sha256 && existing.sourceTranscriptByteCount == source.revision.byteCount ? .ready : .stale
                     self.setPresentation(from: existing, phase: phase, message: phase == .ready ? "Ready." : "Transcript changed. Regenerate to update.", session: session)
                 } else if let recovered,
@@ -722,6 +873,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             } catch {
                 guard self.reloadTokensBySessionID[session.id] == token,
                       self.tasksBySessionID[session.id] == nil,
+                      self.editTasksBySessionID[session.id] == nil,
                       !self.isShutDown,
                       !self.removedSessionIDs.contains(session.id) else { return }
                 self.setFailed("Meeting intelligence needs attention.", for: session)
@@ -729,7 +881,8 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         }
     }
 
-    private func setPresentation(from artifact: MeetingIntelligenceArtifact, phase: MeetingIntelligencePresentation.Phase, message: String, session: RecordingSession) {
+    @discardableResult
+    private func setPresentation(from artifact: MeetingIntelligenceArtifact, phase: MeetingIntelligencePresentation.Phase, message: String, session: RecordingSession) -> Bool {
         let editableContent: MeetingIntelligenceEditableContent?
         switch phase {
         case .ready, .stale:
@@ -739,9 +892,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         default:
             editableContent = nil
         }
-        setPresentation(.init(phase: phase, summary: artifact.summary, suggestedTitle: artifact.suggestedTitle,
-                              statusMessage: message, model: artifact.model, titleIsProtected: titleIsProtected(session), unavailableReason: nil,
-                              editableContent: editableContent), for: session)
+        return setPresentation(.init(phase: phase, summary: artifact.summary, suggestedTitle: artifact.suggestedTitle,
+                                     statusMessage: message, model: artifact.model, titleIsProtected: titleIsProtected(session), unavailableReason: nil,
+                                     editableContent: editableContent), for: session)
     }
 
     private func setFailed(_ message: String, for session: RecordingSession) {
@@ -750,9 +903,14 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                               model: presentation(for: session).model, titleIsProtected: titleIsProtected(session), unavailableReason: nil), for: session)
     }
 
-    private func setPresentation(_ value: MeetingIntelligencePresentation, for session: RecordingSession) {
-        guard !isShutDown, !removedSessionIDs.contains(session.id) else { return }
-        replaceSnapshot(snapshot.replacing(value, for: session))
+    @discardableResult
+    private func setPresentation(_ value: MeetingIntelligencePresentation, for session: RecordingSession) -> Bool {
+        guard !isShutDown, !removedSessionIDs.contains(session.id) else { return false }
+        guard let next = snapshot.replacing(value, for: session) else {
+            return presentation(for: session) == value
+        }
+        replaceSnapshot(next)
+        return true
     }
 
     private func replaceSnapshot(_ next: MeetingIntelligenceFeatureSnapshot?) {
@@ -798,6 +956,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         workspaceFence: WorkspacePublicationFence = .initial
     ) -> Ticket {
         invalidateWork(for: session.id)
+        cancelledSessionIDs.remove(session.id)
         let generation = (generationsBySessionID[session.id] ?? 0) &+ 1
         let attempt = UUID()
         let lease = MeetingIntelligenceAttemptLease()
@@ -819,6 +978,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private func invalidateWork(for sessionID: RecordingSession.ID) {
         leasesBySessionID[sessionID]?.invalidate()
         tasksBySessionID.removeValue(forKey: sessionID)?.cancel()
+        editTasksBySessionID.removeValue(forKey: sessionID)?.cancel()
         attemptsBySessionID.removeValue(forKey: sessionID)
         leasesBySessionID.removeValue(forKey: sessionID)
     }
@@ -836,6 +996,14 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         nextWriteSequenceBySessionID.removeValue(forKey: session.id)
     }
 
+    private func clearEditTaskIfOwned(_ ticket: Ticket, for session: RecordingSession) {
+        guard owns(ticket, for: session) else { return }
+        editTasksBySessionID.removeValue(forKey: session.id)
+        attemptsBySessionID.removeValue(forKey: session.id)
+        leasesBySessionID.removeValue(forKey: session.id)
+        nextWriteSequenceBySessionID.removeValue(forKey: session.id)
+    }
+
     private func canonicalSession(for session: RecordingSession) -> RecordingSession? {
         let folder = RecordingLibraryURLIdentity.normalized(session.folderURL)
         let recording = RecordingLibraryURLIdentity.normalized(session.recordingURL)
@@ -846,6 +1014,62 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         // Darwin. The verified input path is already physical/canonical; keep
         // the Library's value identity unchanged for task dictionaries.
         return session
+    }
+
+    private func retainedCanonicalSession(for session: RecordingSession) -> RecordingSession? {
+        guard canonicalSession(for: session) != nil,
+              let retained = sessionsByID[session.id],
+              canonicalSession(for: retained) != nil,
+              RecordingLibraryURLIdentity.normalized(retained.folderURL).path
+                  == RecordingLibraryURLIdentity.normalized(session.folderURL).path,
+              RecordingLibraryURLIdentity.normalized(retained.recordingURL).path
+                  == RecordingLibraryURLIdentity.normalized(session.recordingURL).path
+        else { return nil }
+        return retained
+    }
+
+    private func editOutcome(for error: Error) -> MeetingIntelligenceEditSaveOutcome {
+        if let error = error as? MeetingIntelligenceArtifactEditError {
+            switch error {
+            case .invalidSummary:
+                return .invalidSummary(editMessage(for: error))
+            case .invalidSuggestedTitle:
+                return .invalidSuggestedTitle(editMessage(for: error))
+            case .conflict, .transcriptChanged, .leaseInvalid:
+                return .conflict(editMessage(for: error))
+            case .unsafeSessionFolder, .storageFailure:
+                return .failed(editMessage(for: error))
+            }
+        }
+        if error is CancellationError {
+            return .conflict(editMessage(for: .leaseInvalid))
+        }
+        return .failed(editMessage(for: .storageFailure))
+    }
+
+    private func editMessage(for error: MeetingIntelligenceArtifactEditError) -> String {
+        switch error {
+        case .invalidSummary:
+            return "The meeting intelligence summary is invalid."
+        case .invalidSuggestedTitle:
+            return "The meeting intelligence suggested title is invalid."
+        case .conflict:
+            return "Meeting intelligence changed before the edit could be saved."
+        case .transcriptChanged:
+            return "The transcript changed before the edit could be saved."
+        case .leaseInvalid:
+            return "The meeting intelligence edit was cancelled."
+        case .unsafeSessionFolder, .storageFailure:
+            return "The meeting intelligence edit could not be saved."
+        }
+    }
+
+    private func editProjectionFailure(for session: RecordingSession) -> MeetingIntelligenceEditSaveOutcome {
+        if isShutDown || removedSessionIDs.contains(session.id) || cancelledSessionIDs.contains(session.id) || sessionsByID[session.id] == nil ||
+            presentation(for: session).phase == .cancelled {
+            return .conflict(editMessage(for: .leaseInvalid))
+        }
+        return .conflict(editMessage(for: .conflict))
     }
 
     private func makePublication(

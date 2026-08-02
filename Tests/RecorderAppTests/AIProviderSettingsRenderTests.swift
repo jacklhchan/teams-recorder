@@ -52,6 +52,65 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         }
     }
 
+    func testPromptEditorSourceContractRejectsDetachedLabelAndMissingFrame() {
+        let validSource = #"""
+        Text("ASR Prompt")
+            .font(.subheadline)
+        Text("Optional transcription guidance sent only with future transcription jobs.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        TextEditor(text: $model.prompt)
+            .accessibilityLabel("ASR Prompt")
+            .providerAccessibility(RecorderActionID.providerPrompt)
+            .frame(minHeight: 58, maxHeight: 96)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
+        Text("Meeting Intelligence Prompt")
+            .font(.subheadline)
+        Text("Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        TextEditor(text: $model.meetingIntelligencePrompt)
+            .accessibilityLabel("Meeting Intelligence Prompt")
+            .providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)
+            .frame(minHeight: 58, maxHeight: 96)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
+        }
+
+        HStack(alignment: .center, spacing: 10) {
+        """#
+        let detachedLabelSource = validSource.replacingOccurrences(
+            of: #"""
+            TextEditor(text: $model.meetingIntelligencePrompt)
+                .accessibilityLabel("Meeting Intelligence Prompt")
+            """#,
+            with: #"""
+            Text("Detached label")
+                .accessibilityLabel("Meeting Intelligence Prompt")
+            TextEditor(text: $model.meetingIntelligencePrompt)
+            """#
+        )
+        let missingFrameSource = validSource.replacingOccurrences(
+            of: "    .frame(minHeight: 58, maxHeight: 96)\n    .overlay",
+            with: "    .overlay",
+            options: [],
+            range: validSource.range(of: "TextEditor(text: $model.meetingIntelligencePrompt)")
+                .map { $0.lowerBound..<validSource.endIndex }
+        )
+
+        XCTAssertTrue(
+            PromptEditorSourceContract.matches(validSource),
+            "Synthetic prompt editor contract fixture is invalid."
+        )
+        XCTAssertFalse(
+            PromptEditorSourceContract.matches(detachedLabelSource),
+            "Prompt editor source contract accepted an invalid mutation."
+        )
+        XCTAssertFalse(
+            PromptEditorSourceContract.matches(missingFrameSource),
+            "Prompt editor source contract accepted an invalid mutation."
+        )
+    }
+
     func testProviderColorSchemeIsLocallyDarkWithoutOverridingAdjacentLightSettingsContent() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
         let model = makeConfiguredModel(repository: repository)
@@ -212,32 +271,119 @@ final class AIProviderSettingsRenderTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/RecorderApp/Views/AIProviderSettingsView.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        let requiredFragments = [
-            "Text(\"Meeting Intelligence Prompt\")",
-            "Text(\"Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.\")",
-            ".font(.subheadline)",
-            ".font(.caption)",
-            ".foregroundStyle(.secondary)",
-            ".accessibilityLabel(\"Meeting Intelligence Prompt\")",
-            ".providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)",
-            ".frame(minHeight: 58, maxHeight: 96)",
-            ".overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))"
-        ]
-        for fragment in requiredFragments {
-            XCTAssertTrue(source.contains(fragment), "Meeting Intelligence prompt UI contract is incomplete.", file: file, line: line)
-        }
-        guard let asrEditor = source.range(of: "TextEditor(text: $model.prompt)"),
-              let meetingIntelligenceEditor = source.range(of: "TextEditor(text: $model.meetingIntelligencePrompt)")
-        else {
-            XCTFail("Both prompt editors must be present in the provider settings view.", file: file, line: line)
+        guard PromptEditorSourceContract.matches(source) else {
+            XCTFail("Prompt editor source contract is incomplete.", file: file, line: line)
             return
         }
-        XCTAssertTrue(
-            asrEditor.lowerBound < meetingIntelligenceEditor.lowerBound,
-            "Meeting Intelligence prompt editor must follow the ASR prompt editor.",
-            file: file,
-            line: line
+    }
+}
+
+private enum PromptEditorSourceContract {
+    private static let asrTitle = #"Text("ASR Prompt")"#
+    private static let meetingIntelligenceTitle = #"Text("Meeting Intelligence Prompt")"#
+    private static let meetingIntelligenceHelp = #"Text("Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.")"#
+    private static let actionsBoundary = "HStack(alignment: .center, spacing: 10) {"
+    private static let frame = ".frame(minHeight: 58, maxHeight: 96)"
+    private static let overlay = ".overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))"
+
+    private struct EditorChain {
+        let source: String
+        let trailingSectionSource: String
+    }
+
+    static func matches(_ source: String) -> Bool {
+        guard let asrTitleRange = source.range(of: asrTitle),
+              let meetingIntelligenceTitleRange = source.range(
+                of: meetingIntelligenceTitle,
+                range: asrTitleRange.upperBound..<source.endIndex
+              ),
+              let actionsBoundaryRange = source.range(
+                of: actionsBoundary,
+                range: meetingIntelligenceTitleRange.upperBound..<source.endIndex
+              ) else {
+            return false
+        }
+
+        let asrSection = String(source[asrTitleRange.lowerBound..<meetingIntelligenceTitleRange.lowerBound])
+        let meetingIntelligenceSection = String(
+            source[meetingIntelligenceTitleRange.lowerBound..<actionsBoundaryRange.lowerBound]
         )
+        guard let asrEditorChain = editorChain(
+            in: asrSection,
+            binding: "TextEditor(text: $model.prompt)"
+        ), let meetingIntelligenceEditorChain = editorChain(
+            in: meetingIntelligenceSection,
+            binding: "TextEditor(text: $model.meetingIntelligencePrompt)"
+        ) else {
+            return false
+        }
+
+        let asrChainRequirements = [
+            "TextEditor(text: $model.prompt)",
+            #".accessibilityLabel("ASR Prompt")"#,
+            ".providerAccessibility(RecorderActionID.providerPrompt)",
+            frame,
+            overlay
+        ]
+        let meetingIntelligenceChainRequirements = [
+            "TextEditor(text: $model.meetingIntelligencePrompt)",
+            #".accessibilityLabel("Meeting Intelligence Prompt")"#,
+            ".providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)",
+            frame,
+            overlay
+        ]
+        let meetingIntelligenceSectionRequirements = [
+            meetingIntelligenceTitle,
+            meetingIntelligenceHelp,
+            ".font(.subheadline)",
+            ".font(.caption)",
+            ".foregroundStyle(.secondary)"
+        ]
+
+        return asrChainRequirements.allSatisfy(asrEditorChain.source.contains)
+            && meetingIntelligenceChainRequirements.allSatisfy(
+                meetingIntelligenceEditorChain.source.contains
+            )
+            && meetingIntelligenceSectionRequirements.allSatisfy(
+                meetingIntelligenceSection.contains
+            )
+            && asrEditorChain.trailingSectionSource
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+            && meetingIntelligenceEditorChain.trailingSectionSource
+                .trimmingCharacters(in: .whitespacesAndNewlines) == "}"
+    }
+
+    private static func editorChain(in section: String, binding: String) -> EditorChain? {
+        guard occurrences(of: "TextEditor(", in: section) == 1,
+              occurrences(of: binding, in: section) == 1,
+              let bindingRange = section.range(of: binding),
+              let overlayRange = section.range(
+                of: overlay,
+                range: bindingRange.upperBound..<section.endIndex
+              ) else {
+            return nil
+        }
+
+        let chainSource = String(section[bindingRange.lowerBound..<overlayRange.upperBound])
+        let chainLines = chainSource.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let bindingLine = chainLines.first,
+              bindingLine.trimmingCharacters(in: .whitespacesAndNewlines) == binding,
+              chainLines.dropFirst().allSatisfy({ line in
+                let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmedLine.isEmpty || trimmedLine.hasPrefix(".")
+              }) else {
+            return nil
+        }
+
+        return EditorChain(
+            source: chainSource,
+            trailingSectionSource: String(section[overlayRange.upperBound...])
+        )
+    }
+
+    private static func occurrences(of fragment: String, in source: String) -> Int {
+        source.components(separatedBy: fragment).count - 1
     }
 }
 

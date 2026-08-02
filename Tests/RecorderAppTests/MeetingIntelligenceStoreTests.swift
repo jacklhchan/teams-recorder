@@ -78,25 +78,39 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
 
     func testValidV2GeneratedAndEditedArtifactsRoundTripProvenance() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
-        let cases = [
-            Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","contentOrigin":"generated"}"#.utf8),
-            Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"regenerate","contentOrigin":"edited","editedAt":"2026-07-31T01:02:03Z"}"#.utf8)
+        let editedAt = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: "2026-07-31T01:02:03Z")
+        )
+        let cases: [(Data, MeetingIntelligenceContentOrigin, Date?)] = [
+            (
+                Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate","contentOrigin":"generated"}"#.utf8),
+                .generated,
+                nil
+            ),
+            (
+                Data(#"{"schemaVersion":2,"summary":"Summary","suggestedTitle":"Title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"model","generatedAt":"2026-07-31T00:00:00Z","intent":"regenerate","contentOrigin":"edited","editedAt":"2026-07-31T01:02:03Z"}"#.utf8),
+                .edited,
+                editedAt
+            )
         ]
 
-        for original in cases {
+        for (original, expectedContentOrigin, expectedEditedAt) in cases {
             try original.write(to: fixture.artifactURL)
             let artifact = try XCTUnwrap(
                 try MeetingIntelligenceArtifactStore(mutationGate: gate).load(in: fixture.folder)
             )
+            XCTAssertEqual(artifact.schemaVersion, 2)
+            XCTAssertEqual(artifact.contentOrigin, expectedContentOrigin)
+            XCTAssertEqual(artifact.editedAt, expectedEditedAt)
+
             let encoded = try JSONEncoder.meetingIntelligence.encode(artifact)
-            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-            XCTAssertEqual(object["schemaVersion"] as? Int, 2)
-            XCTAssertNotNil(object["contentOrigin"] as? String)
-            if (object["contentOrigin"] as? String) == "edited" {
-                XCTAssertNotNil(object["editedAt"] as? String)
-            } else {
-                XCTAssertNil(object["editedAt"])
-            }
+            let roundTripped = try JSONDecoder.meetingIntelligenceForTests.decode(
+                MeetingIntelligenceArtifact.self,
+                from: encoded
+            )
+            XCTAssertEqual(roundTripped.contentOrigin, expectedContentOrigin)
+            XCTAssertEqual(roundTripped.editedAt, expectedEditedAt)
+            XCTAssertEqual(roundTripped, artifact)
         }
     }
 
@@ -198,6 +212,50 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
             XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(3))
         }
         XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), future)
+    }
+
+    func testPromotionReplacesExactValidV1DestinationWithStagedV2Artifact() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let legacy = fixture.exactV1ArtifactData()
+        try legacy.write(to: fixture.artifactURL)
+        let expected = fixture.artifact(
+            summary: "Regenerated summary",
+            title: "Regenerated title"
+        )
+
+        let staged = try store.stage(expected, in: fixture.folder)
+        XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), legacy)
+
+        try store.promoteStaged(staged, in: fixture.folder)
+
+        let stored = try Data(contentsOf: fixture.artifactURL)
+        XCTAssertEqual(
+            try JSONDecoder.meetingIntelligenceForTests.decode(MeetingIntelligenceArtifact.self, from: stored),
+            expected
+        )
+        XCTAssertEqual(try store.load(in: fixture.folder), expected)
+    }
+
+    func testPromotionRejectsInPlaceStagedV1OverwriteWithoutChangingDestination() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
+        let destination = try fixture.writeExistingArtifact()
+        let staged = try store.stage(
+            fixture.artifact(summary: "Replacement summary"),
+            in: fixture.folder
+        )
+        let legacy = fixture.exactV1ArtifactData()
+        let handle = try FileHandle(forWritingTo: staged)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: legacy)
+        try handle.close()
+        XCTAssertEqual(try Data(contentsOf: staged), legacy)
+
+        XCTAssertThrowsError(try store.promoteStaged(staged, in: fixture.folder)) {
+            XCTAssertEqual($0 as? MeetingIntelligenceStoreError, .unsupportedSchemaVersion(1))
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.artifactURL), destination)
     }
 
     func testActiveStateLoadsAsInterruptedAndTerminalStateIsRetained() throws {
@@ -643,6 +701,10 @@ private final class MeetingIntelligenceStoreFixture {
         return data
     }
 
+    func exactV1ArtifactData() -> Data {
+        Data(#"{"schemaVersion":1,"summary":"Legacy summary","suggestedTitle":"Legacy title","sourceTranscriptSHA256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceTranscriptByteCount":3,"model":"legacy-model","generatedAt":"2026-07-31T00:00:00Z","intent":"generate"}"#.utf8)
+    }
+
     func state() -> MeetingIntelligenceState {
         .init(schemaVersion: 1, phase: .completed, message: "Completed", sourceTranscriptSHA256: nil, startedAt: Date(timeIntervalSince1970: 1), finishedAt: nil)
     }
@@ -798,5 +860,13 @@ private extension JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
+    }
+}
+
+private extension JSONDecoder {
+    static var meetingIntelligenceForTests: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
     }
 }

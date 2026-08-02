@@ -75,7 +75,7 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertEqual(fixture.artifactStore.promotions, 1)
         XCTAssertEqual(fixture.artifactStore.cleanups, 0)
         XCTAssertEqual(fixture.artifactStore.visibleArtifact?.summary, "Decision summary")
-        try assertGeneratedV2(outcome.artifact)
+        assertGeneratedV2(outcome.artifact)
     }
 
     func testMeetingIntelligenceOwnedTitleIsReplacedByNextCapturedMeetingIntelligenceTitle() async throws {
@@ -94,8 +94,8 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         XCTAssertTrue(second.titleWasApplied)
         XCTAssertEqual(fixture.metadata.title, "Follow-up decision")
         XCTAssertEqual(fixture.metadata.titleOrigin, .meetingIntelligence)
-        try assertGeneratedV2(first.artifact)
-        try assertGeneratedV2(second.artifact)
+        assertGeneratedV2(first.artifact)
+        assertGeneratedV2(second.artifact)
     }
 
     func testManualTitleAndManualClearStoreSuggestionWithoutOverwriting() async throws {
@@ -112,7 +112,53 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
             XCTAssertNil(outcome.titleWarning)
             XCTAssertEqual(fixture.metadata, metadata)
             XCTAssertEqual(outcome.artifact.suggestedTitle, "Project decision")
+            assertGeneratedV2(outcome.artifact)
+            let stored = try XCTUnwrap(fixture.artifactStore.visibleArtifact)
+            XCTAssertEqual(stored, outcome.artifact)
+            assertGeneratedV2(stored)
         }
+    }
+
+    func testRegenerateOverEditedArtifactPublishesGeneratedV2Provenance() async throws {
+        let fixture = try PublicationFixture(metadata: .init())
+        defer { fixture.remove() }
+        let editedAt = Date(timeIntervalSince1970: 1_775_000_000)
+        let editedArtifact = MeetingIntelligenceArtifact(
+            schemaVersion: 2,
+            summary: "Manually edited summary",
+            suggestedTitle: "Manually edited title",
+            sourceTranscriptSHA256: fixture.request.sourceRevision.sha256,
+            sourceTranscriptByteCount: fixture.request.sourceRevision.byteCount,
+            model: fixture.request.snapshot.profile.llmModel,
+            generatedAt: fixture.request.generatedAt,
+            intent: .generate,
+            contentOrigin: .edited,
+            editedAt: editedAt
+        )
+        fixture.artifactStore.seedVisibleArtifact(editedArtifact)
+        XCTAssertEqual(fixture.artifactStore.visibleArtifact, editedArtifact)
+
+        let request = MeetingIntelligencePublicationRequest(
+            session: fixture.request.session,
+            sourceRevision: fixture.request.sourceRevision,
+            capturedTitle: fixture.request.capturedTitle,
+            capturedTitleOrigin: fixture.request.capturedTitleOrigin,
+            content: .init(title: "Regenerated decision", summary: "Regenerated summary"),
+            snapshot: fixture.request.snapshot,
+            intent: .regenerate,
+            generatedAt: Date(timeIntervalSince1970: 1_775_000_100),
+            lease: .init()
+        )
+
+        let outcome = try await fixture.publisher.publish(request)
+
+        XCTAssertEqual(outcome.artifact.intent, .regenerate)
+        XCTAssertEqual(outcome.artifact.summary, "Regenerated summary")
+        XCTAssertEqual(outcome.artifact.suggestedTitle, "Regenerated decision")
+        assertGeneratedV2(outcome.artifact)
+        let stored = try XCTUnwrap(fixture.artifactStore.visibleArtifact)
+        XCTAssertEqual(stored, outcome.artifact)
+        assertGeneratedV2(stored)
     }
 
     func testInvalidLeaseOrChangedDigestDoesNotPromoteArtifact() async throws {
@@ -256,12 +302,10 @@ final class MeetingIntelligencePublisherTests: XCTestCase {
         }
     }
 
-    private func assertGeneratedV2(_ artifact: MeetingIntelligenceArtifact) throws {
-        let data = try JSONEncoder().encode(artifact)
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(object["schemaVersion"] as? Int, 2)
-        XCTAssertEqual(object["contentOrigin"] as? String, "generated")
-        XCTAssertNil(object["editedAt"])
+    private func assertGeneratedV2(_ artifact: MeetingIntelligenceArtifact) {
+        XCTAssertEqual(artifact.schemaVersion, 2)
+        XCTAssertEqual(artifact.contentOrigin, .generated)
+        XCTAssertNil(artifact.editedAt)
     }
 }
 
@@ -395,6 +439,10 @@ final class PublisherArtifactStore: MeetingIntelligenceArtifactStoring, @uncheck
     var onStage: (() -> Void)?
     var onPromote: (() -> Void)?
     var promoteError: Error?
+
+    func seedVisibleArtifact(_ artifact: MeetingIntelligenceArtifact) {
+        visibleArtifact = artifact
+    }
 
     func load(in _: URL) throws -> MeetingIntelligenceArtifact? { nil }
     func stage(_ artifact: MeetingIntelligenceArtifact, in folder: URL) throws -> URL {

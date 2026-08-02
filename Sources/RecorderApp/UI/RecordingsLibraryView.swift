@@ -391,44 +391,43 @@ private struct SessionListView: View {
                                 Text(statusText(for: session)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                 Spacer()
                                 if transcribingSessionID == session.id {
-                                    Button("Cancel") {
+                                    RecordingSessionActionButton(
+                                        title: "Cancel",
+                                        symbol: nil,
+                                        identifier: "recorder.row.transcription-cancel.\(session.id.lastPathComponent)",
+                                        accessibilityLabel: "Cancel",
+                                        help: nil,
+                                        compact: false,
+                                        disabled: false
+                                    ) {
                                         _ = admission.perform(sessionID: session.id) { canonical in
                                             guard transcribingSessionID == canonical.id else { return }
                                             cancelTranscription()
                                         }
                                     }
-                                    .buttonStyle(.bordered)
-                                    .background(
-                                        RecorderDestinationAccessibilityMarker(
-                                            identifier: "recorder.row.transcription-cancel.\(session.id.lastPathComponent)",
-                                            label: "Cancel"
-                                        )
-                                    )
+                                    .fixedSize()
                                 }
-                                Button {
+                                RecordingSessionActionButton(
+                                    title: "ASR Log",
+                                    symbol: "terminal",
+                                    identifier: "recorder.row.transcription-log.\(session.id.lastPathComponent)",
+                                    accessibilityLabel: "Open ASR log for \(session.displayName)",
+                                    help: "Open ASR log",
+                                    compact: true,
+                                    disabled: false
+                                ) {
                                     _ = admission.perform(
                                         sessionID: session.id,
                                         action: openTranscriptLog
                                     )
-                                } label: {
-                                    Image(systemName: "terminal")
                                 }
-                                .buttonStyle(.bordered)
-                                .help("Open ASR log")
-                                .accessibilityLabel("Open ASR log for \(session.displayName)")
-                                .background(
-                                    RecorderDestinationAccessibilityMarker(
-                                        identifier: "recorder.row.transcription-log.\(session.id.lastPathComponent)",
-                                        label: "Open ASR log for \(session.displayName)"
-                                    )
-                                )
+                                .fixedSize()
                             }
                             .padding(10)
                             .background(palette.status, in: RoundedRectangle(cornerRadius: 6))
                             .background(
                                 RecorderDestinationAccessibilityMarker(
-                                    identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)",
-                                    label: statusText(for: session)
+                                    identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)"
                                 )
                             )
                             .background(
@@ -519,7 +518,7 @@ private struct SessionListView: View {
 /// accessibility action and geometry at both ViewThatFits alternatives.
 private struct RecordingSessionActionButton: NSViewRepresentable {
     let title: String
-    let symbol: String
+    let symbol: String?
     let identifier: String
     let accessibilityLabel: String
     let help: String?
@@ -537,11 +536,15 @@ private struct RecordingSessionActionButton: NSViewRepresentable {
     func updateNSView(_ button: NSButton, context: Context) {
         context.coordinator.action = action
         button.title = compact ? "" : title
-        button.image = NSImage(
-            systemSymbolName: symbol,
-            accessibilityDescription: accessibilityLabel
-        )
-        button.imagePosition = compact ? .imageOnly : .imageLeading
+        button.image = symbol.flatMap {
+            NSImage(
+                systemSymbolName: $0,
+                accessibilityDescription: accessibilityLabel
+            )
+        }
+        button.imagePosition = symbol == nil
+            ? .noImage
+            : (compact ? .imageOnly : .imageLeading)
         button.isEnabled = !disabled
         button.toolTip = help
         button.setAccessibilityIdentifier(identifier)

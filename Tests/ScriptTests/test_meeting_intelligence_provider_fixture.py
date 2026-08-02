@@ -114,21 +114,20 @@ class MeetingIntelligenceProviderFixtureTests(unittest.TestCase):
                 headers={"Authorization": secret},
             )
             telemetry = provider.telemetry_path.read_text(encoding="utf-8")
-            for forbidden in (
-                secret,
-                prompt,
-                response,
-                provider.base_url,
-                "/Users/example/private",
-                "Authorization",
-                "messages",
+            for category, forbidden in (
+                ("credential", secret),
+                ("prompt", prompt),
+                ("response", response),
+                ("endpoint", provider.base_url),
+                ("path", "/Users/example/private"),
+                ("field-name", "Authorization"),
+                ("field-name", "messages"),
             ):
-                with self.subTest(check="telemetry redaction"):
-                    self.assertNotIn(
-                        forbidden,
-                        telemetry,
-                        "Telemetry must exclude sensitive request data",
-                    )
+                with self.subTest(category=category):
+                    if forbidden in telemetry:
+                        self.fail(
+                            f"Telemetry redaction failed for category: {category}"
+                        )
 
 
 if __name__ == "__main__":

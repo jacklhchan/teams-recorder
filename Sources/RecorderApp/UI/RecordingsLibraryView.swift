@@ -40,8 +40,10 @@ struct RecordingsLibraryView: View {
         let toolbarPresentation = RecordingsToolbarPresentation.make(
             isTranscribing: transcription.transcribingSessionID != nil
         )
+        let palette = RecordingsPalette(colorScheme: systemColorScheme)
 
         SessionListView(
+            palette: palette,
             sessions: visibleSessions,
             allSessions: librarySessions,
             libraryRevision: librarySnapshot.revision,
@@ -132,18 +134,18 @@ struct RecordingsLibraryView: View {
                 identifier: "recorder.destination.recordings"
             )
         )
-        .background(RecorderVisualStyle.recordingsCanvas)
+        .background(palette.canvas)
         .background(
             RecorderDestinationAccessibilityMarker(
-                identifier: RecorderSurfaceAppearance.recordingsDark.accessibilityIdentifier
+                identifier: palette.appearance.accessibilityIdentifier
             )
         )
         .accessibilityIdentifier("recorder.destination.recordings")
-        .environment(\.colorScheme, .dark)
     }
 }
 
 private struct SessionListView: View {
+    let palette: RecordingsPalette
     let sessions: [RecordingSession]
     let allSessions: [RecordingSession]
     let libraryRevision: UInt64
@@ -354,7 +356,11 @@ private struct SessionListView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(sessions) { session in
-                    RecordingSessionCardView(session: session, isExpanded: expansionBinding(for: session.id)) {
+                    RecordingSessionCardView(
+                        session: session,
+                        palette: palette,
+                        isExpanded: expansionBinding(for: session.id)
+                    ) {
                     VStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 8) {
                             VStack(alignment: .leading, spacing: 3) {
@@ -390,14 +396,35 @@ private struct SessionListView: View {
                                             guard transcribingSessionID == canonical.id else { return }
                                             cancelTranscription()
                                         }
-                                    }.buttonStyle(.bordered)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .background(
+                                        RecorderDestinationAccessibilityMarker(
+                                            identifier: "recorder.row.transcription-cancel.\(session.id.lastPathComponent)",
+                                            label: "Cancel"
+                                        )
+                                    )
                                 }
-                                Button { _ = admission.perform(sessionID: session.id, action: openTranscriptLog) } label: { Image(systemName: "terminal") }
-                                    .buttonStyle(.bordered).help("Open ASR log")
-                                    .accessibilityLabel("Open ASR log for \(session.displayName)")
+                                Button {
+                                    _ = admission.perform(
+                                        sessionID: session.id,
+                                        action: openTranscriptLog
+                                    )
+                                } label: {
+                                    Image(systemName: "terminal")
+                                }
+                                .buttonStyle(.bordered)
+                                .help("Open ASR log")
+                                .accessibilityLabel("Open ASR log for \(session.displayName)")
+                                .background(
+                                    RecorderDestinationAccessibilityMarker(
+                                        identifier: "recorder.row.transcription-log.\(session.id.lastPathComponent)",
+                                        label: "Open ASR log for \(session.displayName)"
+                                    )
+                                )
                             }
                             .padding(10)
-                            .background(RecorderVisualStyle.recordingsStatusSurface.color, in: RoundedRectangle(cornerRadius: 6))
+                            .background(palette.status, in: RoundedRectangle(cornerRadius: 6))
                             .background(
                                 RecorderDestinationAccessibilityMarker(
                                     identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)",
@@ -406,7 +433,7 @@ private struct SessionListView: View {
                             )
                             .background(
                                 RecorderDestinationAccessibilityMarker(
-                                    identifier: RecorderSurfaceAppearance.recordingsStatusDark.accessibilityIdentifier
+                                    identifier: palette.statusAppearance.accessibilityIdentifier
                                 )
                             )
                         }

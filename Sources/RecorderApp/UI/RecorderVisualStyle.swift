@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct RecorderSRGBColor: Equatable, Sendable {
@@ -21,7 +22,9 @@ struct RecorderSRGBColor: Equatable, Sendable {
 }
 
 enum RecorderSurfaceAppearance: String, Equatable, Sendable {
+    case recordingsLight = "recordings.light"
     case recordingsDark = "recordings.dark"
+    case recordingsStatusLight = "recordings.status.light"
     case recordingsStatusDark = "recordings.status.dark"
     case providerDark = "provider.dark"
     case transcriptLight = "transcript.light"
@@ -31,6 +34,33 @@ enum RecorderSurfaceAppearance: String, Equatable, Sendable {
 
     var accessibilityIdentifier: String {
         "recorder.surface.\(rawValue)"
+    }
+}
+
+struct RecordingsPalette {
+    let canvas: Color
+    let card: Color
+    let status: Color
+    let hairline: Color
+    let appearance: RecorderSurfaceAppearance
+    let statusAppearance: RecorderSurfaceAppearance
+
+    init(colorScheme: ColorScheme) {
+        if colorScheme == .dark {
+            canvas = RecorderVisualStyle.recordingsCanvas
+            card = RecorderVisualStyle.recordingsCard
+            status = RecorderVisualStyle.recordingsStatusSurface.color
+            hairline = .white.opacity(0.16)
+            appearance = .recordingsDark
+            statusAppearance = .recordingsStatusDark
+        } else {
+            canvas = Color(nsColor: .windowBackgroundColor)
+            card = Color(nsColor: .controlBackgroundColor)
+            status = Color(nsColor: .underPageBackgroundColor)
+            hairline = Color(nsColor: .separatorColor)
+            appearance = .recordingsLight
+            statusAppearance = .recordingsStatusLight
+        }
     }
 }
 

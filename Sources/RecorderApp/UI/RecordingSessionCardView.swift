@@ -4,6 +4,7 @@ import SwiftUI
 /// Presentation-only card shell. The parent owns the sole expansion identity.
 struct RecordingSessionCardView<Content: View>: View {
     let session: RecordingSession
+    let palette: RecordingsPalette
     @Binding var isExpanded: Bool
     @ViewBuilder let content: () -> Content
 
@@ -36,8 +37,8 @@ struct RecordingSessionCardView<Content: View>: View {
             }
         }
         .padding(14)
-        .background(RecorderVisualStyle.recordingsCard, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.16)))
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.hairline))
     }
 }
 

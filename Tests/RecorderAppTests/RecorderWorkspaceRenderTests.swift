@@ -4,6 +4,21 @@ import SwiftUI
 import XCTest
 @testable import RecorderApp
 
+private enum RecordingsSurfaceTestMarker {
+    static let recordingsLight = RecorderSurfaceAppearance.recordingsLight.accessibilityIdentifier
+    static let recordingsDark = RecorderSurfaceAppearance.recordingsDark.accessibilityIdentifier
+    static let recordingsStatusLight = RecorderSurfaceAppearance.recordingsStatusLight.accessibilityIdentifier
+    static let recordingsStatusDark = RecorderSurfaceAppearance.recordingsStatusDark.accessibilityIdentifier
+
+    static func transcriptionCancel(_ rowID: String) -> String {
+        "recorder.row.transcription-cancel.\(rowID)"
+    }
+
+    static func transcriptionLog(_ rowID: String) -> String {
+        "recorder.row.transcription-log.\(rowID)"
+    }
+}
+
 @MainActor
 final class RecorderWorkspaceRenderTests: XCTestCase {
     func testDirectionARecordingsOpensCanonicalDetailAndFailsClosedWhenRemoved() throws {
@@ -48,27 +63,283 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertFalse(host.containsView(named: "RecordingPlaybackView"))
     }
 
-    func testRecordingsKeepsNativeControlsDarkInsideALightSystemAndRestoresTranscriptLight() throws {
+    func testRecordingsFollowsLightSystemAppearance() throws {
+        try assertRecordingsFollowsSystemAppearance(
+            .light,
+            expectedNativeAppearance: .aqua,
+            expectedRecordingsMarker: RecordingsSurfaceTestMarker.recordingsLight,
+            expectedStatusMarker: RecordingsSurfaceTestMarker.recordingsStatusLight,
+            expectedTranscriptMarker: RecorderSurfaceAppearance.transcriptLight
+        )
+    }
+
+    func testRecordingsFollowsDarkSystemAppearance() throws {
+        try assertRecordingsFollowsSystemAppearance(
+            .dark,
+            expectedNativeAppearance: .darkAqua,
+            expectedRecordingsMarker: RecordingsSurfaceTestMarker.recordingsDark,
+            expectedStatusMarker: RecordingsSurfaceTestMarker.recordingsStatusDark,
+            expectedTranscriptMarker: RecorderSurfaceAppearance.transcriptDark
+        )
+    }
+
+    private func assertRecordingsFollowsSystemAppearance(
+        _ systemColorScheme: ColorScheme,
+        expectedNativeAppearance: NSAppearance.Name,
+        expectedRecordingsMarker: String,
+        expectedStatusMarker: String,
+        expectedTranscriptMarker: RecorderSurfaceAppearance
+    ) throws {
         let fixture = try RecordingsMeetingIntelligenceRenderFixture()
         defer { fixture.remove() }
         let host = try makeWorkspaceHost(
             model: fixture.model,
             size: .init(width: 1_280, height: 800),
-            systemColorScheme: .light
+            systemColorScheme: systemColorScheme
         )
         defer { host.close() }
 
         host.select(.recordings)
         let rowID = fixture.session.id.lastPathComponent
-        XCTAssertEqual(host.colorSchemeAppearance(for: "recorder.destination.recordings"), .darkAqua)
-        XCTAssertEqual(host.nativeButtonColorSchemeAppearance(for: "recorder.row.card.\(rowID)"), .darkAqua)
-        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
-        XCTAssertEqual(host.nativeButtonColorSchemeAppearance(for: "recorder.row.open.\(rowID)"), .darkAqua)
 
-        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
-        XCTAssertTrue(host.containsAccessibilityIdentifier(
-            RecorderSurfaceAppearance.transcriptLight.accessibilityIdentifier
+        assertOnlyRecordingsMarker(host, expected: expectedRecordingsMarker)
+        assertNoRecordingsStatusMarker(host)
+        XCTAssertEqual(
+            host.colorSchemeAppearance(for: "recorder.destination.recordings"),
+            expectedNativeAppearance
+        )
+        XCTAssertEqual(
+            host.nativeButtonColorSchemeAppearance(for: "recorder.row.card.\(rowID)"),
+            expectedNativeAppearance
+        )
+
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
+        assertOnlyRecordingsMarker(host, expected: expectedRecordingsMarker)
+        for identifier in [
+            "recorder.row.play.\(rowID)",
+            "recorder.row.open.\(rowID)",
+            "recorder.row.edit.\(rowID)",
+            "recorder.row.transcribe.\(rowID)",
+            "recorder.row.trash.\(rowID)",
+            "recorder.row.log.\(rowID)",
+            RecorderActionID.openTranscript
+        ] {
+            XCTAssertEqual(
+                host.nativeButtonColorSchemeAppearance(for: identifier),
+                expectedNativeAppearance,
+                "Expanded Recordings action must follow the system appearance: \(identifier)"
+            )
+        }
+
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.edit.\(rowID)"))
+        try waitUntil(timeout: 1, message: "metadata editor text fields to render") {
+            host.nativeTextFieldColorSchemeAppearance(for: RecorderActionID.metadataTitle)
+                == expectedNativeAppearance
+                && host.nativeTextFieldColorSchemeAppearance(for: RecorderActionID.metadataTags)
+                    == expectedNativeAppearance
+        }
+        XCTAssertEqual(
+            host.nativeTextFieldColorSchemeAppearance(for: RecorderActionID.metadataTitle),
+            expectedNativeAppearance
+        )
+        XCTAssertEqual(
+            host.nativeTextFieldColorSchemeAppearance(for: RecorderActionID.metadataTags),
+            expectedNativeAppearance
+        )
+        host.dismissSheets()
+
+        fixture.model.transcriptionFeature.replaceLoadedStates([
+            fixture.session.id: .init(
+                phase: .completed,
+                message: "Transcription finished",
+                startedAt: .now,
+                finishedAt: .now
+            )
+        ])
+        let statusID = "recorder.row.transcription-status.\(rowID)"
+        try waitUntil(timeout: 1, message: "successful transcription status to render") {
+            host.containsAccessibilityIdentifier(statusID)
+                && host.containsAccessibilityIdentifier(expectedStatusMarker)
+        }
+        assertOnlyRecordingsMarker(host, expected: expectedRecordingsMarker)
+        assertOnlyRecordingsStatusMarker(host, expected: expectedStatusMarker)
+        XCTAssertEqual(
+            host.nativeButtonColorSchemeAppearance(forAccessibilityLabel: "Open ASR log for \(fixture.session.displayName)"),
+            expectedNativeAppearance
+        )
+
+        fixture.model.transcriptionFeature.replaceLoadedStates([
+            fixture.session.id: .init(
+                phase: .failed,
+                message: "Transcription failed",
+                startedAt: .now,
+                finishedAt: .now
+            )
+        ])
+        try waitUntil(timeout: 1, message: "failed transcription status to render") {
+            host.containsAccessibilityIdentifier(statusID)
+                && host.containsAccessibilityIdentifier(expectedStatusMarker)
+                && host.containsAccessibilityLabel("Transcription failed")
+        }
+        assertOnlyRecordingsMarker(host, expected: expectedRecordingsMarker)
+        assertOnlyRecordingsStatusMarker(host, expected: expectedStatusMarker)
+
+        host.close()
+        fixture.model.transcriptionFeature.start(
+            session: fixture.session,
+            providerIsConfigured: true
+        )
+        let activeHost = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 1_200),
+            systemColorScheme: systemColorScheme
+        )
+        defer { activeHost.close() }
+        activeHost.select(.recordings)
+        XCTAssertTrue(activeHost.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
+        fixture.model.transcriptionFeature.objectWillChange.send()
+        activeHost.render()
+        XCTAssertTrue(activeHost.revealSettingsControl(statusID))
+        try waitUntil(timeout: 1, message: "active transcription status to render") {
+            activeHost.containsAccessibilityIdentifier(statusID)
+                && activeHost.containsAccessibilityIdentifier(expectedStatusMarker)
+                && activeHost.containsAccessibilityIdentifier(
+                    RecordingsSurfaceTestMarker.transcriptionCancel(rowID)
+                )
+                && activeHost.containsAccessibilityIdentifier(
+                    RecordingsSurfaceTestMarker.transcriptionLog(rowID)
+                )
+        }
+        assertOnlyRecordingsMarker(activeHost, expected: expectedRecordingsMarker)
+        assertOnlyRecordingsStatusMarker(activeHost, expected: expectedStatusMarker)
+        XCTAssertEqual(
+            activeHost.colorSchemeAppearance(
+                for: RecordingsSurfaceTestMarker.transcriptionCancel(rowID)
+            ),
+            expectedNativeAppearance
+        )
+        XCTAssertEqual(
+            activeHost.colorSchemeAppearance(
+                for: RecordingsSurfaceTestMarker.transcriptionLog(rowID)
+            ),
+            expectedNativeAppearance
+        )
+        XCTAssertTrue(activeHost.containsAccessibilityLabel("Cancel"))
+        XCTAssertTrue(
+            activeHost.containsAccessibilityLabel(
+                "Open ASR log for \(fixture.session.displayName)"
+            )
+        )
+
+        fixture.model.transcriptionFeature.cancel()
+        fixture.transcriptionPreparer.release()
+        XCTAssertTrue(activeHost.click(atAccessibilityFrame: RecorderActionID.openTranscript))
+        XCTAssertTrue(activeHost.containsAccessibilityIdentifier(
+            expectedTranscriptMarker.accessibilityIdentifier
         ))
+    }
+
+    func testRecordingsAppearanceMarkersAtMinimumAndWideSizes() throws {
+        let variants: [(ColorScheme, NSAppearance.Name, String)] = [
+            (
+                .light,
+                .aqua,
+                RecordingsSurfaceTestMarker.recordingsLight
+            ),
+            (
+                .dark,
+                .darkAqua,
+                RecordingsSurfaceTestMarker.recordingsDark
+            )
+        ]
+        let sizes = [
+            CGSize(width: 860, height: 680),
+            CGSize(width: 1_280, height: 800)
+        ]
+
+        for (systemColorScheme, expectedNativeAppearance, expectedMarker) in variants {
+            for size in sizes {
+                let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+                defer { fixture.remove() }
+                let host = try makeWorkspaceHost(
+                    model: fixture.model,
+                    size: size,
+                    systemColorScheme: systemColorScheme
+                )
+                defer { host.close() }
+
+                host.select(.recordings)
+                let rowID = fixture.session.id.lastPathComponent
+                assertOnlyRecordingsMarker(host, expected: expectedMarker)
+                XCTAssertEqual(
+                    host.colorSchemeAppearance(for: "recorder.destination.recordings"),
+                    expectedNativeAppearance
+                )
+                XCTAssertEqual(
+                    host.nativeButtonColorSchemeAppearance(
+                        for: "recorder.row.card.\(rowID)"
+                    ),
+                    expectedNativeAppearance
+                )
+            }
+        }
+    }
+
+    private func assertOnlyRecordingsMarker(
+        _ host: WorkspaceHost,
+        expected: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for marker in [
+            RecordingsSurfaceTestMarker.recordingsLight,
+            RecordingsSurfaceTestMarker.recordingsDark
+        ] {
+            XCTAssertEqual(
+                host.containsAccessibilityIdentifier(marker),
+                marker == expected,
+                "Unexpected Recordings surface marker: \(marker)",
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    private func assertNoRecordingsStatusMarker(
+        _ host: WorkspaceHost,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertFalse(
+            host.containsAccessibilityIdentifier(RecordingsSurfaceTestMarker.recordingsStatusLight),
+            file: file,
+            line: line
+        )
+        XCTAssertFalse(
+            host.containsAccessibilityIdentifier(RecordingsSurfaceTestMarker.recordingsStatusDark),
+            file: file,
+            line: line
+        )
+    }
+
+    private func assertOnlyRecordingsStatusMarker(
+        _ host: WorkspaceHost,
+        expected: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for marker in [
+            RecordingsSurfaceTestMarker.recordingsStatusLight,
+            RecordingsSurfaceTestMarker.recordingsStatusDark
+        ] {
+            XCTAssertEqual(
+                host.containsAccessibilityIdentifier(marker),
+                marker == expected,
+                "Unexpected Recordings status marker: \(marker)",
+                file: file,
+                line: line
+            )
+        }
     }
 
     func testDirectionARecordingsCardsAllowExactlyOneExpandedSession() throws {
@@ -1049,6 +1320,7 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
     let model: AppModel
     let coordinator: MeetingIntelligenceJobCoordinator
     let feature: MeetingIntelligenceFeatureModel
+    let transcriptionPreparer: RenderBlockingTranscriptionAudioPreparer
     let generationGate: RenderMeetingIntelligenceGenerationGate
     let generatorEntered: XCTestExpectation
     let generatorFinished: XCTestExpectation
@@ -1063,6 +1335,8 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
         self.generatorEntered = generatorEntered
         self.generatorFinished = generatorFinished
         self.published = published
+        let transcriptionPreparer = RenderBlockingTranscriptionAudioPreparer()
+        self.transcriptionPreparer = transcriptionPreparer
         workspace = FileManager.default.temporaryDirectory.appendingPathComponent(
             "recordings-mi-render-\(UUID().uuidString)",
             isDirectory: true
@@ -1128,6 +1402,7 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
             defaultInputDeviceID: { nil },
             performStartupWork: false,
             initialOutputFolder: workspace,
+            transcriptionAudioPreparer: transcriptionPreparer,
             libraryFeature: injectedLibraryFeature,
             meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
                 let coordinator = MeetingIntelligenceJobCoordinator(
@@ -1161,6 +1436,7 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
 
     func remove() {
         feature.shutdown()
+        transcriptionPreparer.release()
         try? FileManager.default.removeItem(at: workspace)
     }
 }
@@ -1402,8 +1678,17 @@ final class WorkspaceHost {
     }
 
     func close() {
+        dismissSheets()
         window.orderOut(nil)
         window.contentView = nil
+    }
+
+    func dismissSheets() {
+        for sheet in window.sheets {
+            window.endSheet(sheet)
+            sheet.orderOut(nil)
+        }
+        render()
     }
 
     func render() {
@@ -1464,6 +1749,41 @@ final class WorkspaceHost {
             .compactMap({ $0 as? NSButton })
             .first { $0.accessibilityIdentifier() == identifier }
         return button?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+    }
+
+    func nativeButtonColorSchemeAppearance(
+        forAccessibilityLabel label: String
+    ) -> NSAppearance.Name? {
+        let button = renderedRoots
+            .flatMap({ allViews(startingAt: $0) })
+            .compactMap({ $0 as? NSButton })
+            .first {
+                $0.accessibilityLabel() == label
+                    || (label == "Cancel" && $0.title == "Cancel")
+            }
+        return button?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+    }
+
+    func nativeTextFieldColorSchemeAppearance(
+        for identifier: String
+    ) -> NSAppearance.Name? {
+        let textField = renderedRoots
+            .flatMap({ allViews(startingAt: $0) })
+            .compactMap({ $0 as? NSTextField })
+            .first {
+                if $0.accessibilityIdentifier() == identifier {
+                    return true
+                }
+                switch identifier {
+                case RecorderActionID.metadataTitle:
+                    return $0.placeholderString == "Title"
+                case RecorderActionID.metadataTags:
+                    return $0.placeholderString == "Tags, separated by commas"
+                default:
+                    return false
+                }
+            }
+        return textField?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
     }
 
     func revealSettingsControl(_ identifier: String) -> Bool {
@@ -1532,7 +1852,9 @@ final class WorkspaceHost {
         // The transcript detail is an AppKit sheet owned by this host window.
         // Do not search every application window: playback lifecycle tests can
         // leave unrelated `AVPlayerView` windows alive in the same process.
-        let windows = [window] + window.sheets
+        let windows = [window] + window.sheets + NSApp.windows.filter {
+            $0.sheetParent === window
+        }
         var seen = Set<ObjectIdentifier>()
         return windows.compactMap(\.contentView).filter {
             seen.insert(ObjectIdentifier($0)).inserted
@@ -1740,6 +2062,49 @@ private final class PausedRefreshCaptureSource: CaptureSourceProtocol {
     func resumeRefresh() {
         refreshContinuation?.resume()
         refreshContinuation = nil
+    }
+}
+
+private final class RenderBlockingTranscriptionAudioPreparer: TranscriptionAudioPreparing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: (
+        url: URL,
+        continuation: CheckedContinuation<PreparedTranscriptionAudio, Never>
+    )?
+    private var released = false
+
+    func prepare(for session: RecordingSession) async throws -> PreparedTranscriptionAudio {
+        try Task.checkCancellation()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation {
+                (continuation: CheckedContinuation<PreparedTranscriptionAudio, Never>) in
+                lock.lock()
+                if released {
+                    lock.unlock()
+                    continuation.resume(
+                        returning: .init(audioURL: session.recordingURL, cleanupURL: nil)
+                    )
+                } else {
+                    pending = (session.recordingURL, continuation)
+                    lock.unlock()
+                }
+            }
+        }, onCancel: {
+            release()
+        })
+    }
+
+    func cleanup(_: PreparedTranscriptionAudio) {}
+
+    func release() {
+        lock.lock()
+        let pending = self.pending
+        self.pending = nil
+        released = true
+        lock.unlock()
+        pending?.continuation.resume(
+            returning: .init(audioURL: pending?.url ?? URL(fileURLWithPath: "/tmp/unused.m4a"), cleanupURL: nil)
+        )
     }
 }
 

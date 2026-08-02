@@ -53,6 +53,29 @@ final class RecorderVisualStyleTests: XCTestCase {
         )
     }
 
+    func testRecordingsPaletteFollowsSystemAppearance() {
+        XCTAssertEqual(
+            RecordingsPalette(colorScheme: .light).appearance,
+            .recordingsLight
+        )
+        XCTAssertEqual(
+            RecordingsPalette(colorScheme: .dark).appearance,
+            .recordingsDark
+        )
+        XCTAssertEqual(
+            RecordingsPalette(colorScheme: .light).statusAppearance,
+            .recordingsStatusLight
+        )
+        XCTAssertEqual(
+            RecordingsPalette(colorScheme: .dark).statusAppearance,
+            .recordingsStatusDark
+        )
+        XCTAssertEqual(
+            RecorderVisualStyle.recordingsStatusSurface.hexToken,
+            "#0E1933"
+        )
+    }
+
     func testFixedDarkSurfacesHaveStableIdentifiers() {
         XCTAssertEqual(
             RecorderSurfaceAppearance.recordingsDark.accessibilityIdentifier,

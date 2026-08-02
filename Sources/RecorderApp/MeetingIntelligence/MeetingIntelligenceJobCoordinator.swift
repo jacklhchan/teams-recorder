@@ -244,6 +244,8 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     private var tasksBySessionID: [RecordingSession.ID: Task<Void, Never>] = [:]
     private var editTasksBySessionID: [RecordingSession.ID: Task<MeetingIntelligenceEditSaveOutcome, Never>] = [:]
+    private var editTicketsBySessionID: [RecordingSession.ID: Ticket] = [:]
+    private var cancelledEditTicketsBySessionID: [RecordingSession.ID: Ticket] = [:]
     private var reloadTasksBySessionID: [RecordingSession.ID: Task<Void, Never>] = [:]
     private var reloadTokensBySessionID: [RecordingSession.ID: UUID] = [:]
     private var generationsBySessionID: [RecordingSession.ID: UInt64] = [:]
@@ -401,28 +403,49 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         }
 
         let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
+        let capturedPublicationDelivery = onPublication
         let task: Task<MeetingIntelligenceEditSaveOutcome, Never> = Task { @MainActor [weak self] in
             guard let self else { return .conflict("The meeting intelligence edit was cancelled.") }
-            defer { self.clearEditTaskIfOwned(ticket, for: canonicalSession) }
+            defer {
+                self.clearEditTaskIfOwned(ticket, for: canonicalSession)
+                self.clearEditTicketIfMatching(ticket, for: canonicalSession)
+            }
             return await self.saveEditOwned(
                 session: canonicalSession,
                 capturedArtifact: capturedArtifact,
                 summary: summary,
                 suggestedTitle: suggestedTitle,
-                ticket: ticket
+                ticket: ticket,
+                publicationDelivery: capturedPublicationDelivery
             )
         }
         editTasksBySessionID[canonicalSession.id] = task
+        editTicketsBySessionID[canonicalSession.id] = ticket
         return await task.value
     }
 
     func cancel(sessionID: RecordingSession.ID) {
         guard let session = sessionsByID[sessionID], !isShutDown else { return }
+        if editTasksBySessionID[sessionID] == nil,
+           cancelledEditTicketsBySessionID[sessionID] != nil {
+            return
+        }
+        let inFlightEdit = editTasksBySessionID[sessionID]
+        let inFlightEditTicket = editTicketsBySessionID[sessionID]
         let ticket = replaceWork(for: session)
         cancelledSessionIDs.insert(sessionID)
+        if let inFlightEditTicket {
+            cancelledEditTicketsBySessionID[sessionID] = inFlightEditTicket
+        }
         tasksBySessionID[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: session) }
+            if let inFlightEdit {
+                let outcome = await inFlightEdit.value
+                guard self.owns(ticket, for: session) else { return }
+                if case .saved = outcome { return }
+            }
+            guard self.owns(ticket, for: session) else { return }
             self.setPresentation(.init(
                 phase: .cancelled, summary: self.presentation(for: session).summary,
                 suggestedTitle: self.presentation(for: session).suggestedTitle,
@@ -711,7 +734,8 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         capturedArtifact: MeetingIntelligenceArtifact,
         summary: String,
         suggestedTitle: String,
-        ticket: Ticket
+        ticket: Ticket,
+        publicationDelivery: ((MeetingIntelligencePublished) -> Void)?
     ) async -> MeetingIntelligenceEditSaveOutcome {
         guard owns(ticket, for: session), !Task.isCancelled else {
             return .conflict(editMessage(for: .leaseInvalid))
@@ -743,16 +767,16 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                 artifact: editedArtifact,
                 titleOutcome: .preserved
             )
-            await deliverDurablePublication(publication)
+            await deliverDurablePublication(publication, capturedDelivery: publicationDelivery)
 
             // A newer generation/edit/remove owns the presentation now. The
             // durable edit is still saved and published, but its late result
             // must not overwrite that canonical latest projection.
-            guard owns(ticket, for: session), !Task.isCancelled else {
+            guard acceptsEditProjection(ticket, for: session) else {
                 return editProjectionFailure(for: session)
             }
             let projection = await editProjection(for: editedArtifact, session: session)
-            guard owns(ticket, for: session), !Task.isCancelled else {
+            guard acceptsEditProjection(ticket, for: session) else {
                 return editProjectionFailure(for: session)
             }
             guard setPresentation(
@@ -979,6 +1003,8 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         leasesBySessionID[sessionID]?.invalidate()
         tasksBySessionID.removeValue(forKey: sessionID)?.cancel()
         editTasksBySessionID.removeValue(forKey: sessionID)?.cancel()
+        editTicketsBySessionID.removeValue(forKey: sessionID)
+        cancelledEditTicketsBySessionID.removeValue(forKey: sessionID)
         attemptsBySessionID.removeValue(forKey: sessionID)
         leasesBySessionID.removeValue(forKey: sessionID)
     }
@@ -986,6 +1012,14 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private func owns(_ ticket: Ticket, for session: RecordingSession) -> Bool {
         !isShutDown && !removedSessionIDs.contains(session.id) && ticket.lease.isValid &&
             generationsBySessionID[session.id] == ticket.generation && attemptsBySessionID[session.id] == ticket.attempt
+    }
+
+    private func acceptsEditProjection(_ ticket: Ticket, for session: RecordingSession) -> Bool {
+        guard !isShutDown,
+              !removedSessionIDs.contains(session.id),
+              sessionsByID[session.id] != nil else { return false }
+        if owns(ticket, for: session) { return true }
+        return cancelledEditTicketsBySessionID[session.id] == ticket
     }
 
     private func clearTaskIfOwned(_ ticket: Ticket, for session: RecordingSession) {
@@ -1002,6 +1036,14 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         attemptsBySessionID.removeValue(forKey: session.id)
         leasesBySessionID.removeValue(forKey: session.id)
         nextWriteSequenceBySessionID.removeValue(forKey: session.id)
+    }
+
+    private func clearEditTicketIfMatching(_ ticket: Ticket, for session: RecordingSession) {
+        guard editTicketsBySessionID[session.id] == ticket else { return }
+        editTicketsBySessionID.removeValue(forKey: session.id)
+        if cancelledEditTicketsBySessionID[session.id] == ticket {
+            cancelledEditTicketsBySessionID.removeValue(forKey: session.id)
+        }
     }
 
     private func canonicalSession(for session: RecordingSession) -> RecordingSession? {
@@ -1101,11 +1143,14 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         )
     }
 
-    private func deliverDurablePublication(_ publication: MeetingIntelligencePublished) async {
+    private func deliverDurablePublication(
+        _ publication: MeetingIntelligencePublished,
+        capturedDelivery: ((MeetingIntelligencePublished) -> Void)? = nil
+    ) async {
         // Capture the recipient at the durable boundary. Feature shutdown is
         // permitted to detach its live callback, but it cannot erase a
         // semantic publication whose artifact/title mutation has committed.
-        let delivery = onPublication
+        let delivery = capturedDelivery ?? onPublication
         await publicationDeliveryScheduler.awaitDeliveryAdmission()
         // Do not consult task ownership or cancellation here. Publisher/title
         // success is the durable boundary, and this one semantic event must

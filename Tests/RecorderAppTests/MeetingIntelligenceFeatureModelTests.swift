@@ -228,6 +228,60 @@ final class MeetingIntelligenceFeatureModelTests: XCTestCase {
         XCTAssertEqual(fixture.counters.snapshot.publication, 1)
     }
 
+    func testFeatureDeliversPostReservationEditPublicationAfterShutdownClearsCallback() async throws {
+        let entered = expectation(description: "edit commit reserved")
+        let gate = FeatureGenerationGate()
+        let editor = BlockingFeatureArtifactEditor(entered: entered, gate: gate)
+        let delivery = FeatureBlockingPublicationDelivery()
+        let fixture = try FeatureFixture(
+            publicationDeliveryScheduler: delivery,
+            artifactEditorOverride: editor
+        )
+        let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
+        let captured = testArtifact()
+        fixture.artifacts.artifact = captured
+        feature.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+        XCTAssertEqual(feature.presentation(for: fixture.session).phase, .stale)
+
+        let edited = fixture.editedArtifact(
+            from: captured,
+            summary: "Feature edited summary",
+            title: "Feature edited title",
+            editedAt: Date(timeIntervalSince1970: 654)
+        )
+        editor.result = edited
+        let delivered = expectation(description: "post-reservation edit publication delivered")
+        var publications: [MeetingIntelligencePublished] = []
+        feature.onPublished = {
+            publications.append($0)
+            delivered.fulfill()
+        }
+
+        let save = Task { @MainActor in
+            await feature.saveEdit(
+                for: fixture.session,
+                capturedArtifact: captured,
+                summary: "Feature edited summary",
+                suggestedTitle: "Feature edited title",
+                workspaceFence: WorkspacePublicationFence(revision: 902)
+            )
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        feature.shutdown()
+        await gate.release()
+        await fulfillment(of: [delivery.admitted], timeout: 1)
+        await delivery.release()
+        await fulfillment(of: [delivered], timeout: 1)
+
+        let outcome = await save.value
+        XCTAssertEqual(outcome, .conflict("The meeting intelligence edit was cancelled."))
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(publications.first?.identity.kind, .editedArtifact)
+        XCTAssertEqual(publications.first?.artifact, edited)
+        XCTAssertEqual(fixture.counters.snapshot.publication, 0)
+    }
+
     func testFeatureForwardsAutomaticPublicationAndTranscriptEditWithoutAutomaticRestart() async throws {
         let fixture = try FeatureFixture()
         let feature = MeetingIntelligenceFeatureModel(coordinator: fixture.coordinator)
@@ -549,6 +603,40 @@ private final class FeatureArtifactEditor: MeetingIntelligenceArtifactEditing, @
         _ request: MeetingIntelligenceArtifactEditRequest
     ) async throws -> MeetingIntelligenceArtifact {
         requests.append(request)
+        return result ?? .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: request.proposedSummary,
+            suggestedTitle: request.proposedSuggestedTitle,
+            sourceTranscriptSHA256: request.capturedArtifact.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: request.capturedArtifact.sourceTranscriptByteCount,
+            model: request.capturedArtifact.model,
+            generatedAt: request.capturedArtifact.generatedAt,
+            intent: request.capturedArtifact.intent,
+            contentOrigin: .edited,
+            editedAt: request.editedAt
+        )
+    }
+}
+
+private final class BlockingFeatureArtifactEditor: MeetingIntelligenceArtifactEditing, @unchecked Sendable {
+    let entered: XCTestExpectation
+    let gate: FeatureGenerationGate
+    var result: MeetingIntelligenceArtifact?
+
+    init(entered: XCTestExpectation, gate: FeatureGenerationGate) {
+        self.entered = entered
+        self.gate = gate
+    }
+
+    func save(
+        _ request: MeetingIntelligenceArtifactEditRequest
+    ) async throws -> MeetingIntelligenceArtifact {
+        guard let reservation = request.lease.beginCommit() else {
+            throw MeetingIntelligenceArtifactEditError.leaseInvalid
+        }
+        entered.fulfill()
+        await gate.wait()
+        reservation.finish()
         return result ?? .init(
             schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
             summary: request.proposedSummary,

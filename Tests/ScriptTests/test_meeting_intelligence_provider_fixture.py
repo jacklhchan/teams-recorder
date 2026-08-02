@@ -123,8 +123,12 @@ class MeetingIntelligenceProviderFixtureTests(unittest.TestCase):
                 "Authorization",
                 "messages",
             ):
-                with self.subTest(forbidden=forbidden):
-                    self.assertNotIn(forbidden, telemetry)
+                with self.subTest(check="telemetry redaction"):
+                    self.assertNotIn(
+                        forbidden,
+                        telemetry,
+                        "Telemetry must exclude sensitive request data",
+                    )
 
 
 if __name__ == "__main__":

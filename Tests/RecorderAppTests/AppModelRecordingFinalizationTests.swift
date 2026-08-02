@@ -241,9 +241,11 @@ private final class FinalizationCaptureSource: CaptureSourceProtocol {
     func start(selection _: ResolvedCaptureSelection, microphoneUID _: String?, onAudio _: @escaping (AudioFrameBlock) -> Void, onVideo _: @escaping (ScreenVideoFrame) -> Void, onEvent _: @escaping (CaptureEvent) -> Void) async throws {}
     func stop() async {
         guard pauseStop else { return }
-        stopWaiters.forEach { $0.resume() }
-        stopWaiters.removeAll()
-        await withCheckedContinuation { stopContinuation = $0 }
+        await withCheckedContinuation { continuation in
+            stopContinuation = continuation
+            stopWaiters.forEach { $0.resume() }
+            stopWaiters.removeAll()
+        }
     }
     func waitForPausedStop() async {
         if stopContinuation != nil { return }

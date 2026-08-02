@@ -32,6 +32,7 @@ final class AIProviderSettingsModel: ObservableObject {
     @Published var llmModel = "" { didSet { invalidateConnectionTest() } }
     @Published var language = "" { didSet { invalidateConnectionTest() } }
     @Published var prompt = "" { didSet { invalidateConnectionTest() } }
+    @Published var meetingIntelligencePrompt = "" { didSet { invalidateConnectionTest() } }
     @Published private(set) var discoveredModels: [String] = []
     @Published private(set) var apiKeyStatus: APIKeyStatus = .absent
     @Published private(set) var hasSavedProfile = false
@@ -75,6 +76,7 @@ final class AIProviderSettingsModel: ObservableObject {
         var llmModel = ""
         var language = ""
         var prompt = ""
+        var meetingIntelligencePrompt = ""
 
         static func blank(for kind: AIProviderKind) -> Self {
             switch kind {
@@ -96,11 +98,13 @@ final class AIProviderSettingsModel: ObservableObject {
             llmModel = profile.llmModel
             language = profile.language
             prompt = profile.prompt
+            meetingIntelligencePrompt = profile.meetingIntelligencePrompt
         }
 
         init(
             baseURLText: String = "", groupIDText: String = "", asrModel: String = "",
-            llmModel: String = "", language: String = "", prompt: String = ""
+            llmModel: String = "", language: String = "", prompt: String = "",
+            meetingIntelligencePrompt: String = ""
         ) {
             self.baseURLText = baseURLText
             self.groupIDText = groupIDText
@@ -108,6 +112,7 @@ final class AIProviderSettingsModel: ObservableObject {
             self.llmModel = llmModel
             self.language = language
             self.prompt = prompt
+            self.meetingIntelligencePrompt = meetingIntelligencePrompt
         }
     }
 
@@ -279,7 +284,8 @@ final class AIProviderSettingsModel: ObservableObject {
     private func currentDraft() -> Draft {
         .init(
             baseURLText: baseURLText, groupIDText: groupIDText, asrModel: asrModel,
-            llmModel: llmModel, language: language, prompt: prompt
+            llmModel: llmModel, language: language, prompt: prompt,
+            meetingIntelligencePrompt: meetingIntelligencePrompt
         )
     }
 
@@ -291,6 +297,7 @@ final class AIProviderSettingsModel: ObservableObject {
         llmModel = draft.llmModel
         language = draft.language
         prompt = draft.prompt
+        meetingIntelligencePrompt = draft.meetingIntelligencePrompt
         applyingDraft = false
     }
 
@@ -299,12 +306,14 @@ final class AIProviderSettingsModel: ObservableObject {
         case .openAICompatible:
             try OpenAICompatibleProviderProfile.validated(
                 baseURLText: baseURLText, asrModel: asrModel, llmModel: llmModel,
-                language: language, prompt: prompt
+                language: language, prompt: prompt,
+                meetingIntelligencePrompt: meetingIntelligencePrompt
             )
         case .hktGenAI:
             try OpenAICompatibleProviderProfile.hktValidated(
                 groupID: groupIDText, asrModel: asrModel, llmModel: llmModel,
-                language: language, prompt: prompt
+                language: language, prompt: prompt,
+                meetingIntelligencePrompt: meetingIntelligencePrompt
             )
         }
     }

@@ -75,15 +75,27 @@ final class OpenAICompatibleProviderProfileStore: ProviderPresetProfileStoring, 
 
     private func loadEnvelopeMigratingLegacy() throws -> ProviderProfileEnvelope? {
         guard let data = defaults.data(forKey: Self.key) else { return nil }
-        if let envelope = try? JSONDecoder().decode(ProviderProfileEnvelope.self, from: data) {
-            return try validatedEnvelope(envelope)
+        let envelope: ProviderProfileEnvelope?
+        do {
+            envelope = try JSONDecoder().decode(ProviderProfileEnvelope.self, from: data)
+        } catch let error as ProviderProfileValidationError {
+            throw error
+        } catch {
+            envelope = nil
+        }
+        if let envelope {
+            let validated = try validatedEnvelope(envelope)
+            if validated != envelope {
+                try saveEnvelope(validated)
+            }
+            return validated
         }
         let legacy = try JSONDecoder().decode(OpenAICompatibleProviderProfile.self, from: data)
         let generic = try OpenAICompatibleProviderProfile.validatedPersisted(legacy)
         guard generic.providerKind == .openAICompatible else { throw ProviderProfileValidationError.invalidProviderConfiguration }
-        let envelope = try validatedEnvelope(.init(schemaVersion: ProviderProfileEnvelope.currentSchemaVersion, activeProviderKind: .openAICompatible, genericProfile: generic, hktProfile: nil))
-        try saveEnvelope(envelope)
-        return envelope
+        let legacyEnvelope = try validatedEnvelope(.init(schemaVersion: ProviderProfileEnvelope.currentSchemaVersion, activeProviderKind: .openAICompatible, genericProfile: generic, hktProfile: nil))
+        try saveEnvelope(legacyEnvelope)
+        return legacyEnvelope
     }
 
     private func validatedEnvelope(_ envelope: ProviderProfileEnvelope) throws -> ProviderProfileEnvelope {

@@ -2,6 +2,103 @@ import XCTest
 @testable import RecorderApp
 
 final class OpenAICompatibleProviderProfileTests: XCTestCase {
+    func testSchemaV2MigratesV1ASRPromptAndRoundTripsMeetingIntelligencePrompt() throws {
+        let v1Data = Data(
+            #"{"schemaVersion":1,"baseURL":"https://api.example.com/v1","asrModel":"asr","llmModel":"llm","language":"yue","prompt":"ASR guidance"}"#.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(
+            OpenAICompatibleProviderProfile.self,
+            from: v1Data
+        )
+        let migrated = try OpenAICompatibleProviderProfile.validatedPersisted(decoded)
+
+        XCTAssertEqual(OpenAICompatibleProviderProfile.currentSchemaVersion, 2)
+        XCTAssertEqual(decoded.meetingIntelligencePrompt, "")
+        XCTAssertEqual(migrated.schemaVersion, 2)
+        XCTAssertEqual(migrated.prompt, "ASR guidance")
+        XCTAssertEqual(migrated.meetingIntelligencePrompt, "")
+
+        let profile = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "asr",
+            llmModel: "llm",
+            language: "yue",
+            prompt: "ASR guidance",
+            meetingIntelligencePrompt: " Summarize decisions "
+        )
+        let roundTripped = try JSONDecoder().decode(
+            OpenAICompatibleProviderProfile.self,
+            from: JSONEncoder().encode(profile)
+        )
+
+        XCTAssertEqual(roundTripped.meetingIntelligencePrompt, "Summarize decisions")
+    }
+
+    func testMeetingIntelligencePromptNormalizesWhitespaceAndNFC() throws {
+        let profile = try makeProfile(
+            meetingIntelligencePrompt: "\n\tCafe\u{301}\n\t"
+        )
+
+        XCTAssertEqual(profile.meetingIntelligencePrompt, "Café")
+
+        let multiline = try makeProfile(
+            meetingIntelligencePrompt: "\n\tSummarize\tdecisions\nnext steps\t\n"
+        )
+        XCTAssertEqual(
+            multiline.meetingIntelligencePrompt,
+            "Summarize\tdecisions\nnext steps"
+        )
+    }
+
+    func testMeetingIntelligencePromptAccepts8192UTF8BytesAndRejects8193() throws {
+        let accepted = String(repeating: "é", count: 4_096)
+        XCTAssertEqual(accepted.utf8.count, 8_192)
+        XCTAssertNoThrow(try makeProfile(meetingIntelligencePrompt: accepted))
+
+        let submitted = accepted + "a"
+        XCTAssertEqual(submitted.utf8.count, 8_193)
+        XCTAssertThrowsError(try makeProfile(meetingIntelligencePrompt: submitted)) {
+            XCTAssertEqual(
+                $0 as? ProviderProfileValidationError,
+                .meetingIntelligencePromptTooLarge
+            )
+            XCTAssertFalse($0.localizedDescription.contains(submitted))
+        }
+    }
+
+    func testMeetingIntelligencePromptRejectsC0C1AndFormatScalarsWithoutEchoingValue() {
+        for submitted in [
+            "contains\u{0001}control",
+            "contains\u{0085}control",
+            "contains\u{200B}format"
+        ] {
+            XCTAssertThrowsError(try makeProfile(meetingIntelligencePrompt: submitted)) {
+                XCTAssertEqual(
+                    $0 as? ProviderProfileValidationError,
+                    .unsafeMeetingIntelligencePrompt
+                )
+                XCTAssertFalse($0.localizedDescription.contains(submitted))
+            }
+        }
+    }
+
+    func testRejectsFutureProfileSchemaV3() {
+        let future = Data(
+            #"{"schemaVersion":3,"baseURL":"https://api.example.com/v1","asrModel":"asr","llmModel":"llm","language":"yue","prompt":"ASR guidance","meetingIntelligencePrompt":"future"}"#.utf8
+        )
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(OpenAICompatibleProviderProfile.self, from: future)
+        ) {
+            XCTAssertEqual(
+                $0 as? ProviderProfileValidationError,
+                .unsupportedSchemaVersion(3)
+            )
+            XCTAssertFalse($0.localizedDescription.contains("future"))
+        }
+    }
+
     func testNormalizesRootURLToV1() throws {
         let profile = try makeProfile(baseURL: "https://api.example.com/")
 
@@ -120,14 +217,16 @@ final class OpenAICompatibleProviderProfileTests: XCTestCase {
     }
 
     private func makeProfile(
-        baseURL: String = "https://api.example.com/v1"
+        baseURL: String = "https://api.example.com/v1",
+        meetingIntelligencePrompt: String = ""
     ) throws -> OpenAICompatibleProviderProfile {
         try OpenAICompatibleProviderProfile.validated(
             baseURLText: baseURL,
             asrModel: "asr-model",
             llmModel: "llm-model",
             language: "yue",
-            prompt: ""
+            prompt: "",
+            meetingIntelligencePrompt: meetingIntelligencePrompt
         )
     }
 }

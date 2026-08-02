@@ -61,6 +61,94 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertEqual(repository.activeKind, .hktGenAI)
     }
 
+    func testUnsavedGenericAndHKTDraftsRetainASRAndMeetingIntelligencePromptsIndependently() throws {
+        let generic = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "generic-asr",
+            llmModel: "generic-llm",
+            language: "yue",
+            prompt: "saved generic ASR",
+            meetingIntelligencePrompt: "saved generic MI"
+        )
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "42",
+            asrModel: "hkt-asr",
+            llmModel: "hkt-llm",
+            language: "en",
+            prompt: "saved hkt ASR",
+            meetingIntelligencePrompt: "saved hkt MI"
+        )
+        let repository = RecordingProviderRepository(
+            profiles: [.openAICompatible: generic, .hktGenAI: hkt],
+            activeKind: .openAICompatible,
+            keys: [:]
+        )
+        let model = AIProviderSettingsModel(repository: repository, client: StubProviderClient())
+
+        model.prompt = "unsaved generic ASR"
+        model.meetingIntelligencePrompt = "unsaved generic MI"
+        model.selectedProviderKind = .hktGenAI
+        model.prompt = "unsaved hkt ASR"
+        model.meetingIntelligencePrompt = "unsaved hkt MI"
+        model.selectedProviderKind = .openAICompatible
+
+        XCTAssertEqual(model.prompt, "unsaved generic ASR")
+        XCTAssertEqual(model.meetingIntelligencePrompt, "unsaved generic MI")
+        model.selectedProviderKind = .hktGenAI
+        XCTAssertEqual(model.prompt, "unsaved hkt ASR")
+        XCTAssertEqual(model.meetingIntelligencePrompt, "unsaved hkt MI")
+        XCTAssertEqual(repository.saveCount, 0)
+    }
+
+    func testSaveAndReloadRoundTripsASRAndMeetingIntelligencePrompts() {
+        let repository = RecordingProviderRepository()
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+        model.prompt = "ASR guidance"
+        model.meetingIntelligencePrompt = "Summarize decisions"
+
+        model.save()
+        model.prompt = "discarded ASR"
+        model.meetingIntelligencePrompt = "discarded MI"
+        model.reload()
+
+        XCTAssertEqual(repository.profiles[.openAICompatible]?.prompt, "ASR guidance")
+        XCTAssertEqual(
+            repository.profiles[.openAICompatible]?.meetingIntelligencePrompt,
+            "Summarize decisions"
+        )
+        XCTAssertEqual(model.prompt, "ASR guidance")
+        XCTAssertEqual(model.meetingIntelligencePrompt, "Summarize decisions")
+    }
+
+    func testFailedSavePreservesPriorRepositoryPrompts() throws {
+        let prior = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "prior-asr",
+            llmModel: "prior-llm",
+            language: "yue",
+            prompt: "prior ASR",
+            meetingIntelligencePrompt: "prior MI"
+        )
+        let repository = RecordingProviderRepository(profile: prior, saveError: TestError.failed)
+        let model = AIProviderSettingsModel(repository: repository, client: StubProviderClient())
+        model.prompt = "new ASR"
+        model.meetingIntelligencePrompt = "new MI"
+
+        model.save()
+
+        XCTAssertEqual(repository.profiles[.openAICompatible], prior)
+        XCTAssertEqual(repository.saveCount, 0)
+        XCTAssertEqual(model.status, "Could not update provider settings.")
+    }
+
     func testPickerKeepsReplacementKeyWithItsUnsavedPresetDraft() throws {
         let generic = try makeProfile()
         let hkt = try OpenAICompatibleProviderProfile.hktValidated(

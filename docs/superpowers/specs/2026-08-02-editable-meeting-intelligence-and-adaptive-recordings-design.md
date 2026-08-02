@@ -2,7 +2,7 @@
 
 Date: 2026-08-02
 
-Status: Approved design candidate awaiting written-spec review
+Status: Approved by the user on 2026-08-02
 
 Base: `codex/pr7-direction-a-visual-alignment` at `d460279`
 

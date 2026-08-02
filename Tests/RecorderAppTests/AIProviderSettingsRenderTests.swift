@@ -96,6 +96,51 @@ final class AIProviderSettingsRenderTests: XCTestCase {
             range: validSource.range(of: "TextEditor(text: $model.meetingIntelligencePrompt)")
                 .map { $0.lowerBound..<validSource.endIndex }
         )
+        let meetingIntelligenceHeader = [
+            "Text(\"Meeting Intelligence Prompt\")",
+            "    .font(.subheadline)",
+            "Text(\"Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.\")",
+            "    .font(.caption)",
+            "    .foregroundStyle(.secondary)"
+        ].joined(separator: "\n")
+        let swappedMeetingIntelligenceHeader = [
+            "Text(\"Meeting Intelligence Prompt\")",
+            "    .font(.caption)",
+            "Text(\"Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.\")",
+            "    .font(.subheadline)",
+            "    .foregroundStyle(.secondary)"
+        ].joined(separator: "\n")
+        let styleSwapSource = validSource.replacingOccurrences(
+            of: meetingIntelligenceHeader,
+            with: swappedMeetingIntelligenceHeader,
+            options: [],
+            range: validSource.range(of: "Text(\"Meeting Intelligence Prompt\")")
+                .map { $0.lowerBound..<validSource.endIndex }
+        )
+        let orderedMeetingIntelligenceModifiers = [
+            "    .accessibilityLabel(\"Meeting Intelligence Prompt\")",
+            "    .providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)",
+            "    .frame(minHeight: 58, maxHeight: 96)"
+        ].joined(separator: "\n")
+        let reorderedMeetingIntelligenceModifiers = [
+            "    .accessibilityLabel(\"Meeting Intelligence Prompt\")",
+            "    .frame(minHeight: 58, maxHeight: 96)",
+            "    .providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)"
+        ].joined(separator: "\n")
+        let modifierReorderedSource = validSource.replacingOccurrences(
+            of: orderedMeetingIntelligenceModifiers,
+            with: reorderedMeetingIntelligenceModifiers,
+            options: [],
+            range: validSource.range(of: "TextEditor(text: $model.meetingIntelligencePrompt)")
+                .map { $0.lowerBound..<validSource.endIndex }
+        )
+        let nestedLabelSource = validSource.replacingOccurrences(
+            of: "    .accessibilityLabel(\"Meeting Intelligence Prompt\")",
+            with: "    .background(Text(\"Nested view\").accessibilityLabel(\"Meeting Intelligence Prompt\"))",
+            options: [],
+            range: validSource.range(of: "TextEditor(text: $model.meetingIntelligencePrompt)")
+                .map { $0.lowerBound..<validSource.endIndex }
+        )
 
         XCTAssertTrue(
             PromptEditorSourceContract.matches(validSource),
@@ -107,6 +152,18 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         )
         XCTAssertFalse(
             PromptEditorSourceContract.matches(missingFrameSource),
+            "Prompt editor source contract accepted an invalid mutation."
+        )
+        XCTAssertFalse(
+            PromptEditorSourceContract.matches(styleSwapSource),
+            "Prompt editor source contract accepted an invalid mutation."
+        )
+        XCTAssertFalse(
+            PromptEditorSourceContract.matches(modifierReorderedSource),
+            "Prompt editor source contract accepted an invalid mutation."
+        )
+        XCTAssertFalse(
+            PromptEditorSourceContract.matches(nestedLabelSource),
             "Prompt editor source contract accepted an invalid mutation."
         )
     }
@@ -280,110 +337,106 @@ final class AIProviderSettingsRenderTests: XCTestCase {
 
 private enum PromptEditorSourceContract {
     private static let asrTitle = #"Text("ASR Prompt")"#
+    private static let asrHelp = #"Text("Optional transcription guidance sent only with future transcription jobs.")"#
     private static let meetingIntelligenceTitle = #"Text("Meeting Intelligence Prompt")"#
     private static let meetingIntelligenceHelp = #"Text("Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.")"#
     private static let actionsBoundary = "HStack(alignment: .center, spacing: 10) {"
     private static let frame = ".frame(minHeight: 58, maxHeight: 96)"
     private static let overlay = ".overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))"
 
-    private struct EditorChain {
-        let source: String
-        let trailingSectionSource: String
+    private struct SourceLine {
+        let text: String
+        let indentation: Int
     }
 
     static func matches(_ source: String) -> Bool {
-        guard let asrTitleRange = source.range(of: asrTitle),
-              let meetingIntelligenceTitleRange = source.range(
-                of: meetingIntelligenceTitle,
-                range: asrTitleRange.upperBound..<source.endIndex
-              ),
-              let actionsBoundaryRange = source.range(
-                of: actionsBoundary,
-                range: meetingIntelligenceTitleRange.upperBound..<source.endIndex
-              ) else {
+        let lines = normalizedLines(source)
+        guard let asrTitleIndex = lines.firstIndex(where: { $0.text == asrTitle }) else {
+            return false
+        }
+        let afterASRTitle = lines.index(after: asrTitleIndex)
+        guard let meetingIntelligenceTitleIndex = lines[afterASRTitle...]
+            .firstIndex(where: { $0.text == meetingIntelligenceTitle }) else {
+            return false
+        }
+        let afterMeetingIntelligenceTitle = lines.index(after: meetingIntelligenceTitleIndex)
+        guard let actionsBoundaryIndex = lines[afterMeetingIntelligenceTitle...]
+            .firstIndex(where: { $0.text == actionsBoundary }) else {
             return false
         }
 
-        let asrSection = String(source[asrTitleRange.lowerBound..<meetingIntelligenceTitleRange.lowerBound])
-        let meetingIntelligenceSection = String(
-            source[meetingIntelligenceTitleRange.lowerBound..<actionsBoundaryRange.lowerBound]
+        let asrSection = Array(lines[asrTitleIndex..<meetingIntelligenceTitleIndex])
+        let meetingIntelligenceSection = Array(
+            lines[meetingIntelligenceTitleIndex..<actionsBoundaryIndex]
         )
-        guard let asrEditorChain = editorChain(
-            in: asrSection,
-            binding: "TextEditor(text: $model.prompt)"
-        ), let meetingIntelligenceEditorChain = editorChain(
-            in: meetingIntelligenceSection,
-            binding: "TextEditor(text: $model.meetingIntelligencePrompt)"
-        ) else {
-            return false
-        }
+        return matchesPromptSection(
+            asrSection,
+            title: asrTitle,
+            help: asrHelp,
+            binding: "TextEditor(text: $model.prompt)",
+            accessibilityLabel: #".accessibilityLabel("ASR Prompt")"#,
+            accessibilityIdentifier: ".providerAccessibility(RecorderActionID.providerPrompt)",
+            expectsClosingBrace: false
+        ) && matchesPromptSection(
+            meetingIntelligenceSection,
+            title: meetingIntelligenceTitle,
+            help: meetingIntelligenceHelp,
+            binding: "TextEditor(text: $model.meetingIntelligencePrompt)",
+            accessibilityLabel: #".accessibilityLabel("Meeting Intelligence Prompt")"#,
+            accessibilityIdentifier: ".providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)",
+            expectsClosingBrace: true
+        )
+    }
 
-        let asrChainRequirements = [
-            "TextEditor(text: $model.prompt)",
-            #".accessibilityLabel("ASR Prompt")"#,
-            ".providerAccessibility(RecorderActionID.providerPrompt)",
-            frame,
-            overlay
-        ]
-        let meetingIntelligenceChainRequirements = [
-            "TextEditor(text: $model.meetingIntelligencePrompt)",
-            #".accessibilityLabel("Meeting Intelligence Prompt")"#,
-            ".providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)",
-            frame,
-            overlay
-        ]
-        let meetingIntelligenceSectionRequirements = [
-            meetingIntelligenceTitle,
-            meetingIntelligenceHelp,
+    private static func matchesPromptSection(
+        _ section: [SourceLine],
+        title: String,
+        help: String,
+        binding: String,
+        accessibilityLabel: String,
+        accessibilityIdentifier: String,
+        expectsClosingBrace: Bool
+    ) -> Bool {
+        let expectedCore = [
+            title,
             ".font(.subheadline)",
+            help,
             ".font(.caption)",
-            ".foregroundStyle(.secondary)"
+            ".foregroundStyle(.secondary)",
+            binding,
+            accessibilityLabel,
+            accessibilityIdentifier,
+            frame,
+            overlay
         ]
+        let expectedCount = expectedCore.count + (expectsClosingBrace ? 1 : 0)
+        guard section.count == expectedCount else { return false }
 
-        return asrChainRequirements.allSatisfy(asrEditorChain.source.contains)
-            && meetingIntelligenceChainRequirements.allSatisfy(
-                meetingIntelligenceEditorChain.source.contains
-            )
-            && meetingIntelligenceSectionRequirements.allSatisfy(
-                meetingIntelligenceSection.contains
-            )
-            && asrEditorChain.trailingSectionSource
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
-            && meetingIntelligenceEditorChain.trailingSectionSource
-                .trimmingCharacters(in: .whitespacesAndNewlines) == "}"
-    }
+        let core = Array(section.prefix(expectedCore.count))
+        guard core.map(\.text) == expectedCore else { return false }
 
-    private static func editorChain(in section: String, binding: String) -> EditorChain? {
-        guard occurrences(of: "TextEditor(", in: section) == 1,
-              occurrences(of: binding, in: section) == 1,
-              let bindingRange = section.range(of: binding),
-              let overlayRange = section.range(
-                of: overlay,
-                range: bindingRange.upperBound..<section.endIndex
-              ) else {
-            return nil
+        let baseIndentation = core[0].indentation
+        let expectedIndentationDeltas = [0, 4, 0, 4, 4, 0, 4, 4, 4, 4]
+        guard core.enumerated().allSatisfy({ index, line in
+            line.indentation == baseIndentation + expectedIndentationDeltas[index]
+        }) else {
+            return false
         }
 
-        let chainSource = String(section[bindingRange.lowerBound..<overlayRange.upperBound])
-        let chainLines = chainSource.split(separator: "\n", omittingEmptySubsequences: false)
-        guard let bindingLine = chainLines.first,
-              bindingLine.trimmingCharacters(in: .whitespacesAndNewlines) == binding,
-              chainLines.dropFirst().allSatisfy({ line in
-                let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmedLine.isEmpty || trimmedLine.hasPrefix(".")
-              }) else {
-            return nil
-        }
-
-        return EditorChain(
-            source: chainSource,
-            trailingSectionSource: String(section[overlayRange.upperBound...])
-        )
+        return !expectsClosingBrace || section.last?.text == "}"
     }
 
-    private static func occurrences(of fragment: String, in source: String) -> Int {
-        source.components(separatedBy: fragment).count - 1
+    private static func normalizedLines(_ source: String) -> [SourceLine] {
+        source.components(separatedBy: .newlines).compactMap { rawLine in
+            let text = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            let indentation = rawLine.prefix(while: { character in
+                character == " " || character == "\t"
+            }).reduce(into: 0) { count, character in
+                count += character == "\t" ? 4 : 1
+            }
+            return SourceLine(text: text, indentation: indentation)
+        }
     }
 }
 

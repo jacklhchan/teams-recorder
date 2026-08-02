@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Approved specification: `docs/superpowers/specs/2026-08-02-editable-meeting-intelligence-and-adaptive-recordings-design.md`.
-- Planning baseline: `codex/pr7-direction-a-visual-alignment` at `a5aef88`. Execute in a new child worktree and branch created from the commit containing this plan; never edit the repository-root `main` worktree during implementation.
+- Planning baseline: `codex/pr7-direction-a-visual-alignment` at `c3cf581`. This checkout is already a linked worktree, so create and switch it to `codex/editable-mi-adaptive-recordings` from the commit containing this plan; do not create a nested worktree and never edit the repository-root `main` worktree during implementation.
 - The controller assigns every implementation/fix task to `gpt-5.6-luna` with reasoning effort `max`. It assigns every task review and final whole-stack review to `gpt-5.6-sol` with reasoning effort `max`.
 - Every behavior change follows RED → capture the expected failure → minimal GREEN → focused regressions → `git diff --check` → path-limited commit. A pre-existing failure or a test that already passes is not RED evidence.
 - Preserve unrelated root-worktree files, including `.superpowers/`, `docs/Local-Meeting-Recorder-Setup-Tutorial-zh-Hant.md`, and `docs/assets/`. Do not clean, reset, delete, overwrite, or stage them.

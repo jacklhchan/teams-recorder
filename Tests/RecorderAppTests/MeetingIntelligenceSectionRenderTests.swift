@@ -6,6 +6,174 @@ import XCTest
 
 @MainActor
 final class MeetingIntelligenceSectionRenderTests: XCTestCase {
+    func testEditControllerCancelNeverSubmitsAndDiscardsDraft() {
+        let controller = MeetingIntelligenceEditController()
+        let identity = snapshot(1, phase: .ready, title: "Current title").identity
+        controller.begin(projection: editableReadyPresentation(), identity: identity)
+        controller.edit(summary: "Draft summary", suggestedTitle: "Draft title")
+
+        XCTAssertTrue(controller.isEditing)
+        controller.cancel()
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertNil(controller.submit())
+    }
+
+    func testEditControllerDisablesUnchangedDraftAndGuardsSubmit() {
+        let controller = MeetingIntelligenceEditController()
+        let projection = editableReadyPresentation()
+        controller.begin(
+            projection: projection,
+            identity: snapshot(1, phase: .ready, title: "Current title").identity
+        )
+
+        XCTAssertTrue(controller.isSaveDisabled)
+        XCTAssertNil(controller.submit())
+    }
+
+    func testEditControllerAllowsOnlyOneSubmitWhileSaving() {
+        let controller = MeetingIntelligenceEditController()
+        controller.begin(
+            projection: editableReadyPresentation(),
+            identity: snapshot(1, phase: .ready, title: "Current title").identity
+        )
+        controller.edit(summary: "Draft summary", suggestedTitle: "Draft title")
+
+        let first = controller.submit()
+        let duplicate = controller.submit()
+
+        XCTAssertNotNil(first)
+        XCTAssertTrue(controller.isSaving)
+        XCTAssertTrue(controller.isSaveDisabled)
+        XCTAssertNil(duplicate)
+    }
+
+    func testEditControllerValidationAndStorageFailuresKeepDrafts() {
+        let controller = MeetingIntelligenceEditController()
+        controller.begin(
+            projection: editableReadyPresentation(),
+            identity: snapshot(1, phase: .ready, title: "Current title").identity
+        )
+
+        controller.edit(summary: " ", suggestedTitle: "Draft title")
+        XCTAssertNil(controller.submit())
+        XCTAssertEqual(controller.draftSummary, " ")
+        XCTAssertEqual(controller.draftSuggestedTitle, "Draft title")
+        XCTAssertEqual(controller.editStatus, "Enter a valid summary before saving.")
+
+        controller.edit(summary: "Draft summary", suggestedTitle: ".")
+        XCTAssertNil(controller.submit())
+        XCTAssertEqual(controller.draftSummary, "Draft summary")
+        XCTAssertEqual(controller.draftSuggestedTitle, ".")
+        XCTAssertEqual(controller.editStatus, "Enter a valid suggested title before saving.")
+
+        controller.edit(summary: "Draft summary", suggestedTitle: "Draft title")
+        let request = try! XCTUnwrap(controller.submit())
+        controller.receiveOutcome(.failed("storage"), for: request.attemptID)
+
+        XCTAssertTrue(controller.isEditing)
+        XCTAssertFalse(controller.isSaving)
+        XCTAssertEqual(controller.draftSummary, "Draft summary")
+        XCTAssertEqual(controller.draftSuggestedTitle, "Draft title")
+        XCTAssertEqual(controller.editStatus, "Could not save the edits. Your draft is still here. Try again.")
+    }
+
+    func testEditControllerSavedOutcomeExitsOnlyAfterMatchingProjection() throws {
+        let original = editableReadyPresentation()
+        let identity = snapshot(1, phase: .ready, title: "Current title").identity
+        let controller = MeetingIntelligenceEditController()
+        controller.begin(projection: original, identity: identity)
+        controller.edit(summary: "Draft summary", suggestedTitle: "Draft title")
+        let request = try XCTUnwrap(controller.submit())
+        let saved = artifact(from: try XCTUnwrap(original.editableContent?.artifact), summary: "Draft summary", title: "Draft title")
+
+        controller.receiveOutcome(.saved(saved), for: request.attemptID)
+
+        XCTAssertTrue(controller.isEditing)
+        XCTAssertFalse(controller.isSaving)
+
+        controller.observeProjection(editablePresentation(for: saved), identity: identity)
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertNil(controller.editStatus)
+    }
+
+    func testEditControllerArtifactReplacementExitsEditAndRejectsLateResponse() throws {
+        let original = editableReadyPresentation()
+        let identity = snapshot(1, phase: .ready, title: "Current title").identity
+        let controller = MeetingIntelligenceEditController()
+        controller.begin(projection: original, identity: identity)
+        controller.edit(summary: "Old draft", suggestedTitle: "Old title")
+        let request = try XCTUnwrap(controller.submit())
+        let replacement = artifact(from: try XCTUnwrap(original.editableContent?.artifact), summary: "Canonical summary", title: "Canonical title")
+
+        controller.observeProjection(editablePresentation(for: replacement), identity: identity)
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertFalse(controller.isSaving)
+        XCTAssertEqual(controller.editStatus, "Edit conflict: showing the latest content.")
+
+        controller.receiveOutcome(.saved(replacement), for: request.attemptID)
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertEqual(controller.editStatus, "Edit conflict: showing the latest content.")
+    }
+
+    func testEditControllerIdentityMismatchGuardsAndInvalidatesSubmit() throws {
+        let controller = MeetingIntelligenceEditController()
+        controller.begin(
+            projection: editableReadyPresentation(),
+            identity: snapshot(1, sessionID: "session-1", phase: .ready, title: "Current title").identity
+        )
+        controller.edit(summary: "Draft summary", suggestedTitle: "Draft title")
+        let oldIdentity = snapshot(1, sessionID: "session-1", phase: .ready, title: "Current title").identity
+        let newIdentity = snapshot(2, sessionID: "session-2", phase: .ready, title: "Other title").identity
+        let request = try XCTUnwrap(controller.submit())
+
+        controller.observeProjection(editableReadyPresentation(), identity: newIdentity)
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertFalse(controller.isSaving)
+        XCTAssertNotEqual(oldIdentity, newIdentity)
+        XCTAssertNil(controller.submit())
+        controller.receiveOutcome(.saved(request.artifact), for: request.attemptID)
+        XCTAssertEqual(controller.editStatus, "Edit conflict: showing the latest content.")
+    }
+
+    func testEditControllerOnDisappearRejectsLateResponse() throws {
+        let original = editableReadyPresentation()
+        let identity = snapshot(1, phase: .ready, title: "Current title").identity
+        let controller = MeetingIntelligenceEditController()
+        controller.begin(projection: original, identity: identity)
+        controller.edit(summary: "Draft summary", suggestedTitle: "Draft title")
+        let request = try XCTUnwrap(controller.submit())
+
+        controller.disappear()
+        controller.receiveOutcome(.saved(try XCTUnwrap(original.editableContent?.artifact)), for: request.attemptID)
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertFalse(controller.isSaving)
+        XCTAssertNil(controller.editStatus)
+    }
+
+    func testArtifactReplacementRendersCanonicalReadOnlyProjectionAndConflictStatus() throws {
+        let original = editableReadyPresentation()
+        let state = MeetingIntelligenceSectionRenderState(presentation: original)
+        let host = try MeetingIntelligenceSectionRenderHost(state: state)
+
+        try host.click(RecorderActionID.meetingIntelligenceEdit)
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceEditSummary))
+
+        let base = try XCTUnwrap(original.editableContent?.artifact)
+        state.presentation = editablePresentation(for: artifact(from: base, summary: "Canonical summary", title: "Canonical title"))
+        host.renderWithoutWaitingForAnimationCompletion()
+
+        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceEditSummary))
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceSummary))
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceSuggestedTitle))
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceEditStatus))
+    }
+
     func testPhaseMatrixExposesOnlyCurrentCommands() throws {
         try assertCommands(unconfirmedPresentation(), present: [RecorderActionID.meetingIntelligenceCheckAgain, RecorderActionID.meetingIntelligenceGenerate])
         try assertCommands(checkingPresentation(), present: [RecorderActionID.meetingIntelligenceCancel])
@@ -203,7 +371,7 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
     }
 
     private func editableReadyPresentation() -> MeetingIntelligencePresentation {
-        let artifact = MeetingIntelligenceArtifact(
+        return editablePresentation(for: MeetingIntelligenceArtifact(
             schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
             summary: "Summary",
             suggestedTitle: "Suggested title",
@@ -214,8 +382,11 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
             intent: .generate,
             contentOrigin: .generated,
             editedAt: nil
-        )
-        return .init(
+        ))
+    }
+
+    private func editablePresentation(for artifact: MeetingIntelligenceArtifact) -> MeetingIntelligencePresentation {
+        .init(
             phase: .ready,
             summary: artifact.summary,
             suggestedTitle: artifact.suggestedTitle,
@@ -224,6 +395,21 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
             titleIsProtected: true,
             unavailableReason: nil,
             editableContent: .init(artifact: artifact)
+        )
+    }
+
+    private func artifact(from base: MeetingIntelligenceArtifact, summary: String, title: String) -> MeetingIntelligenceArtifact {
+        .init(
+            schemaVersion: base.schemaVersion,
+            summary: summary,
+            suggestedTitle: title,
+            sourceTranscriptSHA256: base.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: base.sourceTranscriptByteCount,
+            model: base.model,
+            generatedAt: base.generatedAt,
+            intent: base.intent,
+            contentOrigin: .edited,
+            editedAt: Date(timeIntervalSince1970: 2)
         )
     }
 

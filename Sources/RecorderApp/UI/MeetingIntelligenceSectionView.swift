@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 private struct MeetingIntelligenceReduceMotionOverrideKey: EnvironmentKey {
@@ -130,6 +131,236 @@ struct MeetingIntelligenceActions {
     }
 }
 
+/// Owns the edit attempt lifecycle independently from SwiftUI rendering.
+/// Every save response must still belong to the active attempt and the
+/// canonical projection before the editor can leave edit mode.
+@MainActor
+final class MeetingIntelligenceEditController: ObservableObject {
+    struct Submission: Equatable, Sendable {
+        let attemptID: UUID
+        let artifact: MeetingIntelligenceArtifact
+        let summary: String
+        let suggestedTitle: String
+    }
+
+    @Published private(set) var isEditing = false
+    @Published private(set) var isSaving = false
+    @Published private(set) var draftSummary = ""
+    @Published private(set) var draftSuggestedTitle = ""
+    @Published private(set) var editStatus: String?
+
+    private var capturedArtifact: MeetingIntelligenceArtifact?
+    private var capturedIdentity: MeetingIntelligenceSessionPresentationIdentity?
+    private var observedProjection: MeetingIntelligencePresentation?
+    private var observedIdentity: MeetingIntelligenceSessionPresentationIdentity?
+    private var activeAttemptID: UUID?
+    private var pendingSavedArtifact: MeetingIntelligenceArtifact?
+    private var requiresFreshEdit = false
+
+    var isDirty: Bool {
+        guard let capturedArtifact else { return false }
+        return draftSummary != capturedArtifact.summary ||
+            draftSuggestedTitle != capturedArtifact.suggestedTitle
+    }
+
+    var isIdentityMismatch: Bool {
+        guard let capturedIdentity else { return false }
+        return observedIdentity != capturedIdentity
+    }
+
+    var isSaveDisabled: Bool {
+        guard isEditing, capturedArtifact != nil else { return true }
+        return isSaving ||
+            pendingSavedArtifact != nil ||
+            requiresFreshEdit ||
+            isIdentityMismatch ||
+            !currentProjectionMatchesCapture ||
+            !isDirty
+    }
+
+    func begin(
+        projection: MeetingIntelligencePresentation,
+        identity: MeetingIntelligenceSessionPresentationIdentity?
+    ) {
+        guard !isEditing,
+              projection.phase == .ready || projection.phase == .stale,
+              let artifact = projection.editableContent?.artifact,
+              MeetingIntelligenceArtifactValidator.isValid(artifact)
+        else { return }
+
+        observedProjection = projection
+        observedIdentity = identity
+        capturedArtifact = artifact
+        capturedIdentity = identity
+        draftSummary = projection.summary ?? artifact.summary
+        draftSuggestedTitle = projection.suggestedTitle ?? artifact.suggestedTitle
+        activeAttemptID = nil
+        pendingSavedArtifact = nil
+        requiresFreshEdit = false
+        editStatus = nil
+        isSaving = false
+        isEditing = true
+    }
+
+    func edit(summary: String, suggestedTitle: String) {
+        guard isEditing, !isSaving, pendingSavedArtifact == nil, !requiresFreshEdit else { return }
+        draftSummary = summary
+        draftSuggestedTitle = suggestedTitle
+        editStatus = nil
+    }
+
+    func submit() -> Submission? {
+        guard isEditing,
+              !isSaveDisabled,
+              let artifact = capturedArtifact,
+              MeetingIntelligenceArtifactValidator.isValid(artifact)
+        else { return nil }
+
+        guard MeetingIntelligenceArtifactValidator.summary(draftSummary) != nil else {
+            editStatus = "Enter a valid summary before saving."
+            return nil
+        }
+        guard MeetingIntelligenceArtifactValidator.title(draftSuggestedTitle) != nil else {
+            editStatus = "Enter a valid suggested title before saving."
+            return nil
+        }
+
+        let submission = Submission(
+            attemptID: UUID(),
+            artifact: artifact,
+            summary: draftSummary,
+            suggestedTitle: draftSuggestedTitle
+        )
+        activeAttemptID = submission.attemptID
+        isSaving = true
+        editStatus = "Saving…"
+        return submission
+    }
+
+    func cancel() {
+        guard isEditing, !isSaving else { return }
+        invalidateEdit()
+    }
+
+    func receiveOutcome(_ outcome: MeetingIntelligenceEditSaveOutcome, for attemptID: UUID) {
+        guard activeAttemptID == attemptID else { return }
+        activeAttemptID = nil
+        isSaving = false
+        guard isEditing else { return }
+
+        switch outcome {
+        case let .saved(artifact):
+            guard MeetingIntelligenceArtifactValidator.isValid(artifact) else {
+                editStatus = "The saved meeting intelligence content was invalid. Your draft is still here."
+                return
+            }
+            pendingSavedArtifact = artifact
+            editStatus = "Saved. Waiting for updated meeting intelligence content."
+            if let observedProjection,
+               !isIdentityMismatch,
+               isAcceptedProjection(artifact, in: observedProjection) {
+                finishEditing()
+            }
+        case .invalidSummary:
+            editStatus = "Enter a valid summary before saving."
+        case .invalidSuggestedTitle:
+            editStatus = "Enter a valid suggested title before saving."
+        case .conflict:
+            markConflict()
+        case .failed:
+            editStatus = "Could not save the edits. Your draft is still here. Try again."
+        }
+    }
+
+    func observeProjection(
+        _ projection: MeetingIntelligencePresentation,
+        identity: MeetingIntelligenceSessionPresentationIdentity?
+    ) {
+        observedProjection = projection
+        observedIdentity = identity
+        guard isEditing else { return }
+
+        guard !isIdentityMismatch else {
+            markConflict()
+            return
+        }
+
+        if let pendingSavedArtifact,
+           isAcceptedProjection(pendingSavedArtifact, in: projection) {
+            finishEditing()
+            return
+        }
+
+        guard let capturedArtifact,
+              projection.phase == .ready || projection.phase == .stale,
+              projection.editableContent?.artifact == capturedArtifact,
+              projection.summary == capturedArtifact.summary,
+              projection.suggestedTitle == capturedArtifact.suggestedTitle
+        else {
+            markConflict()
+            return
+        }
+    }
+
+    func disappear() {
+        invalidateEdit()
+        observedProjection = nil
+        observedIdentity = nil
+    }
+
+    private var currentProjectionMatchesCapture: Bool {
+        guard let observedProjection, let capturedArtifact else { return false }
+        guard !isIdentityMismatch,
+              observedProjection.phase == .ready || observedProjection.phase == .stale,
+              observedProjection.editableContent?.artifact == capturedArtifact,
+              observedProjection.summary == capturedArtifact.summary,
+              observedProjection.suggestedTitle == capturedArtifact.suggestedTitle
+        else { return false }
+        return true
+    }
+
+    private func isAcceptedProjection(
+        _ artifact: MeetingIntelligenceArtifact,
+        in projection: MeetingIntelligencePresentation
+    ) -> Bool {
+        (projection.phase == .ready || projection.phase == .stale) &&
+            projection.editableContent?.artifact == artifact &&
+            projection.summary == artifact.summary &&
+            projection.suggestedTitle == artifact.suggestedTitle
+    }
+
+    private func markConflict() {
+        guard isEditing else { return }
+        activeAttemptID = nil
+        isSaving = false
+        pendingSavedArtifact = nil
+        requiresFreshEdit = true
+        editStatus = "Edit conflict: showing the latest content."
+        isEditing = false
+        draftSummary = ""
+        draftSuggestedTitle = ""
+        capturedArtifact = nil
+        capturedIdentity = nil
+    }
+
+    private func finishEditing() {
+        invalidateEdit()
+    }
+
+    private func invalidateEdit() {
+        activeAttemptID = nil
+        isSaving = false
+        isEditing = false
+        draftSummary = ""
+        draftSuggestedTitle = ""
+        capturedArtifact = nil
+        capturedIdentity = nil
+        pendingSavedArtifact = nil
+        requiresFreshEdit = false
+        editStatus = nil
+    }
+}
+
 struct MeetingIntelligenceSectionView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.meetingIntelligenceReduceMotionOverride) private var reduceMotionOverride
@@ -138,21 +369,12 @@ struct MeetingIntelligenceSectionView: View {
     let actions: MeetingIntelligenceActions
     private let palette: TranscriptDetailPalette
     private let observedSnapshot: RecorderObservedSnapshot?
+    @StateObject private var editController: MeetingIntelligenceEditController
     @State private var previousObservedSnapshot: RecorderObservedSnapshot?
     @State private var showsCompletionFeedback = false
     @State private var highlightsSuggestedTitle = false
     @State private var feedbackResetTask: Task<Void, Never>?
     @State private var revealsContent = false
-    @State private var isEditing = false
-    @State private var summaryDraft = ""
-    @State private var suggestedTitleDraft = ""
-    @State private var capturedArtifact: MeetingIntelligenceArtifact?
-    @State private var capturedSessionIdentity: MeetingIntelligenceSessionPresentationIdentity?
-    @State private var saveAttemptID: UUID?
-    @State private var pendingSavedArtifact: MeetingIntelligenceArtifact?
-    @State private var editStatus: String?
-    @State private var requiresFreshEdit = false
-    @State private var editResponseOwner = UUID()
 
     init(
         presentation: MeetingIntelligencePresentation,
@@ -165,6 +387,7 @@ struct MeetingIntelligenceSectionView: View {
         self.observedSnapshot = observedSnapshot
         self.actions = actions
         self.palette = palette
+        _editController = StateObject(wrappedValue: MeetingIntelligenceEditController())
     }
 
     var body: some View {
@@ -186,7 +409,7 @@ struct MeetingIntelligenceSectionView: View {
             }
             .accessibilityIdentifier(RecorderActionID.meetingIntelligenceCard)
 
-            if isEditing {
+            if editController.isEditing {
                 editFields
                 editControls
             } else {
@@ -225,18 +448,18 @@ struct MeetingIntelligenceSectionView: View {
             resetObservedFeedback()
             previousObservedSnapshot = observedSnapshot
             revealsContent = true
-            reconcileEditProjection(presentation)
+            editController.observeProjection(presentation, identity: observedSnapshot?.identity)
         }
         .onChange(of: presentation) { _, current in
-            reconcileEditProjection(current)
+            editController.observeProjection(current, identity: observedSnapshot?.identity)
         }
         .onChange(of: observedSnapshot) { _, current in
             updateObservedFeedback(current)
-            reconcileEditSession(current)
+            editController.observeProjection(presentation, identity: current?.identity)
         }
         .onDisappear {
             resetObservedFeedback()
-            editResponseOwner = UUID()
+            editController.disappear()
         }
         .animation(.easeInOut(duration: motionPolicy.revealDuration), value: showsCompletionFeedback)
         .animation(.easeInOut(duration: motionPolicy.revealDuration), value: highlightsSuggestedTitle)
@@ -294,6 +517,19 @@ struct MeetingIntelligenceSectionView: View {
                     .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceManualTitleProtection))
             }
         }
+        if let editStatus = editController.editStatus, !editController.isEditing {
+            Text(editStatus)
+                .font(.caption)
+                .foregroundStyle(editStatusColor)
+                .accessibilityIdentifier(RecorderActionID.meetingIntelligenceEditStatus)
+                .accessibilityLabel(editStatus)
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: RecorderActionID.meetingIntelligenceEditStatus,
+                        label: editStatus
+                    )
+                )
+        }
     }
 
     private var editFields: some View {
@@ -302,7 +538,12 @@ struct MeetingIntelligenceSectionView: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(palette.secondary)
                 .accessibilityLabel("Summary")
-            TextEditor(text: $summaryDraft)
+            TextEditor(
+                text: Binding(
+                    get: { editController.draftSummary },
+                    set: { editController.edit(summary: $0, suggestedTitle: editController.draftSuggestedTitle) }
+                )
+            )
                 .font(.callout)
                 .frame(minHeight: 96, maxHeight: 180)
                 .scrollContentBackground(.hidden)
@@ -322,7 +563,13 @@ struct MeetingIntelligenceSectionView: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(palette.secondary)
                 .accessibilityLabel("Suggested title")
-            TextField("Suggested title", text: $suggestedTitleDraft)
+            TextField(
+                "Suggested title",
+                text: Binding(
+                    get: { editController.draftSuggestedTitle },
+                    set: { editController.edit(summary: editController.draftSummary, suggestedTitle: $0) }
+                )
+            )
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier(RecorderActionID.meetingIntelligenceEditSuggestedTitle)
                 .accessibilityLabel("Suggested title")
@@ -342,7 +589,7 @@ struct MeetingIntelligenceSectionView: View {
                     .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceManualTitleProtection))
             }
 
-            if let editStatus {
+            if let editStatus = editController.editStatus {
                 Text(editStatus)
                     .font(.caption)
                     .foregroundStyle(editStatusColor)
@@ -361,181 +608,45 @@ struct MeetingIntelligenceSectionView: View {
     private var editControls: some View {
         HStack(spacing: 8) {
             Button("Cancel", action: cancelEditing)
-                .disabled(isSaving)
+                .disabled(editController.isSaving)
                 .accessibilityIdentifier(RecorderActionID.meetingIntelligenceEditCancel)
                 .accessibilityLabel("Cancel meeting intelligence edit")
                 .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceEditCancel, label: "Cancel meeting intelligence edit"))
             Button("Save", action: submitEdit)
-                .disabled(isSaveDisabled)
+                .disabled(editController.isSaveDisabled)
                 .accessibilityIdentifier(RecorderActionID.meetingIntelligenceEditSave)
-                .accessibilityLabel(isSaving ? "Save meeting intelligence edit, saving" : "Save meeting intelligence edit")
+                .accessibilityLabel(editController.isSaving ? "Save meeting intelligence edit, saving" : "Save meeting intelligence edit")
                 .background(RecorderDestinationAccessibilityMarker(identifier: RecorderActionID.meetingIntelligenceEditSave, label: "Save meeting intelligence edit"))
         }
         .buttonStyle(.bordered)
     }
 
-    private var isSaving: Bool { saveAttemptID != nil }
-
-    private var isSaveDisabled: Bool {
-        isSaving || pendingSavedArtifact != nil || requiresFreshEdit
-    }
-
     private var editStatusColor: Color {
-        isSaving ? .blue : .orange
+        editController.isSaving ? .blue : .orange
     }
 
     private func beginEditing() {
-        guard section.showsEdit,
-              !isEditing,
-              let artifact = presentation.editableContent?.artifact,
-              MeetingIntelligenceArtifactValidator.isValid(artifact)
-        else { return }
-
-        capturedArtifact = artifact
-        capturedSessionIdentity = observedSnapshot?.identity
-        summaryDraft = section.summary ?? artifact.summary
-        suggestedTitleDraft = section.suggestedTitle ?? artifact.suggestedTitle
-        pendingSavedArtifact = nil
-        editStatus = nil
-        requiresFreshEdit = false
-        editResponseOwner = UUID()
-        isEditing = true
+        guard section.showsEdit else { return }
+        editController.begin(projection: presentation, identity: observedSnapshot?.identity)
     }
 
     private func cancelEditing() {
-        guard !isSaving else { return }
-        editResponseOwner = UUID()
-        isEditing = false
-        summaryDraft = ""
-        suggestedTitleDraft = ""
-        capturedArtifact = nil
-        capturedSessionIdentity = nil
-        pendingSavedArtifact = nil
-        editStatus = nil
-        requiresFreshEdit = false
+        editController.cancel()
     }
 
     private func submitEdit() {
-        guard isEditing,
-              !isSaveDisabled,
-              let artifact = capturedArtifact,
-              MeetingIntelligenceArtifactValidator.isValid(artifact)
-        else { return }
-
-        guard MeetingIntelligenceArtifactValidator.summary(summaryDraft) != nil else {
-            editStatus = "Enter a valid summary before saving."
-            return
-        }
-        guard MeetingIntelligenceArtifactValidator.title(suggestedTitleDraft) != nil else {
-            editStatus = "Enter a valid suggested title before saving."
-            return
-        }
-
-        let attempt = UUID()
-        let owner = editResponseOwner
-        let summary = summaryDraft
-        let suggestedTitle = suggestedTitleDraft
+        guard let submission = editController.submit() else { return }
+        let controller = editController
         let saveEdit = actions.saveEdit
-        saveAttemptID = attempt
-        editStatus = "Saving…"
 
-        // This is intentionally an unstructured task.  The durable action may
-        // outlive this view; response ownership below decides whether its
-        // result may update local UI state, without cancelling the command.
         Task { @MainActor in
-            let outcome = await saveEdit(artifact, summary, suggestedTitle)
-            guard saveAttemptID == attempt else { return }
-            saveAttemptID = nil
-            guard editResponseOwner == owner else { return }
-            handleEditSaveOutcome(outcome)
+            let outcome = await saveEdit(
+                submission.artifact,
+                submission.summary,
+                submission.suggestedTitle
+            )
+            controller.receiveOutcome(outcome, for: submission.attemptID)
         }
-    }
-
-    private func handleEditSaveOutcome(_ outcome: MeetingIntelligenceEditSaveOutcome) {
-        switch outcome {
-        case let .saved(artifact):
-            guard MeetingIntelligenceArtifactValidator.isValid(artifact) else {
-                editStatus = "The saved meeting intelligence content was invalid. Your draft is still here."
-                return
-            }
-            pendingSavedArtifact = artifact
-            editStatus = "Saved. Waiting for updated meeting intelligence content."
-            if isAcceptedProjection(artifact, in: presentation) {
-                finishEditing()
-            }
-        case .invalidSummary:
-            editStatus = "Enter a valid summary before saving."
-        case .invalidSuggestedTitle:
-            editStatus = "Enter a valid suggested title before saving."
-        case .conflict:
-            markConflict()
-        case .failed:
-            editStatus = "Could not save the edits. Your draft is still here. Try again."
-        }
-    }
-
-    private func reconcileEditProjection(_ current: MeetingIntelligencePresentation) {
-        guard isEditing else { return }
-
-        if let pendingSavedArtifact,
-           isAcceptedProjection(pendingSavedArtifact, in: current) {
-            finishEditing()
-            return
-        }
-
-        guard !requiresFreshEdit, let capturedArtifact else { return }
-        guard current.phase == .ready || current.phase == .stale else {
-            markConflict()
-            return
-        }
-        guard current.editableContent?.artifact == capturedArtifact else {
-            markConflict()
-            return
-        }
-    }
-
-    private func reconcileEditSession(_ current: RecorderObservedSnapshot?) {
-        guard isEditing, !requiresFreshEdit,
-              let capturedSessionIdentity,
-              current?.identity != capturedSessionIdentity
-        else { return }
-        markConflict()
-    }
-
-    private func markConflict() {
-        guard isEditing, !requiresFreshEdit else { return }
-        // Dropping only the local attempt handle makes any late response a
-        // no-op while the unstructured durable task is allowed to finish.
-        saveAttemptID = nil
-        editResponseOwner = UUID()
-        pendingSavedArtifact = nil
-        requiresFreshEdit = true
-        editStatus = "This meeting intelligence content changed elsewhere. Review the latest content before trying again."
-    }
-
-    private func isAcceptedProjection(
-        _ artifact: MeetingIntelligenceArtifact,
-        in current: MeetingIntelligencePresentation
-    ) -> Bool {
-        guard current.phase == .ready || current.phase == .stale,
-              current.editableContent?.artifact == artifact,
-              current.summary == artifact.summary,
-              current.suggestedTitle == artifact.suggestedTitle
-        else { return false }
-        return true
-    }
-
-    private func finishEditing() {
-        editResponseOwner = UUID()
-        isEditing = false
-        summaryDraft = ""
-        suggestedTitleDraft = ""
-        capturedArtifact = nil
-        capturedSessionIdentity = nil
-        saveAttemptID = nil
-        pendingSavedArtifact = nil
-        editStatus = nil
-        requiresFreshEdit = false
     }
 
     private var statusColor: Color {

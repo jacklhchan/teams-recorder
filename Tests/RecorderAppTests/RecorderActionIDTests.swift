@@ -69,6 +69,12 @@ final class RecorderActionIDTests: XCTestCase {
         XCTAssertEqual(RecorderActionID.meetingIntelligenceSuggestedTitle, "recorder.meeting-intelligence.suggested-title")
         XCTAssertEqual(RecorderActionID.meetingIntelligenceApplyTitle, "recorder.meeting-intelligence.apply-title")
         XCTAssertEqual(RecorderActionID.meetingIntelligenceManualTitleProtection, "recorder.meeting-intelligence.manual-title-protection")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceEdit, "recorder.meeting-intelligence.edit")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceEditSummary, "recorder.meeting-intelligence.edit.summary")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceEditSuggestedTitle, "recorder.meeting-intelligence.edit.suggested-title")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceEditSave, "recorder.meeting-intelligence.edit.save")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceEditCancel, "recorder.meeting-intelligence.edit.cancel")
+        XCTAssertEqual(RecorderActionID.meetingIntelligenceEditStatus, "recorder.meeting-intelligence.edit.status")
         XCTAssertEqual(Set(RecorderActionID.all).count, RecorderActionID.all.count)
     }
 }

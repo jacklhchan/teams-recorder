@@ -23,6 +23,15 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
         try assertCommands(recoveryPresentation(.failed, unavailable: true, protected: true), present: [RecorderActionID.meetingIntelligenceCheckAgain, RecorderActionID.meetingIntelligenceRetryGeneration, RecorderActionID.meetingIntelligenceApplyTitle])
     }
 
+    func testEditableReadyCardExposesEditAction() throws {
+        let host = try MeetingIntelligenceSectionRenderHost(
+            state: .init(presentation: editableReadyPresentation())
+        )
+        XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceEdit))
+        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceEditSummary))
+        XCTAssertFalse(host.contains(RecorderActionID.meetingIntelligenceEditSuggestedTitle))
+    }
+
     func testOutgoingGenerateIsImmediatelyStaleAndIncomingCancelIsImmediatelyRoutable() throws {
         let state = MeetingIntelligenceSectionRenderState(presentation: unconfirmedPresentation())
         let host = try MeetingIntelligenceSectionRenderHost(state: state)
@@ -191,6 +200,31 @@ final class MeetingIntelligenceSectionRenderTests: XCTestCase {
 
     private func protectedReadyPresentation() -> MeetingIntelligencePresentation {
         .init(phase: .ready, summary: "Summary", suggestedTitle: "Suggested title", statusMessage: "Ready.", model: "gpt-test", titleIsProtected: true, unavailableReason: nil)
+    }
+
+    private func editableReadyPresentation() -> MeetingIntelligencePresentation {
+        let artifact = MeetingIntelligenceArtifact(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: "Summary",
+            suggestedTitle: "Suggested title",
+            sourceTranscriptSHA256: "sha256:" + String(repeating: "b", count: 64),
+            sourceTranscriptByteCount: 42,
+            model: "gpt-test",
+            generatedAt: Date(timeIntervalSince1970: 1),
+            intent: .generate,
+            contentOrigin: .generated,
+            editedAt: nil
+        )
+        return .init(
+            phase: .ready,
+            summary: artifact.summary,
+            suggestedTitle: artifact.suggestedTitle,
+            statusMessage: "Ready.",
+            model: artifact.model,
+            titleIsProtected: true,
+            unavailableReason: nil,
+            editableContent: .init(artifact: artifact)
+        )
     }
 
     private func recoveryPresentation(_ phase: MeetingIntelligencePresentation.Phase, unavailable: Bool = false, protected: Bool = false) -> MeetingIntelligencePresentation {

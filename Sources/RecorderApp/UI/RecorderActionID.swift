@@ -53,6 +53,12 @@ enum RecorderActionID {
     static let meetingIntelligenceSuggestedTitle = "recorder.meeting-intelligence.suggested-title"
     static let meetingIntelligenceApplyTitle = "recorder.meeting-intelligence.apply-title"
     static let meetingIntelligenceManualTitleProtection = "recorder.meeting-intelligence.manual-title-protection"
+    static let meetingIntelligenceEdit = "recorder.meeting-intelligence.edit"
+    static let meetingIntelligenceEditSummary = "recorder.meeting-intelligence.edit.summary"
+    static let meetingIntelligenceEditSuggestedTitle = "recorder.meeting-intelligence.edit.suggested-title"
+    static let meetingIntelligenceEditSave = "recorder.meeting-intelligence.edit.save"
+    static let meetingIntelligenceEditCancel = "recorder.meeting-intelligence.edit.cancel"
+    static let meetingIntelligenceEditStatus = "recorder.meeting-intelligence.edit.status"
 
     static let all = [
         startStop,
@@ -107,6 +113,12 @@ enum RecorderActionID {
         meetingIntelligenceRetryGeneration,
         meetingIntelligenceSuggestedTitle,
         meetingIntelligenceApplyTitle,
-        meetingIntelligenceManualTitleProtection
+        meetingIntelligenceManualTitleProtection,
+        meetingIntelligenceEdit,
+        meetingIntelligenceEditSummary,
+        meetingIntelligenceEditSuggestedTitle,
+        meetingIntelligenceEditSave,
+        meetingIntelligenceEditCancel,
+        meetingIntelligenceEditStatus
     ]
 }

@@ -81,6 +81,66 @@ final class MeetingIntelligencePresentationTests: XCTestCase {
         XCTAssertTrue(section.showsManualTitleProtection)
     }
 
+    func testEditIsAvailableOnlyForValidReadyOrStaleEditableContent() {
+        let valid = editableArtifact()
+        let editable = { (phase: MeetingIntelligencePresentation.Phase, artifact: MeetingIntelligenceArtifact?) in
+            MeetingIntelligencePresentation(
+                phase: phase,
+                summary: valid.summary,
+                suggestedTitle: valid.suggestedTitle,
+                statusMessage: "Ready.",
+                model: valid.model,
+                titleIsProtected: false,
+                unavailableReason: nil,
+                editableContent: artifact.map(MeetingIntelligenceEditableContent.init(artifact:))
+            )
+        }
+
+        XCTAssertTrue(section(editable(.ready, valid)).showsEdit)
+        XCTAssertTrue(section(editable(.stale, valid)).showsEdit)
+
+        for phase in [
+            MeetingIntelligencePresentation.Phase.notGenerated,
+            .checkingAvailability,
+            .generating(.init(stage: .generatingFinal, current: 1, total: 1)),
+            .failed,
+            .cancelled,
+            .interrupted
+        ] {
+            XCTAssertFalse(section(editable(phase, valid)).showsEdit, "Edit must be hidden for \(phase).")
+        }
+
+        XCTAssertFalse(section(editable(.ready, nil)).showsEdit)
+        XCTAssertFalse(section(editable(.stale, nil)).showsEdit)
+
+        let invalid = MeetingIntelligenceArtifact(
+            schemaVersion: valid.schemaVersion,
+            summary: " ",
+            suggestedTitle: valid.suggestedTitle,
+            sourceTranscriptSHA256: valid.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: valid.sourceTranscriptByteCount,
+            model: valid.model,
+            generatedAt: valid.generatedAt,
+            intent: valid.intent,
+            contentOrigin: valid.contentOrigin,
+            editedAt: valid.editedAt
+        )
+        XCTAssertFalse(section(editable(.ready, invalid)).showsEdit)
+    }
+
+    func testDefaultEditSaveActionIsSafeAndDoesNotPretendToPersist() async {
+        let outcome = await MeetingIntelligenceActions().saveEdit(
+            editableArtifact(),
+            "Draft summary",
+            "Draft title"
+        )
+
+        XCTAssertEqual(
+            outcome,
+            .failed("Meeting intelligence edits are unavailable.")
+        )
+    }
+
     func testDraftTextSurvivesAnUnrelatedPresentationRerenderInSameOpenSheet() {
         XCTAssertEqual(
             TranscriptEditorDraft.loadedText(existing: "Edited draft", hasLoaded: true, load: { "Stored transcript" }),
@@ -98,5 +158,20 @@ final class MeetingIntelligencePresentationTests: XCTestCase {
 
     private func section(_ presentation: MeetingIntelligencePresentation) -> MeetingIntelligenceSectionPresentation {
         .make(presentation: presentation)
+    }
+
+    private func editableArtifact() -> MeetingIntelligenceArtifact {
+        .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: "Editable summary",
+            suggestedTitle: "Editable title",
+            sourceTranscriptSHA256: "sha256:" + String(repeating: "a", count: 64),
+            sourceTranscriptByteCount: 42,
+            model: "gpt-test",
+            generatedAt: Date(timeIntervalSince1970: 1),
+            intent: .generate,
+            contentOrigin: .generated,
+            editedAt: nil
+        )
     }
 }

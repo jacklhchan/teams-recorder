@@ -14,10 +14,10 @@ final class OpenAICompatibleProviderProfileTests: XCTestCase {
         let migrated = try OpenAICompatibleProviderProfile.validatedPersisted(decoded)
 
         XCTAssertEqual(OpenAICompatibleProviderProfile.currentSchemaVersion, 2)
-        XCTAssertEqual(decoded.meetingIntelligencePrompt, "")
+        assertSensitiveEqual(decoded.meetingIntelligencePrompt, "")
         XCTAssertEqual(migrated.schemaVersion, 2)
-        XCTAssertEqual(migrated.prompt, "ASR guidance")
-        XCTAssertEqual(migrated.meetingIntelligencePrompt, "")
+        assertSensitiveEqual(migrated.prompt, "ASR guidance")
+        assertSensitiveEqual(migrated.meetingIntelligencePrompt, "")
 
         let profile = try OpenAICompatibleProviderProfile.validated(
             baseURLText: "https://api.example.com/v1",
@@ -32,7 +32,10 @@ final class OpenAICompatibleProviderProfileTests: XCTestCase {
             from: JSONEncoder().encode(profile)
         )
 
-        XCTAssertEqual(roundTripped.meetingIntelligencePrompt, "Summarize decisions")
+        assertSensitiveEqual(
+            roundTripped.meetingIntelligencePrompt,
+            "Summarize decisions"
+        )
     }
 
     func testMeetingIntelligencePromptNormalizesWhitespaceAndNFC() throws {
@@ -40,12 +43,12 @@ final class OpenAICompatibleProviderProfileTests: XCTestCase {
             meetingIntelligencePrompt: "\n\tCafe\u{301}\n\t"
         )
 
-        XCTAssertEqual(profile.meetingIntelligencePrompt, "Café")
+        assertSensitiveEqual(profile.meetingIntelligencePrompt, "Café")
 
         let multiline = try makeProfile(
             meetingIntelligencePrompt: "\n\tSummarize\tdecisions\nnext steps\t\n"
         )
-        XCTAssertEqual(
+        assertSensitiveEqual(
             multiline.meetingIntelligencePrompt,
             "Summarize\tdecisions\nnext steps"
         )
@@ -72,6 +75,23 @@ final class OpenAICompatibleProviderProfileTests: XCTestCase {
             "contains\u{0001}control",
             "contains\u{0085}control",
             "contains\u{200B}format"
+        ] {
+            XCTAssertThrowsError(try makeProfile(meetingIntelligencePrompt: submitted)) {
+                XCTAssertEqual(
+                    $0 as? ProviderProfileValidationError,
+                    .unsafeMeetingIntelligencePrompt
+                )
+                XCTAssertFalse($0.localizedDescription.contains(submitted))
+            }
+        }
+    }
+
+    func testMeetingIntelligencePromptRejectsUnsafeScalarsAtTrimBoundaries() {
+        for submitted in [
+            "\u{000B}boundary", "boundary\u{000B}",
+            "\u{000C}boundary", "boundary\u{000C}",
+            "\u{0085}boundary", "boundary\u{0085}",
+            "\u{000D}boundary", "boundary\u{000D}"
         ] {
             XCTAssertThrowsError(try makeProfile(meetingIntelligencePrompt: submitted)) {
                 XCTAssertEqual(
@@ -148,7 +168,7 @@ final class OpenAICompatibleProviderProfileTests: XCTestCase {
         XCTAssertEqual(profile.asrModel, "vendor/custom-asr:2026-07")
         XCTAssertEqual(profile.llmModel, "local/my-meeting-llm")
         XCTAssertEqual(profile.language, "yue")
-        XCTAssertEqual(profile.prompt, "Hong Kong meeting")
+        assertSensitiveEqual(profile.prompt, "Hong Kong meeting")
     }
 
     func testGenericAcceptsOnlyExactSupportedLanguageCodesAfterOuterWhitespaceTrim() throws {
@@ -228,5 +248,19 @@ final class OpenAICompatibleProviderProfileTests: XCTestCase {
             prompt: "",
             meetingIntelligencePrompt: meetingIntelligencePrompt
         )
+    }
+
+    private func assertSensitiveEqual<T: Equatable>(
+        _ actual: @autoclosure () throws -> T,
+        _ expected: @autoclosure () throws -> T,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) rethrows {
+        let actualValue = try actual()
+        let expectedValue = try expected()
+        guard actualValue == expectedValue else {
+            XCTFail("Sensitive values did not match.", file: file, line: line)
+            return
+        }
     }
 }

@@ -92,11 +92,11 @@ final class AIProviderSettingsModelTests: XCTestCase {
         model.meetingIntelligencePrompt = "unsaved hkt MI"
         model.selectedProviderKind = .openAICompatible
 
-        XCTAssertEqual(model.prompt, "unsaved generic ASR")
-        XCTAssertEqual(model.meetingIntelligencePrompt, "unsaved generic MI")
+        assertSensitiveEqual(model.prompt, "unsaved generic ASR")
+        assertSensitiveEqual(model.meetingIntelligencePrompt, "unsaved generic MI")
         model.selectedProviderKind = .hktGenAI
-        XCTAssertEqual(model.prompt, "unsaved hkt ASR")
-        XCTAssertEqual(model.meetingIntelligencePrompt, "unsaved hkt MI")
+        assertSensitiveEqual(model.prompt, "unsaved hkt ASR")
+        assertSensitiveEqual(model.meetingIntelligencePrompt, "unsaved hkt MI")
         XCTAssertEqual(repository.saveCount, 0)
     }
 
@@ -119,13 +119,16 @@ final class AIProviderSettingsModelTests: XCTestCase {
         model.meetingIntelligencePrompt = "discarded MI"
         model.reload()
 
-        XCTAssertEqual(repository.profiles[.openAICompatible]?.prompt, "ASR guidance")
-        XCTAssertEqual(
+        assertSensitiveEqual(
+            repository.profiles[.openAICompatible]?.prompt,
+            "ASR guidance"
+        )
+        assertSensitiveEqual(
             repository.profiles[.openAICompatible]?.meetingIntelligencePrompt,
             "Summarize decisions"
         )
-        XCTAssertEqual(model.prompt, "ASR guidance")
-        XCTAssertEqual(model.meetingIntelligencePrompt, "Summarize decisions")
+        assertSensitiveEqual(model.prompt, "ASR guidance")
+        assertSensitiveEqual(model.meetingIntelligencePrompt, "Summarize decisions")
     }
 
     func testFailedSavePreservesPriorRepositoryPrompts() throws {
@@ -144,7 +147,7 @@ final class AIProviderSettingsModelTests: XCTestCase {
 
         model.save()
 
-        XCTAssertEqual(repository.profiles[.openAICompatible], prior)
+        assertSensitiveEqual(repository.profiles[.openAICompatible], prior)
         XCTAssertEqual(repository.saveCount, 0)
         XCTAssertEqual(model.status, "Could not update provider settings.")
     }
@@ -758,6 +761,20 @@ final class AIProviderSettingsModelTests: XCTestCase {
         model.asrModel = "asr"
         model.llmModel = "llm"
         return model
+    }
+
+    private func assertSensitiveEqual<T: Equatable>(
+        _ actual: @autoclosure () throws -> T,
+        _ expected: @autoclosure () throws -> T,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) rethrows {
+        let actualValue = try actual()
+        let expectedValue = try expected()
+        guard actualValue == expectedValue else {
+            XCTFail("Sensitive values did not match.", file: file, line: line)
+            return
+        }
     }
 
     private func makeProfile() throws -> OpenAICompatibleProviderProfile {

@@ -176,10 +176,10 @@ struct OpenAICompatibleProviderProfile: Codable, Equatable, Sendable {
 
     private static func validatedMeetingIntelligencePrompt(_ raw: String) throws -> String {
         let normalized = raw.precomposedStringWithCanonicalMapping
-        let value = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !containsUnsafeMeetingIntelligenceScalar(value) else {
+        guard !containsUnsafeMeetingIntelligenceScalar(normalized) else {
             throw ProviderProfileValidationError.unsafeMeetingIntelligencePrompt
         }
+        let value = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.utf8.count <= maximumMeetingIntelligencePromptBytes else {
             throw ProviderProfileValidationError.meetingIntelligencePromptTooLarge
         }
@@ -189,7 +189,7 @@ struct OpenAICompatibleProviderProfile: Codable, Equatable, Sendable {
     private static func containsUnsafeMeetingIntelligenceScalar(_ value: String) -> Bool {
         value.unicodeScalars.contains { scalar in
             let scalarValue = scalar.value
-            if scalarValue == 9 || scalarValue == 10 || scalarValue == 13 { return false }
+            if scalarValue == 9 || scalarValue == 10 { return false }
             return scalarValue < 32 || (127...159).contains(scalarValue) ||
                 scalar.properties.generalCategory == .format
         }

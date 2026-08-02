@@ -30,8 +30,8 @@ final class ProviderProfileStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(profile.schemaVersion, 2)
-        XCTAssertEqual(profile.prompt, "ASR guidance")
-        XCTAssertEqual(profile.meetingIntelligencePrompt, "")
+        assertSensitiveEqual(profile.prompt, "ASR guidance")
+        assertSensitiveEqual(profile.meetingIntelligencePrompt, "")
 
         let savedJSON = try XCTUnwrap(
             JSONSerialization.jsonObject(
@@ -41,7 +41,7 @@ final class ProviderProfileStoreTests: XCTestCase {
         XCTAssertEqual(savedJSON["schemaVersion"] as? Int, 2)
         let genericJSON = try XCTUnwrap(savedJSON["genericProfile"] as? [String: Any])
         XCTAssertEqual(genericJSON["schemaVersion"] as? Int, 2)
-        XCTAssertEqual(genericJSON["meetingIntelligencePrompt"] as? String, "")
+        assertSensitiveEqual(genericJSON["meetingIntelligencePrompt"] as? String, "")
     }
 
     func testCurrentEnvelopeMigratesV1ProfilesAndRewritesBothPresets() throws {
@@ -58,11 +58,11 @@ final class ProviderProfileStoreTests: XCTestCase {
         let hkt = try XCTUnwrap(try store.loadProfile(for: .hktGenAI))
 
         XCTAssertEqual(generic.schemaVersion, 2)
-        XCTAssertEqual(generic.prompt, "generic ASR")
-        XCTAssertEqual(generic.meetingIntelligencePrompt, "")
+        assertSensitiveEqual(generic.prompt, "generic ASR")
+        assertSensitiveEqual(generic.meetingIntelligencePrompt, "")
         XCTAssertEqual(hkt.schemaVersion, 2)
-        XCTAssertEqual(hkt.prompt, "hkt ASR")
-        XCTAssertEqual(hkt.meetingIntelligencePrompt, "")
+        assertSensitiveEqual(hkt.prompt, "hkt ASR")
+        assertSensitiveEqual(hkt.meetingIntelligencePrompt, "")
 
         let savedJSON = try XCTUnwrap(
             JSONSerialization.jsonObject(
@@ -73,7 +73,7 @@ final class ProviderProfileStoreTests: XCTestCase {
         for key in ["genericProfile", "hktProfile"] {
             let profileJSON = try XCTUnwrap(savedJSON[key] as? [String: Any])
             XCTAssertEqual(profileJSON["schemaVersion"] as? Int, 2)
-            XCTAssertEqual(profileJSON["meetingIntelligencePrompt"] as? String, "")
+            assertSensitiveEqual(profileJSON["meetingIntelligencePrompt"] as? String, "")
         }
     }
 
@@ -170,13 +170,25 @@ final class ProviderProfileStoreTests: XCTestCase {
         try store.setActiveProviderKind(.hktGenAI)
 
         XCTAssertEqual(try store.activeProviderKind(), .hktGenAI)
-        XCTAssertEqual(try store.load(), hkt)
-        XCTAssertEqual(try store.loadProfile(for: .openAICompatible), generic)
-        XCTAssertEqual(try store.loadProfile(for: .hktGenAI), hkt)
-        XCTAssertEqual(try store.loadProfile(for: .openAICompatible)?.prompt, "generic ASR")
-        XCTAssertEqual(try store.loadProfile(for: .openAICompatible)?.meetingIntelligencePrompt, "generic MI")
-        XCTAssertEqual(try store.loadProfile(for: .hktGenAI)?.prompt, "hkt ASR")
-        XCTAssertEqual(try store.loadProfile(for: .hktGenAI)?.meetingIntelligencePrompt, "hkt MI")
+        try assertSensitiveEqual(try store.load(), hkt)
+        try assertSensitiveEqual(try store.loadProfile(for: .openAICompatible), generic)
+        try assertSensitiveEqual(try store.loadProfile(for: .hktGenAI), hkt)
+        try assertSensitiveEqual(
+            try store.loadProfile(for: .openAICompatible)?.prompt,
+            "generic ASR"
+        )
+        try assertSensitiveEqual(
+            try store.loadProfile(for: .openAICompatible)?.meetingIntelligencePrompt,
+            "generic MI"
+        )
+        try assertSensitiveEqual(
+            try store.loadProfile(for: .hktGenAI)?.prompt,
+            "hkt ASR"
+        )
+        try assertSensitiveEqual(
+            try store.loadProfile(for: .hktGenAI)?.meetingIntelligencePrompt,
+            "hkt MI"
+        )
     }
 
     func testLegacyV1ProfileMigratesAsGenericAndFutureEnvelopeIsRejected() throws {
@@ -253,5 +265,19 @@ final class ProviderProfileStoreTests: XCTestCase {
             }
             """.utf8
         )
+    }
+
+    private func assertSensitiveEqual<T: Equatable>(
+        _ actual: @autoclosure () throws -> T,
+        _ expected: @autoclosure () throws -> T,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) rethrows {
+        let actualValue = try actual()
+        let expectedValue = try expected()
+        guard actualValue == expectedValue else {
+            XCTFail("Sensitive values did not match.", file: file, line: line)
+            return
+        }
     }
 }

@@ -103,6 +103,49 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact, edited)
     }
 
+    func testSaveEditKeepsStaleProjectionWhenPostSaveTranscriptReadFails() async throws {
+        let fixture = try CoordinatorFixture(availability: .confirmed)
+        let originalRevision = fixture.reader.snapshot.revision
+        let currentRevision = TranscriptDocumentRevision(
+            sha256: "sha256:" + String(repeating: "b", count: 64),
+            byteCount: 84
+        )
+        fixture.reader.snapshot = .init(
+            url: fixture.reader.snapshot.url,
+            data: fixture.reader.snapshot.data,
+            revision: currentRevision
+        )
+        let staleArtifact = fixture.artifact(revision: originalRevision)
+        fixture.artifactStore.loaded = staleArtifact
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+
+        let captured = try XCTUnwrap(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact)
+        let edited = fixture.editedArtifact(
+            from: captured,
+            summary: "Edited stale summary",
+            title: "Edited stale title",
+            editedAt: Date(timeIntervalSince1970: 456)
+        )
+        fixture.artifactEditor.result = edited
+        fixture.reader.readError = SecureTranscriptReadError.missing
+
+        let outcome = await fixture.coordinator.saveEdit(
+            for: fixture.session,
+            capturedArtifact: captured,
+            summary: edited.summary,
+            suggestedTitle: edited.suggestedTitle
+        )
+
+        XCTAssertEqual(outcome, .saved(edited))
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .stale)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).statusMessage, "Transcript changed. Regenerate to update.")
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).editableContent?.transcriptRevision, currentRevision)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact, edited)
+        XCTAssertEqual(edited.sourceTranscriptSHA256, originalRevision.sha256)
+        XCTAssertEqual(edited.sourceTranscriptByteCount, originalRevision.byteCount)
+    }
+
     func testDuplicateSaveEditIsRejectedBeforeSecondEditorCall() async throws {
         let entered = expectation(description: "first edit entered")
         let gate = GenerationGate()

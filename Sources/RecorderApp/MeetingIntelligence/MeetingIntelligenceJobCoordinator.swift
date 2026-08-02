@@ -828,6 +828,10 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             // The editor already validated the transcript before durable
             // promotion. A later observational read must not turn that durable
             // success into a user-visible failure.
+            guard fallbackRevision.sha256 == artifact.sourceTranscriptSHA256,
+                  fallbackRevision.byteCount == artifact.sourceTranscriptByteCount else {
+                return (.stale, "Transcript changed. Regenerate to update.", fallbackRevision)
+            }
             return (.ready, "Ready.", fallbackRevision)
         }
     }

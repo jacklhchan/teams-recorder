@@ -1222,6 +1222,153 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertEqual(capture.requests.count, 1)
     }
 
+    func testProductionRecordingsEditAccessibilityPathSendsCapturedArtifactAndDraftsExactlyOnce() async throws {
+        let editorEntered = expectation(description: "production edit reached artifact editor")
+        let editor = RenderMeetingIntelligenceEditSpy(entered: editorEntered)
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture(artifactEditor: editor)
+        defer { fixture.remove() }
+        fixture.feature.reload(sessions: [fixture.session])
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: fixture.session.id)
+
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        XCTAssertTrue(host.click(
+            atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"
+        ))
+        XCTAssertTrue(host.click(
+            atAccessibilityFrame: "recorder.row.transcript.\(fixture.session.id.lastPathComponent)"
+        ))
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier("recorder.transcript.detail.root")
+                && host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceGenerate)
+        }
+
+        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.meetingIntelligenceGenerate))
+        await fulfillment(of: [fixture.generatorEntered], timeout: 1)
+        await fixture.generationGate.release()
+        await fulfillment(of: [fixture.generatorFinished, fixture.published], timeout: 1)
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: fixture.session.id)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceSummary)
+                && host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceSuggestedTitle)
+                && host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceEdit)
+        }
+
+        let capturedArtifact = try XCTUnwrap(
+            fixture.feature.presentation(for: fixture.session).editableContent?.artifact
+        )
+        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.meetingIntelligenceEdit))
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceEditSummary)
+                && host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceEditSuggestedTitle)
+                && host.containsAccessibilityIdentifier(RecorderActionID.meetingIntelligenceEditSave)
+        }
+
+        func allViews(startingAt view: NSView?) -> [NSView] {
+            guard let view else { return [] }
+            return [view] + view.subviews.flatMap { allViews(startingAt: $0) }
+        }
+
+        let renderedViews = NSApp.windows.flatMap { allViews(startingAt: $0.contentView) }
+        func accessibilityFrame(for identifier: String) -> CGRect? {
+            renderedViews.first { $0.accessibilityIdentifier() == identifier }?.accessibilityFrame()
+        }
+
+        func setAccessibilityValue(
+            _ value: String,
+            for identifier: String,
+            replacing currentValue: String,
+            expectedRole: NSAccessibility.Role?
+        ) throws {
+            let markerFrame = try XCTUnwrap(
+                accessibilityFrame(for: identifier),
+                "Missing rendered accessibility marker: \(identifier)"
+            )
+            let control = try XCTUnwrap(
+                renderedViews.first { view in
+                    guard markerFrame.intersects(view.accessibilityFrame()),
+                          view.accessibilityValue() as? String == currentValue else {
+                        return false
+                    }
+                    if let expectedRole {
+                        return view.accessibilityRole() == expectedRole
+                    }
+                    return true
+                },
+                "The rendered \(identifier) marker must resolve to an accessibility value control."
+            )
+            if let expectedRole {
+                XCTAssertEqual(
+                    control.accessibilityRole(),
+                    expectedRole,
+                    "identifier=\(identifier) value=\(String(describing: control.accessibilityValue()))"
+                )
+            }
+            func insertThroughTextInputClient(_ text: NSText) throws {
+                text.window?.makeFirstResponder(text)
+                let inputClient = try XCTUnwrap(
+                    text as? any NSTextInputClient,
+                    "The accessibility-resolved text control must accept text input."
+                )
+                inputClient.insertText(
+                    value,
+                    replacementRange: NSRange(location: 0, length: (text.string as NSString).length)
+                )
+            }
+
+            if let nativeControl = control as? NSControl {
+                nativeControl.window?.makeFirstResponder(nativeControl)
+                let editor = try XCTUnwrap(
+                    nativeControl.currentEditor(),
+                    "The accessibility-resolved control must expose its AppKit field editor."
+                )
+                try insertThroughTextInputClient(editor)
+                nativeControl.window?.endEditing(for: nativeControl)
+            } else if let text = control as? NSText {
+                try insertThroughTextInputClient(text)
+            } else {
+                control.setAccessibilityValue(value)
+            }
+            host.render()
+            XCTAssertEqual(
+                control.accessibilityValue() as? String,
+                value,
+                "identifier=\(identifier) role=\(String(describing: control.accessibilityRole()))"
+            )
+        }
+
+        try setAccessibilityValue(
+            "Production UI edited summary",
+            for: RecorderActionID.meetingIntelligenceEditSummary,
+            replacing: capturedArtifact.summary,
+            expectedRole: NSAccessibility.Role.textArea
+        )
+        try setAccessibilityValue(
+            "Production UI edited title",
+            for: RecorderActionID.meetingIntelligenceEditSuggestedTitle,
+            replacing: capturedArtifact.suggestedTitle,
+            expectedRole: nil
+        )
+        host.render()
+
+        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.meetingIntelligenceEditSave))
+        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.meetingIntelligenceEditSave))
+        await fulfillment(of: [editorEntered], timeout: 1)
+
+        XCTAssertEqual(editor.requests.count, 1)
+        XCTAssertEqual(editor.requests[0].capturedArtifact, capturedArtifact)
+        XCTAssertEqual(editor.requests[0].summary, "Production UI edited summary")
+        XCTAssertEqual(editor.requests[0].suggestedTitle, "Production UI edited title")
+
+        await editor.release()
+        await fixture.coordinator.waitUntilIdleForTesting(sessionID: fixture.session.id)
+    }
+
     func testRecordingsSheetObservesMeetingIntelligenceFeatureSnapshotWithoutAppModelRelay() async throws {
         let fixture = try RecordingsMeetingIntelligenceRenderFixture()
         defer { fixture.remove() }
@@ -1613,7 +1760,10 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
     let generatorFinished: XCTestExpectation
     let published: XCTestExpectation
 
-    init(mutationGate: RecordingSessionMutationGate? = nil) throws {
+    init(
+        mutationGate: RecordingSessionMutationGate? = nil,
+        artifactEditor: (any MeetingIntelligenceArtifactEditing)? = nil
+    ) throws {
         let generationGate = RenderMeetingIntelligenceGenerationGate()
         let generatorEntered = XCTestExpectation(description: "recordings MI generation entered")
         let generatorFinished = XCTestExpectation(description: "recordings MI generation finished")
@@ -1701,7 +1851,8 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
                     generator: generator,
                     publisher: RenderMeetingIntelligencePublisher(published: published),
                     artifactStore: RenderMeetingIntelligenceArtifactStore(),
-                    stateStore: RenderMeetingIntelligenceStateStore()
+                    stateStore: RenderMeetingIntelligenceStateStore(),
+                    artifactEditor: artifactEditor
                 )
                 let feature = MeetingIntelligenceFeatureModel(coordinator: coordinator)
                 retainedCoordinator = coordinator
@@ -2571,5 +2722,71 @@ private final class WorkspaceMeetingIntelligenceSaveCapture {
             suggestedTitle: suggestedTitle
         ))
         return .saved(artifact)
+    }
+}
+
+private actor RenderMeetingIntelligenceEditGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private final class RenderMeetingIntelligenceEditSpy: MeetingIntelligenceArtifactEditing, @unchecked Sendable {
+    struct Request: Equatable {
+        let capturedArtifact: MeetingIntelligenceArtifact
+        let summary: String
+        let suggestedTitle: String
+    }
+
+    let entered: XCTestExpectation
+    private let gate = RenderMeetingIntelligenceEditGate()
+    private let lock = NSLock()
+    private var storedRequests: [Request] = []
+
+    init(entered: XCTestExpectation) {
+        self.entered = entered
+    }
+
+    var requests: [Request] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedRequests
+    }
+
+    func save(
+        _ request: MeetingIntelligenceArtifactEditRequest
+    ) async throws -> MeetingIntelligenceArtifact {
+        lock.lock()
+        storedRequests.append(.init(
+            capturedArtifact: request.capturedArtifact,
+            summary: request.proposedSummary,
+            suggestedTitle: request.proposedSuggestedTitle
+        ))
+        lock.unlock()
+        entered.fulfill()
+        await gate.wait()
+        return .init(
+            schemaVersion: MeetingIntelligenceArtifact.currentSchemaVersion,
+            summary: request.proposedSummary,
+            suggestedTitle: request.proposedSuggestedTitle,
+            sourceTranscriptSHA256: request.capturedArtifact.sourceTranscriptSHA256,
+            sourceTranscriptByteCount: request.capturedArtifact.sourceTranscriptByteCount,
+            model: request.capturedArtifact.model,
+            generatedAt: request.capturedArtifact.generatedAt,
+            intent: request.capturedArtifact.intent,
+            contentOrigin: .edited,
+            editedAt: request.editedAt
+        )
+    }
+
+    func release() async {
+        await gate.release()
     }
 }

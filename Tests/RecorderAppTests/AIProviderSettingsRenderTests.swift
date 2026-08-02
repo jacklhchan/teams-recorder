@@ -5,6 +5,53 @@ import XCTest
 
 @MainActor
 final class AIProviderSettingsRenderTests: XCTestCase {
+    func testPromptEditorsAreIndependentlyReachableAndLabeledAtSupportedSizes() throws {
+        let repository = RecordingProviderRepository(hasAPIKey: true)
+        let defaultsSuite = "provider-prompt-render-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let appModel = AppModel(
+            defaults: defaults,
+            providerRepository: repository,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            virtualMicStateProvider: { .absent }
+        )
+        let model = appModel.aiProviderSettingsModel
+        model.selectedProviderKind = .openAICompatible
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr-model"
+        model.llmModel = "llm-model"
+        model.language = MeetingLanguage.cantonese.rawValue
+        try assertPromptEditorSourceContract()
+
+        for size in [
+            CGSize(width: 860, height: 680),
+            CGSize(width: 1_280, height: 800)
+        ] {
+            model.prompt = ""
+            model.meetingIntelligencePrompt = ""
+            let host = ProviderSettingsProductionHost(model: appModel, size: size)
+            host.selectSettingsSection("ai-provider")
+            defer { host.close() }
+
+            XCTAssertTrue(host.reveal(RecorderActionID.providerPrompt))
+            XCTAssertTrue(host.reveal(RecorderActionID.providerMeetingIntelligencePrompt))
+
+            host.replaceTextEditor(RecorderActionID.providerPrompt, with: "asr guidance")
+            assertSensitiveEqual(model.prompt, "asr guidance")
+            assertSensitiveEqual(model.meetingIntelligencePrompt, "")
+
+            host.replaceTextEditor(
+                RecorderActionID.providerMeetingIntelligencePrompt,
+                with: "meeting guidance"
+            )
+            assertSensitiveEqual(model.prompt, "asr guidance")
+            assertSensitiveEqual(model.meetingIntelligencePrompt, "meeting guidance")
+        }
+    }
+
     func testProviderColorSchemeIsLocallyDarkWithoutOverridingAdjacentLightSettingsContent() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
         let model = makeConfiguredModel(repository: repository)
@@ -131,6 +178,7 @@ final class AIProviderSettingsRenderTests: XCTestCase {
             RecorderActionID.providerLLMModel,
             RecorderActionID.providerLanguage,
             RecorderActionID.providerPrompt,
+            RecorderActionID.providerMeetingIntelligencePrompt,
             RecorderActionID.providerSave,
             RecorderActionID.providerTest,
             RecorderActionID.providerRemoveKey,
@@ -138,6 +186,58 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         ] {
             XCTAssertTrue(host.reveal(identifier), "Unreachable provider control: \(identifier)")
         }
+    }
+
+    private func assertSensitiveEqual<T: Equatable>(
+        _ actual: @autoclosure () throws -> T,
+        _ expected: @autoclosure () throws -> T,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) rethrows {
+        let actualValue = try actual()
+        let expectedValue = try expected()
+        guard actualValue == expectedValue else {
+            XCTFail("Sensitive values did not match.", file: file, line: line)
+            return
+        }
+    }
+
+    private func assertPromptEditorSourceContract(
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let sourceURL = URL(fileURLWithPath: String(describing: file))
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/RecorderApp/Views/AIProviderSettingsView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let requiredFragments = [
+            "Text(\"Meeting Intelligence Prompt\")",
+            "Text(\"Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.\")",
+            ".font(.subheadline)",
+            ".font(.caption)",
+            ".foregroundStyle(.secondary)",
+            ".accessibilityLabel(\"Meeting Intelligence Prompt\")",
+            ".providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)",
+            ".frame(minHeight: 58, maxHeight: 96)",
+            ".overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))"
+        ]
+        for fragment in requiredFragments {
+            XCTAssertTrue(source.contains(fragment), "Meeting Intelligence prompt UI contract is incomplete.", file: file, line: line)
+        }
+        guard let asrEditor = source.range(of: "TextEditor(text: $model.prompt)"),
+              let meetingIntelligenceEditor = source.range(of: "TextEditor(text: $model.meetingIntelligencePrompt)")
+        else {
+            XCTFail("Both prompt editors must be present in the provider settings view.", file: file, line: line)
+            return
+        }
+        XCTAssertTrue(
+            asrEditor.lowerBound < meetingIntelligenceEditor.lowerBound,
+            "Meeting Intelligence prompt editor must follow the ASR prompt editor.",
+            file: file,
+            line: line
+        )
     }
 }
 
@@ -249,9 +349,14 @@ private final class ProviderSettingsProductionHost {
         let rect = marker.convert(marker.bounds, to: document)
         let content = window.contentLayoutRect
         let screenContent = CGRect(origin: window.convertPoint(toScreen: content.origin), size: content.size)
+        let isProviderSurface = identifier == RecorderSurfaceAppearance.providerDark.accessibilityIdentifier
         return !rect.isEmpty
-            && scroll.documentVisibleRect.contains(rect)
-            && screenContent.contains(marker.accessibilityFrame())
+            && (isProviderSurface
+                ? scroll.documentVisibleRect.intersects(rect)
+                : scroll.documentVisibleRect.contains(rect))
+            && (isProviderSurface
+                ? screenContent.intersects(marker.accessibilityFrame())
+                : screenContent.contains(marker.accessibilityFrame()))
     }
     func render() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.08))
@@ -314,6 +419,30 @@ private final class ProviderSettingsProductionHost {
         window.orderOut(nil)
         window.contentView = nil
     }
+
+    func replaceTextEditor(_ identifier: String, with text: String) {
+        guard let marker = marker(for: identifier) else {
+            XCTFail("Missing provider editor marker.")
+            return
+        }
+        marker.scrollToVisible(marker.bounds)
+        render()
+        let targetFrame = hostingView.convert(marker.bounds, from: marker)
+        guard let editor = allViews(hostingView)
+            .compactMap({ $0 as? NSTextView })
+            .first(where: { editor in
+                let frame = hostingView.convert(editor.bounds, from: editor)
+                return !frame.isEmpty && frame.intersects(targetFrame)
+            })
+        else {
+            XCTFail("Missing provider text editor.")
+            return
+        }
+        editor.string = text
+        editor.didChangeText()
+        render()
+    }
+
     private func marker(for identifier: String) -> NSView? {
         allViews(hostingView).first { $0.accessibilityIdentifier() == identifier + ".marker" }
     }

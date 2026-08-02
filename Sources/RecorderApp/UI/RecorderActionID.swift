@@ -36,6 +36,8 @@ enum RecorderActionID {
     static let providerLLMModel = "recorder.provider.llm-model"
     static let providerLanguage = "recorder.provider.language"
     static let providerPrompt = "recorder.provider.prompt"
+    static let providerMeetingIntelligencePrompt =
+        "recorder.provider.meeting-intelligence-prompt"
     static let providerSave = "recorder.provider.save"
     static let providerTest = "recorder.provider.test"
     static let providerRemoveKey = "recorder.provider.remove-key"
@@ -90,6 +92,7 @@ enum RecorderActionID {
         providerLLMModel,
         providerLanguage,
         providerPrompt,
+        providerMeetingIntelligencePrompt,
         providerSave,
         providerTest,
         providerRemoveKey,

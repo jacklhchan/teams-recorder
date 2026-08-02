@@ -69,6 +69,16 @@ struct AIProviderSettingsView: View {
                     .providerAccessibility(RecorderActionID.providerPrompt)
                     .frame(minHeight: 58, maxHeight: 96)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
+                Text("Meeting Intelligence Prompt")
+                    .font(.subheadline)
+                Text("Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextEditor(text: $model.meetingIntelligencePrompt)
+                    .accessibilityLabel("Meeting Intelligence Prompt")
+                    .providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)
+                    .frame(minHeight: 58, maxHeight: 96)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
             }
 
             HStack(alignment: .center, spacing: 10) {

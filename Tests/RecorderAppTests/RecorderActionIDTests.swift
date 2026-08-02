@@ -50,6 +50,10 @@ final class RecorderActionIDTests: XCTestCase {
         XCTAssertEqual(RecorderActionID.providerLLMModel, "recorder.provider.llm-model")
         XCTAssertEqual(RecorderActionID.providerLanguage, "recorder.provider.language")
         XCTAssertEqual(RecorderActionID.providerPrompt, "recorder.provider.prompt")
+        XCTAssertEqual(
+            RecorderActionID.providerMeetingIntelligencePrompt,
+            "recorder.provider.meeting-intelligence-prompt"
+        )
         XCTAssertEqual(RecorderActionID.providerSave, "recorder.provider.save")
         XCTAssertEqual(RecorderActionID.providerTest, "recorder.provider.test")
         XCTAssertEqual(RecorderActionID.providerRemoveKey, "recorder.provider.remove-key")

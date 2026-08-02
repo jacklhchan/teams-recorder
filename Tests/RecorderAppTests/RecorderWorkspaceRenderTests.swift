@@ -2755,21 +2755,19 @@ private final class RenderMeetingIntelligenceEditSpy: MeetingIntelligenceArtifac
     }
 
     var requests: [Request] {
-        lock.lock()
-        defer { lock.unlock() }
-        return storedRequests
+        lock.withLock { storedRequests }
     }
 
     func save(
         _ request: MeetingIntelligenceArtifactEditRequest
     ) async throws -> MeetingIntelligenceArtifact {
-        lock.lock()
-        storedRequests.append(.init(
-            capturedArtifact: request.capturedArtifact,
-            summary: request.proposedSummary,
-            suggestedTitle: request.proposedSuggestedTitle
-        ))
-        lock.unlock()
+        lock.withLock {
+            storedRequests.append(.init(
+                capturedArtifact: request.capturedArtifact,
+                summary: request.proposedSummary,
+                suggestedTitle: request.proposedSuggestedTitle
+            ))
+        }
         entered.fulfill()
         await gate.wait()
         return .init(

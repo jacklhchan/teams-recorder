@@ -5,15 +5,42 @@ import SwiftUI
 enum RecordingControllerAccessibility {
     static let statusID = "recording-controller-status"
     static let elapsedID = "recording-controller-elapsed"
+    static let systemWaveformID = "recording-controller-system-waveform"
+    static let microphoneWaveformID = "recording-controller-microphone-waveform"
     static let screenStatusID = "recording-controller-screen-status"
     static let screenToggleID = "recording-controller-screen-toggle"
     static let stopID = "recording-controller-stop"
-    static let allIDs = [statusID, elapsedID, screenStatusID, screenToggleID, stopID]
+    static let allIDs = [
+        statusID,
+        elapsedID,
+        systemWaveformID,
+        microphoneWaveformID,
+        screenStatusID,
+        screenToggleID,
+        stopID
+    ]
     static let stopLabel = "Stop recording"
     static let screenCaptureLabel = "Capture Teams screen"
 
     static func screenCaptureValue(isOn: Bool) -> String {
         isOn ? "On" : "Off"
+    }
+}
+
+enum RecordingControllerInputStatus: String, Equatable {
+    case signal = "Signal"
+    case quiet = "Quiet"
+    case muted = "Muted"
+    case disconnected = "Disconnected"
+
+    static func make(
+        level: LevelSnapshot,
+        isConnected: Bool,
+        isMuted: Bool
+    ) -> Self {
+        if !isConnected { return .disconnected }
+        if isMuted { return .muted }
+        return level.isSilent ? .quiet : .signal
     }
 }
 
@@ -145,7 +172,7 @@ final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
 
 @MainActor
 final class RecordingControllerPanel: NSPanel {
-    private static let panelSize = NSSize(width: 390, height: 112)
+    private static let panelSize = NSSize(width: 390, height: 180)
     private static let screenInset: CGFloat = 16
 
     init() {
@@ -204,7 +231,12 @@ struct RecordingControllerView: View {
                     Task {
                         await model.setTeamsScreenCaptureRequested(requested)
                     }
-                }
+                },
+                systemLevel: recorder.systemLevel,
+                microphoneLevel: recorder.micLevel,
+                isSystemConnected: recorder.isSystemCaptureConnected,
+                isMicrophoneConnected: recorder.isMicrophoneCaptureConnected,
+                isMicrophoneMuted: recorder.micMuted
             )
         }
     }
@@ -228,6 +260,11 @@ struct RecordingControllerPanelContent: View {
     let presentation: RecordingControllerPresentation
     let stop: () -> Void
     let setScreenRequested: (Bool) -> Void
+    let systemLevel: LevelSnapshot
+    let microphoneLevel: LevelSnapshot
+    let isSystemConnected: Bool
+    let isMicrophoneConnected: Bool
+    let isMicrophoneMuted: Bool
 
     var body: some View {
         VStack(spacing: 10) {
@@ -256,6 +293,26 @@ struct RecordingControllerPanelContent: View {
             .padding(.horizontal, 12).padding(.vertical, 7)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
+            RecordingControllerInputRow(
+                title: "System / Teams",
+                systemImage: "speaker.wave.2.fill",
+                level: systemLevel,
+                isConnected: isSystemConnected,
+                isMuted: false,
+                tint: RecorderVisualStyle.systemAudio,
+                accessibilityID: RecordingControllerAccessibility.systemWaveformID
+            )
+
+            RecordingControllerInputRow(
+                title: "Microphone",
+                systemImage: "mic.fill",
+                level: microphoneLevel,
+                isConnected: isMicrophoneConnected,
+                isMuted: isMicrophoneMuted,
+                tint: RecorderVisualStyle.microphone,
+                accessibilityID: RecordingControllerAccessibility.microphoneWaveformID
+            )
+
             HStack(spacing: 10) {
                 Image(systemName: "rectangle.inset.filled").foregroundStyle(screenColor(for: presentation.screenTone))
                 Text(presentation.screenStatusText)
@@ -277,8 +334,94 @@ struct RecordingControllerPanelContent: View {
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .frame(width: 390, height: 112)
+        .frame(width: 390, height: 180)
         .recorderGlassSurface(.navigation)
+    }
+}
+
+private struct RecordingControllerInputRow: View {
+    let title: String
+    let systemImage: String
+    let level: LevelSnapshot
+    let isConnected: Bool
+    let isMuted: Bool
+    let tint: Color
+    let accessibilityID: String
+
+    private var status: RecordingControllerInputStatus {
+        RecordingControllerInputStatus.make(
+            level: level,
+            isConnected: isConnected,
+            isMuted: isMuted
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
+                .frame(width: 18)
+            Text(title)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+                .frame(width: 84, alignment: .leading)
+            WaveformView(samples: level.samples, tint: tint)
+                .frame(maxWidth: .infinity)
+                .frame(height: 18)
+                .accessibilityHidden(true)
+                .background(
+                    RecordingControllerInputAccessibilityMarker(
+                        identifier: accessibilityID,
+                        label: title,
+                        value: status.rawValue
+                    )
+                )
+                .background(RecorderPanelRenderLocationMarker(productionIdentifier: accessibilityID))
+            Circle()
+                .fill(statusColor)
+                .frame(width: 6, height: 6)
+            Text(status.rawValue)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 72, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var statusColor: Color {
+        switch status {
+        case .signal:
+            tint
+        case .quiet:
+            .secondary
+        case .muted:
+            .orange
+        case .disconnected:
+            .red
+        }
+    }
+}
+
+private struct RecordingControllerInputAccessibilityMarker: NSViewRepresentable {
+    let identifier: String
+    let label: String
+    let value: String
+
+    func makeNSView(context: Context) -> RecorderPassiveMarkerView {
+        let view = RecorderPassiveMarkerView(frame: .zero)
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: RecorderPassiveMarkerView, context _: Context) {
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.staticText)
+        view.setAccessibilityIdentifier(identifier)
+        view.setAccessibilityLabel(label)
+        view.setAccessibilityValue(value)
     }
 }
 

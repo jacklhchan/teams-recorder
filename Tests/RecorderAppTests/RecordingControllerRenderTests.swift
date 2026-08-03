@@ -16,13 +16,22 @@ final class RecordingControllerRenderTests: XCTestCase {
             rootView: RecordingControllerPanelContent(
                 presentation: presentation,
                 stop: { stops += 1 },
-                setScreenRequested: { screenRequests.append($0) }
+                setScreenRequested: { screenRequests.append($0) },
+                systemLevel: .init(rms: -24, peak: -12, samples: [0.25, 0.5]),
+                microphoneLevel: .init(rms: -18, peak: -6, samples: [0.35, 0.65]),
+                isSystemConnected: true,
+                isMicrophoneConnected: true,
+                isMicrophoneMuted: false
             ),
-            size: .init(width: 390, height: 112)
+            size: .init(width: 390, height: 180)
         )
         defer { host.close() }
 
-        XCTAssertEqual(host.frame.size, .init(width: 390, height: 112))
+        XCTAssertEqual(host.frame.size, .init(width: 390, height: 180))
+        XCTAssertTrue(host.contains(RecordingControllerAccessibility.systemWaveformID))
+        XCTAssertTrue(host.contains(RecordingControllerAccessibility.microphoneWaveformID))
+        XCTAssertTrue(host.boundsContain(RecordingControllerAccessibility.systemWaveformID))
+        XCTAssertTrue(host.boundsContain(RecordingControllerAccessibility.microphoneWaveformID))
         for identifier in RecordingControllerAccessibility.allIDs {
             XCTAssertTrue(host.boundsContain(identifier), identifier)
         }
@@ -39,8 +48,17 @@ final class RecordingControllerRenderTests: XCTestCase {
             now: Date()
         )
         let host = PanelRenderHost(
-            rootView: RecordingControllerPanelContent(presentation: presentation, stop: { stops += 1 }, setScreenRequested: { screenRequests.append($0) }),
-            size: .init(width: 390, height: 112)
+            rootView: RecordingControllerPanelContent(
+                presentation: presentation,
+                stop: { stops += 1 },
+                setScreenRequested: { screenRequests.append($0) },
+                systemLevel: .init(rms: -24, peak: -12, samples: [0.25, 0.5]),
+                microphoneLevel: .init(rms: -18, peak: -6, samples: [0.35, 0.65]),
+                isSystemConnected: true,
+                isMicrophoneConnected: true,
+                isMicrophoneMuted: false
+            ),
+            size: .init(width: 390, height: 180)
         )
         defer { host.close() }
 
@@ -61,7 +79,21 @@ final class RecordingControllerRenderTests: XCTestCase {
             XCTAssertEqual(RecordingControllerAccessibility.screenCaptureLabel, "Capture Teams screen")
             XCTAssertEqual(RecordingControllerAccessibility.screenCaptureValue(isOn: false), "Off")
             XCTAssertEqual(RecordingControllerAccessibility.screenCaptureValue(isOn: true), "On")
-            let host = PanelRenderHost(rootView: RecordingControllerPanelContent(presentation: presentation, stop: {}, setScreenRequested: { _ in }).environment(\.recorderReduceMotionOverride, motion).environment(\.recorderReduceTransparencyOverride, transparency), size: .init(width: 390, height: 112))
+            let host = PanelRenderHost(
+                rootView: RecordingControllerPanelContent(
+                    presentation: presentation,
+                    stop: {},
+                    setScreenRequested: { _ in },
+                    systemLevel: .init(rms: -24, peak: -12, samples: [0.25, 0.5]),
+                    microphoneLevel: .init(rms: -18, peak: -6, samples: [0.35, 0.65]),
+                    isSystemConnected: true,
+                    isMicrophoneConnected: true,
+                    isMicrophoneMuted: false
+                )
+                .environment(\.recorderReduceMotionOverride, motion)
+                .environment(\.recorderReduceTransparencyOverride, transparency),
+                size: .init(width: 390, height: 180)
+            )
             defer { host.close() }
             XCTAssertTrue(host.contains(expectedMotion))
             XCTAssertFalse(host.contains(expectedMotion == "recorder.motion.scale" ? "recorder.motion.no-scale" : "recorder.motion.scale"))

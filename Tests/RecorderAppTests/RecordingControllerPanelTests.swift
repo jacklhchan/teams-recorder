@@ -23,6 +23,41 @@ final class RecordingControllerPanelTests: XCTestCase {
         )
     }
 
+    func testInputStatusUsesConnectionMuteAndSignalPrecedence() {
+        XCTAssertEqual(
+            RecordingControllerInputStatus.make(
+                level: .init(rms: -12, peak: -3, samples: [0.7]),
+                isConnected: true,
+                isMuted: false
+            ),
+            .signal
+        )
+        XCTAssertEqual(
+            RecordingControllerInputStatus.make(
+                level: .init(),
+                isConnected: true,
+                isMuted: false
+            ),
+            .quiet
+        )
+        XCTAssertEqual(
+            RecordingControllerInputStatus.make(
+                level: .init(rms: -12, peak: -3, samples: [0.7]),
+                isConnected: true,
+                isMuted: true
+            ),
+            .muted
+        )
+        XCTAssertEqual(
+            RecordingControllerInputStatus.make(
+                level: .init(rms: -12, peak: -3, samples: [0.7]),
+                isConnected: false,
+                isMuted: false
+            ),
+            .disconnected
+        )
+    }
+
     func testEpisodeEmitsOneCommandPerRecordingTransition() {
         var episode = RecordingControllerPanelEpisode()
 

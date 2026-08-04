@@ -307,11 +307,22 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
              TeamsTransportHealth.Unavailable or
              TeamsTransportHealth.PairingRequired);
 
-    public string TeamsPairingHealthText => !IsTeamsMuteSyncEnabled
-        ? "Teams API 健康檢查尚未啟用。"
-        : TeamsTransportHealthAssessment.Status == TeamsTransportHealth.Healthy
-            ? "Teams API 健康：目前連線已收到完整會議狀態。"
-            : $"Teams API 健康：{TeamsTransportHealthAssessment.Detail} 可使用「修復 Teams 配對」重新建立本機憑證；實際開始仍只會由完整的 Teams 會議狀態觸發。";
+    public string TeamsPairingHealthText
+    {
+        get
+        {
+            if (!IsTeamsMuteSyncEnabled)
+                return "Teams API 健康檢查尚未啟用。";
+            if (TeamsTransportHealthAssessment.Status == TeamsTransportHealth.Healthy)
+                return "Teams API 健康：目前連線已收到完整會議狀態。";
+            if (TeamsTransportHealthAssessment.Status == TeamsTransportHealth.PairingRequired &&
+                teamsMuteSnapshot.Status == TeamsMuteSyncStatus.WaitingForPairingApproval)
+            {
+                return "Teams 尚未發出新的配對 token。若已按 Allow 但仍停在此狀態，請到 Teams 的 Settings > Privacy > Manage API，對 Local Meeting Recorder 先 Block/Remove 再 Forget，然後回來按「修復 Teams 配對」並接受新的請求。";
+            }
+            return $"Teams API 健康：{TeamsTransportHealthAssessment.Detail} 可使用「修復 Teams 配對」重新建立本機憑證；實際開始仍只會由完整的 Teams 會議狀態觸發。";
+        }
+    }
 
     /// <summary>
     /// Automatic recording is deliberately a separate opt-in.  A Teams connection alone is

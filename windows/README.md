@@ -131,6 +131,25 @@ The resulting installer is:
 windows\out\installer\TeamsRecorderSetup-1.0.0-win-x64.exe
 ```
 
+The setup also installs `teams-recorder.exe`, a same-user local control CLI.
+It uses a current-user-only Windows named pipe; it does not open an HTTP port
+and never exposes the Teams pairing token. With the WinUI app running:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" status
+& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" watch
+& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" devices
+& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" teams
+& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" test
+& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" stop
+```
+
+`status` and `watch` include recording generation/state, separate output and
+microphone levels, bounded timeline counters, Teams pairing/meeting state, and
+the most recent Teams connection, event, and state-query outcome. State-changing
+commands carry the current recording generation so a stale CLI command cannot
+control a newer session.
+
 It installs per-user under `%LocalAppData%\Programs\Teams Recorder`, creates a
 Start Menu shortcut, and can optionally create a desktop shortcut or start the
 app automatically when the installing user signs in to Windows. The startup
@@ -214,6 +233,7 @@ windows/
 |-- scripts/                    Local validation entry points
 |-- src/Recorder.Core/          Portable policy and state machines
 |-- src/Recorder.Application/   Managed native-bridge adapter and lifecycle gate
+|-- src/Recorder.Cli/           Same-user named-pipe control and diagnostics CLI
 |-- src/Recorder.WinUI/         WinUI 3 audio-first capture, library, playback shell
 `-- tests/Recorder.Core.Tests/  Deterministic core tests
 ```

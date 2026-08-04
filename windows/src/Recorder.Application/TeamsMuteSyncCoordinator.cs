@@ -18,8 +18,10 @@ public interface ITeamsThirdPartyApiClient
 {
     event EventHandler<TeamsThirdPartyApiEvent>? EventReceived;
     event EventHandler<string?>? ConnectionChanged;
+    TeamsTransportDiagnosticSnapshot TransportSnapshot { get; }
     Task StartAsync(CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
+    Task RefreshStateAsync(CancellationToken cancellationToken = default);
     Task RequestPairingAsync(CancellationToken cancellationToken = default);
 }
 
@@ -93,6 +95,22 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                 SetSnapshotLocked(snapshot with { Status = TeamsMuteSyncStatus.WaitingForPairingApproval, Detail = null });
             }
         }
+    }
+
+    /// <summary>
+    /// Requests a fresh meeting snapshot without changing pairing state. Teams may not push
+    /// every mute or meeting-end transition on every desktop build, so the host can use this
+    /// small refresh while a recording is active.
+    /// </summary>
+    public async Task RefreshStateAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        lock (gate)
+        {
+            if (!enabled) return;
+        }
+
+        await client.RefreshStateAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private void OnApiEvent(object? sender, TeamsThirdPartyApiEvent @event)

@@ -145,8 +145,10 @@ internal static class TeamsIntegrationTests
     {
         public event EventHandler<TeamsThirdPartyApiEvent>? EventReceived;
         public event EventHandler<string?>? ConnectionChanged;
+        public TeamsTransportDiagnosticSnapshot TransportSnapshot { get; } = TeamsTransportDiagnosticSnapshot.Initial;
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task RefreshStateAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public int PairingRequests { get; private set; }
         public Task RequestPairingAsync(CancellationToken cancellationToken = default)
         {

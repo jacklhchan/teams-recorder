@@ -162,6 +162,33 @@ internal static class TeamsTransportTests
         client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    public static void ClientDoesNotOverlapStateQueries()
+    {
+        var socket = new FakeSocket();
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"),
+            new FakeTokenStore { Token = "paired-token" },
+            () => socket,
+            TimeSpan.FromHours(1));
+
+        client.StartAsync().GetAwaiter().GetResult();
+        Wait(socket.Connected.Task, "The overlap-test socket did not connect.");
+        Wait(socket.ReceiveEntered.Task, "The overlap-test receive loop did not start.");
+        WaitUntil(() => socket.Sent.Count == 1, "The initial state query was not sent.");
+
+        client.RefreshStateAsync().GetAwaiter().GetResult();
+        client.RefreshStateAsync().GetAwaiter().GetResult();
+        Equal(1, socket.Sent.Count);
+
+        socket.Publish("""{"requestId":1,"response":"ok"}""");
+        WaitUntil(() => client.TransportSnapshot.LastQueryOutcome == "acknowledged", "The first query reply was not observed.");
+        client.RefreshStateAsync().GetAwaiter().GetResult();
+        WaitUntil(() => socket.Sent.Count == 2, "A later query was not allowed after the reply.");
+
+        client.StopAsync().GetAwaiter().GetResult();
+        client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     public static void ClientFailsClosedWhenRemoteSocketClosesDuringMeeting()
     {
         var socket = new FakeSocket();

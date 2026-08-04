@@ -3,6 +3,7 @@
 #include "linear_resampler.h"
 #include "m4a_writer.h"
 #include "mix_format_decoder.h"
+#include "mixed_sample_limiter.hpp"
 #include "process_loopback.h"
 #include "selected_audio_session_facade.h"
 #include "wasapi_capture.h"
@@ -717,7 +718,11 @@ private:
             }
 
             for (float& sample : block) {
-                sample = std::tanh(sample);
+                // Preserve loopback samples bit-for-bit within the normalized range. Applying
+                // tanh here distorted even a render-only recording and could turn ordinary
+                // Teams audio into audible harmonic/static-like artefacts. Only clamp when a
+                // real mixed sum exceeds the PCM range.
+                sample = recorder::audio::limit_mixed_sample(sample);
             }
             if (writer->WriteFrames(
                     block.data(),

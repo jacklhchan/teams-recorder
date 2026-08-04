@@ -284,5 +284,14 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         add_test(NAME Recorder.SelectedAudioSessionFacade.Tests
             COMMAND Recorder.SelectedAudioSessionFacade.Tests)
 
+        add_executable(Recorder.MixedSampleLimiter.Tests
+            tests/mixed_sample_limiter_tests.cpp
+        )
+        target_compile_features(Recorder.MixedSampleLimiter.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.MixedSampleLimiter.Tests PRIVATE src)
+        recorder_enable_strict_warnings(Recorder.MixedSampleLimiter.Tests)
+        add_test(NAME Recorder.MixedSampleLimiter.Tests
+            COMMAND Recorder.MixedSampleLimiter.Tests)
+
     endif()
 endif()

@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Recorder.Core;
 using TeamsRecorder.Windows.Application;
+using TeamsRecorder.Windows.Application.Control;
 using TeamsRecorder.Windows.Application.AI;
 using TeamsRecorder.Windows.Application.Recovery;
 using TeamsRecorder.Windows.Application.Library;
@@ -33,6 +34,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private static readonly Brush NeutralHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.Gray);
     private readonly DispatcherQueue dispatcherQueue;
     private readonly DispatcherQueueTimer telemetryTimer;
+    private readonly DispatcherQueueTimer teamsStateRefreshTimer;
     private readonly DispatcherQueueTimer playbackTimer;
     // RecordingLifecycleService keeps native capture, the temporary session plan,
     // and final publication in the Application layer.  This VM only maps that
@@ -77,6 +79,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private bool isRecorderAvailable;
     private bool isShuttingDown;
     private bool isTelemetryRefreshInProgress;
+    private DateTimeOffset lastTeamsStateRefreshUtc = DateTimeOffset.MinValue;
     private bool isFaultFinalizationInProgress;
     private bool isUpdatingPlaybackPosition;
     private double playbackProgress;
@@ -127,6 +130,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         // the C ABI or blocking the audio mixer.
         telemetryTimer.Interval = TimeSpan.FromMilliseconds(100);
         telemetryTimer.Tick += OnTelemetryTimerTick;
+        teamsStateRefreshTimer = dispatcherQueue.CreateTimer();
+        teamsStateRefreshTimer.Interval = TimeSpan.FromSeconds(2);
+        teamsStateRefreshTimer.Tick += OnTeamsStateRefreshTimerTick;
         playbackTimer = dispatcherQueue.CreateTimer();
         playbackTimer.Interval = TimeSpan.FromMilliseconds(250);
         playbackTimer.Tick += (_, _) => UpdatePlaybackPosition();
@@ -388,7 +394,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             TeamsAutoMeetingState.StartCountdown(var seconds) => $"自動錄音已啟用：確認會議狀態後 {seconds} 秒開始。",
             TeamsAutoMeetingState.Starting => "自動錄音正在開始 M4A 工作階段。",
             TeamsAutoMeetingState.AutomaticRecording => "自動錄音進行中；離開會議後會先等待停止緩衝時間。",
+            TeamsAutoMeetingState.ManualRecording => "手動錄音進行中；Teams 回報離開會議後會先等待停止緩衝時間。",
+            TeamsAutoMeetingState.StopCountdown(var seconds) when teamsAutomaticSnapshot.RecordingOwner == RecordingOwner.Manual => $"Teams 回報已離開會議；{seconds} 秒後停止手動會議錄音。",
             TeamsAutoMeetingState.StopCountdown(var seconds) => $"Teams 回報已離開會議；{seconds} 秒後停止自動錄音。",
+            TeamsAutoMeetingState.Stopping when teamsAutomaticSnapshot.RecordingOwner == RecordingOwner.Manual => "正在停止並儲存手動會議錄音。",
             TeamsAutoMeetingState.Stopping => "正在停止並儲存自動錄音。",
             TeamsAutoMeetingState.SuppressedUntilMeetingEnd => "本次會議的自動錄音已暫停，直到 Teams 回報離開會議。",
             TeamsAutoMeetingState.StartBlocked(var reason) => $"自動錄音未開始：{reason}",
@@ -860,6 +869,121 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             dispatcherQueue.TryEnqueue(UpdateCommandStates);
     }
 
+    internal RecorderControlStatus GetControlStatus()
+    {
+        var stats = snapshot.Stats;
+        var meeting = teamsMuteSnapshot.LastMeetingState;
+        return new RecorderControlStatus(
+            DateTimeOffset.UtcNow,
+            isInitialized && isRecorderAvailable && !isShuttingDown,
+            snapshot.Generation,
+            snapshot.State.ToString(),
+            snapshot.State == RecordingCoordinatorState.Recording,
+            snapshot.IsTestRecording,
+            IsRecordingMicrophoneMuted,
+            SelectedRenderEndpoint?.DisplayName ?? "unavailable",
+            SelectedMicrophoneEndpoint?.DisplayName ?? "none",
+            SelectedCaptureSource?.Kind.ToString() ?? "unavailable",
+            StatusText,
+            ErrorText,
+            new RecorderControlAudioStatus(
+                stats.Mode.ToString(),
+                stats.SourceSampleRate,
+                stats.SourceChannels,
+                stats.Packets,
+                stats.InputFrames,
+                stats.OutputFrames,
+                stats.SilentPackets,
+                stats.Discontinuities,
+                stats.Peak,
+                stats.PrimaryLevelPeak,
+                stats.PrimaryLevelRms,
+                stats.MicrophoneLevelPeak,
+                stats.MicrophoneLevelRms,
+                ToControlTimeline(stats.RenderTimeline),
+                ToControlTimeline(stats.MicrophoneTimeline)),
+            new RecorderControlTeamsStatus(
+                IsTeamsMuteSyncEnabled,
+                teamsMuteSnapshot.Status.ToString(),
+                teamsMuteSnapshot.IsPairingKnown,
+                teamsMuteSnapshot.IsPairingAuthenticated,
+                meeting?.IsInMeeting,
+                meeting?.IsMuted,
+                IsTeamsAutomaticRecordingEnabled,
+                teamsAutomaticSnapshot.State.GetType().Name,
+                teamsApiClient?.TransportSnapshot ?? TeamsTransportDiagnosticSnapshot.Initial));
+    }
+
+    internal async Task<RecorderControlStatus> ExecuteControlRequestAsync(RecorderControlRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.SchemaVersion != RecorderControlProtocol.SchemaVersion)
+            throw new RecorderControlException("unsupported_schema", "Unsupported control protocol schema version.");
+        if (string.IsNullOrWhiteSpace(request.RequestId) || request.RequestId.Length > 80)
+            throw new RecorderControlException("invalid_request", "requestId is required and must not exceed 80 characters.");
+        if (!RecorderControlProtocol.IsSupportedCommand(request.Command))
+            throw new RecorderControlException("unknown_command", "The requested control command is not supported.");
+
+        if (request.Command != RecorderControlProtocol.Status)
+            EnsureExpectedGeneration(request.ExpectedGeneration);
+
+        switch (request.Command)
+        {
+            case RecorderControlProtocol.Status:
+                break;
+            case RecorderControlProtocol.RefreshDevices:
+                await RefreshEndpointsAsync();
+                break;
+            case RecorderControlProtocol.RefreshTeams:
+                if (teamsMuteSync is null)
+                    throw new RecorderControlException("not_ready", "Teams integration is not enabled.");
+                await teamsMuteSync.RefreshStateAsync();
+                break;
+            case RecorderControlProtocol.Start:
+                if (!CanStart) throw new RecorderControlException("invalid_state", "Recorder is not ready to start.");
+                await StartAsync();
+                break;
+            case RecorderControlProtocol.Test:
+                if (!CanStart) throw new RecorderControlException("invalid_state", "Recorder is not ready to start a test.");
+                await StartTestAsync();
+                break;
+            case RecorderControlProtocol.Stop:
+                if (!CanStop) throw new RecorderControlException("invalid_state", "There is no active recording to stop.");
+                await StopAsync();
+                break;
+            case RecorderControlProtocol.SetMicrophoneMute:
+                if (!request.Muted.HasValue)
+                    throw new RecorderControlException("invalid_request", "muted must be supplied for microphone.setMuted.");
+                teamsInputMute.SetLocalMuted(request.Muted.Value);
+                break;
+            case RecorderControlProtocol.Diagnostics:
+                if (!CanSaveDiagnostics)
+                    throw new RecorderControlException("not_ready", "Diagnostics are not available yet.");
+                await SaveDiagnosticsAsync();
+                break;
+        }
+
+        return GetControlStatus();
+    }
+
+    private void EnsureExpectedGeneration(long? expectedGeneration)
+    {
+        if (!expectedGeneration.HasValue)
+            throw new RecorderControlException("generation_required", "expectedGeneration is required for commands that change or refresh recorder state.");
+        if (expectedGeneration.Value != snapshot.Generation)
+            throw new RecorderControlException(
+                "stale_generation",
+                $"Expected generation {expectedGeneration.Value}, current generation is {snapshot.Generation}.");
+    }
+
+    private static RecorderControlTimelineStatus ToControlTimeline(NativeSourceTimelineStats value) => new(
+        value.DriftCorrections,
+        value.LatePackets,
+        value.LateFramesDropped,
+        value.QueueOverflows,
+        value.SourceDisconnects,
+        value.Discontinuities);
+
     private async Task InitializeOpenAiProviderAsync()
     {
         openAiProviderRepository = new OpenAICompatibleProviderRepository(
@@ -1221,6 +1345,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         isShuttingDown = true;
         telemetryTimer.Stop();
+        teamsStateRefreshTimer.Stop();
         playbackTimer.Stop();
         UpdateCommandStates();
 
@@ -1318,6 +1443,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             await teamsMuteSync.SetEnabledAsync(true);
             teamsMuteSnapshot = teamsMuteSync.Snapshot;
             IsTeamsMuteSyncEnabled = true;
+            teamsStateRefreshTimer.Start();
             if (restoreAutomaticRecording && teamsAutomaticRecorder is { } automatic)
             {
                 await automatic.SetEnabledAsync(true);
@@ -1491,6 +1617,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     private async Task DisposeTeamsMuteSyncAsync()
     {
+        teamsStateRefreshTimer.Stop();
         await DisposeTeamsAutomaticRecordingAsync();
 
         var sync = teamsMuteSync;
@@ -2463,6 +2590,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private async void OnTelemetryTimerTick(DispatcherQueueTimer _, object __) =>
         await RefreshTelemetryAsync();
 
+    private async void OnTeamsStateRefreshTimerTick(DispatcherQueueTimer _, object __)
+    {
+        try
+        {
+            await RefreshTeamsStateIfNeededAsync();
+        }
+        catch (Exception exception)
+        {
+            // Keep automatic recording fail-closed while making a rejected or unavailable
+            // query visible. The transport continues receiving authoritative pushes.
+            ErrorText = $"Teams state refresh failed: {exception.Message}";
+        }
+    }
+
     private async Task RefreshTelemetryAsync()
     {
         if (isShuttingDown ||
@@ -2477,6 +2618,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         try
         {
             RefreshElapsed();
+            await RefreshTeamsStateIfNeededAsync();
             ApplySnapshot(await recordingLifecycle.RefreshAsync());
         }
         catch (Exception exception)
@@ -2615,6 +2757,30 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         {
             OutputWaveformBars.Add(WaveformBar.Silence);
             InputWaveformBars.Add(WaveformBar.Silence);
+        }
+    }
+
+    private async Task RefreshTeamsStateIfNeededAsync()
+    {
+        if (teamsMuteSync is null || !IsTeamsMuteSyncEnabled)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (now - lastTeamsStateRefreshUtc < TimeSpan.FromSeconds(1))
+        {
+            return;
+        }
+
+        lastTeamsStateRefreshUtc = now;
+        try
+        {
+            await teamsMuteSync.RefreshStateAsync();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Disable/shutdown may dispose the Teams transport between the field check and send.
         }
     }
 

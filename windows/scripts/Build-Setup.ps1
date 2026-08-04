@@ -12,6 +12,7 @@ if ($Version -notmatch "^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$") {
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 $windowsRoot = Join-Path $repoRoot "windows"
 $project = Join-Path $windowsRoot "src\Recorder.WinUI\Recorder.WinUI.csproj"
+$cliProject = Join-Path $windowsRoot "src\Recorder.Cli\Recorder.Cli.csproj"
 $nativeBridge = Join-Path $windowsRoot "out\native\Release\Recorder.NativeBridge.dll"
 $installerScript = Join-Path $windowsRoot "installer\TeamsRecorder.iss"
 $publishDirectory = Join-Path $windowsRoot "out\publish\setup-win-x64"
@@ -61,6 +62,22 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.WinUI.ex
 }
 if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.NativeBridge.dll") -PathType Leaf)) {
     throw "Self-contained publish did not include Recorder.NativeBridge.dll."
+}
+
+& $dotnet publish $cliProject `
+    --configuration Release `
+    --runtime win-x64 `
+    --self-contained true `
+    --no-restore `
+    --property:PublishSingleFile=true `
+    --property:PublishTrimmed=false `
+    --output $publishDirectory `
+    --tl:off
+if ($LASTEXITCODE -ne 0) {
+    throw "Self-contained recorder CLI publish failed with exit code $LASTEXITCODE."
+}
+if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "teams-recorder.exe") -PathType Leaf)) {
+    throw "CLI publish did not produce teams-recorder.exe."
 }
 foreach ($runtimeFile in $nativeRuntimeFiles) {
     $runtimeSource = Join-Path $runtimeDirectory $runtimeFile

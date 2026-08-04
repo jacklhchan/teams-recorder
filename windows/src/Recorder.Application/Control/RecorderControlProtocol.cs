@@ -15,6 +15,8 @@ public static class RecorderControlProtocol
     public const string Watch = "watch";
     public const string RefreshDevices = "devices.refresh";
     public const string RefreshTeams = "teams.refresh";
+    public const string PairTeams = "teams.pair";
+    public const string ResetTeamsPairing = "teams.resetPairing";
     public const string Start = "recording.start";
     public const string Test = "recording.test";
     public const string Stop = "recording.stop";
@@ -26,6 +28,8 @@ public static class RecorderControlProtocol
         Status,
         RefreshDevices,
         RefreshTeams,
+        PairTeams,
+        ResetTeamsPairing,
         Start,
         Test,
         Stop,

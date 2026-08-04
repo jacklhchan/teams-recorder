@@ -81,6 +81,25 @@ internal static class TeamsIntegrationTests
         if (coordinator.Snapshot.LastMeetingState is null) throw new InvalidOperationException("An issued credential must retain the meeting state.");
     }
 
+    public static void MuteCoordinatorPreservesTrustedMeetingAcrossPartialUpdate()
+    {
+        var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
+        using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
+        var presence = new List<bool>(); coordinator.MeetingPresenceChanged += (_, value) => presence.Add(value);
+        coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, true, true, false), true, false), true));
+        var before = coordinator.Snapshot;
+
+        // Teams emits permission-only updates independently of full meeting state. They are
+        // diagnostics and must not fabricate a meeting-end or retract trusted mute routing.
+        client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(null, true, false), true));
+
+        if (coordinator.Snapshot != before)
+            throw new InvalidOperationException("A partial Teams update must preserve the trusted meeting snapshot.");
+        if (!microphone.Calls.SequenceEqual([true]) || !presence.SequenceEqual([true]))
+            throw new InvalidOperationException("A partial Teams update changed microphone or meeting ownership.");
+    }
+
     public static void MuteCoordinatorFailsClosedOnApiError()
     {
         var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
@@ -153,6 +172,12 @@ internal static class TeamsIntegrationTests
         public Task RequestPairingAsync(CancellationToken cancellationToken = default)
         {
             PairingRequests++;
+            return Task.CompletedTask;
+        }
+        public int ResetRequests { get; private set; }
+        public Task ResetPairingAsync(CancellationToken cancellationToken = default)
+        {
+            ResetRequests++;
             return Task.CompletedTask;
         }
         public void Publish(TeamsThirdPartyApiEvent value) => EventReceived?.Invoke(this, value);

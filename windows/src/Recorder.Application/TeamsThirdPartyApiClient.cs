@@ -214,6 +214,30 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
 
     public Task RequestPairingAsync(CancellationToken cancellationToken = default) => SendCommandAsync(TeamsThirdPartyApiAction.Pair, cancellationToken);
 
+    /// <summary>
+    /// Discards only this user's DPAPI-protected credential and reconnects without it. Teams-side
+    /// approval is intentionally never modified here. A successful repair is never inferred from
+    /// this operation: it requires a later Teams-issued token refresh and complete meeting state.
+    /// </summary>
+    public async Task ResetPairingAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await StopAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await tokens.ClearAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A failed local clear must not leave the integration permanently offline. Restart
+            // with the original credential and surface the clear failure to the caller.
+            await StartAsync(CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+
+        await StartAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public Task RefreshStateAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -283,21 +307,33 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
                     IsConnected = true,
                     PairingCredentialPresent = !string.IsNullOrWhiteSpace(token),
                     ConnectedAtUtc = DateTimeOffset.UtcNow,
+                    LastReceiveUtc = null,
+                    LastQuerySentUtc = null,
+                    LastQueryReplyUtc = null,
+                    LastQueryOutcome = null,
+                    LastEventKind = null,
+                    LastMeetingUpdateHadState = null,
+                    LastMeetingUpdateHadIsInMeeting = null,
+                    LastMeetingUpdateHadIsMuted = null,
+                    LastMeetingUpdateCanPair = null,
+                    LastMeetingUpdateCanToggleMute = null,
+                    LastAuthoritativeMeetingStateUtc = null,
+                    StateLessMeetingUpdateCount = 0,
                     LastConnectionError = null,
                 });
                 PublishConnection(runGeneration, null);
-                // Teams can acknowledge an authenticated device without including meetingState.
-                // Start receiving first, then issue one best-effort current-state query. This is
-                // the same order used by the macOS client: a query failure cannot suppress later
-                // push updates or take a paired connection offline.
-                var receive = ReceiveLoopAsync(
+                // Meeting updates are push-authoritative.  In particular, do not issue a
+                // startup query-state request: some Teams desktop versions only return a
+                // permissions-shaped acknowledgement for that request, which must never
+                // interfere with the normal meeting-update stream.
+                var reconnectingWithRefreshedCredential = await ReceiveLoopAsync(
                     runGeneration,
                     current,
                     !string.IsNullOrWhiteSpace(token),
-                    cancellationToken);
-                await TryQueryStateAfterReceiveStartsAsync(runGeneration, current, cancellationToken).ConfigureAwait(false);
-                await receive.ConfigureAwait(false);
-                if (!cancellationToken.IsCancellationRequested && IsCurrent(runGeneration, current))
+                    cancellationToken).ConfigureAwait(false);
+                if (!reconnectingWithRefreshedCredential &&
+                    !cancellationToken.IsCancellationRequested &&
+                    IsCurrent(runGeneration, current))
                     PublishConnection(runGeneration, "Teams API connection unavailable");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
@@ -351,35 +387,29 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
             payload.SetLength(0);
             var @event = TeamsThirdPartyApi.Decode(json);
             UpdateTransportFromEvent(runGeneration, @event);
-            if (IsStateQueryReply(runGeneration, current, @event))
-            {
-                // A state-query acknowledgement/error is informational. In particular, it is
-                // not a user-requested pairing outcome and must not change pairing trust.
-                continue;
-            }
-            if (@event is TeamsThirdPartyApiEvent.TokenRefresh(var token))
-            {
-                await tokens.WriteAsync(token, cancellationToken).ConfigureAwait(false);
-                // Teams issues the credential on this active localhost connection.  Retain the
-                // socket and refresh its state instead of reconnecting into a race that can
-                // suppress the automatic-recording countdown.
-                hasPairingCredential = true;
-                UpdateTransport(runGeneration, value => value with { PairingCredentialPresent = true });
-                // The unauthenticated pairing query is no longer useful once Teams issues a
-                // credential on this socket. Replace it with one authenticated state query.
-                await TryQueryStateAfterReceiveStartsAsync(
-                    runGeneration,
-                    current,
-                    cancellationToken,
-                    allowCredentialRefreshSupersede: true).ConfigureAwait(false);
-                continue;
-            }
+            // Invalid credentials take precedence over correlation with an optional manual
+            // query-state reply.  Otherwise an error carrying the query request ID could be
+            // swallowed and the revoked credential would be retried forever.
             if (@event is TeamsThirdPartyApiEvent.Error(_, var message) && IsInvalidPairingToken(message))
             {
                 // A revoked/expired token otherwise causes every reconnect to fail before
                 // Teams can advertise that this instance is eligible to pair again.
                 await tokens.ClearAsync(cancellationToken).ConfigureAwait(false);
-                return false;
+                return true;
+            }
+            if (IsStateQueryReply(runGeneration, current, @event))
+            {
+                // A manually requested state-query acknowledgement/error is diagnostic only.
+                continue;
+            }
+            if (@event is TeamsThirdPartyApiEvent.TokenRefresh(var token))
+            {
+                await tokens.WriteAsync(token, cancellationToken).ConfigureAwait(false);
+                UpdateTransport(runGeneration, value => value with { PairingCredentialPresent = true });
+                // A token received on the pairing socket is persisted but does not promote that
+                // socket to trusted. Reconnect so all authoritative push updates arrive on a
+                // URL authenticated by the refreshed credential.
+                return true;
             }
             if (@event is TeamsThirdPartyApiEvent.MeetingUpdate { Update.CanPair: true } &&
                 !hasPairingCredential && !automaticPairingRequested)
@@ -532,6 +562,12 @@ public sealed class TeamsThirdPartyApiClient : ITeamsThirdPartyApiClient, IAsync
                 LastMeetingUpdateHadState = update.HasMeetingState,
                 LastMeetingUpdateHadIsInMeeting = update.HasIsInMeeting,
                 LastMeetingUpdateHadIsMuted = update.HasIsMuted,
+                LastMeetingUpdateCanPair = update.CanPair,
+                LastMeetingUpdateCanToggleMute = update.CanToggleMute,
+                // A meetingState object without both fields is still partial and cannot drive
+                // automatic recording. Track only the decoded complete state as authoritative.
+                LastAuthoritativeMeetingStateUtc = update.State is not null ? DateTimeOffset.UtcNow : value.LastAuthoritativeMeetingStateUtc,
+                StateLessMeetingUpdateCount = update.State is not null ? value.StateLessMeetingUpdateCount : checked(value.StateLessMeetingUpdateCount + 1),
             },
             TeamsThirdPartyApiEvent.TokenRefresh => value with { LastEventKind = "tokenRefresh" },
             TeamsThirdPartyApiEvent.Response => value with { LastEventKind = "response" },

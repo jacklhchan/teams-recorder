@@ -140,9 +140,15 @@ and never exposes the Teams pairing token. With the WinUI app running:
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" watch
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" devices
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" teams
+& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" pair
+& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" reset-pairing
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" test
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" stop
 ```
+
+`reset-pairing` removes only this PC's protected local credential and reconnects
+for a diagnostic pairing attempt. It cannot change Teams settings and does not
+claim success until Teams sends a new credential and complete meeting state.
 
 `status` and `watch` include recording generation/state, separate output and
 microphone levels, bounded timeline counters, Teams pairing/meeting state, and

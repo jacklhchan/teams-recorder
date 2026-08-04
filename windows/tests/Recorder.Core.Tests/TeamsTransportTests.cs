@@ -4,14 +4,15 @@ using TeamsRecorder.Windows.Application;
 
 internal static class TeamsTransportTests
 {
-    public static void ClientPromotesTokenRefreshWithoutDroppingConnection()
+    public static void ClientReconnectsAfterTokenRefreshBeforeTrustingPushes()
     {
-        var socket = new FakeSocket();
+        var socket = new FakeSocket(); var authenticatedSocket = new FakeSocket();
+        var sockets = new Queue<FakeSocket>([socket, authenticatedSocket]);
         var store = new FakeTokenStore();
         var client = new TeamsThirdPartyApiClient(
             TeamsThirdPartyApiIdentity.Recorder("test"),
             store,
-            () => socket,
+            () => sockets.Dequeue(),
             TimeSpan.Zero);
         var events = 0; client.EventReceived += (_, _) => Interlocked.Increment(ref events);
         var connectionErrors = new List<string?>();
@@ -25,23 +26,24 @@ internal static class TeamsTransportTests
         client.StartAsync().GetAwaiter().GetResult();
         Wait(socket.Connected.Task, "The pairing socket did not connect.");
         Wait(socket.ReceiveEntered.Task, "The pairing socket did not begin receiving.");
-        Equal(1, socket.Sent.Count);
-        AssertAction(socket.Sent[0], "query-state");
+        Equal(0, socket.Sent.Count);
         socket.Publish("""{"tokenRefresh":"stored-only-in-fake"}""");
         WaitUntil(() => store.Token == "stored-only-in-fake", "The refreshed token was not saved.");
+        Wait(authenticatedSocket.Connected.Task, "The token refresh did not reconnect.");
+        Wait(authenticatedSocket.ReceiveEntered.Task, "The authenticated socket did not begin receiving.");
+        if (!authenticatedSocket.Endpoint!.Query.Contains("token=stored-only-in-fake", StringComparison.Ordinal))
+            throw new InvalidOperationException("The replacement socket did not use the refreshed token.");
         lock (connectionErrors)
         {
             if (connectionErrors.Count != 0)
                 throw new InvalidOperationException("A token refresh must not be reported as a Teams API disconnect.");
         }
-        WaitUntil(() => socket.Sent.Count == 2, "The refreshed connection did not query Teams state again.");
-        AssertAction(socket.Sent[1], "query-state");
-        socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true,"canPair":true}}}""");
+        authenticatedSocket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true,"canPair":true}}}""");
         WaitUntil(() => Volatile.Read(ref events) == 1, "The WebSocket event was not delivered.");
         Equal("stored-only-in-fake", store.Token!);
         client.RequestPairingAsync().GetAwaiter().GetResult();
-        WaitUntil(() => socket.Sent.Count == 3, "The pairing command was not sent.");
-        AssertAction(socket.Sent[2], "pair");
+        WaitUntil(() => authenticatedSocket.Sent.Count == 1, "The pairing command was not sent.");
+        AssertAction(authenticatedSocket.Sent[0], "pair");
         client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
@@ -65,12 +67,11 @@ internal static class TeamsTransportTests
         client.StartAsync().GetAwaiter().GetResult();
         Wait(socket.Connected.Task, "The overlapping-query socket did not connect.");
         Wait(socket.ReceiveEntered.Task, "The overlapping-query socket did not begin receiving.");
-        WaitUntil(() => socket.Sent.Count == 1, "The startup state query was not sent.");
-
-        socket.Publish("""{"tokenRefresh":"refreshed-token"}""");
-        WaitUntil(() => socket.Sent.Count == 2, "The token refresh state query was not sent.");
+        Equal(0, socket.Sent.Count);
+        client.RefreshStateAsync().GetAwaiter().GetResult();
+        client.RefreshStateAsync().GetAwaiter().GetResult();
+        Equal(1, socket.Sent.Count);
         socket.Publish("""{"requestId":1,"errorMsg":"First query completed late"}""");
-        socket.Publish("""{"requestId":2,"errorMsg":"Second query unavailable"}""");
         Thread.Sleep(50);
         Equal(0, Volatile.Read(ref events));
         Equal(0, Volatile.Read(ref connectionErrors));
@@ -115,8 +116,7 @@ internal static class TeamsTransportTests
         client.StartAsync().GetAwaiter().GetResult();
         Wait(socket.Connected.Task, "The push socket did not connect.");
         Wait(socket.ReceiveEntered.Task, "The push socket did not begin receiving.");
-        Equal(1, socket.Sent.Count);
-        AssertAction(socket.Sent[0], "query-state");
+        Equal(0, socket.Sent.Count);
 
         socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
         WaitUntil(() => { lock (states) return states.Count == 1; }, "The initial authenticated state was not delivered.");
@@ -129,7 +129,7 @@ internal static class TeamsTransportTests
 
         client.StopAsync().GetAwaiter().GetResult();
         Wait(socket.Closed.Task, "Stopping the client did not close the push socket.");
-        Equal(1, socket.Sent.Count);
+        Equal(0, socket.Sent.Count);
         client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
@@ -152,8 +152,9 @@ internal static class TeamsTransportTests
 
         client.StartAsync().GetAwaiter().GetResult();
         Wait(socket.Connected.Task, "The query-failure socket did not connect.");
-        Wait(socket.ReceiveEntered.Task, "The client must start receiving before state query is sent.");
-        WaitUntil(() => socket.Sent.Count == 1, "The state query was not sent.");
+        Wait(socket.ReceiveEntered.Task, "The client must start receiving before a manual state query is sent.");
+        client.RefreshStateAsync().GetAwaiter().GetResult();
+        WaitUntil(() => socket.Sent.Count == 1, "The manual state query was not sent.");
         socket.Publish("""{"requestId":1,"errorMsg":"Device already paired"}""");
         socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":false},"meetingPermissions":{"canToggleMute":true}}}""");
 
@@ -174,8 +175,6 @@ internal static class TeamsTransportTests
         client.StartAsync().GetAwaiter().GetResult();
         Wait(socket.Connected.Task, "The overlap-test socket did not connect.");
         Wait(socket.ReceiveEntered.Task, "The overlap-test receive loop did not start.");
-        WaitUntil(() => socket.Sent.Count == 1, "The initial state query was not sent.");
-
         client.RefreshStateAsync().GetAwaiter().GetResult();
         client.RefreshStateAsync().GetAwaiter().GetResult();
         Equal(1, socket.Sent.Count);
@@ -185,6 +184,81 @@ internal static class TeamsTransportTests
         client.RefreshStateAsync().GetAwaiter().GetResult();
         WaitUntil(() => socket.Sent.Count == 2, "A later query was not allowed after the reply.");
 
+        client.StopAsync().GetAwaiter().GetResult();
+        client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void ClientResetPairingClearsCredentialReconnectsAndRequestsFreshPairing()
+    {
+        var firstSocket = new FakeSocket(); var repairedSocket = new FakeSocket();
+        var sockets = new Queue<FakeSocket>([firstSocket, repairedSocket]);
+        var store = new FakeTokenStore { Token = "old-paired-token" };
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"),
+            store,
+            () => sockets.Dequeue(),
+            TimeSpan.FromHours(1));
+
+        client.StartAsync().GetAwaiter().GetResult();
+        Wait(firstSocket.ReceiveEntered.Task, "The initial pairing socket did not begin receiving.");
+        client.RefreshStateAsync().GetAwaiter().GetResult();
+        firstSocket.Publish("""{"requestId":1,"response":"ok"}""");
+        WaitUntil(() => client.TransportSnapshot.LastQueryOutcome == "acknowledged",
+            "The pre-repair diagnostic query did not complete.");
+        client.ResetPairingAsync().GetAwaiter().GetResult();
+
+        Wait(firstSocket.Closed.Task, "Pairing repair did not stop the old socket.");
+        Wait(repairedSocket.Connected.Task, "Pairing repair did not start a fresh socket.");
+        Wait(repairedSocket.ReceiveEntered.Task, "The repaired socket did not begin receiving.");
+        Equal(1, store.ClearCalls);
+        if (client.TransportSnapshot.LastQuerySentUtc is not null ||
+            client.TransportSnapshot.LastQueryReplyUtc is not null ||
+            client.TransportSnapshot.LastQueryOutcome is not null)
+            throw new InvalidOperationException("Pairing repair retained query evidence from the previous connection generation.");
+        if (repairedSocket.Endpoint!.Query.Contains("token=", StringComparison.Ordinal))
+            throw new InvalidOperationException("Pairing repair reconnected using the removed credential.");
+
+        repairedSocket.Publish("""{"meetingUpdate":{"meetingPermissions":{"canPair":true}}}""");
+        WaitUntil(() => repairedSocket.Sent.Any(message => message.Contains("\"action\":\"pair\"", StringComparison.Ordinal)),
+            "The repaired unauthenticated connection did not request fresh Teams pairing.");
+        client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void ClientResetPairingRestartsWhenCredentialClearFails()
+    {
+        var firstSocket = new FakeSocket(); var replacementSocket = new FakeSocket();
+        var sockets = new Queue<FakeSocket>([firstSocket, replacementSocket]);
+        var store = new FakeTokenStore { Token = "old-paired-token", ClearError = new IOException("simulated clear failure") };
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"), store, () => sockets.Dequeue(), TimeSpan.FromHours(1));
+        client.StartAsync().GetAwaiter().GetResult();
+        Wait(firstSocket.ReceiveEntered.Task, "The initial socket did not begin receiving.");
+        try { client.ResetPairingAsync().GetAwaiter().GetResult(); }
+        catch (IOException) { }
+        Wait(replacementSocket.Connected.Task, "A failed credential clear left Teams integration offline.");
+        if (!replacementSocket.Endpoint!.Query.Contains("token=old-paired-token", StringComparison.Ordinal))
+            throw new InvalidOperationException("A failed credential clear must retain the original local credential.");
+        client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void TransportDiagnosticsExposePermissionsWithoutPayloads()
+    {
+        var socket = new FakeSocket(); var authenticatedSocket = new FakeSocket();
+        var sockets = new Queue<FakeSocket>([socket, authenticatedSocket]);
+        var client = new TeamsThirdPartyApiClient(
+            TeamsThirdPartyApiIdentity.Recorder("test"),
+            new FakeTokenStore { Token = "paired-token" },
+            () => sockets.Dequeue(),
+            TimeSpan.FromHours(1));
+        client.StartAsync().GetAwaiter().GetResult();
+        Wait(socket.ReceiveEntered.Task, "The diagnostic socket did not begin receiving.");
+        socket.Publish("""{"meetingUpdate":{"meetingPermissions":{"canPair":true,"canToggleMute":false}}}""");
+        WaitUntil(() => client.TransportSnapshot.LastMeetingUpdateCanPair == true, "The permission shape was not diagnosed.");
+        Equal(false, client.TransportSnapshot.LastMeetingUpdateCanToggleMute!.Value);
+        Equal(false, client.TransportSnapshot.LastMeetingUpdateHadState!.Value);
+        Equal(1, client.TransportSnapshot.StateLessMeetingUpdateCount);
+        if (client.TransportSnapshot.LastAuthoritativeMeetingStateUtc is not null)
+            throw new InvalidOperationException("A permission-only update must not become an authoritative meeting state.");
         client.StopAsync().GetAwaiter().GetResult();
         client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
@@ -203,8 +277,7 @@ internal static class TeamsTransportTests
         coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
         Wait(socket.Connected.Task, "The close-test socket did not connect.");
         Wait(socket.ReceiveEntered.Task, "The close-test socket did not begin receiving.");
-        Equal(1, socket.Sent.Count);
-        AssertAction(socket.Sent[0], "query-state");
+        Equal(0, socket.Sent.Count);
         socket.Publish("""{"meetingUpdate":{"meetingState":{"isInMeeting":true,"isMuted":true},"meetingPermissions":{"canToggleMute":true}}}""");
         WaitUntil(() => coordinator.Snapshot.Status == TeamsMuteSyncStatus.InMeeting, "The authenticated meeting state was not applied.");
         socket.PublishClose();
@@ -252,7 +325,9 @@ internal static class TeamsTransportTests
         client.StartAsync().GetAwaiter().GetResult();
         Wait(rejectedSocket.Connected.Task, "The initial fake socket did not connect.");
         Wait(rejectedSocket.ReceiveEntered.Task, "The initial fake socket did not begin receiving.");
-        rejectedSocket.Publish("""{"errorMsg":"Invalid token"}""");
+        client.RefreshStateAsync().GetAwaiter().GetResult();
+        WaitUntil(() => rejectedSocket.Sent.Count == 1, "The manual query was not sent before the invalid-token reply.");
+        rejectedSocket.Publish("""{"requestId":1,"errorMsg":"Invalid token"}""");
 
         WaitUntil(() => store.ClearCalls == 1, "The invalid pairing token was not cleared.");
         Wait(replacementSocket.Connected.Task, "The client did not reconnect after clearing the invalid token.");
@@ -281,11 +356,11 @@ internal static class TeamsTransportTests
             throw new InvalidOperationException("The initial pairing socket must not include a token.");
         socket.Publish("""{"meetingUpdate":{"meetingPermissions":{"canPair":true}}}""");
         WaitUntil(() => Volatile.Read(ref pairingOffers) == 1, "The unauthenticated fresh pairing offer was not delivered.");
-        WaitUntil(() => socket.Sent.Count == 2, "The pairing command was not sent for the fresh connection.");
-        AssertAction(socket.Sent[1], "pair");
+        WaitUntil(() => socket.Sent.Count == 1, "The pairing command was not sent for the fresh connection.");
+        AssertAction(socket.Sent[0], "pair");
         socket.Publish("""{"meetingUpdate":{"meetingPermissions":{"canPair":true}}}""");
         Thread.Sleep(50);
-        Equal(2, socket.Sent.Count);
+        Equal(1, socket.Sent.Count);
         client.StopAsync().GetAwaiter().GetResult(); client.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
@@ -307,9 +382,16 @@ internal static class TeamsTransportTests
     {
         public string? Token { get; set; }
         public int ClearCalls { get; private set; }
+        public Exception? ClearError { get; set; }
         public Task<string?> ReadAsync(CancellationToken cancellationToken = default) => Task.FromResult(Token);
         public Task WriteAsync(string token, CancellationToken cancellationToken = default) { Token = token; return Task.CompletedTask; }
-        public Task ClearAsync(CancellationToken cancellationToken = default) { Token = null; ClearCalls++; return Task.CompletedTask; }
+        public Task ClearAsync(CancellationToken cancellationToken = default)
+        {
+            ClearCalls++;
+            if (ClearError is { } error) return Task.FromException(error);
+            Token = null;
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class RecordingMuteSink : IRecorderMicrophoneMuteSink

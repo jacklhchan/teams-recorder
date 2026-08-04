@@ -159,19 +159,22 @@
             <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                 <StackPanel Spacing="10">
                     <TextBlock Text="Teams 會議／靜音 Preview（選用）" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock Text="選擇啟用後，應用程式才會嘗試連線至本機 Teams Third-party API。請在 Teams 中完成配對；此 Preview 只採用已配對連線推送的狀態，不能假定 Teams 會可靠推送每次靜音變更。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <TextBlock Text="此區會持續檢查 Teams token 與會議狀態是否真正同步。僅有已儲存憑證或 WebSocket 連線並不代表同步健康；沒有收到完整會議狀態時，自動錄音會保持關閉。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <TextBlock Text="{Binding TeamsMuteStatusText}" TextWrapping="Wrap" />
+                    <InfoBar IsOpen="{Binding IsTeamsPairingRepairRecommended}" IsClosable="False" Severity="Warning" Title="Teams API 未提供會議狀態" Message="{Binding TeamsPairingHealthText}" />
+                    <TextBlock Text="{Binding TeamsPairingHealthText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <TextBlock Text="{Binding TeamsMuteRoutingText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <StackPanel Orientation="Horizontal" Spacing="10">
                         <Button Command="{Binding EnableTeamsMuteSyncCommand}" Content="啟用 Teams 靜音同步" />
                         <Button Command="{Binding DisableTeamsMuteSyncCommand}" Content="停用" />
                         <Button Command="{Binding RequestTeamsPairingCommand}" Content="在 Teams 中要求配對" />
+                        <Button Command="{Binding RepairTeamsPairingCommand}" Content="修復 Teams 配對" />
                     </StackPanel>
                     <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
                         <StackPanel Spacing="8">
                             <TextBlock Text="Teams 自動錄音（選用）" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="預設關閉。只有在 Teams 配對成功且收到可信會議狀態後，才能由使用者明確啟用；此功能只控制本機 M4A 工作階段，絕不向 Teams 發出錄音或靜音命令。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                            <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="測試限制" Message="Teams 的「Make a test call」可能不會推送會議狀態，因此不會觸發自動錄音。請在已配對的真實 Teams 會議中驗證此 Preview。" />
+                            <TextBlock Text="預設關閉。配對連線可先由使用者明確啟用；只有收到完整可信的會議狀態後才會開始倒數。此功能只控制本機 M4A 工作階段，絕不向 Teams 發出錄音或靜音命令。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="故障安全限制" Message="未收到可信 Teams 會議狀態時，Recorder 不會觸發自動錄音。「修復 Teams 配對」會清除本機舊 token 並重新握手；只有新的 token 與完整 meeting state 都到達才算修復完成。" />
                             <TextBlock Text="{Binding TeamsAutomaticRecordingStatusText}" TextWrapping="Wrap" />
                             <StackPanel Orientation="Horizontal" Spacing="10">
                                 <Button Command="{Binding EnableTeamsAutomaticRecordingCommand}" Content="啟用自動錄音" />

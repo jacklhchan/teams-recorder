@@ -322,6 +322,33 @@ internal static class TeamsAutomaticRecordingControllerTests
         controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    public static void LocalSignalReturnCancelsLocalStopDebounce()
+    {
+        var delay = new ControllableDelay();
+        var stops = 0;
+        var controller = new TeamsAutomaticRecordingController(
+            _ => Task.FromResult(TeamsAutomaticStartResult.Succeeded()),
+            _ => { Interlocked.Increment(ref stops); return Task.CompletedTask; },
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1, stopDebounceSeconds: 2),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetLocalMeetingCandidateAsync().GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => controller.Snapshot.State is TeamsAutoMeetingState.AutomaticRecording, "Local candidate did not start recording.");
+        controller.SetLocalMeetingEndedAsync().GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.StopCountdown)
+            throw new InvalidOperationException("Bounded local leave did not begin stop debounce.");
+        controller.SetLocalMeetingCandidateAsync().GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.AutomaticRecording)
+            throw new InvalidOperationException("Returned local evidence did not cancel stop debounce.");
+        delay.Tick();
+        Thread.Sleep(50);
+        if (Volatile.Read(ref stops) != 0)
+            throw new InvalidOperationException("A cancelled local stop debounce still stopped recording.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     private static void WaitUntil(Func<bool> condition, string message)
     {
         var deadline = DateTime.UtcNow.AddSeconds(2);

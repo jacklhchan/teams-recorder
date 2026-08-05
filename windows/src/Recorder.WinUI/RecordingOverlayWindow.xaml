@@ -14,7 +14,7 @@
         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
         BorderThickness="1"
         CornerRadius="10">
-        <Grid MinWidth="280" ColumnSpacing="12">
+        <Grid MinWidth="360" ColumnSpacing="12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
@@ -38,6 +38,18 @@
                     x:Name="CountdownText"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Text="倒數 0 秒" />
+                <ToggleSwitch
+                    x:Name="TeamsWindowCaptureToggle"
+                    Header="錄製 Teams 畫面"
+                    OffContent="已停止"
+                    OnContent="進行中"
+                    Toggled="OnTeamsWindowCaptureToggleToggled"
+                    Visibility="Collapsed" />
+                <TextBlock
+                    x:Name="TeamsWindowCaptureStatusText"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    TextWrapping="Wrap"
+                    Visibility="Collapsed" />
             </StackPanel>
 
             <Button

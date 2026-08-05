@@ -283,7 +283,7 @@ internal static class TeamsTransportTests
         socket.PublishClose();
 
         WaitUntil(() => coordinator.Snapshot.Status == TeamsMuteSyncStatus.WaitingForTeamsApi, "A remote close did not clear trusted meeting state.");
-        if (!microphone.Calls.SequenceEqual([true, true])) throw new InvalidOperationException("A remote close during a routed mute must fail closed.");
+        if (microphone.Calls.Count != 0) throw new InvalidOperationException("A remote close must not change recorder microphone state.");
         Equal(false, coordinator.Snapshot.IsPairingAuthenticated);
         if (coordinator.Snapshot.LastMeetingState is not null) throw new InvalidOperationException("A closed socket must not retain a trusted meeting state.");
 

@@ -202,6 +202,66 @@ internal static class AudioMvpTests
         }
     }
 
+    public static void WindowVideoCanRestartWithoutOverwritingSegments()
+    {
+        using var root = new TemporaryRoot();
+        var bridge = new MixedBridge { WriteOutputOnStart = true, WriteVideoOutputOnStart = true };
+        using var lifecycle = new RecordingLifecycleService(bridge, root.Path);
+        var started = lifecycle.StartMixedAsync(RecordingSessionKind.Manual, null, null).GetAwaiter().GetResult();
+        var first = Path.Combine(started.Session.FolderPath, RecordingSessionLayout.VideoSegmentFileName(1));
+        var second = Path.Combine(started.Session.FolderPath, RecordingSessionLayout.VideoSegmentFileName(2));
+        if (!lifecycle.StartWindowVideo(new NativeWindowVideoRecordingRequest(1, first)).IsSuccess ||
+            !lifecycle.StopWindowVideo().IsSuccess ||
+            !lifecycle.StartWindowVideo(new NativeWindowVideoRecordingRequest(1, second)).IsSuccess)
+            throw new InvalidOperationException("Video companion could not stop and restart while audio remained recording.");
+        lifecycle.StopAsync().GetAwaiter().GetResult();
+        var published = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
+        var info = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
+        var intervals = info.Document["screenIntervals"] as System.Text.Json.Nodes.JsonArray;
+        var segments = info.Document["windowsVideoSegments"] as System.Text.Json.Nodes.JsonArray;
+        if (!published.Published || !File.Exists(first) || !File.Exists(second) ||
+            intervals is not { Count: 2 } ||
+            segments is not { Count: 2 } ||
+            intervals[0]?["startSeconds"]?.GetValue<double>() != 1.25 ||
+            intervals[0]?["endSeconds"]?.GetValue<double>() != 4.5 ||
+            segments[0]?["fileName"]?.GetValue<string>() != RecordingSessionLayout.VideoSegmentFileName(1) ||
+            segments[1]?["fileName"]?.GetValue<string>() != RecordingSessionLayout.VideoSegmentFileName(2))
+            throw new InvalidOperationException("Video restart did not publish distinct non-overwriting segments.");
+    }
+
+    public static void WindowVideoToggleAndFullStopAreSerialized()
+    {
+        using var root = new TemporaryRoot();
+        var bridge = new MixedBridge
+        {
+            WriteOutputOnStart = true,
+            WriteVideoOutputOnStart = true,
+            BlockWindowVideoStop = true,
+        };
+        using var lifecycle = new RecordingLifecycleService(bridge, root.Path);
+        var started = lifecycle.StartMixedAsync(RecordingSessionKind.Manual, null, null).GetAwaiter().GetResult();
+        var video = lifecycle.GetNextWindowVideoOutputPath();
+        if (!lifecycle.StartWindowVideo(new NativeWindowVideoRecordingRequest(1, video)).IsSuccess)
+            throw new InvalidOperationException("Video companion did not start.");
+
+        var toggleStop = Task.Run(lifecycle.StopWindowVideo);
+        if (!bridge.WindowVideoStopEntered.Wait(TimeSpan.FromSeconds(2)))
+            throw new InvalidOperationException("Video toggle stop did not enter the fake bridge.");
+        var fullStop = lifecycle.StopAsync();
+        if (SpinWait.SpinUntil(() => bridge.StopCalls != 0, TimeSpan.FromMilliseconds(150)))
+            throw new InvalidOperationException("Full stop bypassed the in-progress video toggle operation.");
+
+        bridge.ReleaseWindowVideoStop.Set();
+        if (!toggleStop.GetAwaiter().GetResult().IsSuccess)
+            throw new InvalidOperationException("Video toggle stop failed.");
+        fullStop.GetAwaiter().GetResult();
+        var published = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
+        var info = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
+        var segments = info.Document["windowsVideoSegments"] as System.Text.Json.Nodes.JsonArray;
+        if (!published.Published || bridge.StopCalls != 1 || segments is not { Count: 1 })
+            throw new InvalidOperationException("Serialized toggle/full stop did not publish the finalized MP4 segment.");
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private static void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new InvalidOperationException($"Expected {typeof(T).Name}."); }
 
@@ -219,6 +279,9 @@ internal static class AudioMvpTests
         public bool WriteOutputOnStart { get; init; }
         public bool WriteVideoOutputOnStart { get; init; }
         public bool FinalVideoStatsAreValid { get; init; } = true;
+        public bool BlockWindowVideoStop { get; init; }
+        public ManualResetEventSlim WindowVideoStopEntered { get; } = new(false);
+        public ManualResetEventSlim ReleaseWindowVideoStop { get; } = new(false);
         private bool videoRunning;
         private NativeRecorderState state = NativeRecorderState.Ready;
         public NativeOperationResult Start(NativeRecordingRequest request) { RegularStartCalls++; state = NativeRecorderState.Recording; return NativeOperationResult.Success(); }
@@ -243,13 +306,25 @@ internal static class AudioMvpTests
             videoRunning = true;
             return NativeOperationResult.Success();
         }
-        public NativeOperationResult StopWindowVideo() { StopWindowVideoCalls++; videoRunning = false; return NativeOperationResult.Success(); }
+        public NativeOperationResult StopWindowVideo()
+        {
+            StopWindowVideoCalls++;
+            WindowVideoStopEntered.Set();
+            if (BlockWindowVideoStop && !ReleaseWindowVideoStop.Wait(TimeSpan.FromSeconds(5)))
+                return NativeOperationResult.Failure(NativeRecorderResult.CaptureError, "timed out waiting for test release");
+            videoRunning = false;
+            return NativeOperationResult.Success();
+        }
         public NativeWindowVideoSnapshot GetWindowVideoSnapshot()
         {
             var operation = FinalVideoStatsAreValid ? NativeOperationResult.Success() :
                 NativeOperationResult.Failure(NativeRecorderResult.CaptureError, "final MP4 flush failed");
+            // The pre-stop snapshot is intentionally different. Lifecycle code
+            // must use this final snapshot after Stop/Finalize, not the live one.
+            var first = videoRunning ? 50_000_000UL : 12_500_000UL;
+            var end = videoRunning ? 75_000_000UL : FinalVideoStatsAreValid ? 45_000_000UL : 0UL;
             return new NativeWindowVideoSnapshot(operation, videoRunning, 2, 2, 0, 0,
-                12_500_000, FinalVideoStatsAreValid ? 45_000_000UL : 0UL);
+                first, end);
         }
         public NativeRecorderSnapshot GetSnapshot() => SourceFaulted
             ? new(

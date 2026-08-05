@@ -8,8 +8,8 @@ being delivered in small, testable slices.
 
 The repository now contains:
 
-- a portable .NET domain core for recording ownership and Teams automatic
-  recording policy;
+- a portable .NET domain core for recording ownership and explicitly opted-in
+  local automatic-recording policy;
 - a versioned native C ABI and a SafeHandle-backed managed coordinator for
   recording lifecycle, endpoint enumeration, test recordings, and telemetry;
 - Windows WASAPI system, microphone, and process-loopback capture modules with
@@ -30,6 +30,10 @@ The repository now contains:
   and zero-size windows, and keeps process-start-time/HWND identity in memory
   for revalidation. Native WGC frames feed an independently bounded H.264/AAC
   MP4 companion; an MP4 failure preserves the primary M4A audio session.
+  While audio is recording, the user can turn this companion on, off, and on
+  again; each accepted video span is published as a bounded screen interval.
+- a small non-activating floating recording window with stop/cancel controls
+  and the same video-companion toggle as the main window;
 - an explicit OpenAI-compatible ASR workflow for one selected, completed M4A
   session at a time, plus a separately confirmed transcript-only LLM meeting
   summary. The API key is held only in the current Windows user's DPAPI store;
@@ -41,21 +45,17 @@ The repository now contains:
 - deterministic native and managed tests, JSON contract fixtures, and real
   process-audio diagnostic tools.
 
-This is an audio-first MVP, not a generally available Teams integration. In one
-Windows validation environment, Teams Third-party App API pairing completed,
-authoritative meeting-presence updates were received, and the automatic-recording
-flow finalized an M4A file. This is limited single-environment evidence only; it
-does not establish general Teams API availability, Teams-only process recording,
-or cross-tenant support. Teams UI mute/unmute actions did not deliver reliable
-mute-state updates in that validation. Teams Mute Sync therefore remains an
-unverified Preview and must not be presented as working, reliable, or capable of
-controlling Teams mute. The integration relies on supported pushed events and
-uses one best-effort `query-state` request after its receive loop is active, so
-an authenticated connection can obtain its current meeting state even when Teams
-does not emit a new transition push. The Third-party App API remains an
-optional Preview. The local Teams-audio heuristic is separately opt-in, is
-only permitted while authoritative transport is degraded/unavailable, can
-propose a one-time recording start, and never reads or changes Teams mute.
+This is an audio-first MVP, not a generally available Teams integration. The
+app and CLI do not use or present Teams Third-party App API pairing. Automatic
+recording is an explicit local opt-in: a WASAPI audio-session heuristic observes
+eligible Teams playback activity and requires sustained joined evidence before
+it starts. Missing render sessions never stop an active recording, because a
+meeting may be quiet; automatic stop requires the Teams process to be absent for
+three consecutive polls. Normal meeting departure is stopped manually from the
+floating recording window. This is intentionally a heuristic, so it can miss
+meetings or see unrelated Teams activity; it never reads, writes, or infers
+Teams mute. The recorder microphone mute is local to the recorder's optional
+microphone contribution only and never controls the Teams client.
 The Draft WGC/MP4 path has automated contract and timeline evidence, but is
 not GA: it still requires controlled two-account Teams, resize/DPI, and
 long-duration validation before any availability claim. A virtual microphone
@@ -143,29 +143,21 @@ windows\out\installer\TeamsRecorderSetup-1.0.0-win-x64.exe
 ```
 
 The setup also installs `teams-recorder.exe`, a same-user local control CLI.
-It uses a current-user-only Windows named pipe; it does not open an HTTP port
-and never exposes the Teams pairing token. With the WinUI app running:
+It uses a current-user-only Windows named pipe and does not open an HTTP port.
+With the WinUI app running:
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" status
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" watch
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" devices
-& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" teams
-& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" pair
-& "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" reset-pairing
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" test
 & "$env:LOCALAPPDATA\Programs\Teams Recorder\teams-recorder.exe" stop
 ```
 
-`reset-pairing` removes only this PC's protected local credential and reconnects
-for a diagnostic pairing attempt. It cannot change Teams settings and does not
-claim success until Teams sends a new credential and complete meeting state.
-
 `status` and `watch` include recording generation/state, separate output and
-microphone levels, bounded timeline counters, Teams pairing/meeting state, and
-the most recent Teams connection, event, and state-query outcome. State-changing
-commands carry the current recording generation so a stale CLI command cannot
-control a newer session.
+microphone levels, bounded timeline counters, and local automatic-recording
+health. State-changing commands carry the current recording generation so a
+stale CLI command cannot control a newer session.
 
 It installs per-user under `%LocalAppData%\Programs\Teams Recorder`, creates a
 Start Menu shortcut, and can optionally create a desktop shortcut or start the

@@ -35,7 +35,7 @@ internal static class TeamsIntegrationTests
         client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, true, true, false), true, false), true));
         client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, false), true, false), true));
         client.Disconnect("Teams API unavailable");
-        if (!microphone.Calls.SequenceEqual([true, false, true]) || !presence.SequenceEqual([true, true, true])) throw new InvalidOperationException("Mute routing or confirmed meeting updates were not ordered and fail-closed.");
+        if (microphone.Calls.Count != 0 || !presence.SequenceEqual([true, true, true])) throw new InvalidOperationException("Teams evidence must not drive recorder microphone mute.");
         if (evidence.LastOrDefault() is not TeamsMeetingEvidence.StateUnavailable)
             throw new InvalidOperationException("A lost Teams connection must publish unavailable evidence, not a confirmed leave.");
         Equal(TeamsMuteSyncStatus.WaitingForTeamsApi, coordinator.Snapshot.Status); Equal("Teams API unavailable", coordinator.Snapshot.Detail!);
@@ -99,8 +99,8 @@ internal static class TeamsIntegrationTests
 
         if (coordinator.Snapshot != before)
             throw new InvalidOperationException("A partial Teams update must preserve the trusted meeting snapshot.");
-        if (!microphone.Calls.SequenceEqual([true]) || !presence.SequenceEqual([true]))
-            throw new InvalidOperationException("A partial Teams update changed microphone or meeting ownership.");
+        if (microphone.Calls.Count != 0 || !presence.SequenceEqual([true]))
+            throw new InvalidOperationException("A partial Teams update changed recorder microphone state or meeting ownership.");
     }
 
     public static void MuteCoordinatorFailsClosedOnApiError()
@@ -111,7 +111,7 @@ internal static class TeamsIntegrationTests
         client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, true, true, false), true, false), true));
         client.Publish(new TeamsThirdPartyApiEvent.Error(null, "Teams API request failed"));
 
-        if (!microphone.Calls.SequenceEqual([true, true])) throw new InvalidOperationException("An API error after Teams routed a mute must fail closed.");
+        if (microphone.Calls.Count != 0) throw new InvalidOperationException("A Teams API error must not change recorder microphone state.");
         Equal(TeamsMuteSyncStatus.Failed, coordinator.Snapshot.Status);
         Equal(false, coordinator.Snapshot.IsPairingAuthenticated);
     }

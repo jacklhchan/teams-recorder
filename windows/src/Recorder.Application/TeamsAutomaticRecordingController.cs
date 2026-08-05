@@ -64,6 +64,13 @@ public sealed class TeamsAutomaticRecordingController : IAsyncDisposable
     public Task SetLocalMeetingCandidateAsync(CancellationToken cancellationToken = default) =>
         DispatchAsync(new TeamsAutoMeetingEvent.MeetingPresenceChanged(true), cancellationToken);
 
+    /// <summary>
+    /// Accepts only the bounded local detector's ended signal. It does not
+    /// modify authoritative Teams generation/revision state.
+    /// </summary>
+    public Task SetLocalMeetingEndedAsync(CancellationToken cancellationToken = default) =>
+        DispatchAsync(new TeamsAutoMeetingEvent.MeetingPresenceChanged(false), cancellationToken);
+
     /// <summary>Accepts only non-stale, paired-transport meeting evidence.</summary>
     public Task SetMeetingEvidenceAsync(TeamsMeetingEvidence evidence, CancellationToken cancellationToken = default)
     {

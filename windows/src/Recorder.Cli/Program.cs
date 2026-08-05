@@ -79,9 +79,6 @@ internal static class RecorderCli
     {
         "status" when args.Length == 1 => (RecorderControlProtocol.Status, null),
         "devices" when args.Length == 1 => (RecorderControlProtocol.RefreshDevices, null),
-        "teams" when args.Length == 1 => (RecorderControlProtocol.RefreshTeams, null),
-        "pair" when args.Length == 1 => (RecorderControlProtocol.PairTeams, null),
-        "reset-pairing" when args.Length == 1 => (RecorderControlProtocol.ResetTeamsPairing, null),
         "start" when args.Length == 1 => (RecorderControlProtocol.Start, null),
         "test" when args.Length == 1 => (RecorderControlProtocol.Test, null),
         "stop" when args.Length == 1 => (RecorderControlProtocol.Stop, null),
@@ -158,7 +155,7 @@ internal static class RecorderCli
     private static void PrintUsage()
     {
         Console.WriteLine("Teams Recorder control CLI");
-        Console.WriteLine("  teams-recorder status | watch | devices | teams | pair | reset-pairing");
+        Console.WriteLine("  teams-recorder status | watch | devices");
         Console.WriteLine("  teams-recorder start | test | stop | mute on|off | diagnostics");
         Console.WriteLine("The WinUI recorder must be running under the same Windows user.");
     }

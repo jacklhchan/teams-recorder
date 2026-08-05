@@ -24,8 +24,10 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
     private long generation;
     private RecordingSessionKind? activeSessionKind;
     private WindowsCaptureMetadata? activeWindowsCapture;
-    private VideoPublicationOutcome activeVideoOutcome;
-    private VideoPublicationInterval? activeVideoInterval;
+    private readonly List<VideoPublicationSegment> completedVideoSegments = [];
+    private string? activeVideoFileName;
+    private int nextVideoSegmentOrdinal;
+    private bool videoLossDetected;
     private bool disposed;
 
     public RecordingLifecycleService(
@@ -74,12 +76,32 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
     public bool IsWindowVideoCaptureAvailable => nativeBridge is INativeWindowVideoRecorderBridge video &&
         video.GetWindowVideoSnapshot().Operation.Result != NativeRecorderResult.NotImplemented;
 
+    /// <summary>Returns the next owned MP4 artifact without reserving it.</summary>
+    public string GetNextWindowVideoOutputPath()
+    {
+        ThrowIfDisposed();
+        lock (stateGate)
+        {
+            if (activeSession is null || activeVideoFileName is not null)
+                throw new InvalidOperationException("A new Teams window video segment is not currently startable.");
+            return Path.Combine(activeSession.FolderPath,
+                RecordingSessionLayout.VideoSegmentFileName(nextVideoSegmentOrdinal + 1));
+        }
+    }
+
     /// <summary>
     /// Starts an optional MP4 companion for the current audio-first session.
     /// The path is constrained to that session's owned folder, so UI callers
     /// cannot redirect native video output outside the recording library.
     /// </summary>
     public NativeOperationResult StartWindowVideo(NativeWindowVideoRecordingRequest request)
+    {
+        operationGate.Wait();
+        try { return StartWindowVideoCore(request); }
+        finally { operationGate.Release(); }
+    }
+
+    private NativeOperationResult StartWindowVideoCore(NativeWindowVideoRecordingRequest request)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
@@ -90,28 +112,77 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
             return NativeOperationResult.Failure(NativeRecorderResult.InvalidState,
                 "Window video can start only while an audio session is recording.");
 
-        var expected = Path.Combine(plan.FolderPath, RecordingSessionLayout.FinalVideoFileName);
+        string expected;
+        lock (stateGate)
+        {
+            if (activeVideoFileName is not null)
+                return NativeOperationResult.Failure(NativeRecorderResult.InvalidState,
+                    "A Teams window video segment is already active.");
+            expected = Path.Combine(plan.FolderPath,
+                RecordingSessionLayout.VideoSegmentFileName(nextVideoSegmentOrdinal + 1));
+        }
         if (!string.Equals(Path.GetFullPath(request.OutputPath), expected, StringComparison.OrdinalIgnoreCase))
             return NativeOperationResult.Failure(NativeRecorderResult.InvalidArgument,
                 "Window video output must be the current session companion path.");
+        if (File.Exists(expected))
+            return NativeOperationResult.Failure(NativeRecorderResult.InvalidState,
+                "The next Teams window video segment already exists and will not be overwritten.");
+        lock (stateGate)
+        {
+            // Consume an ordinal before native ingress. A failed capture can
+            // leave recoverable partial media, which a later restart must never overwrite.
+            if (activeVideoFileName is not null || !string.Equals(expected,
+                Path.Combine(plan.FolderPath, RecordingSessionLayout.VideoSegmentFileName(nextVideoSegmentOrdinal + 1)),
+                StringComparison.OrdinalIgnoreCase))
+                return NativeOperationResult.Failure(NativeRecorderResult.InvalidState,
+                    "The Teams window video segment changed before capture could start.");
+            nextVideoSegmentOrdinal++;
+        }
         var result = nativeBridge is INativeWindowVideoRecorderBridge video
             ? video.StartWindowVideo(request)
             : NativeOperationResult.Failure(NativeRecorderResult.NotImplemented,
                 "The installed native recorder does not include Teams window video capture.");
         lock (stateGate)
         {
-            activeVideoOutcome = result.IsSuccess ? VideoPublicationOutcome.Completed : VideoPublicationOutcome.LostAudioPreserved;
-            activeVideoInterval = null;
+            if (result.IsSuccess)
+            {
+                activeVideoFileName = Path.GetFileName(expected);
+            }
+            else videoLossDetected = true;
         }
         return result;
     }
 
     public NativeOperationResult StopWindowVideo()
     {
+        operationGate.Wait();
+        try { return StopWindowVideoCore(); }
+        finally { operationGate.Release(); }
+    }
+
+    private NativeOperationResult StopWindowVideoCore()
+    {
         ThrowIfDisposed();
-        return nativeBridge is INativeWindowVideoRecorderBridge video
+        string? fileName;
+        lock (stateGate) fileName = activeVideoFileName;
+        if (fileName is null) return NativeOperationResult.Failure(NativeRecorderResult.InvalidState,
+            "No Teams window video segment is active.");
+        var stopped = nativeBridge is INativeWindowVideoRecorderBridge video
             ? video.StopWindowVideo()
-            : NativeOperationResult.Success();
+            : NativeOperationResult.Failure(NativeRecorderResult.NotImplemented,
+                "The installed native recorder does not include Teams window video capture.");
+        lock (stateGate)
+        {
+            activeVideoFileName = null;
+            // The interval is valid only after the native writer has finalized;
+            // pre-stop stats can omit its drained tail or report a later fault.
+            var final = GetWindowVideoSnapshot();
+            if (stopped.IsSuccess && final.Operation.IsSuccess && TryCreateVideoInterval(final, out var interval) &&
+                activeSession is { } plan && IsNonEmptyFile(Path.Combine(plan.FolderPath, fileName)))
+                completedVideoSegments.Add(new VideoPublicationSegment(fileName, interval));
+            else videoLossDetected = true;
+        }
+        return stopped;
     }
 
     public NativeWindowVideoSnapshot GetWindowVideoSnapshot() => nativeBridge is INativeWindowVideoRecorderBridge video
@@ -195,8 +266,7 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
                 activeSession = plan;
                 activeSessionKind = request.Kind;
                 activeWindowsCapture = RecordingStartMetadataPolicy.CreateWindowsCaptureMetadata(request);
-                activeVideoOutcome = VideoPublicationOutcome.None;
-                activeVideoInterval = null;
+                ResetVideoState();
                 capture = activeWindowsCapture;
                 currentStorage = storage;
                 generation = checked(generation + 1);
@@ -279,8 +349,7 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
                 activeSession = plan;
                 activeSessionKind = kind;
                 activeWindowsCapture = WindowsCaptureMetadata.ForSystemLoopback(renderEndpointId);
-                activeVideoOutcome = VideoPublicationOutcome.None;
-                activeVideoInterval = null;
+                ResetVideoState();
                 generation = checked(generation + 1);
             }
 
@@ -314,27 +383,22 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
             // freezes both companion ingresses, drains/finalizes M4A, then
             // finalizes MP4. Calling StopWindowVideo here would cut the MP4
             // audio tail before that coordinated drain.
-            var beforeStop = nativeBridge is INativeWindowVideoRecorderBridge video
-                ? video.GetWindowVideoSnapshot() : null;
+            string? activeFile;
+            lock (stateGate) activeFile = activeVideoFileName;
             var stopped = await coordinator.StopAsync().ConfigureAwait(false);
-            if (nativeBridge is INativeWindowVideoRecorderBridge afterStopVideo)
+            if (activeFile is not null)
             {
-                var afterStop = afterStopVideo.GetWindowVideoSnapshot();
                 lock (stateGate)
                 {
-                    var hasVideoInterval = TryCreateVideoInterval(afterStop, out var interval);
-                    if (activeVideoOutcome == VideoPublicationOutcome.Completed &&
-                        (!beforeStop!.Operation.IsSuccess || beforeStop.DeliveredFrames == 0 ||
-                         !afterStop.Operation.IsSuccess ||
-                         !hasVideoInterval))
-                    {
-                        activeVideoOutcome = VideoPublicationOutcome.LostAudioPreserved;
-                        activeVideoInterval = null;
-                    }
-                    else if (activeVideoOutcome == VideoPublicationOutcome.Completed)
-                    {
-                        activeVideoInterval = interval;
-                    }
+                    activeVideoFileName = null;
+                    // coordinator.StopAsync reaches native's coordinated finalizer;
+                    // query only afterwards so MP4 tail/drain stats are authoritative.
+                    var final = GetWindowVideoSnapshot();
+                    if (stopped.State == RecordingCoordinatorState.Stopped && final.Operation.IsSuccess &&
+                        TryCreateVideoInterval(final, out var interval) &&
+                        activeSession is { } plan && IsNonEmptyFile(Path.Combine(plan.FolderPath, activeFile)))
+                        completedVideoSegments.Add(new VideoPublicationSegment(activeFile, interval));
+                    else videoLossDetected = true;
                 }
             }
             return stopped;
@@ -382,8 +446,7 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
             activeSession = null;
             activeSessionKind = null;
             activeWindowsCapture = null;
-            activeVideoOutcome = VideoPublicationOutcome.None;
-            activeVideoInterval = null;
+            ResetVideoState();
         }
         coordinator.CompleteFaultRecovery();
         var diagnostic = string.IsNullOrWhiteSpace(stopped.Error)
@@ -411,8 +474,7 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
                 activeSession = null;
                 activeSessionKind = null;
                 activeWindowsCapture = null;
-                activeVideoOutcome = VideoPublicationOutcome.None;
-                activeVideoInterval = null;
+                ResetVideoState();
             }
             // CleanupEmptyOwnedSession itself refuses any media, partial media,
             // diagnostics, or recovery evidence; it can only remove an empty folder.
@@ -427,16 +489,20 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
             SessionStorageService current;
             WindowsCaptureMetadata? capture;
             VideoPublicationOutcome videoOutcome;
-            VideoPublicationInterval? videoInterval;
+            VideoPublicationSegment[] videoSegments;
             lock (stateGate)
             {
                 current = storage;
                 capture = activeWindowsCapture;
-                videoOutcome = activeVideoOutcome;
-                videoInterval = activeVideoInterval;
+                videoOutcome = videoLossDetected
+                    ? VideoPublicationOutcome.LostAudioPreserved
+                    : completedVideoSegments.Count > 0
+                        ? VideoPublicationOutcome.Completed
+                        : VideoPublicationOutcome.None;
+                videoSegments = completedVideoSegments.ToArray();
             }
             await current.PublishCompletedMediaAsync(plan, title: null, windowsCapture: capture,
-                videoOutcome: videoOutcome, videoInterval: videoInterval).ConfigureAwait(false);
+                videoOutcome: videoOutcome, videoSegments: videoSegments).ConfigureAwait(false);
             return new RecordingSessionPublicationResult(plan, true, null);
         }
         catch (Exception exception) { return new RecordingSessionPublicationResult(plan, false, exception); }
@@ -449,8 +515,7 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
                     activeSession = null;
                     activeSessionKind = null;
                     activeWindowsCapture = null;
-                    activeVideoOutcome = VideoPublicationOutcome.None;
-                    activeVideoInterval = null;
+                ResetVideoState();
                 }
                 publication = null;
             }
@@ -467,6 +532,17 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
             TimeSpan.FromTicks((long)snapshot.FirstAcceptedVideoPts100Nanoseconds),
             TimeSpan.FromTicks((long)snapshot.LastAcceptedVideoEnd100Nanoseconds));
         return interval.IsValid;
+    }
+
+    private static bool IsNonEmptyFile(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
+
+    // Must be called under stateGate.
+    private void ResetVideoState()
+    {
+        completedVideoSegments.Clear();
+        activeVideoFileName = null;
+        nextVideoSegmentOrdinal = 0;
+        videoLossDetected = false;
     }
 
     private void OnSnapshotChanged(object? sender, RecordingCoordinatorSnapshot snapshot)

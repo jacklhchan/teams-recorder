@@ -26,6 +26,7 @@ public enum TeamsLocalMeetingHealth
     Candidate,
     MeetingLikely,
     EvidenceLost,
+    MeetingEndedLikely,
 }
 
 /// <summary>
@@ -53,35 +54,46 @@ public sealed record TeamsLocalHeuristicPolicy(bool EnableLocalHeuristicAutoStar
 public sealed record TeamsLocalMeetingSnapshot(
     TeamsLocalMeetingHealth Health,
     int ConsecutiveActiveObservations,
+    int ConsecutiveMissingObservations,
     bool StartSignalLatched,
     bool ShouldTriggerAutomaticStart,
+    bool ShouldTriggerAutomaticStop,
     DateTimeOffset? FirstActiveObservationUtc,
     DateTimeOffset? LastActiveObservationUtc,
     string Detail,
     TeamsLocalMuteCapability MuteCapability);
 
 /// <summary>
-/// Fail-closed local meeting-start detector. A start is emitted once after a
-/// bounded run of active Teams render-session observations. Negative evidence
-/// never means "meeting ended": the signal latches until the host explicitly
-/// resets it after the user stops or cancels the recording.
+/// Fail-closed local meeting detector. A start is emitted after a bounded run
+/// of active Teams render-session observations. Render silence is not evidence
+/// that a meeting ended. A stop is emitted only after Teams itself is absent
+/// for a bounded number of healthy polls; probe failure never stops.
 /// </summary>
 public sealed class TeamsLocalMeetingDetector
 {
     public const int DefaultRequiredActiveObservations = 3;
+    public const int DefaultRequiredMissingProcessObservations = 3;
 
     private readonly int requiredActiveObservations;
+    private readonly int requiredMissingProcessObservations;
     private int consecutiveActiveObservations;
+    private int consecutiveMissingObservations;
     private bool startSignalLatched;
     private bool automaticStartForwarded;
+    private bool automaticStopForwarded;
     private DateTimeOffset? firstActiveObservationUtc;
     private DateTimeOffset? lastActiveObservationUtc;
 
-    public TeamsLocalMeetingDetector(int requiredActiveObservations = DefaultRequiredActiveObservations)
+    public TeamsLocalMeetingDetector(
+        int requiredActiveObservations = DefaultRequiredActiveObservations,
+        int requiredMissingProcessObservations = DefaultRequiredMissingProcessObservations)
     {
         if (requiredActiveObservations < 2)
             throw new ArgumentOutOfRangeException(nameof(requiredActiveObservations), "At least two observations are required to reject transient notification audio.");
+        if (requiredMissingProcessObservations < 2)
+            throw new ArgumentOutOfRangeException(nameof(requiredMissingProcessObservations));
         this.requiredActiveObservations = requiredActiveObservations;
+        this.requiredMissingProcessObservations = requiredMissingProcessObservations;
     }
 
     public TeamsLocalMeetingSnapshot Observe(
@@ -94,38 +106,62 @@ public sealed class TeamsLocalMeetingDetector
         if (!observation.ProbeAvailable)
         {
             consecutiveActiveObservations = 0;
+            consecutiveMissingObservations = 0;
             firstActiveObservationUtc = null;
             return Snapshot(
                 startSignalLatched ? TeamsLocalMeetingHealth.EvidenceLost : TeamsLocalMeetingHealth.Unavailable,
                 false,
-                "Windows 無法讀取 Teams 的 WASAPI 播放工作階段；本機自動開始已停用。");
+                false,
+                "Windows 無法讀取 Teams 的 WASAPI 播放工作階段；探針失敗不會觸發自動開始或停止。");
         }
 
         if (!observation.HasActiveTeamsRenderSession)
         {
             consecutiveActiveObservations = 0;
             firstActiveObservationUtc = null;
+            if (startSignalLatched && !observation.TeamsProcessPresent)
+                consecutiveMissingObservations = checked(consecutiveMissingObservations + 1);
+            else
+                consecutiveMissingObservations = 0;
+            var stopNow = startSignalLatched &&
+                !observation.TeamsProcessPresent &&
+                !automaticStopForwarded &&
+                consecutiveMissingObservations >= requiredMissingProcessObservations &&
+                policy.EnableLocalHeuristicAutoStart;
+            automaticStopForwarded |= stopNow;
             var health = startSignalLatched
-                ? TeamsLocalMeetingHealth.EvidenceLost
+                ? automaticStopForwarded
+                    ? TeamsLocalMeetingHealth.MeetingEndedLikely
+                    : TeamsLocalMeetingHealth.EvidenceLost
                 : observation.TeamsProcessPresent
                     ? TeamsLocalMeetingHealth.WaitingForAudio
                     : TeamsLocalMeetingHealth.WaitingForTeams;
             var detail = startSignalLatched
-                ? "先前的 Teams 播放訊號已消失；這不代表會議已結束，錄音不會被自動停止。"
+                ? automaticStopForwarded
+                    ? "Teams 程序已連續 3 次不存在；已提出一次本機推測停止，仍可在浮動視窗手動停止。"
+                    : observation.TeamsProcessPresent
+                        ? "Teams 播放工作階段目前沒有活動；這可能只是會議沉默，因此不會據此自動停止。"
+                        : $"Teams 程序目前不存在（{consecutiveMissingObservations}/{requiredMissingProcessObservations}）；尚未提出停止。"
                 : observation.TeamsProcessPresent
                     ? "Teams 正在執行，但尚未持續觀察到 Teams 播放音訊工作階段。"
                     : "尚未觀察到 Teams 程序或 Teams 播放音訊工作階段。";
-            return Snapshot(health, false, detail);
+            return Snapshot(health, false, stopNow, detail);
         }
 
         lastActiveObservationUtc = observation.ObservedAtUtc;
+        consecutiveMissingObservations = 0;
         if (startSignalLatched)
         {
-            var forwardNow = policy.EnableLocalHeuristicAutoStart && !automaticStartForwarded;
+            var returnedDuringStop = automaticStopForwarded;
+            automaticStopForwarded = false;
+            var forwardNow = policy.EnableLocalHeuristicAutoStart &&
+                (!automaticStartForwarded || returnedDuringStop);
             automaticStartForwarded |= forwardNow;
-            return Snapshot(TeamsLocalMeetingHealth.MeetingLikely, forwardNow,
+            return Snapshot(TeamsLocalMeetingHealth.MeetingLikely, forwardNow, false,
                 forwardNow
-                    ? "使用者已啟用本機推測自動開始；可將一次倒數開始訊號交給錄音控制器。"
+                    ? returnedDuringStop
+                        ? "Teams 播放訊號已恢復；已取消本機推測停止倒數。"
+                        : "使用者已啟用本機推測自動開始；可將一次倒數開始訊號交給錄音控制器。"
                     : automaticStartForwarded
                         ? "已送出一次本機 Teams 推測開始訊號；不會重複觸發。"
                         : "已偵測到可能的 Teams 會議；本機推測自動開始尚未啟用，僅顯示提示。" );
@@ -134,7 +170,7 @@ public sealed class TeamsLocalMeetingDetector
         firstActiveObservationUtc ??= observation.ObservedAtUtc;
         consecutiveActiveObservations = checked(consecutiveActiveObservations + 1);
         if (consecutiveActiveObservations < requiredActiveObservations)
-            return Snapshot(TeamsLocalMeetingHealth.Candidate, false,
+            return Snapshot(TeamsLocalMeetingHealth.Candidate, false, false,
                 $"已連續觀察到 {consecutiveActiveObservations}/{requiredActiveObservations} 次 Teams 播放訊號；正在排除通知音效。" );
 
         startSignalLatched = true;
@@ -142,6 +178,7 @@ public sealed class TeamsLocalMeetingDetector
         return Snapshot(
             TeamsLocalMeetingHealth.MeetingLikely,
             automaticStartForwarded,
+            false,
             automaticStartForwarded
                 ? "使用者已啟用本機推測自動開始；可將一次倒數開始訊號交給錄音控制器。"
                 : "已偵測到可能的 Teams 會議；本機推測自動開始尚未啟用，僅顯示提示。" );
@@ -151,14 +188,21 @@ public sealed class TeamsLocalMeetingDetector
     public void Reset()
     {
         consecutiveActiveObservations = 0;
+        consecutiveMissingObservations = 0;
         startSignalLatched = false;
         automaticStartForwarded = false;
+        automaticStopForwarded = false;
         firstActiveObservationUtc = null;
         lastActiveObservationUtc = null;
     }
 
-    private TeamsLocalMeetingSnapshot Snapshot(TeamsLocalMeetingHealth health, bool trigger, string detail) =>
-        new(health, consecutiveActiveObservations, startSignalLatched, trigger,
+    private TeamsLocalMeetingSnapshot Snapshot(
+        TeamsLocalMeetingHealth health,
+        bool triggerStart,
+        bool triggerStop,
+        string detail) =>
+        new(health, consecutiveActiveObservations, consecutiveMissingObservations,
+            startSignalLatched, triggerStart, triggerStop,
             firstActiveObservationUtc, lastActiveObservationUtc, detail,
             TeamsLocalMuteCapability.RecorderOnly);
 }
@@ -195,14 +239,15 @@ public sealed class TeamsLocalMeetingSignalSampler(
 }
 
 /// <summary>
-/// Owns cancellable, non-reentrant polling and the explicit hand-off to the
-/// automatic-recording controller. It never emits meeting-left or mute state.
+/// Owns cancellable, non-reentrant polling and explicit local-presence hand-off.
+/// It has no Teams API or mute-state dependency.
 /// </summary>
 public sealed class TeamsLocalHeuristicAutoStartHost : IAsyncDisposable
 {
     private readonly ITeamsLocalMeetingSignalSampler sampler;
     private readonly TeamsLocalMeetingDetector detector;
     private readonly Func<CancellationToken, Task> forwardLocalMeetingCandidate;
+    private readonly Func<CancellationToken, Task> forwardLocalMeetingEnded;
     private readonly Func<DateTimeOffset> utcNow;
     private readonly SemaphoreSlim pollGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
@@ -213,11 +258,13 @@ public sealed class TeamsLocalHeuristicAutoStartHost : IAsyncDisposable
     public TeamsLocalHeuristicAutoStartHost(
         ITeamsLocalMeetingSignalSampler sampler,
         Func<CancellationToken, Task> forwardLocalMeetingCandidate,
+        Func<CancellationToken, Task> forwardLocalMeetingEnded,
         TeamsLocalMeetingDetector? detector = null,
         Func<DateTimeOffset>? utcNow = null)
     {
         this.sampler = sampler ?? throw new ArgumentNullException(nameof(sampler));
         this.forwardLocalMeetingCandidate = forwardLocalMeetingCandidate ?? throw new ArgumentNullException(nameof(forwardLocalMeetingCandidate));
+        this.forwardLocalMeetingEnded = forwardLocalMeetingEnded ?? throw new ArgumentNullException(nameof(forwardLocalMeetingEnded));
         this.detector = detector ?? new TeamsLocalMeetingDetector();
         this.utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
@@ -229,13 +276,11 @@ public sealed class TeamsLocalHeuristicAutoStartHost : IAsyncDisposable
 
     public async Task<TeamsLocalMeetingSnapshot?> PollAsync(
         TeamsLocalHeuristicPolicy policy,
-        TeamsTransportHealth transportHealth,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(policy);
         ThrowIfDisposed();
-        if (!policy.EnableLocalHeuristicAutoStart ||
-            transportHealth is not (TeamsTransportHealth.Degraded or TeamsTransportHealth.Unavailable))
+        if (!policy.EnableLocalHeuristicAutoStart)
         {
             return Snapshot;
         }
@@ -252,6 +297,8 @@ public sealed class TeamsLocalHeuristicAutoStartHost : IAsyncDisposable
             lock (snapshotGate) snapshot = changed;
             if (changed.ShouldTriggerAutomaticStart)
                 await forwardLocalMeetingCandidate(linked.Token).ConfigureAwait(false);
+            if (changed.ShouldTriggerAutomaticStop)
+                await forwardLocalMeetingEnded(linked.Token).ConfigureAwait(false);
             return changed;
         }
         finally

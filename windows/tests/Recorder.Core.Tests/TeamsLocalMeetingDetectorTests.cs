@@ -86,14 +86,14 @@ internal static class TeamsLocalMeetingDetectorTests
         var host = new TeamsLocalHeuristicAutoStartHost(
             sampler,
             _ => { forwarded++; return Task.CompletedTask; },
+            _ => Task.CompletedTask,
             new TeamsLocalMeetingDetector(2));
 
-        host.PollAsync(TeamsLocalHeuristicPolicy.Disabled, TeamsTransportHealth.Degraded).GetAwaiter().GetResult();
-        host.PollAsync(new(true), TeamsTransportHealth.Healthy).GetAwaiter().GetResult();
+        host.PollAsync(TeamsLocalHeuristicPolicy.Disabled).GetAwaiter().GetResult();
         Equal(0, sampler.CallCount);
 
-        host.PollAsync(new(true), TeamsTransportHealth.Degraded).GetAwaiter().GetResult();
-        host.PollAsync(new(true), TeamsTransportHealth.Degraded).GetAwaiter().GetResult();
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
         Equal(2, sampler.CallCount);
         Equal(1, forwarded);
         host.DisposeAsync().AsTask().GetAwaiter().GetResult();
@@ -106,20 +106,21 @@ internal static class TeamsLocalMeetingDetectorTests
         var host = new TeamsLocalHeuristicAutoStartHost(
             sampler,
             _ => { forwarded++; return Task.CompletedTask; },
+            _ => Task.CompletedTask,
             new TeamsLocalMeetingDetector(2));
 
-        var first = host.PollAsync(new(true), TeamsTransportHealth.Unavailable);
+        var first = host.PollAsync(new(true));
         sampler.WaitUntilEntered();
-        var overlapping = host.PollAsync(new(true), TeamsTransportHealth.Unavailable).GetAwaiter().GetResult();
+        var overlapping = host.PollAsync(new(true)).GetAwaiter().GetResult();
         Equal<TeamsLocalMeetingSnapshot?>(null, overlapping);
         Equal(1, sampler.CallCount);
         sampler.Release();
         first.GetAwaiter().GetResult();
 
         // Confirm once, then lose evidence. The host has no leave callback by design.
-        host.PollAsync(new(true), TeamsTransportHealth.Unavailable).GetAwaiter().GetResult();
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
         sampler.Next = new TeamsLocalMeetingObservation(DateTimeOffset.UtcNow, true, false, Array.Empty<string>());
-        var lost = host.PollAsync(new(true), TeamsTransportHealth.Unavailable).GetAwaiter().GetResult();
+        var lost = host.PollAsync(new(true)).GetAwaiter().GetResult();
         Equal(TeamsLocalMeetingHealth.EvidenceLost, lost!.Health);
         Equal(1, forwarded);
         host.DisposeAsync().AsTask().GetAwaiter().GetResult();
@@ -132,10 +133,11 @@ internal static class TeamsLocalMeetingDetectorTests
         var host = new TeamsLocalHeuristicAutoStartHost(
             sampler,
             _ => { forwarded++; return Task.CompletedTask; },
+            _ => Task.CompletedTask,
             new TeamsLocalMeetingDetector(2));
         using var cancellation = new CancellationTokenSource();
 
-        var poll = host.PollAsync(new(true), TeamsTransportHealth.Degraded, cancellation.Token);
+        var poll = host.PollAsync(new(true), cancellation.Token);
         sampler.WaitUntilEntered();
         cancellation.Cancel();
         sampler.Release();
@@ -145,8 +147,79 @@ internal static class TeamsLocalMeetingDetectorTests
         host.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    public static void SilentMeetingAndProbeFailureNeverTriggerStop()
+    {
+        var detector = new TeamsLocalMeetingDetector(2, requiredMissingProcessObservations: 3);
+        var policy = new TeamsLocalHeuristicPolicy(true);
+        var at = DateTimeOffset.UtcNow;
+        detector.Observe(Active(at), policy);
+        detector.Observe(Active(at.AddSeconds(2)), policy);
+
+        for (var index = 0; index < 100; index++)
+        {
+            var silent = detector.Observe(Missing(at.AddSeconds(4 + index * 2), teamsPresent: true), policy);
+            Equal(false, silent.ShouldTriggerAutomaticStop);
+            Equal(TeamsLocalMeetingHealth.EvidenceLost, silent.Health);
+            Equal(0, silent.ConsecutiveMissingObservations);
+        }
+
+        detector.Reset();
+        detector.Observe(Active(at), policy);
+        detector.Observe(Active(at.AddSeconds(2)), policy);
+        for (var index = 0; index < 5; index++)
+            Equal(false, detector.Observe(TeamsLocalMeetingObservation.ProbeFailure(at.AddSeconds(204 + index * 2), true), policy).ShouldTriggerAutomaticStop);
+    }
+
+    public static void ProcessExitUsesBoundedFastStopAndReturnedAudioCancelsStop()
+    {
+        var detector = new TeamsLocalMeetingDetector(2, requiredMissingProcessObservations: 3);
+        var policy = new TeamsLocalHeuristicPolicy(true);
+        var at = DateTimeOffset.UtcNow;
+        detector.Observe(Active(at), policy);
+        detector.Observe(Active(at.AddSeconds(2)), policy);
+        Equal(false, detector.Observe(Missing(at.AddSeconds(4), teamsPresent: false), policy).ShouldTriggerAutomaticStop);
+        Equal(false, detector.Observe(Missing(at.AddSeconds(6), teamsPresent: false), policy).ShouldTriggerAutomaticStop);
+        Equal(true, detector.Observe(Missing(at.AddSeconds(8), teamsPresent: false), policy).ShouldTriggerAutomaticStop);
+
+        var returned = detector.Observe(Active(at.AddSeconds(10)), policy);
+        Equal(true, returned.ShouldTriggerAutomaticStart);
+        Contains("取消", returned.Detail);
+    }
+
+    public static void HostForwardsOneBoundedStopAndARejoin()
+    {
+        var at = DateTimeOffset.UtcNow;
+        var sampler = new QueueSampler(Active(at));
+        var joins = 0;
+        var leaves = 0;
+        var host = new TeamsLocalHeuristicAutoStartHost(
+            sampler,
+            _ => { joins++; return Task.CompletedTask; },
+            _ => { leaves++; return Task.CompletedTask; },
+            new TeamsLocalMeetingDetector(2, 3));
+
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
+        sampler.Next = Missing(at.AddSeconds(4), teamsPresent: false);
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
+        Equal(1, joins);
+        Equal(1, leaves);
+
+        sampler.Next = Active(at.AddSeconds(10));
+        host.PollAsync(new(true)).GetAwaiter().GetResult();
+        Equal(2, joins);
+        Equal(1, leaves);
+        host.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     private static TeamsLocalMeetingObservation Active(DateTimeOffset at) =>
         new(at, true, true, ["render-endpoint"]);
+
+    private static TeamsLocalMeetingObservation Missing(DateTimeOffset at, bool teamsPresent) =>
+        new(at, true, teamsPresent, Array.Empty<string>());
 
     private static void Equal<T>(T expected, T actual)
     {
@@ -170,10 +243,11 @@ internal static class TeamsLocalMeetingDetectorTests
     private sealed class QueueSampler(TeamsLocalMeetingObservation next) : ITeamsLocalMeetingSignalSampler
     {
         public int CallCount { get; private set; }
+        public TeamsLocalMeetingObservation Next { get; set; } = next;
         public TeamsLocalMeetingObservation Sample(DateTimeOffset observedAtUtc)
         {
             CallCount++;
-            return next with { ObservedAtUtc = observedAtUtc };
+            return Next with { ObservedAtUtc = observedAtUtc };
         }
     }
 

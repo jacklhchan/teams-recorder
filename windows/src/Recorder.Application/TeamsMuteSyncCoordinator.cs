@@ -30,31 +30,27 @@ public interface ITeamsThirdPartyApiClient
     Task ResetPairingAsync(CancellationToken cancellationToken = default);
 }
 
-/// <summary>Local recorder/virtual-mic mute sink. The value is absolute, never a toggle.</summary>
+/// <summary>Legacy recorder mute sink retained only for source compatibility.</summary>
 public interface IRecorderMicrophoneMuteSink { void SetMuted(bool muted); }
 
 /// <summary>
-/// Applies authenticated Teams mute updates to recorder audio without ever controlling Teams.
-/// A single initial unmuted snapshot never opens the recorder microphone: routing only engages
-/// after Teams reports a muted state, so an implementation that fails to push later updates cannot
-/// turn a locally muted recording source back on. Once routing has engaged, lost trust fails closed.
+/// Tracks paired Teams meeting evidence only. It does not apply Teams mute state to the
+/// recorder: Recorder microphone contribution is controlled solely by local controls.
 /// </summary>
 public sealed class TeamsMuteSyncCoordinator : IDisposable
 {
     private readonly object gate = new();
     private readonly ITeamsThirdPartyApiClient client;
-    private readonly IRecorderMicrophoneMuteSink microphone;
     private TeamsMuteSyncSnapshot snapshot = TeamsMuteSyncSnapshot.Initial;
     private bool pairingRequestPending;
     private long meetingEvidenceRevision;
     private bool enabled;
-    private bool microphoneRoutingEngaged;
     private bool disposed;
 
-    public TeamsMuteSyncCoordinator(ITeamsThirdPartyApiClient client, IRecorderMicrophoneMuteSink microphone)
+    public TeamsMuteSyncCoordinator(ITeamsThirdPartyApiClient client, IRecorderMicrophoneMuteSink? legacyMicrophoneSink = null)
     {
         this.client = client ?? throw new ArgumentNullException(nameof(client));
-        this.microphone = microphone ?? throw new ArgumentNullException(nameof(microphone));
+        _ = legacyMicrophoneSink;
         client.EventReceived += OnApiEvent;
         client.ConnectionChanged += OnConnectionChanged;
     }
@@ -73,11 +69,6 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         {
             enabled = value;
             if (!value) pairingRequestPending = false;
-            if (!value && microphoneRoutingEngaged)
-            {
-                microphone.SetMuted(false);
-                microphoneRoutingEngaged = false;
-            }
             SetSnapshotLocked(value ? snapshot with { Status = TeamsMuteSyncStatus.WaitingForTeamsApi, Detail = null } : TeamsMuteSyncSnapshot.Initial);
         }
         if (value) await client.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -125,7 +116,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                 null,
                 "Repairing the local Teams pairing credential. Waiting for Teams to issue a new credential and meeting state.",
                 false,
-                microphoneRoutingEngaged,
+                false,
                 false));
         }
 
@@ -168,19 +159,18 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             null,
                             update.CanPair ? "Teams is waiting for pairing approval." : null,
                             false,
-                            microphoneRoutingEngaged,
+                            false,
                             false));
                     }
                     else if (update.State is { } state)
                     {
-                        ApplyMutedStateIfSafeLocked(state);
                         SetSnapshotLocked(snapshot with
                         {
                             LastMeetingState = state,
                             Status = state.IsInMeeting ? TeamsMuteSyncStatus.InMeeting : TeamsMuteSyncStatus.Ready,
                             Detail = null,
                             IsPairingAuthenticated = true,
-                            IsMicrophoneRoutingEngaged = microphoneRoutingEngaged,
+                            IsMicrophoneRoutingEngaged = false,
                             IsPairingKnown = true,
                         });
                         PublishMeetingEvidenceLocked(revision => state.IsInMeeting
@@ -208,13 +198,13 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             null,
                             "Teams reports this recorder is already paired. In Teams, open Settings > Privacy > Manage API, forget Local Meeting Recorder, then request pairing again.",
                             false,
-                            microphoneRoutingEngaged));
+                            false));
                     }
                     break;
                 case TeamsThirdPartyApiEvent.Error(_, var message):
                     pairingRequestPending = false;
                     FailClosedForLostTrustLocked();
-                    SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.Failed, null, message, false, microphoneRoutingEngaged));
+                    SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.Failed, null, message, false, false));
                     break;
             }
         }
@@ -227,40 +217,13 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
             if (!enabled) return;
             pairingRequestPending = false;
             FailClosedForLostTrustLocked();
-            SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.WaitingForTeamsApi, null, error, false, microphoneRoutingEngaged));
+            SetSnapshotLocked(new TeamsMuteSyncSnapshot(TeamsMuteSyncStatus.WaitingForTeamsApi, null, error, false, false));
         }
-    }
-
-    private void ApplyMutedStateIfSafeLocked(TeamsMeetingState state)
-    {
-        var previous = snapshot.LastMeetingState;
-        if (!state.IsInMeeting)
-        {
-            if (microphoneRoutingEngaged)
-            {
-                microphone.SetMuted(false);
-                microphoneRoutingEngaged = false;
-            }
-            return;
-        }
-
-        if (state.IsMuted)
-        {
-            microphone.SetMuted(true);
-            microphoneRoutingEngaged = true;
-            return;
-        }
-
-        // Do not unmute from a connection's initial snapshot. A later unmuted state is useful
-        // only after this connection has first established that the muted state was delivered.
-        if (microphoneRoutingEngaged && previous is { IsInMeeting: true, IsMuted: true })
-            microphone.SetMuted(false);
     }
 
     private void FailClosedForLostTrustLocked()
     {
         var wasTrustedMeeting = snapshot.IsPairingAuthenticated && snapshot.LastMeetingState is { IsInMeeting: true };
-        if (microphoneRoutingEngaged) microphone.SetMuted(true);
         if (wasTrustedMeeting)
             PublishMeetingEvidenceLocked(revision => new TeamsMeetingEvidence.StateUnavailable(
                 client.TransportSnapshot.Generation, revision));

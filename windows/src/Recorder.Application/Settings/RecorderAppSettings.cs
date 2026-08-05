@@ -18,7 +18,8 @@ public sealed record RecorderAppSettings
     [JsonPropertyName("recordMicrophone")] public bool RecordMicrophone { get; init; }
     [JsonPropertyName("microphoneEndpointId")] public string? MicrophoneEndpointId { get; init; }
     [JsonPropertyName("captureSource")] public RecorderPersistedCaptureSource CaptureSource { get; init; } = RecorderPersistedCaptureSource.SystemLoopback;
-    // These are local opt-ins only. Pairing material remains in the separate DPAPI store.
+    // Kept only to read settings written by older builds. Validation always clears it;
+    // the current app has no Teams API pairing or token runtime.
     [JsonPropertyName("teamsMuteSyncEnabled")] public bool TeamsMuteSyncEnabled { get; init; }
     [JsonPropertyName("teamsAutomaticRecordingEnabled")] public bool TeamsAutomaticRecordingEnabled { get; init; }
     // This is a local, explicitly chosen heuristic. It carries no Teams token,
@@ -39,8 +40,10 @@ public sealed record RecorderAppSettings
             OutputFolder = NormalizeFolder(value.OutputFolder),
             RenderEndpointId = NormalizeIdentifier(value.RenderEndpointId),
             MicrophoneEndpointId = value.RecordMicrophone ? NormalizeIdentifier(value.MicrophoneEndpointId) : null,
-            // Automatic recording has no meaning without its separately opted-in Teams connection.
-            TeamsAutomaticRecordingEnabled = value.TeamsMuteSyncEnabled && value.TeamsAutomaticRecordingEnabled,
+            // The app runtime uses only local Teams process/WASAPI evidence. Retain the
+            // legacy property for schema compatibility, but never restore API integration.
+            TeamsMuteSyncEnabled = false,
+            TeamsAutomaticRecordingEnabled = value.LocalHeuristicAutoStartEnabled && value.TeamsAutomaticRecordingEnabled,
         };
     }
 

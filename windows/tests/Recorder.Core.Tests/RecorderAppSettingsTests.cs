@@ -26,7 +26,7 @@ internal static class RecorderAppSettingsTests
             loaded.OutputFolder != Path.GetFullPath(expectedFolder) ||
             loaded.RenderEndpointId != "render-id" || loaded.MicrophoneEndpointId != "mic-id" ||
             loaded.CaptureSource != RecorderPersistedCaptureSource.SelectedApplication ||
-            !loaded.TeamsMuteSyncEnabled || !loaded.TeamsAutomaticRecordingEnabled ||
+            loaded.TeamsMuteSyncEnabled || !loaded.TeamsAutomaticRecordingEnabled ||
             !loaded.LocalHeuristicAutoStartEnabled)
             throw new InvalidOperationException("Public app settings did not round trip.");
 
@@ -48,13 +48,21 @@ internal static class RecorderAppSettingsTests
         if (noMicrophone.MicrophoneEndpointId is not null)
             throw new InvalidOperationException("Explicit no-microphone choice was not preserved.");
 
-        var automaticWithoutTeams = RecorderAppSettings.Validate(new RecorderAppSettings
+        var automaticWithoutLocalOptIn = RecorderAppSettings.Validate(new RecorderAppSettings
         {
-            TeamsMuteSyncEnabled = false,
             TeamsAutomaticRecordingEnabled = true,
         });
-        if (automaticWithoutTeams.TeamsAutomaticRecordingEnabled)
-            throw new InvalidOperationException("Automatic recording must require the Teams opt-in.");
+        if (automaticWithoutLocalOptIn.TeamsAutomaticRecordingEnabled)
+            throw new InvalidOperationException("Automatic recording must require the local heuristic opt-in.");
+
+        var legacyApiChoice = RecorderAppSettings.Validate(new RecorderAppSettings
+        {
+            TeamsMuteSyncEnabled = true,
+            TeamsAutomaticRecordingEnabled = true,
+            LocalHeuristicAutoStartEnabled = true,
+        });
+        if (legacyApiChoice.TeamsMuteSyncEnabled || !legacyApiChoice.TeamsAutomaticRecordingEnabled)
+            throw new InvalidOperationException("Legacy API settings must be disabled without affecting the local opt-in.");
 
         using var root = new TestRoot();
         var legacyPath = Path.Combine(root.Path, "legacy-app-settings.json");

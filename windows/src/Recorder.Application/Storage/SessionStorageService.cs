@@ -128,7 +128,7 @@ public sealed class SessionStorageService
         string? title,
         WindowsCaptureMetadata? windowsCapture,
         VideoPublicationOutcome videoOutcome = VideoPublicationOutcome.None,
-        VideoPublicationInterval? videoInterval = null,
+        IReadOnlyList<VideoPublicationSegment>? videoSegments = null,
         CancellationToken cancellationToken = default)
     {
         EnsurePlan(plan);
@@ -141,20 +141,35 @@ public sealed class SessionStorageService
         var existing = IsSafeFile(plan.MetadataPath)
             ? ReadMetadata(plan.MetadataPath)
             : RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, plan.Kind);
-        var videoPath = Path.Combine(plan.FolderPath, RecordingSessionLayout.FinalVideoFileName);
+        var verifiedSegments = videoSegments?.Where(segment => segment.IsValid &&
+            IsSafeFile(Path.Combine(plan.FolderPath, segment.FileName))).ToArray() ?? [];
         var verifiedVideo = videoOutcome == VideoPublicationOutcome.Completed &&
-            videoInterval is { IsValid: true } &&
-            File.Exists(videoPath) && new FileInfo(videoPath).Length > 0;
+            verifiedSegments.Length > 0 && verifiedSegments.Length == videoSegments!.Count;
         var recovery = videoOutcome == VideoPublicationOutcome.None
             ? RecordingRecoveryState.None
             : verifiedVideo ? RecordingRecoveryState.None : RecordingRecoveryState.VideoLostAudioPreserved;
         var metadata = verifiedVideo
-            ? RecordingInfoJson.CreateVideo(existing.Document, title, plan.Kind, videoInterval!.Value)
+            ? RecordingInfoJson.CreateVideo(existing.Document, title, plan.Kind, verifiedSegments)
             : RecordingInfoJson.CreateAudioOnly(existing.Document, title, recovery, plan.Kind);
         var info = RecordingInfoJson.WithWindowsCapture(metadata, windowsCapture ?? existing.WindowsCapture);
         await WriteMetadataAsync(plan.MetadataPath, info, cancellationToken).ConfigureAwait(false);
         File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
     }
+
+    // Compatibility seam for the original single-companion publication API.
+    // New lifecycle code always supplies named segments so re-enables cannot overwrite media.
+    public Task PublishCompletedMediaAsync(
+        RecordingSessionPlan plan,
+        string? title,
+        WindowsCaptureMetadata? windowsCapture,
+        VideoPublicationOutcome videoOutcome,
+        VideoPublicationInterval? videoInterval,
+        CancellationToken cancellationToken = default) =>
+        PublishCompletedMediaAsync(plan, title, windowsCapture, videoOutcome,
+            videoInterval is { IsValid: true }
+                ? [new VideoPublicationSegment(RecordingSessionLayout.FinalVideoFileName, videoInterval.Value)]
+                : null,
+            cancellationToken);
 
     /// <summary>
     /// Removes only an empty folder allocated by this storage service after a

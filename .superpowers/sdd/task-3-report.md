@@ -141,3 +141,137 @@ exclude.
 - The outer execution sandbox blocks Unix socket binding; socket verification
   therefore requires the same approved out-of-sandbox test context used for
   this report.
+
+---
+
+## Review-fix pass (2026-08-05)
+
+### Findings closed
+
+- Accepted client descriptors are nonblocking. Each client receives one
+  injectable finite timeout (5 seconds by default), represented by one
+  monotonic `SocketDeadline` shared by request read and response write.
+- Accepted descriptors now have close-once ownership. `stop()` removes and
+  closes the complete active-client snapshot before returning; concurrent
+  handler cleanup is idempotent and cannot operate on a reused descriptor.
+- The server checks client activity before dispatch. The app runtime also
+  deactivates a MainActor request gate before stopping the server, so a handler
+  queued behind shutdown is rejected without touching `AppModel`. `stop()`
+  waits only for the non-MainActor accept loop, not for MainActor work.
+- One lifecycle lock serializes the complete `start()` and `stop()` operations,
+  while a listener generation prevents accept work from being mistaken for a
+  later listener generation.
+- Failed-start and normal-stop cleanup require an exact device/inode identity.
+  If identity acquisition fails, cleanup leaves the path alone rather than
+  treating `nil` as a wildcard. Identity is acquired immediately after bind.
+
+### RED evidence
+
+All commands used the required Xcode and module-cache environment:
+
+```text
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH=/tmp/recorder-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/recorder-swiftpm-module-cache \
+swift test --disable-sandbox --filter UnixSocketTransportTests
+```
+
+Before production changes, compilation failed with the expected missing
+focused-test seams: `requestTimeout`, `beforeBind`, `beforeOwnedCleanup`, and
+`socketIdentityProvider` were extra arguments.
+
+After transport compilation was restored, the runtime regression was also
+verified independently by temporarily removing the gate and running:
+
+```text
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH=/tmp/recorder-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/recorder-swiftpm-module-cache \
+swift test --disable-sandbox \
+  --filter RecorderControlServerRuntimeTests/testStoppedRuntimeRejectsCapturedHandlerWithoutTouchingModel
+```
+
+Result: 1 test executed, 2 expected assertion failures. The stopped handler
+returned no `server_stopped` error and changed the model's auto-mode setting.
+The gate implementation was then restored before GREEN verification.
+
+### GREEN evidence
+
+Fresh covering-suite commands, run sequentially outside the outer sandbox:
+
+```text
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH=/tmp/recorder-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/recorder-swiftpm-module-cache \
+swift test --disable-sandbox --filter UnixSocketTransportTests
+
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH=/tmp/recorder-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/recorder-swiftpm-module-cache \
+swift test --disable-sandbox --filter RecorderControlServerRuntimeTests
+
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH=/tmp/recorder-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/recorder-swiftpm-module-cache \
+swift test --disable-sandbox --filter AppRuntimeTests
+```
+
+Exact results:
+
+- `UnixSocketTransportTests`: 9 tests, 0 failures.
+- `RecorderControlServerRuntimeTests`: 2 tests, 0 failures.
+- `AppRuntimeTests`: 4 tests, 0 failures.
+- Total covering tests: 15 tests, 0 failures.
+
+No full suite was rerun for this focused review fix, as requested. The prior
+full-suite result at `1643311` remains 1,332 executed, 5 skipped, 0 failures.
+
+### Focused regression coverage
+
+- A partial-frame client is closed at the injected 50 ms server deadline.
+- `stop()` is proven to leave the accepted descriptor at `EBADF` before it
+  returns.
+- A captured runtime handler is rejected after stop and cannot mutate the
+  model.
+- Deterministic one-shot synchronization proves concurrent start/start and
+  stop/start operations serialize without race loops.
+- Injected identity acquisition failure replaces the bound path with a live
+  socket and proves failed-start cleanup does not unlink that replacement.
+
+### Files changed in the review-fix pass
+
+- `Sources/RecorderControl/UnixSocketTransport.swift`
+- `Sources/RecorderApp/Control/RecorderControlServerRuntime.swift`
+- `Tests/RecorderControlTests/UnixSocketTransportTests.swift`
+- `Tests/RecorderAppTests/RecorderControlServerRuntimeTests.swift`
+- `.superpowers/sdd/task-3-report.md`
+
+`Sources/RecorderApp/AppRuntime.swift` required no edit: it already calls
+`controlServerRuntime.stop()` before `recordingController.shutdown()` and
+`model.shutdown()`; the runtime's strengthened `stop()` now supplies the
+required deactivation semantics.
+
+### Self-review
+
+- Deadline construction occurs once per accepted connection after same-user
+  validation and before request reading; the identical value is passed to both
+  read and write loops.
+- Descriptor ownership serializes each nonblocking syscall with close, while
+  poll snapshots are revalidated before any later syscall. Both `stop()` and
+  async terminal cleanup call the same idempotent close operation.
+- The lifecycle lock is never held while waiting for MainActor work. It only
+  covers socket setup/teardown and the accept-loop join.
+- The exact-identity guard runs before the cleanup test hook and before
+  `lstat`, so a missing identity cannot remove any path.
+- Tests use one-shot synchronization only; no load, fuzz, repeated race loop,
+  daemon, actor redesign, or unrelated behavior was added.
+- `git diff --check` passed. Existing unrelated untracked documentation and
+  brainstorm files were not modified or staged.
+
+### Remaining concerns
+
+- The production server timeout is a fixed finite 5 seconds. Only the internal
+  test initializer injects a shorter value because there is no current product
+  requirement for a public timeout setting.
+- AF_UNIX binding remains blocked by the outer workspace sandbox, so these
+  focused socket suites require the approved out-of-sandbox command above.

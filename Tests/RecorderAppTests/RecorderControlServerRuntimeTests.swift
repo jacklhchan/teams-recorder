@@ -51,6 +51,39 @@ final class RecorderControlServerRuntimeTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
     }
+
+    func testStoppedRuntimeRejectsCapturedHandlerWithoutTouchingModel() async throws {
+        let suiteName = "RecorderControlServerRuntimeTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(
+            defaults: UserDefaults(suiteName: suiteName)!,
+            performStartupWork: false
+        )
+        model.setTeamsAutoMeetingEnabled(true)
+        var capturedHandler: RecorderControlSocketServer.Handler?
+        let runtime = RecorderControlServerRuntime(
+            model: model,
+            serverFactory: { handler in
+                capturedHandler = handler
+                return RecorderControlSocketServer(
+                    socketPath: FileManager.default.temporaryDirectory
+                        .appendingPathComponent("unused-\(UUID().uuidString.prefix(8)).sock").path,
+                    handler: handler
+                )
+            }
+        )
+        try runtime.start()
+        runtime.stop()
+
+        let response = await capturedHandler?(.init(
+            requestID: "after-stop",
+            command: .setAuto,
+            argument: "off"
+        ))
+
+        XCTAssertEqual(response?.error?.code, "server_stopped")
+        XCTAssertTrue(model.teamsAutoMeetingEnabled)
+    }
 }
 
 @MainActor

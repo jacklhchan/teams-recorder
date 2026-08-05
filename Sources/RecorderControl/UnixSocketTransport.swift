@@ -79,17 +79,24 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
     public typealias Handler = @Sendable (RecorderControlRequest) async -> RecorderControlResponse
     typealias CurrentUID = @Sendable () -> uid_t
     typealias PeerUID = @Sendable (Int32) throws -> uid_t
+    typealias SocketIdentityProvider = @Sendable (String) throws -> SocketIdentity
 
     private let socketPathProvider: @Sendable () throws -> String
     private let currentUID: CurrentUID
     private let peerUID: PeerUID
+    private let clientTimeout: TimeInterval
+    private let socketIdentityProvider: SocketIdentityProvider
+    private let beforeBind: @Sendable () -> Void
+    private let beforeOwnedCleanup: @Sendable () -> Void
     private let handler: Handler
+    private let lifecycleLock = NSLock()
     private let stateLock = NSLock()
     private let acceptGroup = DispatchGroup()
     private var listener: Int32 = -1
+    private var listenerGeneration: UInt64 = 0
     private var resolvedSocketPath: String?
     private var resolvedSocketIdentity: SocketIdentity?
-    private var clients: Set<Int32> = []
+    private var clients: [ObjectIdentifier: OwnedSocketDescriptor] = [:]
 
     public init(
         bundleIdentifier: String?,
@@ -102,6 +109,10 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         peerUID = { descriptor in
             try Self.actualPeerUID(descriptor)
         }
+        clientTimeout = 5
+        socketIdentityProvider = { try SocketIdentity.read(at: $0) }
+        beforeBind = {}
+        beforeOwnedCleanup = {}
         self.handler = handler
     }
 
@@ -111,11 +122,21 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         peerUID: @escaping PeerUID = { descriptor in
             try RecorderControlSocketServer.actualPeerUID(descriptor)
         },
+        requestTimeout: TimeInterval = 5,
+        socketIdentityProvider: @escaping SocketIdentityProvider = {
+            try SocketIdentity.read(at: $0)
+        },
+        beforeBind: @escaping @Sendable () -> Void = {},
+        beforeOwnedCleanup: @escaping @Sendable () -> Void = {},
         handler: @escaping Handler
     ) {
         socketPathProvider = { socketPath }
         self.currentUID = currentUID
         self.peerUID = peerUID
+        clientTimeout = requestTimeout
+        self.socketIdentityProvider = socketIdentityProvider
+        self.beforeBind = beforeBind
+        self.beforeOwnedCleanup = beforeOwnedCleanup
         self.handler = handler
     }
 
@@ -124,6 +145,9 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
     }
 
     public func start() throws {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+
         stateLock.lock()
         let alreadyStarted = listener >= 0
         stateLock.unlock()
@@ -135,13 +159,14 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         var bound = false
         var boundIdentity: SocketIdentity?
         do {
+            beforeBind()
             try SocketAddress.withValue(path: socketPath) { address, length in
                 guard Darwin.bind(descriptor, address, length) == 0 else {
                     throw SocketDescriptor.posixError()
                 }
             }
             bound = true
-            boundIdentity = try SocketIdentity.read(at: socketPath)
+            boundIdentity = try socketIdentityProvider(socketPath)
             guard chmod(socketPath, S_IRUSR | S_IWUSR) == 0 else {
                 throw SocketDescriptor.posixError()
             }
@@ -156,9 +181,17 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
                 return
             }
             listener = descriptor
+            listenerGeneration &+= 1
+            let generation = listenerGeneration
             resolvedSocketPath = socketPath
             resolvedSocketIdentity = boundIdentity
             stateLock.unlock()
+
+            acceptGroup.enter()
+            DispatchQueue.global(qos: .utility).async { [self] in
+                acceptConnections(on: descriptor, generation: generation)
+                acceptGroup.leave()
+            }
         } catch {
             Darwin.close(descriptor)
             if bound {
@@ -166,15 +199,12 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
             }
             throw error
         }
-
-        acceptGroup.enter()
-        DispatchQueue.global(qos: .utility).async { [self] in
-            acceptConnections(on: descriptor)
-            acceptGroup.leave()
-        }
     }
 
     public func stop() {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+
         stateLock.lock()
         let descriptor = listener
         listener = -1
@@ -182,11 +212,13 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         resolvedSocketPath = nil
         let socketIdentity = resolvedSocketIdentity
         resolvedSocketIdentity = nil
-        for client in clients {
-            Darwin.shutdown(client, SHUT_RDWR)
-        }
+        let activeClients = Array(clients.values)
+        clients.removeAll()
         stateLock.unlock()
 
+        for client in activeClients {
+            client.close()
+        }
         if descriptor >= 0 {
             Darwin.shutdown(descriptor, SHUT_RDWR)
             Darwin.close(descriptor)
@@ -197,8 +229,8 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         }
     }
 
-    private func acceptConnections(on descriptor: Int32) {
-        while isCurrentListener(descriptor) {
+    private func acceptConnections(on descriptor: Int32, generation: UInt64) {
+        while isCurrentListener(descriptor, generation: generation) {
             let client = Darwin.accept(descriptor, nil, nil)
             guard client >= 0 else {
                 if errno == EINTR { continue }
@@ -206,60 +238,82 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
             }
             do {
                 try SocketDescriptor.preventSIGPIPE(client)
+                try SocketDescriptor.setNonBlocking(client)
             } catch {
                 Darwin.close(client)
                 continue
             }
-            guard register(client, for: descriptor) else {
-                Darwin.close(client)
+            let ownedClient = OwnedSocketDescriptor(client)
+            guard register(ownedClient, for: descriptor, generation: generation) else {
+                ownedClient.close()
                 return
             }
             Task.detached { [self] in
-                await process(client)
+                await process(ownedClient, generation: generation)
             }
         }
     }
 
-    private func process(_ descriptor: Int32) async {
-        defer { finishClient(descriptor) }
+    private func process(_ client: OwnedSocketDescriptor, generation: UInt64) async {
+        defer { finishClient(client) }
         do {
-            guard try peerUID(descriptor) == currentUID() else {
+            let acceptedPeerUID = try client.withDescriptor { try peerUID($0) }
+            guard acceptedPeerUID == currentUID() else {
                 throw RecorderControlSocketError.peerUIDMismatch
             }
-            let requestFrame = try SocketDescriptor.readFrame(from: descriptor)
+            let deadline = SocketDeadline(timeout: clientTimeout)
+            let requestFrame = try SocketDescriptor.readFrame(
+                from: client,
+                deadline: deadline
+            )
             let request: RecorderControlRequest
             do {
                 request = try JSONDecoder().decode(RecorderControlRequest.self, from: requestFrame)
             } catch {
                 throw RecorderControlSocketError.malformedFrame
             }
+            guard isActive(client, generation: generation) else {
+                throw RecorderControlSocketError.connectionClosed
+            }
             let response = await handler(request)
             let responseFrame = try SocketFrame.encode(response)
-            try SocketDescriptor.write(responseFrame, to: descriptor)
+            try SocketDescriptor.write(responseFrame, to: client, deadline: deadline)
         } catch {
             return
         }
     }
 
-    private func finishClient(_ descriptor: Int32) {
+    private func finishClient(_ client: OwnedSocketDescriptor) {
         stateLock.lock()
-        clients.remove(descriptor)
+        clients.removeValue(forKey: ObjectIdentifier(client))
         stateLock.unlock()
-        Darwin.close(descriptor)
+        client.close()
     }
 
-    private func isCurrentListener(_ descriptor: Int32) -> Bool {
+    private func isCurrentListener(_ descriptor: Int32, generation: UInt64) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return listener == descriptor
+        return listener == descriptor && listenerGeneration == generation
     }
 
-    private func register(_ client: Int32, for descriptor: Int32) -> Bool {
+    private func register(
+        _ client: OwnedSocketDescriptor,
+        for descriptor: Int32,
+        generation: UInt64
+    ) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard listener == descriptor else { return false }
-        clients.insert(client)
+        guard listener == descriptor, listenerGeneration == generation else { return false }
+        clients[ObjectIdentifier(client)] = client
         return true
+    }
+
+    private func isActive(_ client: OwnedSocketDescriptor, generation: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return listener >= 0
+            && listenerGeneration == generation
+            && clients[ObjectIdentifier(client)] != nil
     }
 
     private func removeExistingSocket(at socketPath: String) throws {
@@ -279,6 +333,8 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         at socketPath: String,
         matching identity: SocketIdentity?
     ) throws {
+        guard let identity else { return }
+        beforeOwnedCleanup()
         var metadata = stat()
         guard lstat(socketPath, &metadata) == 0 else {
             if errno == ENOENT { return }
@@ -286,7 +342,7 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         }
         guard metadata.st_mode & S_IFMT == S_IFSOCK,
               metadata.st_uid == currentUID(),
-              identity == nil || identity == SocketIdentity(metadata: metadata) else {
+              identity == SocketIdentity(metadata: metadata) else {
             return
         }
         guard unlink(socketPath) == 0 else { throw SocketDescriptor.posixError() }
@@ -302,7 +358,7 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
     }
 }
 
-private struct SocketIdentity: Equatable {
+struct SocketIdentity: Equatable, Sendable {
     let device: dev_t
     let inode: ino_t
 
@@ -377,6 +433,45 @@ private struct SocketDeadline: Sendable {
     }
 }
 
+private final class OwnedSocketDescriptor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var descriptor: Int32?
+
+    init(_ descriptor: Int32) {
+        self.descriptor = descriptor
+    }
+
+    func withDescriptor<Result>(_ body: (Int32) throws -> Result) throws -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let descriptor else {
+            throw RecorderControlSocketError.connectionClosed
+        }
+        return try body(descriptor)
+    }
+
+    func snapshot() throws -> Int32 {
+        try withDescriptor { $0 }
+    }
+
+    func validate(_ candidate: Int32) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard descriptor == candidate else {
+            throw RecorderControlSocketError.connectionClosed
+        }
+    }
+
+    func close() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let descriptor else { return }
+        self.descriptor = nil
+        Darwin.shutdown(descriptor, SHUT_RDWR)
+        Darwin.close(descriptor)
+    }
+}
+
 private enum SocketDescriptor {
     static func make() throws -> Int32 {
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -430,6 +525,28 @@ private enum SocketDescriptor {
         }
     }
 
+    static func wait(
+        _ owner: OwnedSocketDescriptor,
+        events: Int16,
+        deadline: SocketDeadline
+    ) throws {
+        while true {
+            let descriptor = try owner.snapshot()
+            var item = pollfd(fd: descriptor, events: events, revents: 0)
+            let result = Darwin.poll(&item, 1, deadline.remainingMilliseconds)
+            try owner.validate(descriptor)
+            if result > 0 {
+                if item.revents & events != 0 { return }
+                guard item.revents & (Int16(POLLERR) | Int16(POLLHUP) | Int16(POLLNVAL)) == 0 else {
+                    throw RecorderControlSocketError.connectionClosed
+                }
+                return
+            }
+            if result == 0 { throw RecorderControlSocketError.timedOut }
+            if errno != EINTR { throw posixError() }
+        }
+    }
+
     static func readFrame(
         from descriptor: Int32,
         deadline: SocketDeadline? = nil
@@ -460,6 +577,35 @@ private enum SocketDescriptor {
         throw RecorderControlSocketError.oversizedFrame
     }
 
+    static func readFrame(
+        from owner: OwnedSocketDescriptor,
+        deadline: SocketDeadline
+    ) throws -> Data {
+        var frame = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while frame.count < RecorderControlSocketServer.maximumFrameSize {
+            try wait(owner, events: Int16(POLLIN), deadline: deadline)
+            let capacity = min(
+                buffer.count,
+                RecorderControlSocketServer.maximumFrameSize - frame.count
+            )
+            let count = try owner.withDescriptor {
+                Darwin.read($0, &buffer, capacity)
+            }
+            if count > 0 {
+                frame.append(buffer, count: count)
+                if let newline = frame.firstIndex(of: 0x0A) {
+                    return frame.prefix(upTo: newline)
+                }
+                continue
+            }
+            if count == 0 { throw RecorderControlSocketError.connectionClosed }
+            if errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK { continue }
+            throw posixError()
+        }
+        throw RecorderControlSocketError.oversizedFrame
+    }
+
     static func write(
         _ data: Data,
         to descriptor: Int32,
@@ -483,6 +629,35 @@ private enum SocketDescriptor {
                 }
                 if count < 0, errno == EINTR { continue }
                 if deadline != nil, count < 0, errno == EAGAIN || errno == EWOULDBLOCK { continue }
+                throw posixError()
+            }
+        }
+    }
+
+    static func write(
+        _ data: Data,
+        to owner: OwnedSocketDescriptor,
+        deadline: SocketDeadline
+    ) throws {
+        var offset = 0
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            while offset < data.count {
+                try wait(owner, events: Int16(POLLOUT), deadline: deadline)
+                let count = try owner.withDescriptor {
+                    Darwin.write(
+                        $0,
+                        baseAddress.advanced(by: offset),
+                        data.count - offset
+                    )
+                }
+                if count > 0 {
+                    offset += count
+                    continue
+                }
+                if count < 0, errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK {
+                    continue
+                }
                 throw posixError()
             }
         }

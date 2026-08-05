@@ -8,16 +8,18 @@ let package = Package(
         .macOS("26.0")
     ],
     products: [
+        .library(name: "RecorderControl", targets: ["RecorderControl"]),
         .executable(name: "LocalMeetingRecorder", targets: ["RecorderApp"])
     ],
     targets: [
+        .target(name: "RecorderControl"),
         .target(
             name: "VirtualMicBridge",
             path: "Sources/VirtualMicBridge"
         ),
         .executableTarget(
             name: "RecorderApp",
-            dependencies: ["VirtualMicBridge"],
+            dependencies: ["VirtualMicBridge", "RecorderControl"],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AudioToolbox"),
@@ -32,7 +34,11 @@ let package = Package(
         ),
         .testTarget(
             name: "RecorderAppTests",
-            dependencies: ["RecorderApp"]
+            dependencies: ["RecorderApp", "RecorderControl"]
+        ),
+        .testTarget(
+            name: "RecorderControlTests",
+            dependencies: ["RecorderControl"]
         )
     ],
     cxxLanguageStandard: .cxx17

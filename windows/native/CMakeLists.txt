@@ -291,6 +291,15 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         recorder_enable_strict_warnings(Recorder.ShortImpulseRepair.Tests)
         add_test(NAME Recorder.ShortImpulseRepair.Tests COMMAND Recorder.ShortImpulseRepair.Tests)
 
+        add_executable(Recorder.SystemRenderHeadroom.Tests
+            audio/tests/system_render_headroom_tests.cpp
+        )
+        target_compile_features(Recorder.SystemRenderHeadroom.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.SystemRenderHeadroom.Tests PRIVATE audio)
+        recorder_enable_strict_warnings(Recorder.SystemRenderHeadroom.Tests)
+        add_test(NAME Recorder.SystemRenderHeadroom.Tests
+            COMMAND Recorder.SystemRenderHeadroom.Tests)
+
         add_executable(Recorder.SelectedAudioSessionFacade.Tests
             tests/selected_audio_session_facade_tests.cpp
         )

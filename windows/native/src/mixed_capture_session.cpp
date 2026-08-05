@@ -5,6 +5,7 @@
 #include "mix_format_decoder.h"
 #include "mixed_sample_limiter.hpp"
 #include "short_impulse_repair.h"
+#include "system_render_headroom.h"
 #include "process_loopback.h"
 #include "selected_audio_session_facade.h"
 #include "wasapi_capture.h"
@@ -574,6 +575,14 @@ private:
                 const bool is_system_output =
                     &source == &render_ && config_.target_process_id == 0;
                 if (is_system_output) {
+                    // Shared-mode Realtek loopback on the validation machine
+                    // repeatedly produced finite float samples up to sqrt(2).
+                    // Passing those directly to the final PCM safety clamp
+                    // caused audible hard-clipping distortion. Apply fixed,
+                    // linear render headroom before timeline placement; this
+                    // preserves duration and waveform shape without pumping.
+                    recorder::audio::ApplySystemRenderHeadroom(
+                        normalized.data(), normalized.size());
                     source.impulse_repair.Process(
                         normalized.data(), normalized.size() / 2U, block.discontinuity);
                 }

@@ -29,6 +29,7 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "$EX
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")" = "$EXPECTED_VERSION"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")" = "$EXPECTED_BUILD"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "26.0"
+test -x "$APP/Contents/MacOS/LocalMeetingRecorder"
 "$FILE_BIN" "$APP/Contents/MacOS/LocalMeetingRecorder" | grep -q 'arm64'
 HELPER="$APP/Contents/Helpers/recorderctl"
 test -x "$HELPER"

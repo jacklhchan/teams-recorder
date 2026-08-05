@@ -92,6 +92,10 @@ class PackagingContractTests(unittest.TestCase):
         self.assertLess(build.index(app_binary_sign), build.index(outer_sign))
 
         self.assertIn('HELPER="$APP/Contents/Helpers/recorderctl"', verify)
+        self.assertIn(
+            'test -x "$APP/Contents/MacOS/LocalMeetingRecorder"',
+            verify,
+        )
         self.assertIn('test -x "$HELPER"', verify)
         self.assertIn('/usr/bin/xcrun vtool -show-build "$HELPER"', verify)
         self.assertIn("minos 26\\.0", verify)
@@ -112,6 +116,7 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn('LINK_PATH="$INSTALL_ROOT/usr/local/bin/recorderctl"', script)
         self.assertIn("exit 73", script)
         self.assertNotIn("rm -rf", script)
+        self.assertNotIn("/bin/ln -sfn", script)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -127,7 +132,7 @@ class PackagingContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            for obstacle in ("file", "directory", "symlink"):
+            for obstacle in ("file", "directory", "symlink", "dangling-symlink"):
                 with self.subTest(obstacle=obstacle):
                     install_root = root / f"install-{obstacle}"
                     bin_dir = install_root / "usr/local/bin"
@@ -137,10 +142,12 @@ class PackagingContractTests(unittest.TestCase):
                         destination.write_text("keep", encoding="utf-8")
                     elif obstacle == "directory":
                         destination.mkdir()
-                    else:
+                    elif obstacle == "symlink":
                         unrelated = root / "unrelated-helper"
                         unrelated.write_text("keep", encoding="utf-8")
                         destination.symlink_to(unrelated)
+                    else:
+                        destination.symlink_to(root / "missing-helper")
 
                     before = os.lstat(destination)
                     result = subprocess.run(
@@ -153,6 +160,133 @@ class PackagingContractTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 73, result.stderr)
                     after = os.lstat(destination)
                     self.assertEqual(before.st_ino, after.st_ino)
+
+    def test_cli_installer_replaces_owned_link_and_noops_current_link(self):
+        installer = ROOT / "scripts/install-recorder-cli.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "install"
+            destination = install_root / "usr/local/bin/recorderctl"
+            destination.parent.mkdir(parents=True)
+
+            helpers = []
+            for name in ("Old Recorder.app", "New Recorder.app"):
+                app = root / name
+                helper = app / "Contents/Helpers/recorderctl"
+                marker = app / "Contents/Resources/.lmr-build-owner"
+                helper.parent.mkdir(parents=True)
+                marker.parent.mkdir(parents=True)
+                helper.write_text("#!/bin/sh\n", encoding="utf-8")
+                helper.chmod(0o755)
+                marker.write_text(
+                    "local.meeting.recorder.build-app.v1",
+                    encoding="utf-8",
+                )
+                helpers.append(helper)
+
+            destination.symlink_to(helpers[0])
+            environment = {
+                **os.environ,
+                "RECORDER_CLI_INSTALL_ROOT": str(install_root),
+            }
+            replaced = subprocess.run(
+                ["/bin/bash", str(installer), str(helpers[1].parents[2])],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(replaced.returncode, 0, replaced.stderr)
+            self.assertEqual(os.readlink(destination), str(helpers[1]))
+
+            before_noop = os.lstat(destination)
+            noop = subprocess.run(
+                ["/bin/bash", str(installer), str(helpers[1].parents[2])],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(noop.returncode, 0, noop.stderr)
+            self.assertEqual(before_noop.st_ino, os.lstat(destination).st_ino)
+
+    def test_cli_installer_rejects_symlink_ancestor_escape(self):
+        installer = ROOT / "scripts/install-recorder-cli.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = root / "Local Meeting Recorder.app"
+            helper = app / "Contents/Helpers/recorderctl"
+            marker = app / "Contents/Resources/.lmr-build-owner"
+            helper.parent.mkdir(parents=True)
+            marker.parent.mkdir(parents=True)
+            helper.write_text("#!/bin/sh\n", encoding="utf-8")
+            helper.chmod(0o755)
+            marker.write_text(
+                "local.meeting.recorder.build-app.v1",
+                encoding="utf-8",
+            )
+
+            escaped_usr = root / "escaped-usr"
+            (escaped_usr / "local/bin").mkdir(parents=True)
+            install_root = root / "install"
+            install_root.mkdir()
+            (install_root / "usr").symlink_to(escaped_usr)
+            escaped_destination = escaped_usr / "local/bin/recorderctl"
+
+            result = subprocess.run(
+                ["/bin/bash", str(installer), str(app)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "RECORDER_CLI_INSTALL_ROOT": str(install_root),
+                },
+            )
+            self.assertEqual(result.returncode, 73, result.stderr)
+            self.assertFalse(os.path.lexists(escaped_destination))
+
+    def test_cli_installer_preserves_late_post_check_replacement(self):
+        installer = ROOT / "scripts/install-recorder-cli.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "install"
+            destination = install_root / "usr/local/bin/recorderctl"
+            destination.parent.mkdir(parents=True)
+
+            helpers = []
+            for name in ("Old Recorder.app", "New Recorder.app"):
+                app = root / name
+                helper = app / "Contents/Helpers/recorderctl"
+                marker = app / "Contents/Resources/.lmr-build-owner"
+                helper.parent.mkdir(parents=True)
+                marker.parent.mkdir(parents=True)
+                helper.write_text("#!/bin/sh\n", encoding="utf-8")
+                helper.chmod(0o755)
+                marker.write_text(
+                    "local.meeting.recorder.build-app.v1",
+                    encoding="utf-8",
+                )
+                helpers.append(helper)
+
+            destination.symlink_to(helpers[0])
+            late_replacement = root / "late-replacement"
+            late_replacement.write_text("preserve me", encoding="utf-8")
+            result = subprocess.run(
+                ["/bin/bash", str(installer), str(helpers[1].parents[2])],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "RECORDER_CLI_INSTALL_ROOT": str(install_root),
+                    "RECORDER_CLI_TEST_POST_UNLINK_SOURCE": str(late_replacement),
+                },
+            )
+            self.assertEqual(result.returncode, 73, result.stderr)
+            self.assertFalse(destination.is_symlink())
+            self.assertEqual(destination.read_text(encoding="utf-8"), "preserve me")
+            self.assertFalse((destination / "recorderctl").exists())
 
     def test_readme_describes_current_provider_and_license(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

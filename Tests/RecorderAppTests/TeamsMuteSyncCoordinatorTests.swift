@@ -110,6 +110,42 @@ final class TeamsMuteSyncCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.hasPollingTask)
     }
 
+    func testResetInvalidatesInFlightActionsWithoutChangingSafeMuteState() async {
+        let gate = MicrophoneMuteGate(localMuted: true) { _ in }
+        gate.setTeamsMuted(true)
+        let controller = TeamsMuteSuspendingControllerFake()
+        let coordinator = TeamsMuteSyncCoordinator(
+            controller: controller,
+            microphoneMuteGate: gate
+        )
+
+        let unmuteTask = Task {
+            await coordinator.setMuted(false, processID: 42)
+        }
+        await controller.waitForPendingAction()
+        coordinator.resetTeamsSource()
+        await controller.completeNext(with: .unmuted)
+
+        let unmuteResult = await unmuteTask.value
+        XCTAssertEqual(unmuteResult, .unknown(.inactive))
+        XCTAssertTrue(gate.snapshot.localMuted)
+        XCTAssertFalse(gate.snapshot.teamsMuted)
+        XCTAssertEqual(coordinator.state, .unknown(.inactive))
+
+        let muteTask = Task {
+            await coordinator.setMuted(true, processID: 42)
+        }
+        await controller.waitForPendingAction()
+        coordinator.resetTeamsSource()
+        await controller.completeNext(with: .muted)
+
+        let muteResult = await muteTask.value
+        XCTAssertEqual(muteResult, .unknown(.inactive))
+        XCTAssertTrue(gate.snapshot.localMuted)
+        XCTAssertFalse(gate.snapshot.teamsMuted)
+        XCTAssertEqual(coordinator.state, .unknown(.inactive))
+    }
+
     private func waitUntil(
         _ condition: @escaping @MainActor () -> Bool
     ) async {
@@ -179,4 +215,34 @@ private actor TeamsMuteManualTicker {
         }
         continuations.removeFirst().resume()
     }
+}
+
+private actor TeamsMuteSuspendingControllerFake: TeamsMuteControlling {
+    private var pendingActions: [CheckedContinuation<TeamsMicMuteState, Never>] = []
+
+    func readState(processID _: pid_t) async -> TeamsMicMuteState {
+        .unknown(.inactive)
+    }
+
+    func setMuted(
+        _: Bool,
+        processID _: pid_t
+    ) async -> TeamsMicMuteState {
+        await withCheckedContinuation { continuation in
+            pendingActions.append(continuation)
+        }
+    }
+
+    func waitForPendingAction() async {
+        while pendingActions.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func completeNext(with result: TeamsMicMuteState) {
+        pendingActions.removeFirst().resume(returning: result)
+    }
+
+    @MainActor
+    func requestPermission() {}
 }

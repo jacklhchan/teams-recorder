@@ -7,6 +7,8 @@ final class TeamsMuteSyncCoordinator {
     private let tick: @Sendable () async -> Void
     private var pollTask: Task<Void, Never>?
     private var pollingProcessID: pid_t?
+    private var actionGeneration: UInt64 = 0
+    private var actionProcessID: pid_t?
 
     private(set) var state: TeamsMicMuteState = .unknown(.inactive) {
         didSet {
@@ -41,6 +43,9 @@ final class TeamsMuteSyncCoordinator {
         isRecording: Bool,
         processID: pid_t?
     ) {
+        if actionProcessID != nil, actionProcessID != processID {
+            invalidateAction()
+        }
         guard isPanelActive, isRecording, let processID else {
             stopPolling()
             return
@@ -74,6 +79,7 @@ final class TeamsMuteSyncCoordinator {
     }
 
     func resetTeamsSource() {
+        invalidateAction()
         stopPolling()
         publishMuteSnapshot(microphoneMuteGate.setTeamsMuted(false))
     }
@@ -82,6 +88,7 @@ final class TeamsMuteSyncCoordinator {
         _ muted: Bool,
         processID: pid_t?
     ) async -> TeamsMicMuteState {
+        let generation = beginAction(processID: processID)
         guard let processID else {
             publishMuteSnapshot(microphoneMuteGate.setLocalMuted(muted))
             return .unknown(.inactive)
@@ -90,11 +97,19 @@ final class TeamsMuteSyncCoordinator {
         if muted {
             publishMuteSnapshot(microphoneMuteGate.setLocalMuted(true))
             let result = await controller.setMuted(true, processID: processID)
+            guard isCurrentAction(
+                generation: generation,
+                processID: processID
+            ) else { return .unknown(.inactive) }
             applyObservation(result)
             return result
         }
 
         let result = await controller.setMuted(false, processID: processID)
+        guard isCurrentAction(
+            generation: generation,
+            processID: processID
+        ) else { return .unknown(.inactive) }
         applyObservation(result)
         if result == .unmuted {
             publishMuteSnapshot(microphoneMuteGate.setLocalMuted(false))
@@ -104,6 +119,24 @@ final class TeamsMuteSyncCoordinator {
 
     func requestPermission() {
         controller.requestPermission()
+    }
+
+    private func beginAction(processID: pid_t?) -> UInt64 {
+        actionGeneration &+= 1
+        actionProcessID = processID
+        return actionGeneration
+    }
+
+    private func invalidateAction() {
+        actionGeneration &+= 1
+        actionProcessID = nil
+    }
+
+    private func isCurrentAction(
+        generation: UInt64,
+        processID: pid_t
+    ) -> Bool {
+        actionGeneration == generation && actionProcessID == processID
     }
 
     private func applyObservation(_ observation: TeamsMicMuteState) {

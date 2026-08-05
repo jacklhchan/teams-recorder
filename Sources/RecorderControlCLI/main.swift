@@ -7,30 +7,29 @@ func writeLine(_ line: String) {
     FileHandle.standardOutput.write(Data("\(line)\n".utf8))
 }
 
-let exitCode: Int32
-do {
-    let launcher = try RecorderAppLauncher(executablePath: CommandLine.arguments[0])
-    let endpoint = try RecorderControlEndpoint(bundleIdentifier: launcher.bundleIdentifier)
-    let application = RecorderCLIApplication(
-        client: RecorderCLISocketClient(socketPath: endpoint.socketPath),
-        launcher: launcher,
-        clock: SystemRecorderCLIClock(),
+signal(SIGINT, SIG_IGN)
+let task = Task {
+    await RecorderCLIEntrypoint.run(
+        arguments: Array(CommandLine.arguments.dropFirst()),
         writeLine: writeLine
-    )
-    signal(SIGINT, SIG_IGN)
-    let task = Task {
-        await application.run(arguments: Array(CommandLine.arguments.dropFirst()))
+    ) {
+        let executablePath = try RecorderCLIExecutablePath.current()
+        let launcher = try RecorderAppLauncher(executablePath: executablePath)
+        let endpoint = try RecorderControlEndpoint(bundleIdentifier: launcher.bundleIdentifier)
+        return RecorderCLIApplication(
+            client: RecorderCLISocketClient(socketPath: endpoint.socketPath),
+            launcher: launcher,
+            clock: SystemRecorderCLIClock(),
+            writeLine: writeLine
+        )
     }
-    let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT)
-    interruptSource.setEventHandler {
-        task.cancel()
-    }
-    interruptSource.resume()
-    exitCode = await task.value
-    interruptSource.cancel()
-} catch {
-    writeLine("error: \(error.localizedDescription)")
-    exitCode = 3
 }
+let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT)
+interruptSource.setEventHandler {
+    task.cancel()
+}
+interruptSource.resume()
+let exitCode = await task.value
+interruptSource.cancel()
 
 exit(exitCode)

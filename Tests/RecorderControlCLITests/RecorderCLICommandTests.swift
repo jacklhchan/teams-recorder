@@ -37,4 +37,23 @@ final class RecorderCLICommandTests: XCTestCase {
             XCTAssertThrowsError(try RecorderCLICommand(arguments: arguments))
         }
     }
+
+    func testInvalidArgumentsExitTwoBeforeRuntimeInitialization() async {
+        var initializedRuntime = false
+        var output: [String] = []
+
+        let exitCode = await RecorderCLIEntrypoint.run(
+            arguments: ["status", "extra"],
+            writeLine: { output.append($0) }
+        ) {
+            initializedRuntime = true
+            throw RuntimeInitializationError()
+        }
+
+        XCTAssertEqual(exitCode, 2)
+        XCTAssertFalse(initializedRuntime)
+        XCTAssertEqual(output, [RecorderCLIApplication.usage])
+    }
 }
+
+private struct RuntimeInitializationError: Error {}

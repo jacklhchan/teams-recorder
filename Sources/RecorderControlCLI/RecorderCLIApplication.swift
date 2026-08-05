@@ -9,7 +9,7 @@ protocol RecorderCLIClient {
 }
 
 protocol RecorderAppLaunching {
-    func launchInBackground() throws
+    func launchInBackground() async throws
 }
 
 protocol RecorderCLIClock {
@@ -48,6 +48,10 @@ struct RecorderCLIApplication {
             return 2
         }
 
+        return await run(command: command)
+    }
+
+    func run(command: RecorderCLICommand) async -> Int32 {
         do {
             switch command {
             case let .status(json):
@@ -123,14 +127,23 @@ struct RecorderCLIApplication {
         argument: String?
     ) async throws -> RecorderControlResponse {
         do {
-            return try await client.send(command: command, argument: argument)
+            let response = try await client.send(command: command, argument: argument)
+            try Task.checkCancellation()
+            return response
         } catch {
             try Task.checkCancellation()
+            guard Self.isUnavailableTransport(error) else {
+                throw RecorderCLIApplicationError.transportFailed(
+                    Self.transportFailureDescription(error)
+                )
+            }
         }
 
         do {
-            try launcher.launchInBackground()
+            try await launcher.launchInBackground()
+            try Task.checkCancellation()
         } catch {
+            try Task.checkCancellation()
             throw RecorderCLIApplicationError.launchFailed(error.localizedDescription)
         }
 
@@ -142,11 +155,48 @@ struct RecorderCLIApplication {
             }
             try await clock.sleep(for: min(0.1, remaining))
             do {
-                return try await client.send(command: command, argument: argument)
+                let response = try await client.send(command: command, argument: argument)
+                try Task.checkCancellation()
+                return response
             } catch {
                 try Task.checkCancellation()
+                guard Self.isUnavailableTransport(error) else {
+                    throw RecorderCLIApplicationError.transportFailed(
+                        Self.transportFailureDescription(error)
+                    )
+                }
             }
         }
+    }
+
+    private static func isUnavailableTransport(_ error: Error) -> Bool {
+        guard let error = error as? POSIXError else { return false }
+        return error.code == .ENOENT || error.code == .ECONNREFUSED
+    }
+
+    private static func transportFailureDescription(_ error: Error) -> String {
+        if let error = error as? RecorderControlSocketError {
+            switch error {
+            case .invalidSocketPath:
+                return "invalid socket path."
+            case .invalidExistingSocket:
+                return "invalid socket endpoint."
+            case .oversizedFrame:
+                return "oversized response."
+            case .timedOut:
+                return "request timed out."
+            case .connectionClosed:
+                return "connection closed before a complete response."
+            case .malformedFrame:
+                return "malformed response."
+            case .peerUIDMismatch:
+                return "peer identity mismatch."
+            }
+        }
+        if let error = error as? POSIXError {
+            return "POSIX error \(error.code.rawValue)."
+        }
+        return String(describing: error)
     }
 
     private func render(_ status: RecorderControlStatus, json: Bool) throws {
@@ -197,9 +247,34 @@ struct RecorderCLIApplication {
     }
 }
 
+enum RecorderCLIEntrypoint {
+    static func run(
+        arguments: [String],
+        writeLine: @escaping (String) -> Void,
+        makeApplication: () throws -> RecorderCLIApplication
+    ) async -> Int32 {
+        let command: RecorderCLICommand
+        do {
+            command = try RecorderCLICommand(arguments: arguments)
+        } catch {
+            writeLine(RecorderCLIApplication.usage)
+            return 2
+        }
+
+        do {
+            let application = try makeApplication()
+            return await application.run(command: command)
+        } catch {
+            writeLine("error: \(error.localizedDescription)")
+            return 3
+        }
+    }
+}
+
 private enum RecorderCLIApplicationError: Error {
     case startupTimedOut
     case launchFailed(String)
+    case transportFailed(String)
     case missingStatus
     case invalidJSON
 
@@ -209,6 +284,8 @@ private enum RecorderCLIApplicationError: Error {
             return "Recorder app did not become ready within 5 seconds."
         case let .launchFailed(message):
             return "Unable to launch Recorder app: \(message)"
+        case let .transportFailed(message):
+            return "Recorder control transport failed: \(message)"
         case .missingStatus:
             return "Recorder app returned no status."
         case .invalidJSON:

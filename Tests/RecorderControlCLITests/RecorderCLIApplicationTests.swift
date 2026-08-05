@@ -19,8 +19,8 @@ final class RecorderCLIApplicationTests: XCTestCase {
 
     func testMissingSocketLaunchesOnceRetriesAndSendsOnceWhenReady() async {
         let client = FakeClient(results: [
-            .failure(TestError.unavailable),
-            .failure(TestError.unavailable),
+            .failure(POSIXError(.ENOENT)),
+            .failure(POSIXError(.ENOENT)),
             .success(makeResponse(status: makeStatus()))
         ])
         let launcher = FakeLauncher()
@@ -36,7 +36,7 @@ final class RecorderCLIApplicationTests: XCTestCase {
     }
 
     func testStartupTimeoutExitsThree() async {
-        let client = FakeClient(defaultResult: .failure(TestError.unavailable))
+        let client = FakeClient(defaultResult: .failure(POSIXError(.ENOENT)))
         let launcher = FakeLauncher()
         let clock = FakeClock()
         let output = OutputRecorder()
@@ -53,6 +53,25 @@ final class RecorderCLIApplicationTests: XCTestCase {
         XCTAssertEqual(launcher.launchCount, 1)
         XCTAssertEqual(clock.now, 5, accuracy: 0.0001)
         XCTAssertEqual(output.lines, ["error: Recorder app did not become ready within 5 seconds."])
+    }
+
+    func testMalformedTransportResponseExitsThreeWithoutLaunching() async {
+        let launcher = FakeLauncher()
+        let output = OutputRecorder()
+        let application = makeApplication(
+            client: FakeClient(results: [.failure(RecorderControlSocketError.malformedFrame)]),
+            launcher: launcher,
+            output: output
+        )
+
+        let exitCode = await application.run(arguments: ["status"])
+
+        XCTAssertEqual(exitCode, 3)
+        XCTAssertEqual(launcher.launchCount, 0)
+        XCTAssertEqual(
+            output.lines,
+            ["error: Recorder control transport failed: malformed response."]
+        )
     }
 
     func testRejectedOperationExitsFourAndPrintsStableError() async {
@@ -156,6 +175,40 @@ final class RecorderCLIApplicationTests: XCTestCase {
         )
     }
 
+    func testCancellationWhileSendIsInFlightOverridesRejectedResponse() async {
+        let started = expectation(description: "send started")
+        let client = InFlightClient(started: started)
+        let output = OutputRecorder()
+        let application = RecorderCLIApplication(
+            client: client,
+            launcher: FakeLauncher(),
+            clock: FakeClock(),
+            writeLine: output.write
+        )
+        let task = Task {
+            await application.run(arguments: ["start"])
+        }
+
+        await fulfillment(of: [started])
+        task.cancel()
+        await client.resume(
+            with: RecorderControlResponse(
+                protocolVersion: RecorderControlRequest.currentProtocolVersion,
+                requestID: "test-request",
+                ok: false,
+                status: makeStatus(),
+                error: RecorderControlErrorPayload(
+                    code: "operation-in-progress",
+                    message: "Recording finalization is in progress."
+                )
+            )
+        )
+
+        let exitCode = await task.value
+        XCTAssertEqual(exitCode, 0)
+        XCTAssertTrue(output.lines.isEmpty)
+    }
+
     private func makeApplication(
         client: FakeClient,
         launcher: FakeLauncher = FakeLauncher(),
@@ -169,10 +222,6 @@ final class RecorderCLIApplicationTests: XCTestCase {
             writeLine: output.write
         )
     }
-}
-
-private enum TestError: Error {
-    case unavailable
 }
 
 private final class FakeClient: RecorderCLIClient {
@@ -198,7 +247,7 @@ private final class FakeClient: RecorderCLIClient {
         if !results.isEmpty {
             return try results.removeFirst().get()
         }
-        guard let defaultResult else { throw TestError.unavailable }
+        guard let defaultResult else { throw POSIXError(.ENOENT) }
         return try defaultResult.get()
     }
 }
@@ -206,8 +255,30 @@ private final class FakeClient: RecorderCLIClient {
 private final class FakeLauncher: RecorderAppLaunching {
     private(set) var launchCount = 0
 
-    func launchInBackground() throws {
+    func launchInBackground() async throws {
         launchCount += 1
+    }
+}
+
+private actor InFlightClient: RecorderCLIClient {
+    private let started: XCTestExpectation
+    private var continuation: CheckedContinuation<RecorderControlResponse, Never>?
+
+    init(started: XCTestExpectation) {
+        self.started = started
+    }
+
+    func send(
+        command: RecorderControlCommand,
+        argument: String?
+    ) async throws -> RecorderControlResponse {
+        started.fulfill()
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func resume(with response: RecorderControlResponse) {
+        continuation?.resume(returning: response)
+        continuation = nil
     }
 }
 

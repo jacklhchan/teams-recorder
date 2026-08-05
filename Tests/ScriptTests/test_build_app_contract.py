@@ -131,6 +131,9 @@ class BuildAppContractTests(unittest.TestCase):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
     def make_swift_shim(self, directory, binary_directory):
+        helper = binary_directory / "recorderctl"
+        shutil.copyfile(binary_directory / "LocalMeetingRecorder", helper)
+        helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
         shim = directory / "swift-shim"
         self.write_executable(
             shim,
@@ -173,15 +176,28 @@ esac
         self.write_executable(shim, "#!/usr/bin/env bash\nprintf '%s: arm64\\n' \"$1\"\n")
         return shim
 
+    def make_vtool_shim(self, directory):
+        shim = directory / "vtool-shim"
+        self.write_executable(
+            shim,
+            "#!/usr/bin/env bash\nprintf ' platform MACOS\\n    minos 26.0\\n'\n",
+        )
+        return shim
+
     def make_app_fixture(self, root):
         app = root / "Fixture.app"
         macos = app / "Contents/MacOS"
+        helpers = app / "Contents/Helpers"
         resources = app / "Contents/Resources"
         macos.mkdir(parents=True)
+        helpers.mkdir()
         resources.mkdir()
         executable = macos / "LocalMeetingRecorder"
         executable.write_text("fixture", encoding="utf-8")
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        helper = helpers / "recorderctl"
+        helper.write_text("fixture", encoding="utf-8")
+        helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
         with (app / "Contents/Info.plist").open("wb") as stream:
             plistlib.dump(
                 {
@@ -208,6 +224,7 @@ esac
         self, app, codesign, file_command, entitlement_path, sign_mode="ad-hoc", **extra
     ):
         env = os.environ.copy()
+        vtool = self.make_vtool_shim(app.parent)
         env.update(
             {
                 "CODESIGN_BIN": str(codesign),
@@ -216,6 +233,7 @@ esac
                 "CODESIGN_SIGNATURE": "adhoc",
                 "CODESIGN_TEAM": "not set",
                 "CODESIGN_DV_EXIT": "1",
+                "VTOOL_BIN": str(vtool),
             }
         )
         env.update(extra)

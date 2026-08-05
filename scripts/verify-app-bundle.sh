@@ -13,6 +13,7 @@ EXPECTED_BUILD="$4"
 SIGN_MODE="$5"
 CODESIGN_BIN="${CODESIGN_BIN:-codesign}"
 FILE_BIN="${FILE_BIN:-file}"
+VTOOL_BIN="${VTOOL_BIN:-/usr/bin/xcrun}"
 
 [[ "$SIGN_MODE" == "ad-hoc" || "$SIGN_MODE" == "none" ]] || {
   echo "Sign mode must be ad-hoc or none." >&2
@@ -34,7 +35,7 @@ test -x "$APP/Contents/MacOS/LocalMeetingRecorder"
 HELPER="$APP/Contents/Helpers/recorderctl"
 test -x "$HELPER"
 "$FILE_BIN" "$HELPER" | grep -q 'arm64'
-HELPER_BUILD_INFO="$(/usr/bin/xcrun vtool -show-build "$HELPER")"
+HELPER_BUILD_INFO="$("$VTOOL_BIN" vtool -show-build "$HELPER")"
 printf '%s\n' "$HELPER_BUILD_INFO" | grep -Eq '^[[:space:]]*platform MACOS$'
 printf '%s\n' "$HELPER_BUILD_INFO" | grep -Eq '^[[:space:]]*minos 26\.0$'
 test -f "$APP/Contents/Resources/AppIcon.icns"

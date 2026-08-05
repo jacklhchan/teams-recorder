@@ -97,7 +97,8 @@ class PackagingContractTests(unittest.TestCase):
             verify,
         )
         self.assertIn('test -x "$HELPER"', verify)
-        self.assertIn('/usr/bin/xcrun vtool -show-build "$HELPER"', verify)
+        self.assertIn('VTOOL_BIN="${VTOOL_BIN:-/usr/bin/xcrun}"', verify)
+        self.assertIn('"$VTOOL_BIN" vtool -show-build "$HELPER"', verify)
         self.assertIn("minos 26\\.0", verify)
         self.assertIn(
             'validate_macos_26_binary '

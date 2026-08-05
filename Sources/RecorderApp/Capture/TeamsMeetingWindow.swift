@@ -58,10 +58,18 @@ struct TeamsMeetingWindowResolver {
     static let minimumHeight: CGFloat = 360
     static let minimumArea: CGFloat = 230_400
     static let ambiguityAreaRatio: CGFloat = 0.9
-    static let utilityTitles: Set<String> = [
-        "settings",
+    static let nonMeetingTitleSegments: Set<String> = [
+        "activity",
+        "calendar",
+        "calls",
+        "chat",
+        "copilot",
+        "meeting join",
+        "microsoft teams helper",
         "notification",
-        "microsoft teams helper"
+        "onedrive",
+        "settings",
+        "teams"
     ]
 
     private struct TrackedWindow {
@@ -82,7 +90,7 @@ struct TeamsMeetingWindowResolver {
 
     static func rejectionReasons(for window: TeamsWindowSnapshot) -> Set<TeamsWindowRejectionReason> {
         var reasons: Set<TeamsWindowRejectionReason> = []
-        if utilityTitles.contains(window.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) {
+        if nonMeetingTitleSegments.contains(firstTitleSegment(window.title)) {
             reasons.insert(.utilityTitle)
         }
         if window.layer != 0 {
@@ -98,6 +106,12 @@ struct TeamsMeetingWindowResolver {
             reasons.insert(.insufficientArea)
         }
         return reasons
+    }
+
+    private static func firstTitleSegment(_ title: String) -> String {
+        String(title.split(separator: "|", maxSplits: 1).first ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 
     mutating func observe(

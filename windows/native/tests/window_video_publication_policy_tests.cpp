@@ -15,6 +15,18 @@ int main() {
     if (late_first_frame.disposition != recorder::timeline::VideoFrameDisposition::Accepted ||
         late_first_frame.presentation_time_100ns != 2'500'000U) return 1;
 
+    // First frame is initially too far ahead of the queued tail. A later
+    // audio queue update must advance the same timeline again (without
+    // dequeueing PCM) and make that frame eligible for writer bootstrap.
+    recorder::timeline::AvSyncTimeline delayed_bootstrap;
+    delayed_bootstrap.Start(0);
+    delayed_bootstrap.AdvanceAudioEnd(10'000'000U);
+    if (delayed_bootstrap.PlaceVideo(35'000'000U, 333'333U).disposition !=
+        recorder::timeline::VideoFrameDisposition::DroppedTooFarAhead) return 1;
+    delayed_bootstrap.AdvanceAudioEnd(20'000'000U);
+    if (delayed_bootstrap.PlaceVideo(35'000'000U, 333'333U).disposition !=
+        recorder::timeline::VideoFrameDisposition::Accepted) return 1;
+
     // Audio extension has already written static samples through 5s. A fresh
     // WGC callback stamped at 4.8s must only refresh the next cadence cache;
     // it may never insert a backward 4.8s MF sample after the 5s tail.

@@ -49,7 +49,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (capture_ || started_) return FailLocked(RECORDER_NATIVE_INVALID_STATE, "Window video capture is already started.");
             config_ = std::move(config); stats_ = {}; stats_.struct_size = sizeof(stats_); stats_.result = RECORDER_NATIVE_OK;
-            error_.clear(); accepted_range_ = {}; bootstrap_audio_tail_applied_ = false;
+            error_.clear(); accepted_range_ = {};
             last_accepted_bgra_.clear(); last_video_next_pts_100ns_ = 0; last_video_frame_duration_100ns_ = 0;
             capture_ = std::make_unique<recorder::video::WgcWindowCapture>();
         }
@@ -300,13 +300,14 @@ private:
         }
     }
     void AdvanceQueuedAudioTailForBootstrapLocked() noexcept {
-        if (bootstrap_audio_tail_applied_) return;
+        // The first WGC frame can be more than the allowed lead beyond the
+        // initial bounded queue. Re-evaluate every wake-up: AdvanceAudioEnd is
+        // monotonic, and PCM remains queued for AAC after writer bootstrap.
         for (const auto& block : audio_queue_) {
             const auto frames = static_cast<std::uint64_t>(block.samples.size() / 2U);
             av_sync_.AdvanceAudioEnd(config_.session_qpc_origin_100ns + block.start_100ns +
                 frames * kHundredNanosecondsPerSecond / 48'000U);
         }
-        bootstrap_audio_tail_applied_ = true;
     }
     static std::vector<std::uint8_t> LetterboxBgra(const recorder::video::OwnedBgraFrame& source,
                                                     std::int32_t canvas_width, std::int32_t canvas_height) {
@@ -365,7 +366,6 @@ private:
     bool started_ = false;
     bool accepting_audio_ = false;
     bool writer_stopping_ = false;
-    bool bootstrap_audio_tail_applied_ = false;
     recorder::timeline::AvSyncTimeline av_sync_;
 };
 

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_EXECUTABLE="LocalMeetingRecorder"
+HELPER_EXECUTABLE="recorderctl"
 CONFIGURATION="debug"
 VERSION="0.1.0"
 BUILD_NUMBER="1"
@@ -87,8 +88,13 @@ echo "Building $CONFIGURATION app binary" >&2
 "$SWIFT_BIN" build -c "$CONFIGURATION" --arch arm64 >&2
 BIN_DIR="$("$SWIFT_BIN" build -c "$CONFIGURATION" --arch arm64 --show-bin-path)"
 BINARY_PATH="$BIN_DIR/$APP_EXECUTABLE"
+HELPER_BINARY_PATH="$BIN_DIR/$HELPER_EXECUTABLE"
 [[ -x "$BINARY_PATH" ]] || {
   echo "Built executable not found: $BINARY_PATH" >&2
+  exit 70
+}
+[[ -x "$HELPER_BINARY_PATH" ]] || {
+  echo "Built helper executable not found: $HELPER_BINARY_PATH" >&2
   exit 70
 }
 
@@ -108,10 +114,12 @@ trap cleanup EXIT
 CONTENTS_DIR="$TEMP_OUTPUT/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+HELPERS_DIR="$CONTENTS_DIR/Helpers"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$HELPERS_DIR"
 printf '%s' "$OWNER_MARKER_VALUE" > "$RESOURCES_DIR/$OWNER_MARKER_NAME"
 
 cp "$BINARY_PATH" "$MACOS_DIR/$APP_EXECUTABLE"
+cp "$HELPER_BINARY_PATH" "$HELPERS_DIR/$HELPER_EXECUTABLE"
 if [[ "$CONFIGURATION" == "release" ]]; then
   STRIP_BIN="$(/usr/bin/xcrun --find strip)"
   [[ "$STRIP_BIN" == /* && -x "$STRIP_BIN" ]] || {
@@ -119,6 +127,7 @@ if [[ "$CONFIGURATION" == "release" ]]; then
     exit 70
   }
   "$STRIP_BIN" -S "$MACOS_DIR/$APP_EXECUTABLE"
+  "$STRIP_BIN" -S "$HELPERS_DIR/$HELPER_EXECUTABLE"
 fi
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 cp "$ROOT_DIR/LICENSE" "$RESOURCES_DIR/LICENSE"
@@ -154,10 +163,12 @@ plutil -lint "$PLIST" >&2
 
 if [[ "$SIGN_MODE" == "ad-hoc" ]]; then
   ENTITLEMENTS="$ROOT_DIR/Config/LocalMeetingRecorder.entitlements"
+  "$CODESIGN_BIN" --force --sign - --timestamp=none "$HELPERS_DIR/$HELPER_EXECUTABLE" >&2
   "$CODESIGN_BIN" --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$MACOS_DIR/$APP_EXECUTABLE" >&2
   "$CODESIGN_BIN" --force --sign - --timestamp=none --entitlements "$ENTITLEMENTS" "$TEMP_OUTPUT" >&2
   "$CODESIGN_BIN" --verify --deep --strict "$TEMP_OUTPUT" >&2
 else
+  "$CODESIGN_BIN" --remove-signature "$HELPERS_DIR/$HELPER_EXECUTABLE" >/dev/null 2>&1 || true
   "$CODESIGN_BIN" --remove-signature "$MACOS_DIR/$APP_EXECUTABLE" >/dev/null 2>&1 || true
   if "$CODESIGN_BIN" -dv "$TEMP_OUTPUT" >/dev/null 2>&1; then
     echo "Unsigned staging bundle unexpectedly has a signature." >&2

@@ -30,6 +30,12 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")" = "$EXPECTED_BUILD"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "26.0"
 "$FILE_BIN" "$APP/Contents/MacOS/LocalMeetingRecorder" | grep -q 'arm64'
+HELPER="$APP/Contents/Helpers/recorderctl"
+test -x "$HELPER"
+"$FILE_BIN" "$HELPER" | grep -q 'arm64'
+HELPER_BUILD_INFO="$(/usr/bin/xcrun vtool -show-build "$HELPER")"
+printf '%s\n' "$HELPER_BUILD_INFO" | grep -Eq '^[[:space:]]*platform MACOS$'
+printf '%s\n' "$HELPER_BUILD_INFO" | grep -Eq '^[[:space:]]*minos 26\.0$'
 test -f "$APP/Contents/Resources/AppIcon.icns"
 test ! -e "$APP/Contents/Resources/transcribe-openai-compatible.sh"
 test ! -e "$APP/Contents/Resources/transcribe-qwen-asr.sh"

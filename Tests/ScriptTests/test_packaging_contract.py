@@ -1,6 +1,9 @@
 import hashlib
+import os
 import plistlib
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -46,6 +49,111 @@ Mentioning compatibility does not change or grant those licenses.
 
 
 class PackagingContractTests(unittest.TestCase):
+    def test_cli_helper_packaging_and_verification_contract(self):
+        package = (ROOT / "Package.swift").read_text(encoding="utf-8")
+        build = (ROOT / "scripts/build-app.sh").read_text(encoding="utf-8")
+        verify = (
+            ROOT / "scripts/verify-app-bundle.sh"
+        ).read_text(encoding="utf-8")
+        packaging = (
+            ROOT / "Tests/PackagingTests/run-tests.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            '.executable(name: "recorderctl", targets: ["RecorderControlCLI"])',
+            package,
+        )
+        self.assertIn('HELPER_EXECUTABLE="recorderctl"', build)
+        self.assertIn('HELPER_BINARY_PATH="$BIN_DIR/$HELPER_EXECUTABLE"', build)
+        self.assertIn('[[ -x "$HELPER_BINARY_PATH" ]]', build)
+        self.assertIn('HELPERS_DIR="$CONTENTS_DIR/Helpers"', build)
+        self.assertIn('mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$HELPERS_DIR"', build)
+        self.assertIn(
+            'cp "$HELPER_BINARY_PATH" "$HELPERS_DIR/$HELPER_EXECUTABLE"',
+            build,
+        )
+        self.assertIn(
+            '"$STRIP_BIN" -S "$HELPERS_DIR/$HELPER_EXECUTABLE"',
+            build,
+        )
+        helper_sign = (
+            '"$CODESIGN_BIN" --force --sign - --timestamp=none '
+            '"$HELPERS_DIR/$HELPER_EXECUTABLE"'
+        )
+        app_binary_sign = (
+            '"$CODESIGN_BIN" --force --sign - --timestamp=none --entitlements '
+            '"$ENTITLEMENTS" "$MACOS_DIR/$APP_EXECUTABLE"'
+        )
+        outer_sign = (
+            '"$CODESIGN_BIN" --force --sign - --timestamp=none --entitlements '
+            '"$ENTITLEMENTS" "$TEMP_OUTPUT"'
+        )
+        self.assertLess(build.index(helper_sign), build.index(app_binary_sign))
+        self.assertLess(build.index(app_binary_sign), build.index(outer_sign))
+
+        self.assertIn('HELPER="$APP/Contents/Helpers/recorderctl"', verify)
+        self.assertIn('test -x "$HELPER"', verify)
+        self.assertIn('/usr/bin/xcrun vtool -show-build "$HELPER"', verify)
+        self.assertIn("minos 26\\.0", verify)
+        self.assertIn(
+            'validate_macos_26_binary '
+            '"$MOVED/Contents/MacOS/LocalMeetingRecorder"',
+            packaging,
+        )
+        self.assertIn(
+            'validate_macos_26_binary '
+            '"$MOVED/Contents/Helpers/recorderctl"',
+            packaging,
+        )
+
+    def test_cli_installer_refuses_unowned_destination_objects(self):
+        installer = ROOT / "scripts/install-recorder-cli.sh"
+        script = installer.read_text(encoding="utf-8")
+        self.assertIn('LINK_PATH="$INSTALL_ROOT/usr/local/bin/recorderctl"', script)
+        self.assertIn("exit 73", script)
+        self.assertNotIn("rm -rf", script)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = root / "Local Meeting Recorder.app"
+            helper = app / "Contents/Helpers/recorderctl"
+            marker = app / "Contents/Resources/.lmr-build-owner"
+            helper.parent.mkdir(parents=True)
+            marker.parent.mkdir(parents=True)
+            helper.write_text("#!/bin/sh\n", encoding="utf-8")
+            helper.chmod(0o755)
+            marker.write_text(
+                "local.meeting.recorder.build-app.v1",
+                encoding="utf-8",
+            )
+
+            for obstacle in ("file", "directory", "symlink"):
+                with self.subTest(obstacle=obstacle):
+                    install_root = root / f"install-{obstacle}"
+                    bin_dir = install_root / "usr/local/bin"
+                    bin_dir.mkdir(parents=True)
+                    destination = bin_dir / "recorderctl"
+                    if obstacle == "file":
+                        destination.write_text("keep", encoding="utf-8")
+                    elif obstacle == "directory":
+                        destination.mkdir()
+                    else:
+                        unrelated = root / "unrelated-helper"
+                        unrelated.write_text("keep", encoding="utf-8")
+                        destination.symlink_to(unrelated)
+
+                    before = os.lstat(destination)
+                    result = subprocess.run(
+                        ["/bin/bash", str(installer), str(app)],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        env={**os.environ, "RECORDER_CLI_INSTALL_ROOT": str(install_root)},
+                    )
+                    self.assertEqual(result.returncode, 73, result.stderr)
+                    after = os.lstat(destination)
+                    self.assertEqual(before.st_ino, after.st_ino)
+
     def test_readme_describes_current_provider_and_license(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         normalized_readme = " ".join(readme.split())

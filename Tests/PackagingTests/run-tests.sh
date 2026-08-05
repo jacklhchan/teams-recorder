@@ -54,6 +54,14 @@ cp -R "$APP" "$MOVED"
   ad-hoc
 
 validate_macos_26_binary "$MOVED/Contents/MacOS/LocalMeetingRecorder"
+validate_macos_26_binary "$MOVED/Contents/Helpers/recorderctl"
+
+CLI_INSTALL_ROOT="$TEMP_ROOT/cli-install"
+mkdir -p "$CLI_INSTALL_ROOT/usr/local/bin"
+RECORDER_CLI_INSTALL_ROOT="$CLI_INSTALL_ROOT" \
+  "$ROOT_DIR/scripts/install-recorder-cli.sh" "$MOVED"
+test "$(readlink "$CLI_INSTALL_ROOT/usr/local/bin/recorderctl")" = \
+  "$MOVED/Contents/Helpers/recorderctl"
 
 test ! -e "$MOVED/Contents/Resources/transcribe-openai-compatible.sh"
 test ! -e "$MOVED/Contents/Resources/transcribe-qwen-asr.sh"
@@ -67,6 +75,11 @@ if LC_ALL=C /usr/bin/grep -R -n -E \
 fi
 
 /usr/bin/otool -L "$MOVED/Contents/MacOS/LocalMeetingRecorder" \
+  | /usr/bin/tail -n +2 \
+  | /usr/bin/awk '{print $1}' \
+  | validate_macho_dependencies
+
+/usr/bin/otool -L "$MOVED/Contents/Helpers/recorderctl" \
   | /usr/bin/tail -n +2 \
   | /usr/bin/awk '{print $1}' \
   | validate_macho_dependencies

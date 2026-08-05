@@ -187,6 +187,46 @@ final class UnixSocketTransportTests: XCTestCase {
         XCTAssertEqual(errno, EBADF)
     }
 
+    func testStopClosesClientBeforeFinishedClientLeavesRegistry() async throws {
+        let fixture = try SocketFixture()
+        defer { fixture.stop() }
+        let accepted = AcceptedDescriptorProbe()
+        let finish = FinishedClientCloseProbe()
+        defer { finish.releaseClose() }
+        let server = RecorderControlSocketServer(
+            socketPath: fixture.socketPath,
+            peerUID: { descriptor in
+                accepted.capture(descriptor)
+                return getuid()
+            },
+            beforeFinishedClientClose: { finish.beforeClose() },
+            handler: { request in
+                RecorderControlResponse(
+                    protocolVersion: RecorderControlRequest.currentProtocolVersion,
+                    requestID: request.requestID,
+                    ok: true,
+                    status: nil,
+                    error: nil
+                )
+            }
+        )
+        fixture.server = server
+        try server.start()
+
+        _ = try await RecorderControlSocketClient().send(
+            .init(requestID: "finish-order", command: .status),
+            to: fixture.socketPath,
+            timeout: 1
+        )
+        let descriptor = try XCTUnwrap(accepted.waitForDescriptor())
+        XCTAssertTrue(finish.waitForClose())
+
+        server.stop()
+
+        XCTAssertEqual(fcntl(descriptor, F_GETFD), -1)
+        XCTAssertEqual(errno, EBADF)
+    }
+
     func testConcurrentStartsAreSerialized() throws {
         let fixture = try SocketFixture()
         defer { fixture.stop() }
@@ -244,16 +284,21 @@ final class UnixSocketTransportTests: XCTestCase {
         XCTAssertNoThrow(try start.get().get())
     }
 
-    func testFailedStartDoesNotRemoveReplacementWithoutBoundIdentity() throws {
+    func testFailedStartDoesNotRemoveReplacementWhenPathDiffersFromBoundDescriptor() throws {
         let fixture = try SocketFixture()
         defer { fixture.stop() }
         let replacement = ReplacementServerHolder()
         let server = RecorderControlSocketServer(
             socketPath: fixture.socketPath,
-            socketIdentityProvider: { path in
-                XCTAssertEqual(unlink(path), 0)
+            socketIdentityProvider: { descriptor, path, userID in
+                let identity = try SocketIdentity.readBoundSocket(
+                    from: descriptor,
+                    at: path,
+                    ownedBy: userID
+                )
+                XCTAssertEqual(unlink(fixture.socketPath), 0)
                 let replacementServer = RecorderControlSocketServer(
-                    socketPath: path,
+                    socketPath: fixture.socketPath,
                     handler: { request in
                         RecorderControlResponse(
                             protocolVersion: RecorderControlRequest.currentProtocolVersion,
@@ -266,7 +311,7 @@ final class UnixSocketTransportTests: XCTestCase {
                 )
                 replacement.server = replacementServer
                 try replacementServer.start()
-                throw InjectedStartError.identityUnavailable
+                return identity
             },
             handler: { request in
                 RecorderControlResponse(
@@ -283,10 +328,6 @@ final class UnixSocketTransportTests: XCTestCase {
         XCTAssertThrowsError(try server.start())
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.socketPath))
     }
-}
-
-private enum InjectedStartError: Error {
-    case identityUnavailable
 }
 
 private final class AcceptedDescriptorProbe: @unchecked Sendable {
@@ -306,6 +347,24 @@ private final class AcceptedDescriptorProbe: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return descriptor
+    }
+}
+
+private final class FinishedClientCloseProbe: @unchecked Sendable {
+    private let entered = DispatchSemaphore(value: 0)
+    private let release = DispatchSemaphore(value: 0)
+
+    func beforeClose() {
+        entered.signal()
+        release.wait()
+    }
+
+    func waitForClose() -> Bool {
+        entered.wait(timeout: .now() + 1) == .success
+    }
+
+    func releaseClose() {
+        release.signal()
     }
 }
 

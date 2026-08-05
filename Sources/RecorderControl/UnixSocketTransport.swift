@@ -79,7 +79,7 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
     public typealias Handler = @Sendable (RecorderControlRequest) async -> RecorderControlResponse
     typealias CurrentUID = @Sendable () -> uid_t
     typealias PeerUID = @Sendable (Int32) throws -> uid_t
-    typealias SocketIdentityProvider = @Sendable (String) throws -> SocketIdentity
+    typealias SocketIdentityProvider = @Sendable (Int32, String, uid_t) throws -> SocketIdentity
 
     private let socketPathProvider: @Sendable () throws -> String
     private let currentUID: CurrentUID
@@ -88,6 +88,7 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
     private let socketIdentityProvider: SocketIdentityProvider
     private let beforeBind: @Sendable () -> Void
     private let beforeOwnedCleanup: @Sendable () -> Void
+    private let beforeFinishedClientClose: @Sendable () -> Void
     private let handler: Handler
     private let lifecycleLock = NSLock()
     private let stateLock = NSLock()
@@ -110,9 +111,12 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
             try Self.actualPeerUID(descriptor)
         }
         clientTimeout = 5
-        socketIdentityProvider = { try SocketIdentity.read(at: $0) }
+        socketIdentityProvider = {
+            try SocketIdentity.readBoundSocket(from: $0, at: $1, ownedBy: $2)
+        }
         beforeBind = {}
         beforeOwnedCleanup = {}
+        beforeFinishedClientClose = {}
         self.handler = handler
     }
 
@@ -124,10 +128,11 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         },
         requestTimeout: TimeInterval = 5,
         socketIdentityProvider: @escaping SocketIdentityProvider = {
-            try SocketIdentity.read(at: $0)
+            try SocketIdentity.readBoundSocket(from: $0, at: $1, ownedBy: $2)
         },
         beforeBind: @escaping @Sendable () -> Void = {},
         beforeOwnedCleanup: @escaping @Sendable () -> Void = {},
+        beforeFinishedClientClose: @escaping @Sendable () -> Void = {},
         handler: @escaping Handler
     ) {
         socketPathProvider = { socketPath }
@@ -137,6 +142,7 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         self.socketIdentityProvider = socketIdentityProvider
         self.beforeBind = beforeBind
         self.beforeOwnedCleanup = beforeOwnedCleanup
+        self.beforeFinishedClientClose = beforeFinishedClientClose
         self.handler = handler
     }
 
@@ -156,7 +162,6 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
         let socketPath = try socketPathProvider()
         try removeExistingSocket(at: socketPath)
         let descriptor = try SocketDescriptor.make()
-        var bound = false
         var boundIdentity: SocketIdentity?
         do {
             beforeBind()
@@ -165,8 +170,9 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
                     throw SocketDescriptor.posixError()
                 }
             }
-            bound = true
-            boundIdentity = try socketIdentityProvider(socketPath)
+            let identity = try socketIdentityProvider(descriptor, socketPath, currentUID())
+            boundIdentity = identity
+            try verifySocket(at: socketPath, matching: identity)
             guard chmod(socketPath, S_IRUSR | S_IWUSR) == 0 else {
                 throw SocketDescriptor.posixError()
             }
@@ -194,7 +200,7 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
             }
         } catch {
             Darwin.close(descriptor)
-            if bound {
+            if let boundIdentity {
                 try? removeOwnedSocket(at: socketPath, matching: boundIdentity)
             }
             throw error
@@ -224,7 +230,7 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
             Darwin.close(descriptor)
             acceptGroup.wait()
         }
-        if let socketPath {
+        if let socketPath, let socketIdentity {
             try? removeOwnedSocket(at: socketPath, matching: socketIdentity)
         }
     }
@@ -284,10 +290,11 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
     }
 
     private func finishClient(_ client: OwnedSocketDescriptor) {
+        beforeFinishedClientClose()
+        client.close()
         stateLock.lock()
         clients.removeValue(forKey: ObjectIdentifier(client))
         stateLock.unlock()
-        client.close()
     }
 
     private func isCurrentListener(_ descriptor: Int32, generation: UInt64) -> Bool {
@@ -331,9 +338,8 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
 
     private func removeOwnedSocket(
         at socketPath: String,
-        matching identity: SocketIdentity?
+        matching identity: SocketIdentity
     ) throws {
-        guard let identity else { return }
         beforeOwnedCleanup()
         var metadata = stat()
         guard lstat(socketPath, &metadata) == 0 else {
@@ -345,7 +351,20 @@ public final class RecorderControlSocketServer: @unchecked Sendable {
               identity == SocketIdentity(metadata: metadata) else {
             return
         }
+        // The private 0700 directory and same-UID peer check define the trust boundary.
         guard unlink(socketPath) == 0 else { throw SocketDescriptor.posixError() }
+    }
+
+    private func verifySocket(at socketPath: String, matching identity: SocketIdentity) throws {
+        var metadata = stat()
+        guard lstat(socketPath, &metadata) == 0 else {
+            throw SocketDescriptor.posixError()
+        }
+        guard metadata.st_mode & S_IFMT == S_IFSOCK,
+              metadata.st_uid == currentUID(),
+              identity == SocketIdentity(metadata: metadata) else {
+            throw RecorderControlSocketError.invalidExistingSocket
+        }
     }
 
     private static func actualPeerUID(_ descriptor: Int32) throws -> uid_t {
@@ -367,12 +386,32 @@ struct SocketIdentity: Equatable, Sendable {
         inode = metadata.st_ino
     }
 
-    static func read(at path: String) throws -> SocketIdentity {
-        var metadata = stat()
-        guard lstat(path, &metadata) == 0 else {
+    static func readBoundSocket(
+        from descriptor: Int32,
+        at path: String,
+        ownedBy userID: uid_t
+    ) throws -> SocketIdentity {
+        var descriptorMetadata = stat()
+        guard fstat(descriptor, &descriptorMetadata) == 0 else {
             throw SocketDescriptor.posixError()
         }
-        return SocketIdentity(metadata: metadata)
+        guard descriptorMetadata.st_mode & S_IFMT == S_IFSOCK,
+              descriptorMetadata.st_uid == userID else {
+            throw RecorderControlSocketError.invalidExistingSocket
+        }
+
+        // Darwin socket-descriptor inodes are not the bound filesystem node's inode.
+        // The private parent directory makes UID the boundary while this path identity
+        // is recorded for exact cleanup.
+        var pathMetadata = stat()
+        guard lstat(path, &pathMetadata) == 0 else {
+            throw SocketDescriptor.posixError()
+        }
+        guard pathMetadata.st_mode & S_IFMT == S_IFSOCK,
+              pathMetadata.st_uid == userID else {
+            throw RecorderControlSocketError.invalidExistingSocket
+        }
+        return SocketIdentity(metadata: pathMetadata)
     }
 }
 

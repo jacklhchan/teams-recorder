@@ -275,3 +275,56 @@ required deactivation semantics.
   requirement for a public timeout setting.
 - AF_UNIX binding remains blocked by the outer workspace sandbox, so these
   focused socket suites require the approved out-of-sandbox command above.
+
+---
+
+## Final minimal race fixes (2026-08-05)
+
+### Changes
+
+- `finishClient` now closes its close-once `OwnedSocketDescriptor` before
+  removing it from the active-client registry. A deterministic one-shot test
+  pauses that terminal path immediately before close and proves concurrent
+  `stop()` still finds and closes the descriptor.
+- Immediately after `bind`, `fstat` validates that the bound descriptor is a
+  socket owned by the expected UID. An immediate `lstat` then records a
+  nonoptional pathname device/inode identity, which is compared again before
+  `chmod`, `listen`, and publication.
+- Failed-start and stop cleanup accept only a nonoptional identity and compare
+  the pathname's current socket type, UID, device, and inode immediately before
+  unlink. A replacement-path acquisition test proves a mismatched replacement
+  is retained.
+
+On Darwin, an AF_UNIX descriptor's `fstat` device/inode is the kernel socket
+identity and does not equal the bound filesystem node's `lstat` device/inode.
+Accordingly, descriptor `fstat` validates socket type/UID and pathname `lstat`
+supplies the exact cleanup identity. The private `0700` directory, `0600`
+socket, and equal peer UID define the trust boundary; a malicious same-UID
+swap in the final compare-to-unlink window remains intentionally out of scope.
+
+### RED evidence
+
+Before production changes, the focused transport suite failed compilation at
+the two new expectations:
+
+```text
+error: extra argument 'beforeFinishedClientClose' in call
+error: incorrect argument label in call (have 'from:', expected 'at:')
+```
+
+This established that the old API had neither the deterministic finish-close
+ordering seam nor descriptor-based bound-socket identity acquisition.
+
+### GREEN evidence
+
+Fresh covering suites were run sequentially outside the outer sandbox with
+the required Xcode and module-cache environment:
+
+```text
+UnixSocketTransportTests: 10 tests, 0 failures
+RecorderControlServerRuntimeTests: 2 tests, 0 failures
+AppRuntimeTests: 4 tests, 0 failures
+Total: 16 tests, 0 failures
+```
+
+No full suite was run for this bounded final-fix pass, as requested.

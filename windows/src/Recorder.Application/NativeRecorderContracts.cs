@@ -289,6 +289,9 @@ public sealed record NativeCaptureStats(
     /// <summary>Latest normalized optional-microphone envelope for live UI metering.</summary>
     public float MicrophoneLevelPeak { get; init; }
     public float MicrophoneLevelRms { get; init; }
+    public NativeImpulseRepairStats ImpulseRepair { get; init; } = NativeImpulseRepairStats.Empty;
+    public ulong RenderTimestampErrors { get; init; }
+    public ulong MicrophoneTimestampErrors { get; init; }
 
     public static NativeCaptureStats Empty(RecordingCaptureMode mode) => new(
         mode,
@@ -347,6 +350,17 @@ public sealed record NativeEndpointEnumerationResult(
     IReadOnlyList<NativeCaptureEndpoint> Endpoints)
 {
     public bool IsSuccess => Operation.IsSuccess;
+}
+
+public sealed record NativeImpulseRepairStats(
+    ulong CandidateFrames,
+    ulong RepairedFrames,
+    ulong RepairedSamples,
+    ulong SkippedDiscontinuityPackets,
+    ulong SkippedCooldownFrames,
+    float MaximumResidual)
+{
+    public static NativeImpulseRepairStats Empty { get; } = new(0, 0, 0, 0, 0, 0);
 }
 
 /// <summary>

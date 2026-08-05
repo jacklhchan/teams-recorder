@@ -44,7 +44,8 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
                                    std::uint64_t device_position_frames,
                                    std::uint32_t source_sample_rate,
                                    std::uint64_t normalized_frames,
-                                   bool discontinuity) {
+                                   bool discontinuity,
+                                   bool timestamp_reliable) {
     Placement placement{};
     State& source_state = state(source);
     if (!has_origin_) {
@@ -58,6 +59,18 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
             : 0;
     }
     if (discontinuity) ++source_state.counters.discontinuities;
+    if (!timestamp_reliable) {
+        ++source_state.counters.timestamp_errors;
+        // A timestamp-error packet is valid audio with unreliable clock
+        // metadata. Keep its duration continuous instead of manufacturing a
+        // gap, drift correction, or dropped prefix from the bad timestamp.
+        placement.frame = source_state.last_end_frame;
+        if (normalized_frames <=
+            std::numeric_limits<std::uint64_t>::max() - source_state.last_end_frame) {
+            source_state.last_end_frame += normalized_frames;
+        }
+        return placement;
+    }
 
     const std::uint64_t qpc_frame = qpc_100ns >= origin_qpc_100ns_
         ? Scale(qpc_100ns - origin_qpc_100ns_, kSampleRate, kQpcUnitsPerSecond)

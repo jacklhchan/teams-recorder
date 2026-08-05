@@ -108,7 +108,10 @@ public sealed record RecorderControlAudioStatus(
     float MicrophoneLevelPeak,
     float MicrophoneLevelRms,
     RecorderControlTimelineStatus RenderTimeline,
-    RecorderControlTimelineStatus MicrophoneTimeline);
+    RecorderControlTimelineStatus MicrophoneTimeline,
+    NativeImpulseRepairStats ImpulseRepair,
+    ulong RenderTimestampErrors,
+    ulong MicrophoneTimestampErrors);
 
 public sealed record RecorderControlTeamsStatus(
     bool Enabled,

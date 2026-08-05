@@ -170,11 +170,24 @@ typedef struct RecorderNativeStats {
     float primary_level_rms;
     float microphone_level_peak;
     float microphone_level_rms;
+    /* Additive v4 conservative system-loopback impulse diagnostics. Repair is
+       restricted to isolated single-frame events; multi-frame audio is never
+       changed by this policy. */
+    uint64_t render_impulse_candidate_frames;
+    uint64_t render_impulse_repaired_frames;
+    uint64_t render_impulse_repaired_samples;
+    uint64_t render_impulse_skipped_discontinuity_packets;
+    uint64_t render_impulse_skipped_cooldown_frames;
+    float render_impulse_maximum_residual;
+    uint32_t reserved_v4;
+    uint64_t render_timestamp_errors;
+    uint64_t microphone_timestamp_errors;
 } RecorderNativeStats;
 
 #define RECORDER_NATIVE_STATS_V1_SIZE 96u
 #define RECORDER_NATIVE_STATS_V2_SIZE 192u
 #define RECORDER_NATIVE_STATS_V3_SIZE 208u
+#define RECORDER_NATIVE_STATS_V4_SIZE 272u
 
 RECORDER_NATIVE_API RecorderNativeBridge* recorder_native_create(void);
 

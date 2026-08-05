@@ -938,7 +938,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 stats.MicrophoneLevelPeak,
                 stats.MicrophoneLevelRms,
                 ToControlTimeline(stats.RenderTimeline),
-                ToControlTimeline(stats.MicrophoneTimeline)),
+                ToControlTimeline(stats.MicrophoneTimeline),
+                stats.ImpulseRepair,
+                stats.RenderTimestampErrors,
+                stats.MicrophoneTimestampErrors),
             new RecorderControlTeamsStatus(
                 IsTeamsMuteSyncEnabled,
                 teamsMuteSnapshot.Status.ToString(),

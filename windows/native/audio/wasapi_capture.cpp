@@ -878,12 +878,10 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
             block.device_position_frames = position;
             block.qpc_position = qpc;
             block.silent = (packet_flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-            // A timestamp-error packet cannot be placed safely on the canonical timeline.
-            // Treat it as a discontinuity so the mixed-session resume edge is smoothed and
-            // the existing per-source discontinuity counter records the degraded packet.
             block.discontinuity =
-                (packet_flags & (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY |
-                                 AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)) != 0;
+                (packet_flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
+            block.timestamp_error =
+                (packet_flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
             block.event_driven = event_driven;
             // A silent WASAPI packet can have a null data pointer. Preserve that fact rather than invent zeros.
             if (!block.silent && data != nullptr) { block.bytes.assign(data, data + frames * block_align); }

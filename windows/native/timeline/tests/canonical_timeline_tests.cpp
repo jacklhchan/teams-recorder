@@ -131,15 +131,30 @@ void SelectedProcessUsesCanonicalGapsAndCounters() {
                counters.queue_overflows == 1 && counters.source_disconnects == 1,
            "selected-process counters incomplete");
 }
+
+void TimestampErrorsPreserveContinuousDuration() {
+    CanonicalTimeline timeline;
+    (void)timeline.Place(Source::Render, 0, 0, 48'000, 960, false);
+    const auto unreliable = timeline.Place(
+        Source::Render, 90'000'000, 900'000, 48'000, 960, false, false);
+    Expect(unreliable.frame == 960 && unreliable.silence_before_frames == 0 &&
+               unreliable.late_frames_dropped == 0,
+           "timestamp error manufactured a timeline gap or drop");
+    const auto& counters = timeline.counters(Source::Render);
+    Expect(counters.timestamp_errors == 1 && counters.drift_corrections == 0 &&
+               counters.late_packets == 0,
+           "timestamp error was not isolated from drift and late counters");
+}
 }  // namespace
 
 int main() {
-    const std::array<void (*)(), 10> tests = {LongDurationHasNoTimelineCompression,
+    const std::array<void (*)(), 11> tests = {LongDurationHasNoTimelineCompression,
         SilenceGapsArePreserved, ExplicitSessionOriginPreservesInitialSilence,
         SessionClockAdvancesAcrossPacketlessSilence, MicrophoneMuteGapMapsToSilence,
         LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
         SourceWatermarksRequireBothInputsBeforeMixCommit, DriftLateAndFaultCountersAreBounded,
-        SelectedProcessUsesCanonicalGapsAndCounters};
+        SelectedProcessUsesCanonicalGapsAndCounters,
+        TimestampErrorsPreserveContinuousDuration};
     try { for (const auto test : tests) test(); }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
     std::cout << "PASS canonical timeline\n";

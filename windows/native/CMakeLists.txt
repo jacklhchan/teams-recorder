@@ -283,6 +283,14 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         recorder_enable_strict_warnings(Recorder.DiscontinuityFade.Tests)
         add_test(NAME Recorder.DiscontinuityFade.Tests COMMAND Recorder.DiscontinuityFade.Tests)
 
+        add_executable(Recorder.ShortImpulseRepair.Tests
+            audio/tests/short_impulse_repair_tests.cpp
+        )
+        target_compile_features(Recorder.ShortImpulseRepair.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.ShortImpulseRepair.Tests PRIVATE audio)
+        recorder_enable_strict_warnings(Recorder.ShortImpulseRepair.Tests)
+        add_test(NAME Recorder.ShortImpulseRepair.Tests COMMAND Recorder.ShortImpulseRepair.Tests)
+
         add_executable(Recorder.SelectedAudioSessionFacade.Tests
             tests/selected_audio_session_facade_tests.cpp
         )

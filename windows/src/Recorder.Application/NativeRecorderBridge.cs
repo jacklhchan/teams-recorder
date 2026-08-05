@@ -14,7 +14,7 @@ public sealed class NativeRecorderInteropException : Exception
 
 public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge, INativeTeamsRenderEndpointProbe
 {
-    private const string RequiredAbiVersion = "0.7.0";
+    private const string RequiredAbiVersion = "0.8.0";
     private readonly object gate = new();
     private readonly NativeBridgeHandle handle;
     private bool disposed;
@@ -317,7 +317,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         if (Marshal.SizeOf<NativeStartOptions>() != 32 ||
             Marshal.SizeOf<NativeMixedStartOptions>() != 40 ||
             Marshal.SizeOf<NativeSelectedAudioStartOptions>() != 56 ||
-            Marshal.SizeOf<NativeStats>() != 208)
+            Marshal.SizeOf<NativeStats>() != 272)
         {
             throw new NativeRecorderInteropException(
                 "The managed native-bridge layouts do not match the x64 C ABI.");
@@ -387,6 +387,15 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         PrimaryLevelRms = stats.PrimaryLevelRms,
         MicrophoneLevelPeak = stats.MicrophoneLevelPeak,
         MicrophoneLevelRms = stats.MicrophoneLevelRms,
+        ImpulseRepair = new NativeImpulseRepairStats(
+            stats.RenderImpulseCandidateFrames,
+            stats.RenderImpulseRepairedFrames,
+            stats.RenderImpulseRepairedSamples,
+            stats.RenderImpulseSkippedDiscontinuityPackets,
+            stats.RenderImpulseSkippedCooldownFrames,
+            stats.RenderImpulseMaximumResidual),
+        RenderTimestampErrors = stats.RenderTimestampErrors,
+        MicrophoneTimestampErrors = stats.MicrophoneTimestampErrors,
     };
 
     private static string? NormalizeError(string? error) =>
@@ -559,6 +568,15 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         public float PrimaryLevelRms;
         public float MicrophoneLevelPeak;
         public float MicrophoneLevelRms;
+        public ulong RenderImpulseCandidateFrames;
+        public ulong RenderImpulseRepairedFrames;
+        public ulong RenderImpulseRepairedSamples;
+        public ulong RenderImpulseSkippedDiscontinuityPackets;
+        public ulong RenderImpulseSkippedCooldownFrames;
+        public float RenderImpulseMaximumResidual;
+        public uint ReservedV4;
+        public ulong RenderTimestampErrors;
+        public ulong MicrophoneTimestampErrors;
     }
 
     private sealed class NativeBridgeHandle : SafeHandleZeroOrMinusOneIsInvalid

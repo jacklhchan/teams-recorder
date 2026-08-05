@@ -52,6 +52,7 @@ struct AudioBlock {
     std::uint64_t qpc_position = 0;
     bool silent = false;
     bool discontinuity = false;
+    bool timestamp_error = false;
     // False means the endpoint rejected event-callback initialization and the
     // capture worker used bounded polling for this packet.
     bool event_driven = true;

@@ -22,13 +22,15 @@ _Static_assert(sizeof(RecorderNativeStartOptions) == 32u, "x64 start options lay
 _Static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8u, "output path offset changed");
 _Static_assert(offsetof(RecorderNativeStartOptions, endpoint_id_utf8) == 16u, "endpoint ID offset changed");
 _Static_assert(offsetof(RecorderNativeStartOptions, target_process_id) == 24u, "target PID offset changed");
-_Static_assert(sizeof(RecorderNativeStats) == RECORDER_NATIVE_STATS_V3_SIZE, "x64 stats layout changed");
+_Static_assert(sizeof(RecorderNativeStats) == RECORDER_NATIVE_STATS_V4_SIZE, "x64 stats layout changed");
 _Static_assert(offsetof(RecorderNativeStats, packets) == 32u, "packet counter offset changed");
 _Static_assert(offsetof(RecorderNativeStats, peak) == 88u, "peak offset changed");
 _Static_assert(offsetof(RecorderNativeStats, render_drift_corrections) == 96u, "timeline stats must be additive");
 _Static_assert(RECORDER_NATIVE_STATS_V1_SIZE == 96u, "v1 stats prefix changed");
 _Static_assert(RECORDER_NATIVE_STATS_V2_SIZE == 192u, "v2 stats prefix changed");
 _Static_assert(offsetof(RecorderNativeStats, primary_level_peak) == RECORDER_NATIVE_STATS_V2_SIZE, "live levels must be additive");
+_Static_assert(offsetof(RecorderNativeStats, render_impulse_candidate_frames) == RECORDER_NATIVE_STATS_V3_SIZE, "impulse diagnostics must be additive");
+_Static_assert(RECORDER_NATIVE_STATS_V4_SIZE == 272u, "v4 stats layout changed");
 _Static_assert(sizeof(RecorderNativeSelectedAudioStartOptions) == 56u, "x64 selected-audio options layout changed");
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, output_path_utf8) == 8u, "selected-audio output path offset changed");
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, render_endpoint_id_utf8) == 16u, "selected-audio render endpoint offset changed");
@@ -75,7 +77,7 @@ int main(void) {
 
     recorder_native_endpoint_list_destroy(NULL);
 
-    if (!expect(strcmp(recorder_native_version(), "0.7.0") == 0, "version must be exported") ||
+    if (!expect(strcmp(recorder_native_version(), "0.8.0") == 0, "version must be exported") ||
         !expect(recorder_native_start(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "legacy start(NULL) must reject the handle") ||
         !expect(recorder_native_start_with_options(NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,

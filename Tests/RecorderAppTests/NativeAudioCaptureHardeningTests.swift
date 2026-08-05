@@ -452,6 +452,31 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
         XCTAssertEqual(block.right, packet.pcm.channels[1])
     }
 
+    func testThreeChannelMicrophoneBufferMapsFirstTwoChannelsToStereo() throws {
+        let frameCount = 512
+        let sampleBuffer = try makeInterleavedFloat32SampleBuffer(
+            samples: Array(repeating: [0.25, -0.5, 0.75], count: frameCount).flatMap { $0 },
+            channelCount: 3,
+            sampleRate: 48_000,
+            presentationTime: CMTime(value: 48_000, timescale: 48_000)
+        )
+
+        let packet = try SampleBufferConverter.copy(sampleBuffer)
+        let block = try XCTUnwrap(
+            PersistentAudioResampler(source: .microphone).process(packet)
+        )
+
+        XCTAssertEqual(block.source, .microphone)
+        XCTAssertEqual(block.startFrame, 48_000)
+        XCTAssertEqual(block.frameCount, frameCount)
+        XCTAssertTrue(block.left.allSatisfy(\.isFinite))
+        XCTAssertTrue(block.right.allSatisfy(\.isFinite))
+        XCTAssertTrue(block.left.contains(where: { $0 != 0 }))
+        XCTAssertTrue(block.right.contains(where: { $0 != 0 }))
+        XCTAssertTrue(block.left.allSatisfy { abs($0 - 0.25) < 0.000_001 })
+        XCTAssertTrue(block.right.allSatisfy { abs($0 + 0.5) < 0.000_001 })
+    }
+
     func testCopyDecodesSyntheticInterleavedInt16SampleBuffer() throws {
         let presentationTime = CMTime(value: 96_000, timescale: 48_000)
         let sampleBuffer = try makeInterleavedInt16SampleBuffer(
@@ -599,7 +624,7 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
         XCTAssertFalse(int32PlanarLayout.isInterleaved)
     }
 
-    func testMoreThanTwoChannelsAreRejected() {
+    func testThreeChannelPackedPCMIsAccepted() throws {
         let format = makePCMFormat(
             sampleRate: 48_000,
             channels: 3,
@@ -608,9 +633,10 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
             flags: UInt32(kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked)
         )
 
-        XCTAssertThrowsError(try PCMLayoutValidator.validate(format)) { error in
-            XCTAssertEqual(error as? SampleBufferConverterError, .unsupportedChannelCount(3))
-        }
+        let layout = try PCMLayoutValidator.validate(format)
+
+        XCTAssertEqual(layout.channelCount, 3)
+        XCTAssertEqual(layout.bytesPerFrame, 12)
     }
 
     func testInterleavedFrameStrideMustExactlyFitChannels() {
@@ -856,6 +882,96 @@ final class NativeAudioCaptureHardeningTests: XCTestCase {
             return [
                 UInt8(truncatingIfNeeded: littleEndian),
                 UInt8(truncatingIfNeeded: littleEndian >> 8)
+            ]
+        }
+        var blockBuffer: CMBlockBuffer?
+        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: bytes.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: bytes.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard blockStatus == kCMBlockBufferNoErr, let blockBuffer else {
+            throw SyntheticSampleBufferError.creationFailed(blockStatus)
+        }
+        let replaceStatus = bytes.withUnsafeBytes { rawBuffer in
+            CMBlockBufferReplaceDataBytes(
+                with: rawBuffer.baseAddress!,
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: bytes.count
+            )
+        }
+        guard replaceStatus == kCMBlockBufferNoErr else {
+            throw SyntheticSampleBufferError.creationFailed(replaceStatus)
+        }
+
+        let frameCount = samples.count / Int(channelCount)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
+            presentationTimeStamp: presentationTime,
+            decodeTimeStamp: .invalid
+        )
+        var sampleSize = Int(format.mBytesPerFrame)
+        var sampleBuffer: CMSampleBuffer?
+        let sampleStatus = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: formatDescription,
+            sampleCount: frameCount,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &sampleSize,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sampleStatus == noErr, let sampleBuffer else {
+            throw SyntheticSampleBufferError.creationFailed(sampleStatus)
+        }
+        return sampleBuffer
+    }
+
+    private func makeInterleavedFloat32SampleBuffer(
+        samples: [Float],
+        channelCount: UInt32,
+        sampleRate: Double,
+        presentationTime: CMTime
+    ) throws -> CMSampleBuffer {
+        XCTAssertEqual(samples.count % Int(channelCount), 0)
+        var format = makePCMFormat(
+            sampleRate: sampleRate,
+            channels: channelCount,
+            bitsPerChannel: 32,
+            bytesPerFrame: channelCount * 4,
+            flags: UInt32(kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked)
+        )
+        var formatDescription: CMAudioFormatDescription?
+        let formatStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &format,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &formatDescription
+        )
+        guard formatStatus == noErr, let formatDescription else {
+            throw SyntheticSampleBufferError.creationFailed(formatStatus)
+        }
+
+        let bytes = samples.flatMap { sample -> [UInt8] in
+            let littleEndian = sample.bitPattern.littleEndian
+            return [
+                UInt8(truncatingIfNeeded: littleEndian),
+                UInt8(truncatingIfNeeded: littleEndian >> 8),
+                UInt8(truncatingIfNeeded: littleEndian >> 16),
+                UInt8(truncatingIfNeeded: littleEndian >> 24)
             ]
         }
         var blockBuffer: CMBlockBuffer?

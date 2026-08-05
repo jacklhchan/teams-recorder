@@ -3,6 +3,19 @@ import XCTest
 
 @MainActor
 final class AppModelMuteTests: XCTestCase {
+    func testSetRecorderMicMutedSetsExplicitLocalState() {
+        let model = AppModel(
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false
+        )
+
+        model.setRecorderMicMuted(true, source: "Control")
+
+        XCTAssertTrue(model.localMicMuted)
+        XCTAssertEqual(model.statusMessage, "Control: recorder mic muted")
+    }
+
     func testSaveMetadataPreservesMediaAndRecoveryFields() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let folder = root.appendingPathComponent("meeting-metadata", isDirectory: true)

@@ -9,6 +9,12 @@ enum RecordingOwnership: Equatable {
     case teamsAutomatic
 }
 
+enum RecorderControlActionOutcome: Equatable {
+    case accepted
+    case noOp
+    case rejected(code: String, message: String)
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     typealias TranscriptionFeatureFactory = (
@@ -68,6 +74,10 @@ final class AppModel: ObservableObject {
 
     var isCaptureLifecycleWorking: Bool {
         recordingSessionCoordinator.isWorking
+    }
+
+    var recordingLifecycleOperation: CaptureLifecycleOperation? {
+        recordingSessionCoordinator.activeOperation
     }
 
     private(set) var recordingOwnership: RecordingOwnership? {
@@ -1063,6 +1073,29 @@ final class AppModel: ObservableObject {
         beginRecording(ownership: .manual, requestPermissions: true)
     }
 
+    func startRecordingFromControl() -> RecorderControlActionOutcome {
+        if recorder.isRecording { return .noOp }
+        guard !isCaptureLifecycleWorking else {
+            return .rejected(
+                code: "busy",
+                message: "Another capture operation is in progress."
+            )
+        }
+        guard captureReadiness == .ready else {
+            return .rejected(code: "not_ready", message: readinessMessage)
+        }
+        teamsAutoMeetingCoordinator.manualRecordingStarted()
+        beginRecording(ownership: .manual, requestPermissions: false)
+        return .accepted
+    }
+
+    func stopRecordingFromControl() -> RecorderControlActionOutcome {
+        let hadWork = recorder.isRecording || pendingRecordingAttempt != nil
+        guard hadWork else { return .noOp }
+        stopCaptureLifecycle(playAfterStop: false)
+        return .accepted
+    }
+
     private func takeOverPendingAutomaticRecordingStart() -> Bool {
         guard var attempt = pendingRecordingAttempt,
               attempt.ownership == .teamsAutomatic,
@@ -1552,13 +1585,24 @@ final class AppModel: ObservableObject {
     func toggleRecorderMicMute(source: String = "Button") {
         let current = microphoneMuteGate.snapshot
         let requestedMute = !current.localMuted
-        let snapshot = microphoneMuteGate.setLocalMuted(requestedMute)
-        publishMicrophoneMuteSnapshot(snapshot)
+        setRecorderMicMuted(requestedMute, source: source)
+        let snapshot = microphoneMuteGate.snapshot
         if !requestedMute, snapshot.effectiveMuted {
             statusMessage = "\(source): recorder mic remains muted by the input device"
-        } else {
-            statusMessage = "\(source): recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
         }
+    }
+
+    func setRecorderMicMuted(
+        _ muted: Bool,
+        source: String = "Control"
+    ) {
+        let snapshot = microphoneMuteGate.setLocalMuted(muted)
+        publishMicrophoneMuteSnapshot(snapshot)
+        statusMessage = "\(source): recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
+    }
+
+    var recorderMicMuteSnapshot: MicrophoneMuteSnapshot {
+        microphoneMuteGate.snapshot
     }
 
     func installInputMuteHandling() {

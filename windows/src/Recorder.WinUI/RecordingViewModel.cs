@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Recorder.Core;
 using TeamsRecorder.Windows.Application;
+using TeamsRecorder.Windows.Application.Control;
 using TeamsRecorder.Windows.Application.AI;
 using TeamsRecorder.Windows.Application.Recovery;
 using TeamsRecorder.Windows.Application.Library;
@@ -155,6 +156,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         EnableTeamsMuteSyncCommand = new AsyncRelayCommand(EnableTeamsMuteSyncAsync, () => CanManageTeamsMuteSync && !IsTeamsMuteSyncEnabled);
         DisableTeamsMuteSyncCommand = new AsyncRelayCommand(DisableTeamsMuteSyncAsync, () => CanManageTeamsMuteSync && IsTeamsMuteSyncEnabled);
         RequestTeamsPairingCommand = new AsyncRelayCommand(RequestTeamsPairingAsync, () => CanRequestTeamsPairing);
+        RepairTeamsPairingCommand = new AsyncRelayCommand(RepairTeamsPairingAsync, () => CanRepairTeamsPairing);
         EnableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(EnableTeamsAutomaticRecordingAsync, () => CanEnableTeamsAutomaticRecording);
         DisableTeamsAutomaticRecordingCommand = new AsyncRelayCommand(DisableTeamsAutomaticRecordingAsync, () => CanDisableTeamsAutomaticRecording);
         CancelTeamsAutomaticRecordingStartCommand = new AsyncRelayCommand(CancelTeamsAutomaticRecordingStartAsync, () => CanCancelTeamsAutomaticRecordingStart);
@@ -235,6 +237,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public AsyncRelayCommand RequestTeamsPairingCommand { get; }
 
+    /// <summary>
+    /// Re-attempts local Teams pairing after an explicit user request. This is deliberately
+    /// user initiated: a health failure must never silently replace a pairing relationship
+    /// while a meeting is in progress.
+    /// </summary>
+    public AsyncRelayCommand RepairTeamsPairingCommand { get; }
+
     public AsyncRelayCommand EnableTeamsAutomaticRecordingCommand { get; }
 
     public AsyncRelayCommand DisableTeamsAutomaticRecordingCommand { get; }
@@ -281,6 +290,40 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         IsTeamsMuteSyncEnabled &&
         !teamsMuteSnapshot.IsPairingKnown;
 
+    /// <summary>Whether the user may repair a stale or otherwise unusable local Teams pairing.</summary>
+    public bool CanRepairTeamsPairing => CanManageTeamsMuteSync && IsTeamsMuteSyncEnabled;
+
+    private TeamsTransportHealthAssessment TeamsTransportHealthAssessment =>
+        teamsApiClient?.TransportSnapshot.Health ?? TeamsTransportDiagnosticSnapshot.Initial.Health;
+
+    /// <summary>
+    /// A paired credential without a complete meeting update on the current connection is
+    /// surfaced as a diagnostic signal.
+    /// </summary>
+    public bool IsTeamsPairingRepairRecommended =>
+        IsTeamsMuteSyncEnabled &&
+        (teamsMuteSnapshot.Status == TeamsMuteSyncStatus.WaitingForPairingApproval ||
+         TeamsTransportHealthAssessment.Status is TeamsTransportHealth.Degraded or
+             TeamsTransportHealth.Unavailable or
+             TeamsTransportHealth.PairingRequired);
+
+    public string TeamsPairingHealthText
+    {
+        get
+        {
+            if (!IsTeamsMuteSyncEnabled)
+                return "Teams API 健康檢查尚未啟用。";
+            if (TeamsTransportHealthAssessment.Status == TeamsTransportHealth.Healthy)
+                return "Teams API 健康：目前連線已收到完整會議狀態。";
+            if (TeamsTransportHealthAssessment.Status == TeamsTransportHealth.PairingRequired &&
+                teamsMuteSnapshot.Status == TeamsMuteSyncStatus.WaitingForPairingApproval)
+            {
+                return "Teams 尚未發出新的配對 token。若已按 Allow 但仍停在此狀態，請到 Teams 的 Settings > Privacy > Manage API，對 Local Meeting Recorder 先 Block/Remove 再 Forget，然後回來按「修復 Teams 配對」並接受新的請求。";
+            }
+            return $"Teams API 健康：{TeamsTransportHealthAssessment.Detail} 可使用「修復 Teams 配對」重新建立本機憑證；實際開始仍只會由完整的 Teams 會議狀態觸發。";
+        }
+    }
+
     /// <summary>
     /// Automatic recording is deliberately a separate opt-in.  A Teams connection alone is
     /// insufficient: this remains false until a paired API supplies an authoritative meeting state.
@@ -299,8 +342,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     /// </summary>
     private bool HasPairedTeamsConnection =>
         IsTeamsMuteSyncEnabled &&
-        teamsMuteSnapshot.IsPairingAuthenticated &&
-        teamsMuteSnapshot.Status is TeamsMuteSyncStatus.WaitingForMeeting or TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting;
+        teamsMuteSnapshot.IsPairingKnown &&
+        teamsApiClient?.TransportSnapshot is { IsConnected: true, PairingCredentialPresent: true };
 
     public bool CanEnableTeamsAutomaticRecording =>
         !isShuttingDown &&
@@ -388,7 +431,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             TeamsAutoMeetingState.StartCountdown(var seconds) => $"自動錄音已啟用：確認會議狀態後 {seconds} 秒開始。",
             TeamsAutoMeetingState.Starting => "自動錄音正在開始 M4A 工作階段。",
             TeamsAutoMeetingState.AutomaticRecording => "自動錄音進行中；離開會議後會先等待停止緩衝時間。",
+            TeamsAutoMeetingState.ManualRecording => "手動錄音進行中；Teams 回報離開會議後會先等待停止緩衝時間。",
+            TeamsAutoMeetingState.StopCountdown(var seconds) when teamsAutomaticSnapshot.RecordingOwner == RecordingOwner.Manual => $"Teams 回報已離開會議；{seconds} 秒後停止手動會議錄音。",
             TeamsAutoMeetingState.StopCountdown(var seconds) => $"Teams 回報已離開會議；{seconds} 秒後停止自動錄音。",
+            TeamsAutoMeetingState.Stopping when teamsAutomaticSnapshot.RecordingOwner == RecordingOwner.Manual => "正在停止並儲存手動會議錄音。",
             TeamsAutoMeetingState.Stopping => "正在停止並儲存自動錄音。",
             TeamsAutoMeetingState.SuppressedUntilMeetingEnd => "本次會議的自動錄音已暫停，直到 Teams 回報離開會議。",
             TeamsAutoMeetingState.StartBlocked(var reason) => $"自動錄音未開始：{reason}",
@@ -859,6 +905,134 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         mediaPlayer.PlaybackSession.PlaybackStateChanged += (_, _) =>
             dispatcherQueue.TryEnqueue(UpdateCommandStates);
     }
+
+    internal RecorderControlStatus GetControlStatus()
+    {
+        var stats = snapshot.Stats;
+        var meeting = teamsMuteSnapshot.LastMeetingState;
+        return new RecorderControlStatus(
+            DateTimeOffset.UtcNow,
+            isInitialized && isRecorderAvailable && !isShuttingDown,
+            snapshot.Generation,
+            snapshot.State.ToString(),
+            snapshot.State == RecordingCoordinatorState.Recording,
+            snapshot.IsTestRecording,
+            IsRecordingMicrophoneMuted,
+            SelectedRenderEndpoint?.DisplayName ?? "unavailable",
+            SelectedMicrophoneEndpoint?.DisplayName ?? "none",
+            SelectedCaptureSource?.Kind.ToString() ?? "unavailable",
+            StatusText,
+            ErrorText,
+            new RecorderControlAudioStatus(
+                stats.Mode.ToString(),
+                stats.SourceSampleRate,
+                stats.SourceChannels,
+                stats.Packets,
+                stats.InputFrames,
+                stats.OutputFrames,
+                stats.SilentPackets,
+                stats.Discontinuities,
+                stats.Peak,
+                stats.PrimaryLevelPeak,
+                stats.PrimaryLevelRms,
+                stats.MicrophoneLevelPeak,
+                stats.MicrophoneLevelRms,
+                ToControlTimeline(stats.RenderTimeline),
+                ToControlTimeline(stats.MicrophoneTimeline),
+                stats.ImpulseRepair,
+                stats.RenderTimestampErrors,
+                stats.MicrophoneTimestampErrors),
+            new RecorderControlTeamsStatus(
+                IsTeamsMuteSyncEnabled,
+                teamsMuteSnapshot.Status.ToString(),
+                teamsMuteSnapshot.IsPairingKnown,
+                teamsMuteSnapshot.IsPairingAuthenticated,
+                meeting?.IsInMeeting,
+                meeting?.IsMuted,
+                IsTeamsAutomaticRecordingEnabled,
+                teamsAutomaticSnapshot.State.GetType().Name,
+                teamsApiClient?.TransportSnapshot ?? TeamsTransportDiagnosticSnapshot.Initial));
+    }
+
+    internal async Task<RecorderControlStatus> ExecuteControlRequestAsync(RecorderControlRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.SchemaVersion != RecorderControlProtocol.SchemaVersion)
+            throw new RecorderControlException("unsupported_schema", "Unsupported control protocol schema version.");
+        if (string.IsNullOrWhiteSpace(request.RequestId) || request.RequestId.Length > 80)
+            throw new RecorderControlException("invalid_request", "requestId is required and must not exceed 80 characters.");
+        if (!RecorderControlProtocol.IsSupportedCommand(request.Command))
+            throw new RecorderControlException("unknown_command", "The requested control command is not supported.");
+
+        if (request.Command != RecorderControlProtocol.Status)
+            EnsureExpectedGeneration(request.ExpectedGeneration);
+
+        switch (request.Command)
+        {
+            case RecorderControlProtocol.Status:
+                break;
+            case RecorderControlProtocol.RefreshDevices:
+                await RefreshEndpointsAsync();
+                break;
+            case RecorderControlProtocol.RefreshTeams:
+                if (teamsMuteSync is null)
+                    throw new RecorderControlException("not_ready", "Teams integration is not enabled.");
+                await teamsMuteSync.RefreshStateAsync();
+                break;
+            case RecorderControlProtocol.PairTeams:
+                if (teamsMuteSync is null || !IsTeamsMuteSyncEnabled)
+                    throw new RecorderControlException("not_ready", "Teams integration is not enabled.");
+                await teamsMuteSync.RequestPairingAsync();
+                break;
+            case RecorderControlProtocol.ResetTeamsPairing:
+                if (teamsMuteSync is null || !IsTeamsMuteSyncEnabled)
+                    throw new RecorderControlException("not_ready", "Teams integration is not enabled.");
+                await teamsMuteSync.ResetPairingAsync();
+                break;
+            case RecorderControlProtocol.Start:
+                if (!CanStart) throw new RecorderControlException("invalid_state", "Recorder is not ready to start.");
+                await StartAsync();
+                break;
+            case RecorderControlProtocol.Test:
+                if (!CanStart) throw new RecorderControlException("invalid_state", "Recorder is not ready to start a test.");
+                await StartTestAsync();
+                break;
+            case RecorderControlProtocol.Stop:
+                if (!CanStop) throw new RecorderControlException("invalid_state", "There is no active recording to stop.");
+                await StopAsync();
+                break;
+            case RecorderControlProtocol.SetMicrophoneMute:
+                if (!request.Muted.HasValue)
+                    throw new RecorderControlException("invalid_request", "muted must be supplied for microphone.setMuted.");
+                teamsInputMute.SetLocalMuted(request.Muted.Value);
+                break;
+            case RecorderControlProtocol.Diagnostics:
+                if (!CanSaveDiagnostics)
+                    throw new RecorderControlException("not_ready", "Diagnostics are not available yet.");
+                await SaveDiagnosticsAsync();
+                break;
+        }
+
+        return GetControlStatus();
+    }
+
+    private void EnsureExpectedGeneration(long? expectedGeneration)
+    {
+        if (!expectedGeneration.HasValue)
+            throw new RecorderControlException("generation_required", "expectedGeneration is required for commands that change or refresh recorder state.");
+        if (expectedGeneration.Value != snapshot.Generation)
+            throw new RecorderControlException(
+                "stale_generation",
+                $"Expected generation {expectedGeneration.Value}, current generation is {snapshot.Generation}.");
+    }
+
+    private static RecorderControlTimelineStatus ToControlTimeline(NativeSourceTimelineStats value) => new(
+        value.DriftCorrections,
+        value.LatePackets,
+        value.LateFramesDropped,
+        value.QueueOverflows,
+        value.SourceDisconnects,
+        value.Discontinuities);
 
     private async Task InitializeOpenAiProviderAsync()
     {
@@ -1393,6 +1567,35 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     }
 
+    private async Task RepairTeamsPairingAsync()
+    {
+        var sync = teamsMuteSync;
+        if (sync is null || !CanRepairTeamsPairing)
+        {
+            return;
+        }
+
+        isTeamsMuteSyncOperationInProgress = true;
+        UpdateCommandStates();
+        try
+        {
+            await sync.ResetPairingAsync();
+            teamsMuteSnapshot = sync.Snapshot;
+            OnPropertyChanged(nameof(TeamsMuteStatusText));
+            OnPropertyChanged(nameof(TeamsPairingHealthText));
+            OnPropertyChanged(nameof(IsTeamsPairingRepairRecommended));
+        }
+        catch (Exception exception)
+        {
+            ErrorText = $"無法重新嘗試 Teams 配對：{exception.Message}";
+        }
+        finally
+        {
+            isTeamsMuteSyncOperationInProgress = false;
+            UpdateCommandStates();
+        }
+    }
+
     private async Task EnableTeamsAutomaticRecordingAsync()
     {
         var automatic = teamsAutomaticRecorder;
@@ -1552,16 +1755,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             teamsMuteSnapshot = changed;
             OnPropertyChanged(nameof(TeamsMuteStatusText));
             OnPropertyChanged(nameof(TeamsMuteRoutingText));
+            OnPropertyChanged(nameof(TeamsPairingHealthText));
+            OnPropertyChanged(nameof(IsTeamsPairingRepairRecommended));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
             UpdateCommandStates();
 
-            if (!HasPairedTeamsConnection && teamsAutomaticRecorder?.Snapshot.IsEnabled == true)
-            {
-                _ = DisableTeamsAutomaticRecordingAfterTrustLossAsync();
-            }
-            else if (HasTrustedTeamsMeetingState &&
-                     teamsAutomaticRecorder is { } automatic &&
-                     changed.LastMeetingState is { } meeting)
+            if (HasTrustedTeamsMeetingState &&
+                teamsAutomaticRecorder is { } automatic &&
+                changed.LastMeetingState is { } meeting)
             {
                 // SnapshotChanged is queued onto the UI thread, while MeetingPresenceChanged is
                 // raised by the WebSocket callback.  Feed the controller here as well so a fresh
@@ -2767,6 +2968,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         EnableTeamsMuteSyncCommand.RaiseCanExecuteChanged();
         DisableTeamsMuteSyncCommand.RaiseCanExecuteChanged();
         RequestTeamsPairingCommand.RaiseCanExecuteChanged();
+        RepairTeamsPairingCommand.RaiseCanExecuteChanged();
         EnableTeamsAutomaticRecordingCommand.RaiseCanExecuteChanged();
         DisableTeamsAutomaticRecordingCommand.RaiseCanExecuteChanged();
         CancelTeamsAutomaticRecordingStartCommand.RaiseCanExecuteChanged();
@@ -2781,6 +2983,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OnPropertyChanged(nameof(CanConfirmRecycle));
         OnPropertyChanged(nameof(CanManageTeamsMuteSync));
         OnPropertyChanged(nameof(CanRequestTeamsPairing));
+        OnPropertyChanged(nameof(CanRepairTeamsPairing));
+        OnPropertyChanged(nameof(TeamsPairingHealthText));
+        OnPropertyChanged(nameof(IsTeamsPairingRepairRecommended));
         OnPropertyChanged(nameof(IsRecordingMicrophoneMuted));
         OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
         OnPropertyChanged(nameof(GlobalMuteHotKeyStatus));

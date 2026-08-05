@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using TeamsRecorder.Windows.WinUI.Control;
 
 namespace TeamsRecorder.Windows.WinUI;
 
@@ -7,12 +8,18 @@ public sealed partial class MainPage : Page
 {
     private readonly RecordingViewModel viewModel;
     private readonly IRecordingOverlayPresenter recordingOverlayPresenter;
+    private readonly NamedPipeRecorderControlServer controlServer;
     private bool isShutdown;
 
     public MainPage()
     {
         InitializeComponent();
         viewModel = new RecordingViewModel();
+        controlServer = new NamedPipeRecorderControlServer(
+            viewModel,
+            Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()
+                ?? throw new InvalidOperationException("Teams Recorder control server requires the WinUI dispatcher."));
+        controlServer.Start();
         recordingOverlayPresenter = new RecordingOverlayPresenter();
         viewModel.RecordingOverlayStateChanged += OnRecordingOverlayStateChanged;
         recordingOverlayPresenter.CancelRequested += OnRecordingOverlayCancelRequested;
@@ -34,6 +41,7 @@ public sealed partial class MainPage : Page
         recordingOverlayPresenter.CancelRequested -= OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested -= OnRecordingOverlayStopRequested;
         recordingOverlayPresenter.Hide();
+        await controlServer.DisposeAsync();
         await viewModel.ShutdownAsync();
         recordingOverlayPresenter.Dispose();
     }

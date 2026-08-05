@@ -275,6 +275,31 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         recorder_enable_strict_warnings(Recorder.Timeline.Tests)
         add_test(NAME Recorder.Timeline.Tests COMMAND Recorder.Timeline.Tests)
 
+        add_executable(Recorder.DiscontinuityFade.Tests
+            timeline/tests/discontinuity_fade_tests.cpp
+        )
+        target_compile_features(Recorder.DiscontinuityFade.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.DiscontinuityFade.Tests PRIVATE timeline)
+        recorder_enable_strict_warnings(Recorder.DiscontinuityFade.Tests)
+        add_test(NAME Recorder.DiscontinuityFade.Tests COMMAND Recorder.DiscontinuityFade.Tests)
+
+        add_executable(Recorder.ShortImpulseRepair.Tests
+            audio/tests/short_impulse_repair_tests.cpp
+        )
+        target_compile_features(Recorder.ShortImpulseRepair.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.ShortImpulseRepair.Tests PRIVATE audio)
+        recorder_enable_strict_warnings(Recorder.ShortImpulseRepair.Tests)
+        add_test(NAME Recorder.ShortImpulseRepair.Tests COMMAND Recorder.ShortImpulseRepair.Tests)
+
+        add_executable(Recorder.SystemRenderHeadroom.Tests
+            audio/tests/system_render_headroom_tests.cpp
+        )
+        target_compile_features(Recorder.SystemRenderHeadroom.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.SystemRenderHeadroom.Tests PRIVATE audio)
+        recorder_enable_strict_warnings(Recorder.SystemRenderHeadroom.Tests)
+        add_test(NAME Recorder.SystemRenderHeadroom.Tests
+            COMMAND Recorder.SystemRenderHeadroom.Tests)
+
         add_executable(Recorder.SelectedAudioSessionFacade.Tests
             tests/selected_audio_session_facade_tests.cpp
         )
@@ -283,6 +308,15 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         recorder_enable_strict_warnings(Recorder.SelectedAudioSessionFacade.Tests)
         add_test(NAME Recorder.SelectedAudioSessionFacade.Tests
             COMMAND Recorder.SelectedAudioSessionFacade.Tests)
+
+        add_executable(Recorder.MixedSampleLimiter.Tests
+            tests/mixed_sample_limiter_tests.cpp
+        )
+        target_compile_features(Recorder.MixedSampleLimiter.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.MixedSampleLimiter.Tests PRIVATE src)
+        recorder_enable_strict_warnings(Recorder.MixedSampleLimiter.Tests)
+        add_test(NAME Recorder.MixedSampleLimiter.Tests
+            COMMAND Recorder.MixedSampleLimiter.Tests)
 
     endif()
 endif()

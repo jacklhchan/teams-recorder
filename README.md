@@ -262,7 +262,8 @@ observe authoritative meeting state:
 4. Joining a meeting shows a silent, cancellable five-second countdown.
    `Cancel` suppresses automatic recording only for the current meeting, until
    that meeting ends.
-5. Leaving stops only a recording that was started automatically, and only
+5. Leaving stops an automatically started recording, or a manual recording
+   started while this opt-in is enabled and a trusted meeting is active, only
    after Teams reports that the meeting has ended continuously for ten seconds.
    Rejoining during that debounce keeps the recording running.
 6. A Teams API disconnect never stops an active recording.
@@ -270,9 +271,9 @@ observe authoritative meeting state:
    during an active recording.
 8. `Teams Mute Sync` is independent of Teams Auto Recording and may remain
    disabled.
-9. Manual recordings are never auto-stopped. Manually stopping an
-   automatically started recording suppresses automatic restart for the rest of
-   the same meeting.
+9. Manual recordings outside an active Teams meeting are never auto-stopped.
+   Manually stopping an automatically started recording suppresses automatic
+   restart for the rest of the same meeting.
 
 ## Mic Mute
 

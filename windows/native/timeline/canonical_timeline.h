@@ -26,6 +26,9 @@ struct SourceCounters {
     std::uint64_t discontinuities = 0;
     std::uint64_t queue_overflows = 0;
     std::uint64_t source_disconnects = 0;
+    std::uint64_t timestamp_errors = 0;
+    std::uint64_t qpc_jitter_snapped_packets = 0;
+    std::uint64_t qpc_jitter_snapped_frames = 0;
 };
 
 // Shared by the capture session and deterministic CTests. Chunks retain their
@@ -50,7 +53,8 @@ public:
     Placement Place(Source source, std::uint64_t qpc_100ns,
                     std::uint64_t device_position_frames,
                     std::uint32_t source_sample_rate,
-                    std::uint64_t normalized_frames, bool discontinuity);
+                    std::uint64_t normalized_frames, bool discontinuity,
+                    bool timestamp_reliable = true);
     void MarkQueueOverflow(Source source) noexcept;
     void MarkDisconnected(Source source) noexcept;
     const SourceCounters& counters(Source source) const noexcept;
@@ -66,6 +70,11 @@ private:
         std::uint64_t first_device_position = 0;
         std::uint64_t first_qpc_frame = 0;
         std::uint64_t last_end_frame = 0;
+        bool has_previous_device_packet = false;
+        bool previous_packet_continuous = false;
+        std::uint64_t previous_device_position_frames = 0;
+        std::uint64_t previous_normalized_frames = 0;
+        std::uint32_t previous_source_sample_rate = 0;
         SourceCounters counters{};
     };
     State& state(Source source) noexcept;

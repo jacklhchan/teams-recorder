@@ -18,9 +18,16 @@ public interface ITeamsThirdPartyApiClient
 {
     event EventHandler<TeamsThirdPartyApiEvent>? EventReceived;
     event EventHandler<string?>? ConnectionChanged;
+    TeamsTransportDiagnosticSnapshot TransportSnapshot { get; }
     Task StartAsync(CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
+    Task RefreshStateAsync(CancellationToken cancellationToken = default);
     Task RequestPairingAsync(CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Removes the locally protected pairing credential and starts a new local Teams API
+    /// connection. This does not alter Teams settings or approve a pairing prompt.
+    /// </summary>
+    Task ResetPairingAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>Local recorder/virtual-mic mute sink. The value is absolute, never a toggle.</summary>
@@ -95,6 +102,48 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
         }
     }
 
+    /// <summary>
+    /// Repairs a stale local pairing credential. This only asks the client to begin a fresh
+    /// pairing attempt; a healthy state is established solely by a later Teams-issued token and
+    /// complete meeting state. Existing recording audio is deliberately untouched.
+    /// </summary>
+    public async Task ResetPairingAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        lock (gate)
+        {
+            if (!enabled)
+                throw new InvalidOperationException("Teams mute synchronization must be enabled before repairing pairing.");
+            pairingRequestPending = false;
+            FailClosedForLostTrustLocked();
+            SetSnapshotLocked(new TeamsMuteSyncSnapshot(
+                TeamsMuteSyncStatus.WaitingForPairingApproval,
+                null,
+                "Repairing the local Teams pairing credential. Waiting for Teams to issue a new credential and meeting state.",
+                false,
+                microphoneRoutingEngaged,
+                false));
+        }
+
+        await client.ResetPairingAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Requests a fresh meeting snapshot without changing pairing state. Teams may not push
+    /// every mute or meeting-end transition on every desktop build, so the host can use this
+    /// small refresh while a recording is active.
+    /// </summary>
+    public async Task RefreshStateAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        lock (gate)
+        {
+            if (!enabled) return;
+        }
+
+        await client.RefreshStateAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private void OnApiEvent(object? sender, TeamsThirdPartyApiEvent @event)
     {
         lock (gate)
@@ -134,14 +183,11 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                     }
                     else
                     {
-                        FailClosedForLostTrustLocked();
-                        SetSnapshotLocked(new TeamsMuteSyncSnapshot(
-                            TeamsMuteSyncStatus.WaitingForMeeting,
-                            null,
-                            null,
-                            true,
-                            microphoneRoutingEngaged,
-                            true));
+                        // A permissions-only or otherwise partial update is diagnostic, not a
+                        // meeting transition. Preserve the last complete trusted state until an
+                        // explicit connection loss, API error, or complete state changes it.
+                        // This is essential because Teams can send these updates independently
+                        // of meetingUpdate pushes while a meeting remains active.
                     }
                     break;
                 case TeamsThirdPartyApiEvent.Error(_, var message) when IsAlreadyPairedResponse(message):

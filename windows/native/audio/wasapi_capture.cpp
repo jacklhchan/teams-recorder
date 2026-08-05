@@ -878,7 +878,10 @@ void WasapiCapture::CaptureThread(CaptureRequest request, AudioBlockCallback cal
             block.device_position_frames = position;
             block.qpc_position = qpc;
             block.silent = (packet_flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-            block.discontinuity = (packet_flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
+            block.discontinuity =
+                (packet_flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
+            block.timestamp_error =
+                (packet_flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
             block.event_driven = event_driven;
             // A silent WASAPI packet can have a null data pointer. Preserve that fact rather than invent zeros.
             if (!block.silent && data != nullptr) { block.bytes.assign(data, data + frames * block_align); }

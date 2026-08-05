@@ -5,7 +5,7 @@ var tests = new (string Name, Action Run)[]
 {
     ("storage policy uses exact thresholds", StoragePolicyUsesExactThresholds),
     ("meeting starts after countdown", MeetingStartsAfterCountdown),
-    ("manual recording suppresses Teams until end", ManualRecordingSuppressesTeamsUntilEnd),
+    ("manual meeting recording stops when the meeting ends", ManualRecordingStopsWhenTheMeetingEnds),
     ("meeting rejoin cancels stop debounce", MeetingRejoinCancelsStopDebounce),
     ("suppression during stop debounce survives a transient rejoin", SuppressionDuringStopDebounceSurvivesRejoin),
     ("explicit user stop releases automatic recording ownership", ExplicitUserStopReleasesAutomaticOwnership),
@@ -84,11 +84,18 @@ var tests = new (string Name, Action Run)[]
     ,("Teams mute sync ignores out-of-meeting mute state", TeamsIntegrationTests.MuteCoordinatorDoesNotChangeMicForOutOfMeetingState)
     ,("Teams mute sync rejects unauthenticated meeting state", TeamsIntegrationTests.MuteCoordinatorRejectsUnauthenticatedMeetingState)
     ,("Teams issued credential remains valid when pairing is available", TeamsIntegrationTests.MuteCoordinatorKeepsIssuedCredentialWhenTeamsOffersPairing)
+    ,("Teams partial update preserves trusted meeting state", TeamsIntegrationTests.MuteCoordinatorPreservesTrustedMeetingAcrossPartialUpdate)
     ,("Teams mute sync fails closed on API errors", TeamsIntegrationTests.MuteCoordinatorFailsClosedOnApiError)
-    ,("Teams WebSocket client promotes pairing token without losing state", TeamsTransportTests.ClientPromotesTokenRefreshWithoutDroppingConnection)
+    ,("Teams WebSocket client reconnects after pairing token refresh", TeamsTransportTests.ClientReconnectsAfterTokenRefreshBeforeTrustingPushes)
     ,("Teams WebSocket client correlates overlapping state-query replies", TeamsTransportTests.ClientCorrelatesOverlappingStateQueryReplies)
     ,("Teams WebSocket client delivers authenticated push updates", TeamsTransportTests.ClientDeliversAuthenticatedPushUpdates)
     ,("Teams state-query rejection preserves later meeting pushes", TeamsTransportTests.StateQueryFailureDoesNotBlockLaterMeetingPush)
+    ,("Teams state queries never overlap", TeamsTransportTests.ClientDoesNotOverlapStateQueries)
+    ,("Teams pairing repair clears its local credential and requests fresh pairing", TeamsTransportTests.ClientResetPairingClearsCredentialReconnectsAndRequestsFreshPairing)
+    ,("Teams pairing repair restarts after a local credential-clear failure", TeamsTransportTests.ClientResetPairingRestartsWhenCredentialClearFails)
+    ,("Teams transport diagnostics expose permission shape only", TeamsTransportTests.TransportDiagnosticsExposePermissionsWithoutPayloads)
+    ,("Teams transport health does not trust a credential without meeting state", TeamsTransportHealthAdvisorTests.DoesNotTreatCredentialAndAcknowledgementAsMeetingStateHealth)
+    ,("Teams transport health retains complete state within its connection generation", TeamsTransportHealthAdvisorTests.KeepsCompleteStateHealthyForItsConnectionGenerationAndHandlesDisconnects)
     ,("Teams WebSocket client fails closed after a remote close", TeamsTransportTests.ClientFailsClosedWhenRemoteSocketClosesDuringMeeting)
     ,("Teams WebSocket client drops events after stop", TeamsTransportTests.ClientDropsLateEventsAfterStop)
     ,("Teams WebSocket client bounds fragmented payloads", TeamsTransportTests.ClientClosesAndReconnectsAfterOversizedFragmentedPayload)
@@ -96,6 +103,10 @@ var tests = new (string Name, Action Run)[]
     ,("Teams WebSocket client requests fresh pairing once", TeamsTransportTests.ClientRequestsPairingOnceForAnUncredentialedConnection)
     ,("Teams pairing requires an enabled, connected client", TeamsIntegrationTests.MuteCoordinatorOnlyReportsPairingAfterEnabledClientAcceptsIt)
     ,("Teams pairing only accepts already-paired after an explicit pair command", TeamsIntegrationTests.MuteCoordinatorOnlyTreatsAlreadyPairedAsAReplyToAnExplicitPairCommand)
+    ,("control pipe name is stable and non-sensitive", ControlProtocolTests.PipeNameIsPerUserAndNonSensitive)
+    ,("control command allow-list is closed", ControlProtocolTests.CommandAllowListIsClosed)
+    ,("control request contains no paths or credentials", ControlProtocolTests.RequestContractContainsNoPathsOrCredentials)
+    ,("control wire request is one JSON line", ControlProtocolTests.WireRequestIsOneJsonLine)
     ,("live health is neutral before capture and healthy with signals", LiveAudioHealthAdvisorTests.ReportsNeutralBeforeCaptureAndHealthySignalsDuringCapture)
     ,("live health distinguishes silence, disconnect, and microphone mute", LiveAudioHealthAdvisorTests.WarnsOnSilentOrDisconnectedInputsButKeepsMutedMicNeutral)
     ,("live health reports a recovered signal after historical interruptions", LiveAudioHealthAdvisorTests.ReportsRecoveryAfterHistoricalInterruptionsWhenSignalsAreLive)
@@ -175,17 +186,26 @@ static void MeetingStartsAfterCountdown()
     Equal(new TeamsAutoMeetingState.AutomaticRecording(), snapshot.State);
 }
 
-static void ManualRecordingSuppressesTeamsUntilEnd()
+static void ManualRecordingStopsWhenTheMeetingEnds()
 {
     var machine = new TeamsAutoMeetingMachine();
     var snapshot = EnableAndEnterMeeting(machine);
     var transition = machine.Reduce(snapshot, new TeamsAutoMeetingEvent.ManualRecordingStarted());
     Equal(RecordingOwner.Manual, transition.Snapshot.RecordingOwner);
-    Equal(new TeamsAutoMeetingState.SuppressedUntilMeetingEnd(), transition.Snapshot.State);
+    Equal(new TeamsAutoMeetingState.ManualRecording(), transition.Snapshot.State);
     snapshot = machine.Reduce(transition.Snapshot, new TeamsAutoMeetingEvent.MeetingPresenceChanged(false)).Snapshot;
+    Equal(new TeamsAutoMeetingState.StopCountdown(10), snapshot.State);
+    var stop = machine.Reduce(snapshot, new TeamsAutoMeetingEvent.StopDebounceTicked());
+    for (var seconds = 9; seconds > 0; seconds--)
+    {
+        snapshot = stop.Snapshot;
+        Equal(new TeamsAutoMeetingState.StopCountdown(seconds), snapshot.State);
+        stop = machine.Reduce(snapshot, new TeamsAutoMeetingEvent.StopDebounceTicked());
+    }
+    Equal(new TeamsAutoMeetingState.Stopping(), stop.Snapshot.State);
+    snapshot = machine.Reduce(stop.Snapshot, new TeamsAutoMeetingEvent.AutomaticStopCompleted()).Snapshot;
     Equal(new TeamsAutoMeetingState.WaitingForMeeting(), snapshot.State);
-    snapshot = machine.Reduce(snapshot, new TeamsAutoMeetingEvent.MeetingPresenceChanged(true)).Snapshot;
-    Equal(new TeamsAutoMeetingState.StartCountdown(5), snapshot.State);
+    Equal(RecordingOwner.None, snapshot.RecordingOwner);
 }
 
 static void MeetingRejoinCancelsStopDebounce()

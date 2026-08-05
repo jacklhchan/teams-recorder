@@ -52,13 +52,22 @@ public static class TeamsThirdPartyApi
             var canToggle = TryGetBool(permissions, "canToggleMute") ?? false;
             var canPair = TryGetBool(permissions, "canPair") ?? false;
             TeamsMeetingState? state = null;
-            if (update.TryGetProperty("meetingState", out var rawState) && rawState.ValueKind == JsonValueKind.Object)
+            var hasMeetingState = update.TryGetProperty("meetingState", out var rawState) && rawState.ValueKind == JsonValueKind.Object;
+            bool? inMeeting = null;
+            bool? muted = null;
+            if (hasMeetingState)
             {
-                var inMeeting = TryGetBool(rawState, "isInMeeting");
-                var muted = TryGetBool(rawState, "isMuted");
+                inMeeting = TryGetBool(rawState, "isInMeeting");
+                muted = TryGetBool(rawState, "isMuted");
                 if (inMeeting.HasValue && muted.HasValue) state = new(inMeeting.Value, muted.Value, canToggle, canPair);
             }
-            return new TeamsThirdPartyApiEvent.MeetingUpdate(new(state, canToggle, canPair));
+            return new TeamsThirdPartyApiEvent.MeetingUpdate(new(
+                state,
+                canToggle,
+                canPair,
+                HasMeetingState: hasMeetingState,
+                HasIsInMeeting: inMeeting.HasValue,
+                HasIsMuted: muted.HasValue));
         }
         if (TryGetString(root, "response") is { Length: > 0 } response) return new TeamsThirdPartyApiEvent.Response(requestId, response);
         return new TeamsThirdPartyApiEvent.Ignored();
@@ -89,7 +98,13 @@ public static class TeamsThirdPartyApiActionExtensions
 }
 
 public sealed record TeamsMeetingState(bool IsInMeeting, bool IsMuted, bool CanToggleMute, bool CanPair);
-public sealed record TeamsThirdPartyApiMeetingUpdate(TeamsMeetingState? State, bool CanToggleMute, bool CanPair);
+public sealed record TeamsThirdPartyApiMeetingUpdate(
+    TeamsMeetingState? State,
+    bool CanToggleMute,
+    bool CanPair,
+    bool HasMeetingState = false,
+    bool HasIsInMeeting = false,
+    bool HasIsMuted = false);
 public abstract record TeamsThirdPartyApiEvent
 {
     /// <summary>

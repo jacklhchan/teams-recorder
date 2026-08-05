@@ -9,6 +9,7 @@ public abstract record TeamsAutoMeetingState
     public sealed record StartCountdown(int SecondsRemaining) : TeamsAutoMeetingState;
     public sealed record Starting : TeamsAutoMeetingState;
     public sealed record AutomaticRecording : TeamsAutoMeetingState;
+    public sealed record ManualRecording : TeamsAutoMeetingState;
     public sealed record StopCountdown(int SecondsRemaining) : TeamsAutoMeetingState;
     public sealed record Stopping : TeamsAutoMeetingState;
     public sealed record SuppressedUntilMeetingEnd : TeamsAutoMeetingState;
@@ -89,7 +90,7 @@ public sealed class TeamsAutoMeetingMachine
         TeamsAutoMeetingEvent.AutomaticStopCompleted => snapshot.State is TeamsAutoMeetingState.Stopping
             ? TeamsAutoMeetingTransition.NoCommand(WaitingOrCountdown(snapshot with { RecordingOwner = RecordingOwner.None })) : TeamsAutoMeetingTransition.NoCommand(snapshot),
         TeamsAutoMeetingEvent.ManualRecordingStarted => ManualStarted(snapshot),
-        TeamsAutoMeetingEvent.ManualRecordingStopped => TeamsAutoMeetingTransition.NoCommand(snapshot with { RecordingOwner = snapshot.RecordingOwner == RecordingOwner.Manual ? RecordingOwner.None : snapshot.RecordingOwner }),
+        TeamsAutoMeetingEvent.ManualRecordingStopped => ManualStopped(snapshot),
         TeamsAutoMeetingEvent.StartCountdownCancelled => snapshot.State is TeamsAutoMeetingState.StartCountdown
             ? TeamsAutoMeetingTransition.NoCommand(snapshot with { State = new TeamsAutoMeetingState.SuppressedUntilMeetingEnd() }) : TeamsAutoMeetingTransition.NoCommand(snapshot),
         TeamsAutoMeetingEvent.SuppressUntilMeetingEnd => Suppress(snapshot),
@@ -123,7 +124,7 @@ public sealed class TeamsAutoMeetingMachine
             {
                 TeamsAutoMeetingState state = snapshot.SuppressesStopUntilEndDebounce
                     ? new TeamsAutoMeetingState.SuppressedUntilMeetingEnd()
-                    : new TeamsAutoMeetingState.AutomaticRecording();
+                    : RecordingStateForOwner(snapshot.RecordingOwner);
                 return TeamsAutoMeetingTransition.NoCommand(snapshot with { State = state, SuppressesStopUntilEndDebounce = false });
             }
             return TeamsAutoMeetingTransition.NoCommand(snapshot);
@@ -132,7 +133,7 @@ public sealed class TeamsAutoMeetingMachine
         {
             TeamsAutoMeetingState.StartCountdown => TeamsAutoMeetingTransition.NoCommand(snapshot with { State = new TeamsAutoMeetingState.WaitingForMeeting() }),
             TeamsAutoMeetingState.Starting => new(snapshot with { State = new TeamsAutoMeetingState.WaitingForMeeting() }, new TeamsAutoMeetingCommand[] { new TeamsAutoMeetingCommand.CancelAutomaticStart() }),
-            TeamsAutoMeetingState.AutomaticRecording => TeamsAutoMeetingTransition.NoCommand(snapshot with { State = new TeamsAutoMeetingState.StopCountdown(stopDebounceSeconds) }),
+            TeamsAutoMeetingState.AutomaticRecording or TeamsAutoMeetingState.ManualRecording => TeamsAutoMeetingTransition.NoCommand(snapshot with { State = new TeamsAutoMeetingState.StopCountdown(stopDebounceSeconds) }),
             TeamsAutoMeetingState.SuppressedUntilMeetingEnd or TeamsAutoMeetingState.StartBlocked or TeamsAutoMeetingState.StartFailed => TeamsAutoMeetingTransition.NoCommand(snapshot with { State = new TeamsAutoMeetingState.WaitingForMeeting() }),
             _ => TeamsAutoMeetingTransition.NoCommand(snapshot)
         };
@@ -154,13 +155,37 @@ public sealed class TeamsAutoMeetingMachine
     {
         var commands = snapshot.State is TeamsAutoMeetingState.Starting
             ? new TeamsAutoMeetingCommand[] { new TeamsAutoMeetingCommand.CancelAutomaticStart() } : Array.Empty<TeamsAutoMeetingCommand>();
-        var state = snapshot.IsEnabled && snapshot.IsInMeeting ? new TeamsAutoMeetingState.SuppressedUntilMeetingEnd() : snapshot.State;
         // A user cannot replace an already-running automatic capture merely by pressing Start.
         // This mirrors the macOS coordinator: suppress automation, while the host retains ownership.
         var owner = snapshot.RecordingOwner == RecordingOwner.TeamsAutomatic
             ? RecordingOwner.TeamsAutomatic : RecordingOwner.Manual;
+        var state = snapshot.IsEnabled && snapshot.IsInMeeting
+            ? owner == RecordingOwner.Manual
+                ? new TeamsAutoMeetingState.ManualRecording()
+                : new TeamsAutoMeetingState.SuppressedUntilMeetingEnd()
+            : snapshot.State;
         return new(snapshot with { RecordingOwner = owner, State = state, SuppressesStopUntilEndDebounce = false }, commands);
     }
+
+    private TeamsAutoMeetingTransition ManualStopped(TeamsAutoMeetingSnapshot snapshot)
+    {
+        if (snapshot.RecordingOwner != RecordingOwner.Manual)
+        {
+            return TeamsAutoMeetingTransition.NoCommand(snapshot);
+        }
+
+        TeamsAutoMeetingState state = !snapshot.IsEnabled
+            ? new TeamsAutoMeetingState.Disabled()
+            : snapshot.IsInMeeting
+                ? new TeamsAutoMeetingState.SuppressedUntilMeetingEnd()
+                : new TeamsAutoMeetingState.WaitingForMeeting();
+        return TeamsAutoMeetingTransition.NoCommand(snapshot with { RecordingOwner = RecordingOwner.None, State = state, SuppressesStopUntilEndDebounce = false });
+    }
+
+    private static TeamsAutoMeetingState RecordingStateForOwner(RecordingOwner owner) =>
+        owner == RecordingOwner.Manual
+            ? new TeamsAutoMeetingState.ManualRecording()
+            : new TeamsAutoMeetingState.AutomaticRecording();
 
     private TeamsAutoMeetingTransition Suppress(TeamsAutoMeetingSnapshot snapshot) => snapshot.IsEnabled && !snapshot.IsInMeeting && snapshot.State is TeamsAutoMeetingState.StopCountdown
         ? TeamsAutoMeetingTransition.NoCommand(snapshot with { SuppressesStopUntilEndDebounce = true })

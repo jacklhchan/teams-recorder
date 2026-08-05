@@ -145,16 +145,82 @@ void TimestampErrorsPreserveContinuousDuration() {
                counters.late_packets == 0,
            "timestamp error was not isolated from drift and late counters");
 }
+
+void DeviceConfirmedQpcJitterDoesNotDeleteAudio() {
+    CanonicalTimeline timeline;
+    constexpr std::uint64_t packet_frames = 480;
+    constexpr std::uint64_t packet_qpc = 100'000;
+    constexpr std::uint64_t one_frame_qpc = 208;
+    constexpr std::uint64_t packets = 312;
+    for (std::uint64_t packet = 0; packet < packets; ++packet) {
+        const std::int64_t jitter_frames = packet == 0 ? 0 :
+            (packet % 4U == 0U ? -2 : packet % 4U == 1U ? -1 :
+             packet % 4U == 2U ? 1 : 2);
+        const std::int64_t qpc = static_cast<std::int64_t>(packet * packet_qpc) +
+            jitter_frames * static_cast<std::int64_t>(one_frame_qpc);
+        const auto placement = timeline.Place(
+            Source::Render, static_cast<std::uint64_t>(qpc), packet * packet_frames,
+            48'000, packet_frames, false);
+        Expect(placement.frame == packet * packet_frames,
+               "device-confirmed QPC jitter changed packet placement");
+        Expect(placement.silence_before_frames == 0 &&
+                   placement.late_frames_dropped == 0,
+               "device-confirmed QPC jitter inserted or deleted audio");
+    }
+    const auto& counters = timeline.counters(Source::Render);
+    Expect(counters.late_packets == 0 && counters.late_frames_dropped == 0,
+           "small QPC jitter was still reported as late audio");
+    Expect(timeline.end_frame(Source::Render) == packets * packet_frames,
+           "small QPC jitter changed the session duration");
+}
+
+void RealDeviceGapsAndDiscontinuitiesBypassJitterSnap() {
+    CanonicalTimeline gap_timeline;
+    (void)gap_timeline.Place(Source::Render, 0, 0, 48'000, 480, false);
+    const auto gap = gap_timeline.Place(
+        Source::Render, 101'250, 486, 48'000, 480, false);
+    Expect(gap.frame == 486 && gap.silence_before_frames == 6,
+           "a real device-position gap was hidden by jitter tolerance");
+
+    CanonicalTimeline one_frame_device_gap_timeline;
+    (void)one_frame_device_gap_timeline.Place(
+        Source::Render, 0, 0, 48'000, 480, false);
+    const auto one_frame_device_gap = one_frame_device_gap_timeline.Place(
+        Source::Render, 99'792, 481, 48'000, 480, false);
+    Expect(one_frame_device_gap.late_frames_dropped == 1,
+           "a one-frame 48 kHz device gap incorrectly enabled QPC snapping");
+
+    CanonicalTimeline corrected_large_qpc_timeline;
+    (void)corrected_large_qpc_timeline.Place(
+        Source::Render, 0, 0, 48'000, 480, false);
+    const auto corrected_large_qpc = corrected_large_qpc_timeline.Place(
+        Source::Render, 200'208, 480, 48'000, 480, false);
+    Expect(corrected_large_qpc.frame == 481 &&
+               corrected_large_qpc.silence_before_frames == 1,
+           "a large raw QPC jump was hidden after drift correction");
+
+    CanonicalTimeline discontinuity_timeline;
+    (void)discontinuity_timeline.Place(Source::Render, 0, 0, 48'000, 480, false);
+    const auto discontinuity = discontinuity_timeline.Place(
+        Source::Render, 99'792, 480, 48'000, 480, true);
+    Expect(discontinuity.late_frames_dropped == 1,
+           "an explicit discontinuity was hidden by jitter tolerance");
+    const auto& counters = discontinuity_timeline.counters(Source::Render);
+    Expect(counters.discontinuities == 1 && counters.late_packets == 1,
+           "explicit discontinuity counters changed");
+}
 }  // namespace
 
 int main() {
-    const std::array<void (*)(), 11> tests = {LongDurationHasNoTimelineCompression,
+    const std::array<void (*)(), 13> tests = {LongDurationHasNoTimelineCompression,
         SilenceGapsArePreserved, ExplicitSessionOriginPreservesInitialSilence,
         SessionClockAdvancesAcrossPacketlessSilence, MicrophoneMuteGapMapsToSilence,
         LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
         SourceWatermarksRequireBothInputsBeforeMixCommit, DriftLateAndFaultCountersAreBounded,
         SelectedProcessUsesCanonicalGapsAndCounters,
-        TimestampErrorsPreserveContinuousDuration};
+        TimestampErrorsPreserveContinuousDuration,
+        DeviceConfirmedQpcJitterDoesNotDeleteAudio,
+        RealDeviceGapsAndDiscontinuitiesBypassJitterSnap};
     try { for (const auto test : tests) test(); }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
     std::cout << "PASS canonical timeline\n";

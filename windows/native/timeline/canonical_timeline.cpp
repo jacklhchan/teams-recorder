@@ -6,6 +6,7 @@
 namespace recorder::timeline {
 namespace {
 constexpr std::uint64_t kMaxCorrectionFrames = 480;  // 10 ms.
+constexpr std::uint64_t kSmallQpcJitterFrames = 2;  // 41.7 us at 48 kHz.
 
 std::uint64_t Scale(std::uint64_t value, std::uint64_t numerator,
                     std::uint64_t denominator) {
@@ -59,6 +60,16 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
             : 0;
     }
     if (discontinuity) ++source_state.counters.discontinuities;
+    const auto remember_device_packet = [&source_state, device_position_frames,
+                                         normalized_frames, source_sample_rate,
+                                         discontinuity, timestamp_reliable]() {
+        source_state.has_previous_device_packet = source_sample_rate != 0;
+        source_state.previous_device_position_frames = device_position_frames;
+        source_state.previous_normalized_frames = normalized_frames;
+        source_state.previous_source_sample_rate = source_sample_rate;
+        source_state.previous_packet_continuous =
+            timestamp_reliable && !discontinuity;
+    };
     if (!timestamp_reliable) {
         ++source_state.counters.timestamp_errors;
         // A timestamp-error packet is valid audio with unreliable clock
@@ -69,6 +80,7 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
             std::numeric_limits<std::uint64_t>::max() - source_state.last_end_frame) {
             source_state.last_end_frame += normalized_frames;
         }
+        remember_device_packet();
         return placement;
     }
 
@@ -95,6 +107,48 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
                                          : qpc_frame - correction;
     }
 
+    // WASAPI QPC timestamps are independently rounded to the 48 kHz grid for
+    // every packet. A normal one-frame rounding wobble must not delete one
+    // frame from each packet or manufacture an equally small silence gap.
+    // Snap only when the independent device-position delta proves that the
+    // source packets themselves are contiguous. Explicit discontinuities,
+    // timestamp errors, device resets and real gaps all bypass this policy.
+    bool device_continuous = false;
+    if (!discontinuity && source_state.has_previous_device_packet &&
+        source_state.previous_packet_continuous && source_sample_rate != 0 &&
+        source_sample_rate == source_state.previous_source_sample_rate &&
+        device_position_frames >= source_state.previous_device_position_frames) {
+        const std::uint64_t device_delta = Scale(
+            device_position_frames - source_state.previous_device_position_frames,
+            kSampleRate, source_sample_rate);
+        const std::uint64_t duration_difference =
+            device_delta > source_state.previous_normalized_frames
+            ? device_delta - source_state.previous_normalized_frames
+            : source_state.previous_normalized_frames - device_delta;
+        // At the canonical rate, a device delta is exact: even a one-frame
+        // difference is real evidence and must not be hidden. A non-48 kHz
+        // source can differ by one output frame solely from resampler
+        // rounding, so retain the bounded tolerance only for that case.
+        const std::uint64_t device_rounding_tolerance =
+            source_sample_rate == kSampleRate ? 0 : kSmallQpcJitterFrames;
+        device_continuous = duration_difference <= device_rounding_tolerance;
+    }
+    if (device_continuous) {
+        // Use the uncorrected QPC value here. Otherwise a large QPC jump can
+        // be brought to within two frames by the 10 ms drift correction and
+        // then incorrectly disappear as "jitter".
+        const std::uint64_t cursor_difference = qpc_frame > source_state.last_end_frame
+            ? qpc_frame - source_state.last_end_frame
+            : source_state.last_end_frame - qpc_frame;
+        if (cursor_difference <= kSmallQpcJitterFrames) {
+            if (cursor_difference > 0) {
+                ++source_state.counters.qpc_jitter_snapped_packets;
+                source_state.counters.qpc_jitter_snapped_frames += cursor_difference;
+            }
+            frame = source_state.last_end_frame;
+        }
+    }
+
     if (frame < source_state.last_end_frame) {
         const std::uint64_t packet_end = normalized_frames >
                 std::numeric_limits<std::uint64_t>::max() - frame
@@ -110,6 +164,7 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
         frame = source_state.last_end_frame;
         source_state.last_end_frame = (std::max)(source_state.last_end_frame, packet_end);
         placement.frame = frame;
+        remember_device_packet();
         return placement;
     }
     placement.frame = frame;
@@ -118,6 +173,7 @@ Placement CanonicalTimeline::Place(Source source, std::uint64_t qpc_100ns,
     if (normalized_frames <= std::numeric_limits<std::uint64_t>::max() - frame) {
         source_state.last_end_frame = frame + normalized_frames;
     }
+    remember_device_packet();
     return placement;
 }
 

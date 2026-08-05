@@ -64,6 +64,16 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.NativeBr
     throw "Self-contained publish did not include Recorder.NativeBridge.dll."
 }
 
+# Verify-Windows restores the managed solution without a runtime identifier,
+# which can replace Recorder.Cli's assets file with one that has no win-x64
+# target. Restore the exact publish RID here before using --no-restore.
+& $dotnet restore $cliProject `
+    --runtime win-x64 `
+    --tl:off
+if ($LASTEXITCODE -ne 0) {
+    throw "Recorder CLI win-x64 restore failed with exit code $LASTEXITCODE."
+}
+
 & $dotnet publish $cliProject `
     --configuration Release `
     --runtime win-x64 `

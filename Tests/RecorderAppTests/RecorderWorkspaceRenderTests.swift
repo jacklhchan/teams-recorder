@@ -1497,7 +1497,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
-    func testMinimumSettingsKeepsReadyTeamsStatusInsideWindow() throws {
+    func testMinimumSettingsKeepsAutoRecordingStatusInsideWindow() throws {
         let fixture = makeReadyTeamsFixture()
         let host = try makeWorkspaceHost(
             model: fixture.model,
@@ -1510,13 +1510,13 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 
         let frame = try XCTUnwrap(
             host.frame(
-                forAccessibilityIdentifier: "teams-mute-sync-status"
+                forAccessibilityIdentifier: "teams-auto-recording-status"
             ),
-            "Missing Teams mute-sync status"
+            "Missing Teams auto-recording status"
         )
         XCTAssertTrue(
             host.windowContentRect.contains(frame),
-            "Ready Teams status must remain inside the 860×680 window: \(frame)"
+            "Teams auto-recording status must remain inside the 860×680 window: \(frame)"
         )
     }
 
@@ -1562,15 +1562,15 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             ("audio", [
                 "recorder.settings.capture-section",
                 "recorder.settings.microphone-picker",
-                "recorder.settings.audio-integration-section"
+                "recorder.settings.audio-integration-section",
+                "virtual-mic-privacy-mute-detail"
             ]),
             ("recording", [
                 "capture-mode-picker",
                 "recorder.settings.capture-application-picker",
                 "recorder.settings.capture-refresh",
                 "teams-auto-recording-toggle",
-                "teams-auto-recording-status",
-                "teams-mute-sync-status"
+                "teams-auto-recording-status"
             ]),
             ("transcription", [
                 "recorder.settings.transcription-profile-status"
@@ -1699,19 +1699,14 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             "RecorderWorkspaceRenderTests.ready-teams.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
-        let client = RenderTeamsMuteSyncClient()
         let model = AppModel(
             defaults: defaults,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
-            performStartupWork: false,
-            teamsMuteSyncClient: client,
-            teamsIntegrationScheduler: { operation in operation() }
+            performStartupWork: false
         )
         model.systemAudioPermission = .notDetermined
         model.microphonePermission = .granted
-        model.installTeamsMuteSync()
-        client.emit(.status(.ready))
         return .init(model: model, defaults: defaults)
     }
 
@@ -2505,26 +2500,6 @@ final class WorkspaceHost {
 
 private enum WorkspaceHostError: Error {
     case missingAccessibilityElement(String)
-}
-
-private final class RenderTeamsMuteSyncClient: TeamsMuteSyncing {
-    private var onEvent: ((TeamsMuteSyncEvent) -> Void)?
-
-    func start(onEvent: @escaping (TeamsMuteSyncEvent) -> Void) {
-        self.onEvent = onEvent
-    }
-
-    func stop() {
-        onEvent = nil
-    }
-
-    func reconnect() {}
-
-    func requestPairing() {}
-
-    func emit(_ event: TeamsMuteSyncEvent) {
-        onEvent?(event)
-    }
 }
 
 @MainActor

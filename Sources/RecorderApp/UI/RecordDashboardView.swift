@@ -13,8 +13,7 @@ struct RecordDashboardView: View {
                 isCaptureLifecycleWorking: model.isCaptureLifecycleWorking,
                 isRunningTestRecording: model.isRunningTestRecording,
                 localMicMuted: model.localMicMuted,
-                nativeInputMicMuted: model.nativeInputMicMuted,
-                teamsMicMuted: model.teamsMicMuted
+                nativeInputMicMuted: model.nativeInputMicMuted
             )
             dashboard(presentation: presentation)
         }
@@ -68,23 +67,15 @@ struct RecordDashboardView: View {
                     Label(
                         micMuteTitle,
                         systemImage: model.localMicMuted
-                            ? "mic.fill"
-                            : "mic.slash.fill"
+                            ? "mic.slash.fill"
+                            : "mic.fill"
                     )
                 }
                 .accessibilityIdentifier(RecorderActionID.muteMic)
                 .accessibilityValue(
                     model.localMicMuted
                         ? "local-muted"
-                        : (
-                            model.teamsMicMuted
-                                ? "teams-muted"
-                                : (
-                                    model.nativeInputMicMuted
-                                        ? "input-muted"
-                                        : "active"
-                                )
-                        )
+                        : (model.nativeInputMicMuted ? "input-muted" : "active")
                 )
                 .disabled(toolbarPresentation.muteDisabled)
             }
@@ -128,7 +119,6 @@ struct RecordDashboardView: View {
 
     private var micMuteTitle: String {
         if model.localMicMuted { return "Unmute Recorder Mic" }
-        if model.teamsMicMuted { return "Muted by Teams" }
         if model.nativeInputMicMuted { return "Muted by Input" }
         return "Mute Recorder Mic"
     }

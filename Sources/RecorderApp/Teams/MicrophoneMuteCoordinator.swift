@@ -3,15 +3,13 @@ import Foundation
 struct MicrophoneMuteCoordinator {
     private(set) var localMuted: Bool
     private(set) var nativeInputMuted = false
-    private(set) var teamsMuted = false
-    private(set) var teamsInMeeting = false
 
     init(localMuted: Bool = false) {
         self.localMuted = localMuted
     }
 
     var effectiveMuted: Bool {
-        localMuted || nativeInputMuted || (teamsInMeeting && teamsMuted)
+        localMuted || nativeInputMuted
     }
 
     @discardableResult
@@ -28,14 +26,6 @@ struct MicrophoneMuteCoordinator {
         return transition(from: previous)
     }
 
-    @discardableResult
-    mutating func applyTeamsState(_ state: TeamsMeetingState) -> Bool? {
-        let previous = effectiveMuted
-        teamsInMeeting = state.isInMeeting
-        teamsMuted = state.isInMeeting && state.isMuted
-        return transition(from: previous)
-    }
-
     private func transition(from previous: Bool) -> Bool? {
         let current = effectiveMuted
         return current == previous ? nil : current
@@ -45,8 +35,6 @@ struct MicrophoneMuteCoordinator {
 struct MicrophoneMuteSnapshot: Equatable, Sendable {
     let localMuted: Bool
     let nativeInputMuted: Bool
-    let teamsMuted: Bool
-    let teamsInMeeting: Bool
     let effectiveMuted: Bool
 }
 
@@ -92,16 +80,6 @@ final class MicrophoneMuteGate: @unchecked Sendable {
         applyTransition {
             let transition = coordinator.setNativeInputMuted(muted)
             return (transition, ensureAudioGateIsApplied)
-        }
-    }
-
-    @discardableResult
-    func applyTeamsState(
-        _ state: TeamsMeetingState
-    ) -> MicrophoneMuteSnapshot {
-        applyTransition {
-            let transition = coordinator.applyTeamsState(state)
-            return (transition, false)
         }
     }
 
@@ -155,8 +133,6 @@ final class MicrophoneMuteGate: @unchecked Sendable {
         MicrophoneMuteSnapshot(
             localMuted: coordinator.localMuted,
             nativeInputMuted: coordinator.nativeInputMuted,
-            teamsMuted: coordinator.teamsMuted,
-            teamsInMeeting: coordinator.teamsInMeeting,
             effectiveMuted: coordinator.effectiveMuted
         )
     }

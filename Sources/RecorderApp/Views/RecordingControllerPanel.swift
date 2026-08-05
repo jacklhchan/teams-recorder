@@ -7,6 +7,7 @@ enum RecordingControllerAccessibility {
     static let elapsedID = "recording-controller-elapsed"
     static let systemWaveformID = "recording-controller-system-waveform"
     static let microphoneWaveformID = "recording-controller-microphone-waveform"
+    static let microphoneMuteID = "recording-controller-microphone-mute"
     static let screenStatusID = "recording-controller-screen-status"
     static let screenToggleID = "recording-controller-screen-toggle"
     static let stopID = "recording-controller-stop"
@@ -15,12 +16,21 @@ enum RecordingControllerAccessibility {
         elapsedID,
         systemWaveformID,
         microphoneWaveformID,
+        microphoneMuteID,
         screenStatusID,
         screenToggleID,
         stopID
     ]
     static let stopLabel = "Stop recording"
     static let screenCaptureLabel = "Capture Teams screen"
+
+    static func microphoneMuteLabel(isMuted: Bool) -> String {
+        isMuted ? "Unmute microphone" : "Mute microphone"
+    }
+
+    static func microphoneMuteValue(isMuted: Bool) -> String {
+        isMuted ? "Muted" : "Active"
+    }
 
     static func screenCaptureValue(isOn: Bool) -> String {
         isOn ? "On" : "Off"
@@ -227,6 +237,9 @@ struct RecordingControllerView: View {
             RecordingControllerPanelContent(
                 presentation: presentation,
                 stop: model.startOrStop,
+                toggleMicrophoneMute: {
+                    model.toggleRecorderMicMute(source: "Floating panel")
+                },
                 setScreenRequested: { requested in
                     Task {
                         await model.setTeamsScreenCaptureRequested(requested)
@@ -236,7 +249,8 @@ struct RecordingControllerView: View {
                 microphoneLevel: recorder.micLevel,
                 isSystemConnected: recorder.isSystemCaptureConnected,
                 isMicrophoneConnected: recorder.isMicrophoneCaptureConnected,
-                isMicrophoneMuted: recorder.micMuted
+                isMicrophoneMuted: recorder.micMuted,
+                isLocalMicrophoneMuted: model.localMicMuted
             )
         }
     }
@@ -259,12 +273,14 @@ struct RecordingControllerView: View {
 struct RecordingControllerPanelContent: View {
     let presentation: RecordingControllerPresentation
     let stop: () -> Void
+    let toggleMicrophoneMute: () -> Void
     let setScreenRequested: (Bool) -> Void
     let systemLevel: LevelSnapshot
     let microphoneLevel: LevelSnapshot
     let isSystemConnected: Bool
     let isMicrophoneConnected: Bool
     let isMicrophoneMuted: Bool
+    let isLocalMicrophoneMuted: Bool
 
     var body: some View {
         VStack(spacing: 10) {
@@ -300,17 +316,20 @@ struct RecordingControllerPanelContent: View {
                 isConnected: isSystemConnected,
                 isMuted: false,
                 tint: RecorderVisualStyle.systemAudio,
-                accessibilityID: RecordingControllerAccessibility.systemWaveformID
+                accessibilityID: RecordingControllerAccessibility.systemWaveformID,
+                iconAction: nil
             )
 
             RecordingControllerInputRow(
                 title: "Microphone",
-                systemImage: "mic.fill",
+                systemImage: isLocalMicrophoneMuted ? "mic.slash.fill" : "mic.fill",
                 level: microphoneLevel,
                 isConnected: isMicrophoneConnected,
                 isMuted: isMicrophoneMuted,
                 tint: RecorderVisualStyle.microphone,
-                accessibilityID: RecordingControllerAccessibility.microphoneWaveformID
+                accessibilityID: RecordingControllerAccessibility.microphoneWaveformID,
+                iconAction: toggleMicrophoneMute,
+                iconIsMuted: isLocalMicrophoneMuted
             )
 
             HStack(spacing: 10) {
@@ -347,6 +366,8 @@ private struct RecordingControllerInputRow: View {
     let isMuted: Bool
     let tint: Color
     let accessibilityID: String
+    let iconAction: (() -> Void)?
+    var iconIsMuted: Bool? = nil
 
     private var status: RecordingControllerInputStatus {
         RecordingControllerInputStatus.make(
@@ -358,9 +379,40 @@ private struct RecordingControllerInputRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .foregroundStyle(tint)
-                .frame(width: 18)
+            if let iconAction {
+                let buttonIsMuted = iconIsMuted ?? isMuted
+                Button(action: iconAction) {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(buttonIsMuted ? .orange : tint)
+                        .frame(width: 18)
+                }
+                .buttonStyle(.plain)
+                .help(
+                    RecordingControllerAccessibility
+                        .microphoneMuteLabel(isMuted: buttonIsMuted)
+                )
+                .accessibilityLabel(
+                    RecordingControllerAccessibility
+                        .microphoneMuteLabel(isMuted: buttonIsMuted)
+                )
+                .accessibilityValue(
+                    RecordingControllerAccessibility
+                        .microphoneMuteValue(isMuted: buttonIsMuted)
+                )
+                .accessibilityIdentifier(
+                    RecordingControllerAccessibility.microphoneMuteID
+                )
+                .background(
+                    RecorderPanelRenderLocationMarker(
+                        productionIdentifier:
+                            RecordingControllerAccessibility.microphoneMuteID
+                    )
+                )
+            } else {
+                Image(systemName: systemImage)
+                    .foregroundStyle(tint)
+                    .frame(width: 18)
+            }
             Text(title)
                 .font(.caption.weight(.medium))
                 .lineLimit(1)

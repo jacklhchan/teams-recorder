@@ -87,356 +87,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         }
     }
 
-    func testAutoModeKeepsTeamsClientRunningWhenMuteSyncIsDisabled() {
-        withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-
-            model.setTeamsAutoMeetingEnabled(true)
-
-            XCTAssertTrue(model.teamsAutoMeetingEnabled)
-            XCTAssertEqual(client.startCount, 1)
-            XCTAssertEqual(client.stopCount, 0)
-            XCTAssertEqual(model.teamsMuteSyncStatus, .disabled)
-        }
-    }
-
-    func testTeamsClientStopsOnlyWhenBothFeaturesAreDisabled() {
-        withDefaults { defaults in
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.installTeamsIntegrationIfNeeded()
-            model.setTeamsAutoMeetingEnabled(true)
-
-            model.setTeamsMuteSyncEnabled(false)
-            XCTAssertEqual(client.stopCount, 0)
-
-            model.setTeamsAutoMeetingEnabled(false)
-            XCTAssertEqual(client.stopCount, 1)
-        }
-    }
-
-    func testAuthorizedMeetingEventReachesCoordinatorWhileMuteSyncIsDisabled() async {
-        await withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.setTeamsAutoMeetingEnabled(true)
-
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.inMeeting(muted: false)))
-            await settle()
-
-            XCTAssertEqual(
-                model.teamsAutoMeetingState,
-                .startCountdown(secondsRemaining: 5)
-            )
-            XCTAssertEqual(
-                model.teamsConnectionStatus,
-                .inMeeting(muted: false)
-            )
-            XCTAssertEqual(model.teamsMuteSyncStatus, .disabled)
-        }
-    }
-
-    func testUnpairedMeetingEventDoesNotStartCountdown() async {
-        await withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.setTeamsAutoMeetingEnabled(true)
-
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.waitingForPairingApproval))
-            await settle()
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-        }
-    }
-
-    func testOnlyImmediatelyFollowingAuthorizingStatusCanRouteMeetingState() async {
-        await withDefaults { defaults in
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.installTeamsIntegrationIfNeeded()
-
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.connecting))
-            client.emit(.status(.inMeeting(muted: false)))
-            await settle()
-            model.setTeamsAutoMeetingEnabled(true)
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-        }
-    }
-
-    func testReadyAuthorizesImmediatelyPrecedingMeetingEnd() async {
-        await withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.setTeamsAutoMeetingEnabled(true)
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.inMeeting(muted: false)))
-            await settle()
-            XCTAssertEqual(
-                model.teamsAutoMeetingState,
-                .startCountdown(secondsRemaining: 5)
-            )
-
-            client.emit(.meetingState(Self.meetingState(isInMeeting: false)))
-            client.emit(.status(.ready))
-            await settle()
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-        }
-    }
-
-    func testReadyRejectsImmediatelyPrecedingMeetingStart() async {
-        await withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.setTeamsAutoMeetingEnabled(true)
-
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.ready))
-            await settle()
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-        }
-    }
-
-    func testInMeetingRejectsImmediatelyPrecedingMeetingEnd() async {
-        await withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.setTeamsAutoMeetingEnabled(true)
-
-            client.emit(.meetingState(Self.meetingState(isInMeeting: false)))
-            client.emit(.status(.inMeeting(muted: false)))
-            await settle()
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-        }
-    }
-
-    func testMismatchInvalidatesEarlierAuthorizedStateForRuntimeEnable() async {
-        await withDefaults { defaults in
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.installTeamsIntegrationIfNeeded()
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.inMeeting(muted: false)))
-            client.emit(.meetingState(Self.meetingState(isInMeeting: false)))
-            client.emit(.status(.inMeeting(muted: false)))
-            await settle()
-
-            model.setTeamsAutoMeetingEnabled(true)
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-        }
-    }
-
-    func testPersistedAutoModeWaitsForFreshAuthorizedStateOnLaunch() async {
-        await withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            defaults.set(true, forKey: "teamsAutoMeetingEnabled")
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-
-            model.installTeamsIntegrationIfNeeded()
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            await settle()
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-        }
-    }
-
-    func testRuntimeEnableReplaysOnlyCurrentlyAuthorizedMeeting() async {
-        await withDefaults { defaults in
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.installTeamsIntegrationIfNeeded()
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.inMeeting(muted: false)))
-            await settle()
-            var observedStates: [TeamsAutoMeetingState] = []
-            let observation = model.$teamsAutoMeetingState
-                .dropFirst()
-                .sink { observedStates.append($0) }
-
-            model.setTeamsAutoMeetingEnabled(true)
-
-            XCTAssertEqual(
-                model.teamsAutoMeetingState,
-                .startCountdown(secondsRemaining: 5)
-            )
-            XCTAssertEqual(
-                observedStates.filter {
-                    $0 == .startCountdown(secondsRemaining: 5)
-                }.count,
-                1
-            )
-            withExtendedLifetime(observation) {}
-        }
-    }
-
-    func testRuntimeEnableDoesNotReplayAfterConnectionLosesAuthorization() async {
-        await withDefaults { defaults in
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.installTeamsIntegrationIfNeeded()
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.inMeeting(muted: false)))
-            client.emit(.status(.connecting))
-            await settle()
-
-            model.setTeamsAutoMeetingEnabled(true)
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-        }
-    }
-
-    func testStaleReplacedCallbackCannotChangeCoordinatorOrConnectionState() async {
-        await withDefaults { defaults in
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(defaults: defaults, client: client)
-            model.installTeamsIntegrationIfNeeded()
-            model.setTeamsAutoMeetingEnabled(true)
-            model.setTeamsMuteSyncEnabled(false)
-            XCTAssertGreaterThanOrEqual(client.startCount, 2)
-
-            client.emitStale(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emitStale(.status(.inMeeting(muted: true)))
-            await settle()
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-            XCTAssertEqual(model.teamsConnectionStatus, .disabled)
-        }
-    }
-
-    func testDisablingAutoModeDoesNotClearMuteOwnership() async {
-        await withDefaults { defaults in
-            let publisher = AutoMeetingFakePublisher()
-            let recorder = RecordingEngine(virtualMicPublisher: publisher)
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(
-                defaults: defaults,
-                client: client,
-                recorder: recorder
-            )
-            model.installTeamsIntegrationIfNeeded()
-            model.setTeamsAutoMeetingEnabled(true)
-            client.emit(
-                .meetingState(
-                    TeamsMeetingState(
-                        isInMeeting: true,
-                        isMuted: true,
-                        canToggleMute: true,
-                        canPair: false
-                    )
-                )
-            )
-            client.emit(.status(.inMeeting(muted: true)))
-            await settle()
-            XCTAssertTrue(recorder.micMuted)
-
-            model.setTeamsAutoMeetingEnabled(false)
-
-            XCTAssertTrue(recorder.micMuted)
-            XCTAssertTrue(model.teamsMicMuted)
-            XCTAssertEqual(client.stopCount, 0)
-        }
-    }
-
-    func testEnablingMuteSyncDuringAutoOnlyMutedMeetingFailsClosedAndRefreshesState() async {
-        await withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            let publisher = AutoMeetingFakePublisher()
-            let recorder = RecordingEngine(virtualMicPublisher: publisher)
-            let client = AutoMeetingFakeTeamsClient()
-            let model = makeModel(
-                defaults: defaults,
-                client: client,
-                recorder: recorder
-            )
-            model.setTeamsAutoMeetingEnabled(true)
-            client.emit(
-                .meetingState(
-                    TeamsMeetingState(
-                        isInMeeting: true,
-                        isMuted: true,
-                        canToggleMute: true,
-                        canPair: false
-                    )
-                )
-            )
-            client.emit(.status(.inMeeting(muted: true)))
-            await settle()
-            XCTAssertFalse(recorder.micMuted)
-            XCTAssertTrue(publisher.muteCalls.isEmpty)
-
-            model.setTeamsMuteSyncEnabled(true)
-
-            XCTAssertEqual(client.reconnectCount, 1)
-            XCTAssertTrue(recorder.micMuted)
-            XCTAssertEqual(publisher.muteCalls, [true])
-            XCTAssertEqual(model.teamsMuteSyncStatus, .connecting)
-            XCTAssertEqual(model.teamsConnectionStatus, .connecting)
-
-            client.emit(
-                .meetingState(
-                    TeamsMeetingState(
-                        isInMeeting: true,
-                        isMuted: false,
-                        canToggleMute: true,
-                        canPair: false
-                    )
-                )
-            )
-            XCTAssertEqual(publisher.muteCalls, [true, false])
-            client.emit(.status(.inMeeting(muted: false)))
-            await settle()
-
-            XCTAssertFalse(recorder.micMuted)
-            XCTAssertEqual(
-                model.teamsMuteSyncStatus,
-                .inMeeting(muted: false)
-            )
-        }
-    }
-
-    func testOrderedIngressRejectsPairWhenSchedulerRunsSecondWorkFirst() {
-        withDefaults { defaults in
-            defaults.set(false, forKey: "teamsMuteSyncEnabled")
-            let scheduler = ControlledTeamsMainActorScheduler()
-            let client = AutoMeetingFakeTeamsClient()
-            let model = AppModel(
-                defaults: defaults,
-                inputDevices: { [] },
-                defaultInputDeviceID: { nil },
-                performStartupWork: false,
-                teamsMuteSyncClient: client,
-                teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator(),
-                teamsIntegrationScheduler: scheduler.schedule
-            )
-            model.setTeamsAutoMeetingEnabled(true)
-
-            client.emit(.meetingState(Self.meetingState(isInMeeting: true)))
-            client.emit(.status(.connecting))
-            client.emit(.status(.inMeeting(muted: false)))
-            scheduler.runSecondBeforeFirstThenRemaining()
-
-            XCTAssertEqual(model.teamsAutoMeetingState, .waitingForMeeting)
-            XCTAssertEqual(
-                model.teamsConnectionStatus,
-                .inMeeting(muted: false)
-            )
-        }
-    }
 
     func testCountdownStartsAutomaticRecordingWithoutRequestingPermission() async {
         let fixture = makeRecordingFixture()
@@ -505,29 +155,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
-    func testRuntimeEnableDuringManualMeetingSuppressesWithoutBusyFailure() async {
-        let fixture = makeRecordingFixture()
-        fixture.model.installTeamsIntegrationIfNeeded()
-        fixture.model.startOrStop()
-        await waitUntil {
-            fixture.engine.isRecording
-                && fixture.model.recordingOwnership == .manual
-                && !fixture.model.isCaptureLifecycleWorking
-        }
-        emitMeeting(true, in: fixture)
-
-        fixture.model.setTeamsAutoMeetingEnabled(true)
-
-        XCTAssertTrue(fixture.engine.isRecording)
-        XCTAssertEqual(fixture.model.recordingOwnership, .manual)
-        XCTAssertEqual(
-            fixture.model.teamsAutoMeetingState,
-            .suppressedUntilMeetingEnd
-        )
-        XCTAssertEqual(fixture.source.startCount, 1)
-        fixture.model.startOrStop()
-        await waitUntil { !fixture.engine.isRecording }
-    }
 
     func testAuthorizedMeetingStartDuringManualRecordingSuppressesAutomation() async {
         let fixture = makeRecordingFixture()
@@ -579,39 +206,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
-    func testTenFalseTicksStopAndFinalizeAutomaticRecordingExactlyOnce() async {
-        let fixture = makeRecordingFixture()
-        await startAutomaticRecording(fixture)
-
-        emitMeeting(false, in: fixture)
-        await fire(fixture.ticker, count: 9)
-        XCTAssertTrue(fixture.engine.isRecording)
-
-        await fire(fixture.ticker)
-        await waitUntil {
-            !fixture.engine.isRecording
-                && !fixture.model.isCaptureLifecycleWorking
-        }
-
-        XCTAssertNil(fixture.model.recordingOwnership)
-        XCTAssertEqual(fixture.source.stopCount, 1)
-        XCTAssertEqual(fixture.writer.closeCount, 1)
-    }
-
-    func testTrueAtNinthFalseTickCancelsAutomaticStop() async {
-        let fixture = makeRecordingFixture()
-        await startAutomaticRecording(fixture)
-
-        emitMeeting(false, in: fixture)
-        await fire(fixture.ticker, count: 9)
-        emitMeeting(true, in: fixture)
-
-        XCTAssertTrue(fixture.engine.isRecording)
-        XCTAssertEqual(fixture.model.recordingOwnership, .teamsAutomatic)
-        XCTAssertEqual(fixture.source.stopCount, 0)
-        fixture.model.startOrStop()
-        await waitUntil { !fixture.engine.isRecording }
-    }
 
     func testManualStopSuppressesAutomaticRestartForCurrentMeeting() async {
         let fixture = makeRecordingFixture()
@@ -633,55 +227,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertEqual(fixture.writer.closeCount, 1)
     }
 
-    func testManualStopDuringStopDebounceSuppressesRejoinUntilLaterFalse() async {
-        let fixture = makeRecordingFixture()
-        await startAutomaticRecording(fixture)
-        emitMeeting(false, in: fixture)
-        await fire(fixture.ticker, count: 3)
-
-        fixture.model.startOrStop()
-        await waitUntil {
-            !fixture.engine.isRecording
-                && !fixture.model.isCaptureLifecycleWorking
-        }
-        emitMeeting(true, in: fixture)
-
-        guard fixture.model.teamsAutoMeetingState
-                == .suppressedUntilMeetingEnd else {
-            return XCTFail("Manual stop did not suppress the rejoined meeting")
-        }
-        emitMeeting(true, in: fixture)
-        await fire(fixture.ticker)
-        emitMeeting(true, in: fixture)
-
-        XCTAssertEqual(
-            fixture.model.teamsAutoMeetingState,
-            .suppressedUntilMeetingEnd
-        )
-        XCTAssertNil(fixture.model.recordingOwnership)
-        XCTAssertEqual(fixture.source.startCount, 1)
-        XCTAssertEqual(fixture.source.stopCount, 1)
-        XCTAssertEqual(fixture.writer.closeCount, 1)
-
-        emitMeeting(false, in: fixture)
-        XCTAssertEqual(
-            fixture.model.teamsAutoMeetingState,
-            .waitingForMeeting
-        )
-        emitMeeting(true, in: fixture)
-        emitMeeting(true, in: fixture)
-        XCTAssertEqual(
-            fixture.model.teamsAutoMeetingState,
-            .startCountdown(secondsRemaining: 5)
-        )
-        await fire(fixture.ticker)
-        XCTAssertEqual(
-            fixture.model.teamsAutoMeetingState,
-            .startCountdown(secondsRemaining: 4)
-        )
-        XCTAssertEqual(fixture.source.startCount, 1)
-        XCTAssertEqual(fixture.source.stopCount, 1)
-    }
 
     func testDisablingAutoTransfersActiveRecordingToManualWithoutStopping() async {
         let fixture = makeRecordingFixture()
@@ -1103,71 +648,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertTrue(secondResult)
     }
 
-    func testTerminalStopWinningAutoStopRaceCompletesMeetingEndOnce() async {
-        let fixture = makeRecordingFixture()
-        await startAutomaticRecording(fixture)
-        emitMeeting(false, in: fixture)
-        await fire(fixture.ticker, count: 9)
-        fixture.source.pauseStop = true
-
-        fixture.source.emit(.streamFailed)
-        await waitUntil { fixture.source.hasPausedStop }
-        await fire(fixture.ticker)
-        fixture.source.resumeStop()
-        await waitUntil {
-            !fixture.engine.isRecording
-                && !fixture.model.isCaptureLifecycleWorking
-        }
-
-        XCTAssertEqual(
-            fixture.model.teamsAutoMeetingState,
-            .waitingForMeeting
-        )
-        XCTAssertNil(fixture.model.recordingOwnership)
-        XCTAssertEqual(fixture.source.stopCount, 1)
-        XCTAssertEqual(fixture.writer.closeCount, 1)
-    }
-
-    func testTrueAfterCommittedAutomaticStopStartsOneNewCountdown() async {
-        let fixture = makeRecordingFixture()
-        await startAutomaticRecording(fixture)
-        emitMeeting(false, in: fixture)
-        await fire(fixture.ticker, count: 9)
-        fixture.source.pauseStop = true
-
-        await fire(fixture.ticker)
-        await waitUntil { fixture.source.hasPausedStop }
-        XCTAssertTrue(fixture.engine.isRecording)
-        XCTAssertNil(fixture.model.recordingOwnership)
-
-        emitMeeting(true, in: fixture)
-        fixture.source.resumeStop()
-        await waitUntil {
-            !fixture.engine.isRecording
-                && !fixture.model.isCaptureLifecycleWorking
-        }
-
-        XCTAssertNil(fixture.model.recordingOwnership)
-        guard fixture.model.teamsAutoMeetingState
-                == .startCountdown(secondsRemaining: 5) else {
-            return XCTFail(
-                "Committed stop did not reconcile the latest true meeting"
-            )
-        }
-        emitMeeting(true, in: fixture)
-        XCTAssertEqual(
-            fixture.model.teamsAutoMeetingState,
-            .startCountdown(secondsRemaining: 5)
-        )
-        await fire(fixture.ticker)
-        XCTAssertEqual(
-            fixture.model.teamsAutoMeetingState,
-            .startCountdown(secondsRemaining: 4)
-        )
-        XCTAssertEqual(fixture.source.startCount, 1)
-        XCTAssertEqual(fixture.source.stopCount, 1)
-        XCTAssertEqual(fixture.writer.closeCount, 1)
-    }
 
     func testTerminalStopDuringTestRecordingPostStartRefreshClearsStateAndDelay() async {
         let delay = AutoMeetingManualTicker()
@@ -1248,7 +728,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         let coordinator = TeamsAutoMeetingCoordinator(
             tick: { await ticker.waitForTick() }
         )
-        let client = AutoMeetingFakeTeamsClient()
         let permissionRequestCount = AutoMeetingIntBox()
         let suiteName = "AppModelTeamsAutoMeetingLifecycle.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -1270,7 +749,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
             initialOutputFolder: fixtureOutputFolder,
-            teamsMuteSyncClient: client,
             permissionRequestHandler: { _, _ in
                 permissionRequestCount.value += 1
             },
@@ -1278,12 +756,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             storagePolicy: RecordingStoragePolicy(),
             storageMonitorTick: storageMonitorTick,
             testRecordingDelay: testRecordingDelay,
-            teamsAutoMeetingCoordinator: coordinator,
-            teamsIntegrationScheduler: { operation in
-                MainActor.assumeIsolated {
-                    operation()
-                }
-            }
+            teamsAutoMeetingCoordinator: coordinator
         )
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
@@ -1292,7 +765,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             engine: engine,
             source: source,
             writer: writer,
-            teams: client,
+            coordinator: coordinator,
             ticker: ticker,
             permissionRequestCount: permissionRequestCount,
             defaults: defaults
@@ -1315,12 +788,15 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         _ isInMeeting: Bool,
         in fixture: AutoMeetingRecordingFixture
     ) {
-        fixture.teams.emit(
-            .meetingState(Self.meetingState(isInMeeting: isInMeeting))
-        )
-        fixture.teams.emit(
-            .status(isInMeeting ? .inMeeting(muted: false) : .ready)
-        )
+        if isInMeeting {
+            fixture.coordinator.handleMeetingState(isInMeeting: true)
+            if fixture.engine.isRecording,
+               fixture.model.recordingOwnership == .manual {
+                fixture.coordinator.manualRecordingStarted()
+            }
+        } else {
+            fixture.coordinator.handleConfirmedMeetingEnd()
+        }
     }
 
     private func fire(
@@ -1349,7 +825,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
 
     private func makeModel(
         defaults: UserDefaults,
-        client: AutoMeetingFakeTeamsClient = AutoMeetingFakeTeamsClient(),
         recorder: RecordingEngine? = nil
     ) -> AppModel {
         AppModel(
@@ -1358,7 +833,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
-            teamsMuteSyncClient: client,
             teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator()
         )
     }
@@ -1383,14 +857,6 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         try await body(defaults)
     }
 
-    private static func meetingState(isInMeeting: Bool) -> TeamsMeetingState {
-        TeamsMeetingState(
-            isInMeeting: isInMeeting,
-            isMuted: false,
-            canToggleMute: true,
-            canPair: false
-        )
-    }
 
     private func localTeamsWindow(id: CGWindowID) -> TeamsWindowSnapshot {
         TeamsWindowSnapshot(
@@ -1408,96 +874,13 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
     }
 }
 
-private final class AutoMeetingFakeTeamsClient: TeamsMuteSyncing {
-    private var callback: ((TeamsMuteSyncEvent) -> Void)?
-    private var staleCallbacks: [(TeamsMuteSyncEvent) -> Void] = []
-    private(set) var startCount = 0
-    private(set) var stopCount = 0
-    private(set) var reconnectCount = 0
-
-    func start(onEvent: @escaping (TeamsMuteSyncEvent) -> Void) {
-        if let callback {
-            staleCallbacks.append(callback)
-        }
-        callback = onEvent
-        startCount += 1
-    }
-
-    func stop() {
-        callback = nil
-        stopCount += 1
-    }
-
-    func reconnect() {
-        reconnectCount += 1
-    }
-
-    func requestPairing() {}
-
-    func emit(_ event: TeamsMuteSyncEvent) {
-        callback?(event)
-    }
-
-    func emitStale(_ event: TeamsMuteSyncEvent) {
-        staleCallbacks.first?(event)
-    }
-}
-
-private final class AutoMeetingFakePublisher: VirtualMicPublishing {
-    private(set) var state: VirtualMicPublisherState = .stopped
-    private(set) var muteCalls: [Bool] = []
-
-    func start() {
-        state = .ready
-    }
-
-    func publishMicrophone(left: [Float], right: [Float]) {}
-
-    func setMuted(_ muted: Bool) {
-        muteCalls.append(muted)
-    }
-
-    func stop() {
-        state = .stopped
-    }
-}
-
-private final class ControlledTeamsMainActorScheduler: @unchecked Sendable {
-    typealias Operation = @MainActor @Sendable () -> Void
-
-    private let lock = NSLock()
-    private var operations: [Operation] = []
-
-    func schedule(_ operation: @escaping Operation) {
-        lock.lock()
-        operations.append(operation)
-        lock.unlock()
-    }
-
-    @MainActor
-    func runSecondBeforeFirstThenRemaining() {
-        lock.lock()
-        let scheduled = operations
-        operations.removeAll()
-        lock.unlock()
-
-        guard scheduled.count >= 2 else {
-            scheduled.forEach { $0() }
-            return
-        }
-
-        scheduled[1]()
-        scheduled[0]()
-        scheduled.dropFirst(2).forEach { $0() }
-    }
-}
 
 private struct AutoMeetingRecordingFixture {
     let model: AppModel
     let engine: RecordingEngine
     let source: AutoMeetingRecordingCaptureSource
     let writer: AutoMeetingRecordingWriter
-    let teams: AutoMeetingFakeTeamsClient
+    let coordinator: TeamsAutoMeetingCoordinator
     let ticker: AutoMeetingManualTicker
     let permissionRequestCount: AutoMeetingIntBox
     let defaults: UserDefaults

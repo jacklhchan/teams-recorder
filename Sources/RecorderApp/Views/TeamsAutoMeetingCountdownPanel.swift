@@ -15,45 +15,7 @@ struct TeamsAutoMeetingPresentation: Equatable {
     let systemImage: String
     let showsCancel: Bool
 
-    static func make(
-        state: TeamsAutoMeetingState,
-        connectionStatus: TeamsMuteSyncStatus
-    ) -> TeamsAutoMeetingPresentation {
-        if state == .waitingForMeeting {
-            switch connectionStatus {
-            case .connecting:
-                return .init(
-                    title: "Connecting to Teams",
-                    detail: "Automatic recording remains armed",
-                    systemImage: "arrow.triangle.2.circlepath",
-                    showsCancel: false
-                )
-            case .waitingForTeamsAPI:
-                return .init(
-                    title: "Teams API unavailable",
-                    detail: "Automatic recording remains armed",
-                    systemImage: "exclamationmark.triangle.fill",
-                    showsCancel: false
-                )
-            case .waitingForPairingApproval:
-                return .init(
-                    title: "Waiting for Teams approval",
-                    detail: "Automatic recording remains armed",
-                    systemImage: "exclamationmark.triangle.fill",
-                    showsCancel: false
-                )
-            case .failed(let message):
-                return .init(
-                    title: "Teams connection error",
-                    detail: message,
-                    systemImage: "exclamationmark.triangle.fill",
-                    showsCancel: false
-                )
-            case .disabled, .waitingForMeeting, .ready, .inMeeting:
-                break
-            }
-        }
-
+    static func make(state: TeamsAutoMeetingState) -> TeamsAutoMeetingPresentation {
         return switch state {
         case .disabled:
             .init(
@@ -65,7 +27,7 @@ struct TeamsAutoMeetingPresentation: Equatable {
         case .waitingForMeeting:
             .init(
                 title: "Waiting for meeting",
-                detail: "Automatic recording is armed",
+                detail: "Watching Teams meeting windows locally",
                 systemImage: "clock",
                 showsCancel: false
             )
@@ -212,7 +174,7 @@ final class TeamsAutoMeetingCountdownPanelController:
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.title = "Teams Auto Recording"
+        panel.title = "Teams Window Auto Recording"
         panel.delegate = self
     }
 

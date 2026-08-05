@@ -4,50 +4,6 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-private final class TeamsIntegrationIngress: @unchecked Sendable {
-    typealias Operation = @MainActor @Sendable () -> Void
-    typealias Scheduler = (@escaping Operation) -> Void
-
-    private let lock = NSLock()
-    private let scheduler: Scheduler
-    private var pending: [Operation] = []
-    private var drainScheduled = false
-
-    init(scheduler: @escaping Scheduler) {
-        self.scheduler = scheduler
-    }
-
-    func enqueue(_ operation: @escaping Operation) {
-        lock.lock()
-        pending.append(operation)
-        let shouldScheduleDrain = !drainScheduled
-        drainScheduled = true
-        lock.unlock()
-
-        guard shouldScheduleDrain else { return }
-        scheduler { @MainActor [weak self] in
-            self?.drain()
-        }
-    }
-
-    @MainActor
-    private func drain() {
-        while true {
-            lock.lock()
-            guard !pending.isEmpty else {
-                drainScheduled = false
-                lock.unlock()
-                return
-            }
-            let batch = pending
-            pending.removeAll(keepingCapacity: true)
-            lock.unlock()
-
-            batch.forEach { $0() }
-        }
-    }
-}
-
 enum RecordingOwnership: Equatable {
     case manual
     case teamsAutomatic
@@ -82,16 +38,12 @@ final class AppModel: ObservableObject {
     @Published var isRunningTestRecording = false
     @Published private(set) var inputMuteControlAvailable = false
     @Published private(set) var virtualMicInstallationState: VirtualMicInstallationState = .absent
-    @Published private(set) var teamsMuteSyncStatus: TeamsMuteSyncStatus = .disabled
-    @Published private(set) var teamsMuteSyncEnabled: Bool
     @Published private(set) var teamsAutoMeetingEnabled: Bool
     @Published private(set) var teamsAutoMeetingState: TeamsAutoMeetingState
     @Published private(set) var teamsLocalMeetingDetectionState:
         TeamsLocalMeetingDetectionState = .waiting
-    @Published private(set) var teamsConnectionStatus: TeamsMuteSyncStatus = .disabled
     @Published private(set) var localMicMuted = false
     @Published private(set) var nativeInputMicMuted = false
-    @Published private(set) var teamsMicMuted = false
     @Published private(set) var isScreenCaptureAllowedByStorage = true
     @Published private(set) var screenCaptureStorageRestrictionReason: String?
     @Published private(set) var storageWarningMessage: String?
@@ -177,11 +129,8 @@ final class AppModel: ObservableObject {
     private let inputDevices: () -> [AudioDevice]
     private let defaultInputDeviceID: () -> AudioDeviceID?
     private let inputMuteController: InputMuteControlling
-    private let teamsMuteSyncClient: TeamsMuteSyncing
     private let microphoneMuteGate: MicrophoneMuteGate
-    private let teamsMuteRelay: TeamsMuteRelay
     private let teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator
-    private let teamsIntegrationIngress: TeamsIntegrationIngress
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
     private let permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)?
     private let volumeCapacityProvider: any VolumeCapacityProviding
@@ -228,23 +177,16 @@ final class AppModel: ObservableObject {
         }
     }
     private var inputMuteHandlingInstalled = false
-    private var teamsIntegrationInstalled = false
-    private var teamsIntegrationGeneration: UInt64 = 0
-    private var teamsMuteRelayGeneration: UInt64?
-    private var pendingTeamsMeetingState: TeamsMeetingState?
-    private var lastAuthorizedTeamsMeetingState: TeamsMeetingState?
     private var storageMonitorTask: Task<Void, Never>?
     private var storageMonitorGeneration: UInt64 = 0
     private var testRecordingStopTask: Task<Void, Never>?
     private var teamsScreenRefreshTask: Task<Void, Never>?
     private var teamsScreenRefreshGeneration: UInt64 = 0
     private var teamsScreenCaptureIntentGeneration: UInt64 = 0
-    private var teamsMeetingActive = false
     private var teamsLocalMeetingDetector = TeamsLocalMeetingDetector()
     private var workspacePublicationFence: WorkspacePublicationFence = .initial
     private var isShutDown = false
 
-    private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
     private static let teamsAutoMeetingEnabledKey = "teamsAutoMeetingEnabled"
 
     init(
@@ -259,7 +201,6 @@ final class AppModel: ObservableObject {
         inputMuteControllerFactory: (
             (@escaping (Bool) -> Void) -> InputMuteControlling
         )? = nil,
-        teamsMuteSyncClient: TeamsMuteSyncing? = nil,
         virtualMicStateProvider: @escaping () -> VirtualMicInstallationState = {
             VirtualMicInstallation.currentState()
         },
@@ -324,12 +265,7 @@ final class AppModel: ObservableObject {
                 try RecordingSessionMetadataStore.save(metadata, in: folder)
             }
         },
-        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
-        teamsIntegrationScheduler: @escaping (
-            @escaping @MainActor @Sendable () -> Void
-        ) -> Void = { operation in
-            Task { @MainActor in operation() }
-        }
+        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
     ) {
         if let initialOutputFolder {
             outputFolder = initialOutputFolder
@@ -340,9 +276,6 @@ final class AppModel: ObservableObject {
         self.recorder = activeRecorder
         recordingSessionCoordinator = RecordingSessionCoordinator()
         self.teamsAutoMeetingCoordinator = autoCoordinator
-        teamsIntegrationIngress = TeamsIntegrationIngress(
-            scheduler: teamsIntegrationScheduler
-        )
         self.inputDevices = inputDevices
         self.defaultInputDeviceID = defaultInputDeviceID
         self.defaults = defaults
@@ -458,9 +391,6 @@ final class AppModel: ObservableObject {
             }
         }
         self.appPaths = appPaths
-        teamsMuteSyncEnabled = defaults.object(
-            forKey: Self.teamsMuteSyncEnabledKey
-        ) as? Bool ?? true
         teamsAutoMeetingEnabled = defaults.bool(
             forKey: Self.teamsAutoMeetingEnabledKey
         )
@@ -478,9 +408,6 @@ final class AppModel: ObservableObject {
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
         self.microphoneMuteGate = microphoneMuteGate
-        teamsMuteRelay = TeamsMuteRelay(
-            microphoneMuteGate: microphoneMuteGate
-        )
         let applyMuteToAudioPaths: (Bool) -> Void = { muted in
             microphoneMuteGate.setNativeInputMuted(
                 muted,
@@ -494,9 +421,6 @@ final class AppModel: ObservableObject {
                 applyMuteToAudioPaths: applyMuteToAudioPaths
             )
         }
-        self.teamsMuteSyncClient = teamsMuteSyncClient ?? TeamsMuteSyncClient(
-            tokenStore: KeychainTeamsPairingTokenStore(defaults: defaults)
-        )
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
@@ -578,10 +502,15 @@ final class AppModel: ObservableObject {
         observeRecorderRecordingState()
         refreshDevices()
         guard performStartupWork else { return }
-        installInputMuteHandling()
-        if teamsIntegrationRequired {
-            installTeamsIntegrationIfNeeded()
+        do {
+            try LegacyTeamsIntegrationCleaner(
+                secureStore: KeychainSecureValueStore(),
+                defaults: defaults
+            ).clean()
+        } catch {
+            statusMessage = "Retired Teams integration cleanup will retry next launch"
         }
+        installInputMuteHandling()
         hotKeyManager.register()
         refreshPermissionPreflight()
         refreshCaptureApplications()
@@ -595,8 +524,6 @@ final class AppModel: ObservableObject {
         storageMonitorTask?.cancel()
         testRecordingStopTask?.cancel()
         teamsScreenRefreshTask?.cancel()
-        teamsMuteRelay.invalidate()
-        teamsMuteSyncClient.stop()
         inputMuteController.uninstall()
     }
 
@@ -954,13 +881,13 @@ final class AppModel: ObservableObject {
     func refreshTeamsScreenCaptureNow() async {
         guard let selectedTeamsApplication else { return }
         let generation = teamsScreenRefreshGeneration
+        let outcome = await recorder.refreshTeamsWindows(
+            selectedTeamsProcessID: selectedTeamsApplication.processID,
+            mode: .localDetection,
+            manualOverride: teamsManualWindowIdentity
+        )
+        guard generation == teamsScreenRefreshGeneration else { return }
         if teamsAutoMeetingEnabled {
-            let outcome = await recorder.refreshTeamsWindows(
-                selectedTeamsProcessID: selectedTeamsApplication.processID,
-                mode: .localDetection,
-                manualOverride: teamsManualWindowIdentity
-            )
-            guard generation == teamsScreenRefreshGeneration else { return }
             let observation: TeamsLocalMeetingObservation
             switch outcome {
             case .resolved(let resolution):
@@ -971,12 +898,6 @@ final class AppModel: ObservableObject {
             applyLocalMeetingUpdate(
                 teamsLocalMeetingDetector.observe(observation)
             )
-        } else {
-            await recorder.refreshTeamsWindows(
-                selectedTeamsProcessID: selectedTeamsApplication.processID,
-                meetingActive: teamsMeetingActive,
-                manualOverride: teamsManualWindowIdentity
-            )
         }
         guard generation == teamsScreenRefreshGeneration else { return }
         reconcileTeamsManualWindowIdentity()
@@ -986,7 +907,6 @@ final class AppModel: ObservableObject {
     private func applyLocalMeetingUpdate(_ update: TeamsLocalMeetingUpdate) {
         teamsLocalMeetingDetectionState = update.state
         guard let transition = update.meetingTransition else { return }
-        teamsMeetingActive = transition
         if transition {
             teamsAutoMeetingCoordinator.handleMeetingState(isInMeeting: true)
             suppressAutomationForActiveManualRecording()
@@ -1011,7 +931,6 @@ final class AppModel: ObservableObject {
         invalidateTeamsScreenRefresh()
         invalidateTeamsScreenCaptureIntent()
         isTeamsScreenCaptureRequested = false
-        teamsMeetingActive = false
         teamsLocalMeetingDetectionState = teamsLocalMeetingDetector.reset().state
         teamsManualWindowIdentity = nil
         teamsScreenCaptureCandidates = []
@@ -1587,23 +1506,11 @@ final class AppModel: ObservableObject {
 
     func toggleRecorderMicMute(source: String = "Button") {
         let current = microphoneMuteGate.snapshot
-        if current.teamsInMeeting, current.teamsMuted, !current.localMuted {
-            statusMessage = "\(source): recorder mic is muted by Teams"
-            return
-        }
-        if current.nativeInputMuted, !current.localMuted {
-            statusMessage = "\(source): recorder mic is muted by the input device"
-            return
-        }
-
         let requestedMute = !current.localMuted
         let snapshot = microphoneMuteGate.setLocalMuted(requestedMute)
         publishMicrophoneMuteSnapshot(snapshot)
         if !requestedMute, snapshot.effectiveMuted {
-            let owner = snapshot.teamsInMeeting && snapshot.teamsMuted
-                ? "Teams"
-                : "the input device"
-            statusMessage = "\(source): recorder mic remains muted by \(owner)"
+            statusMessage = "\(source): recorder mic remains muted by the input device"
         } else {
             statusMessage = "\(source): recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
         }
@@ -1634,123 +1541,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private var teamsIntegrationRequired: Bool {
-        teamsMuteSyncEnabled || teamsAutoMeetingEnabled
-    }
-
-    func installTeamsMuteSync() {
-        guard teamsMuteSyncEnabled else { return }
-        installTeamsIntegrationIfNeeded()
-    }
-
-    func installTeamsIntegrationIfNeeded() {
-        guard teamsIntegrationRequired else { return }
-
-        var callbackNeedsRefresh = false
-        if teamsMuteSyncEnabled, teamsMuteRelayGeneration == nil {
-            teamsMuteRelayGeneration = teamsMuteRelay.enable()
-            callbackNeedsRefresh = true
-        }
-        if !teamsIntegrationInstalled {
-            teamsIntegrationInstalled = true
-            callbackNeedsRefresh = true
-        }
-        guard callbackNeedsRefresh else { return }
-        installCurrentTeamsCallback()
-    }
-
-    private func installCurrentTeamsCallback() {
-        teamsIntegrationGeneration &+= 1
-        let integrationGeneration = teamsIntegrationGeneration
-        let relayGeneration = teamsMuteRelayGeneration
-        let relay = teamsMuteRelay
-        let ingress = teamsIntegrationIngress
-        teamsMuteSyncClient.start { [weak self, relay, ingress] event in
-            let relayResult = relayGeneration.flatMap {
-                relay.apply(event, generation: $0)
-            }
-            ingress.enqueue { @MainActor [weak self] in
-                self?.handleTeamsIntegration(
-                    event,
-                    relayResult: relayResult,
-                    generation: integrationGeneration
-                )
-            }
-        }
-    }
-
-    func setTeamsMuteSyncEnabled(_ enabled: Bool) {
-        guard teamsMuteSyncEnabled != enabled else { return }
-
-        teamsMuteSyncEnabled = enabled
-        defaults.set(enabled, forKey: Self.teamsMuteSyncEnabledKey)
-        if enabled {
-            let needsFreshState = teamsIntegrationInstalled
-            let connectionIsInMeeting: Bool
-            if case .inMeeting = teamsConnectionStatus {
-                connectionIsInMeeting = true
-            } else {
-                connectionIsInMeeting = false
-            }
-            let shouldFailClosed =
-                needsFreshState
-                && connectionIsInMeeting
-                && lastAuthorizedTeamsMeetingState?.isInMeeting == true
-            teamsMuteRelayGeneration = teamsMuteRelay.enable()
-            if shouldFailClosed {
-                let snapshot = microphoneMuteGate.applyTeamsState(
-                    TeamsMeetingState(
-                        isInMeeting: true,
-                        isMuted: true,
-                        canToggleMute: false,
-                        canPair: false
-                    )
-                )
-                publishMicrophoneMuteSnapshot(snapshot)
-            }
-            if needsFreshState {
-                pendingTeamsMeetingState = nil
-                lastAuthorizedTeamsMeetingState = nil
-                teamsConnectionStatus = .connecting
-                teamsMuteSyncStatus = .connecting
-                installCurrentTeamsCallback()
-                teamsMuteSyncClient.reconnect()
-            } else {
-                installTeamsIntegrationIfNeeded()
-            }
-            return
-        }
-
-        let snapshot = teamsMuteRelay.disable()
-        teamsMuteRelayGeneration = nil
-        teamsMuteSyncStatus = .disabled
-        publishMicrophoneMuteSnapshot(snapshot)
-        if teamsIntegrationRequired {
-            installCurrentTeamsCallback()
-        } else {
-            stopTeamsIntegrationIfUnused()
-        }
-    }
-
     func setTeamsAutoMeetingEnabled(_ enabled: Bool) {
         guard teamsAutoMeetingEnabled != enabled else { return }
 
         teamsAutoMeetingEnabled = enabled
         defaults.set(enabled, forKey: Self.teamsAutoMeetingEnabledKey)
         teamsAutoMeetingCoordinator.setEnabled(enabled)
-        if enabled {
-            installTeamsIntegrationIfNeeded()
-            if case .inMeeting = teamsConnectionStatus,
-               lastAuthorizedTeamsMeetingState?.isInMeeting == true {
-                teamsAutoMeetingCoordinator.handleMeetingState(
-                    isInMeeting: true
-                )
-                suppressAutomationForActiveManualRecording()
-            }
-        } else {
-            teamsMeetingActive = false
+        if !enabled {
             teamsLocalMeetingDetectionState = teamsLocalMeetingDetector.reset().state
-            stopTeamsIntegrationIfUnused()
         }
         restartTeamsScreenRefreshIfNeeded()
         guard selectedTeamsApplication != nil else { return }
@@ -1761,96 +1559,6 @@ final class AppModel: ObservableObject {
 
     func cancelTeamsAutoMeetingCountdown() {
         teamsAutoMeetingCoordinator.cancelCountdown()
-    }
-
-    private func stopTeamsIntegrationIfUnused() {
-        guard !teamsIntegrationRequired, teamsIntegrationInstalled else {
-            return
-        }
-
-        invalidateTeamsScreenRefresh()
-        teamsIntegrationGeneration &+= 1
-        teamsIntegrationInstalled = false
-        pendingTeamsMeetingState = nil
-        lastAuthorizedTeamsMeetingState = nil
-        teamsConnectionStatus = .disabled
-        teamsMuteSyncClient.stop()
-        teamsMeetingActive = false
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.refreshTeamsScreenCaptureNow()
-            self.restartTeamsScreenRefreshIfNeeded()
-        }
-    }
-
-    func retryTeamsMuteSync() {
-        guard teamsIntegrationRequired else { return }
-        teamsMuteSyncClient.reconnect()
-    }
-
-    func requestTeamsPairing() {
-        guard teamsIntegrationRequired else { return }
-        teamsMuteSyncClient.requestPairing()
-    }
-
-    private func handleTeamsIntegration(
-        _ event: TeamsMuteSyncEvent,
-        relayResult: TeamsMuteRelayResult?,
-        generation: UInt64
-    ) {
-        guard teamsIntegrationInstalled,
-              teamsIntegrationGeneration == generation else {
-            return
-        }
-
-        switch event {
-        case .status(let status):
-            teamsConnectionStatus = status
-            teamsMuteSyncStatus = teamsMuteSyncEnabled ? status : .disabled
-            routeAuthorizedAutoMeetingState(for: status)
-            if relayResult?.didFailClosed == true {
-                publishMicrophoneMuteSnapshot(microphoneMuteGate.snapshot)
-                statusMessage = "Teams sync lost: recorder mic muted"
-            }
-
-        case .meetingState(let state):
-            pendingTeamsMeetingState = state
-            if relayResult != nil {
-                let snapshot = microphoneMuteGate.snapshot
-                publishMicrophoneMuteSnapshot(snapshot)
-                statusMessage = "Teams / AirPods: recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
-            }
-            teamsMeetingActive = state.isInMeeting
-            Task { @MainActor [weak self] in
-                await self?.refreshTeamsScreenCaptureNow()
-            }
-        }
-    }
-
-    private func routeAuthorizedAutoMeetingState(
-        for status: TeamsMuteSyncStatus
-    ) {
-        defer { pendingTeamsMeetingState = nil }
-        lastAuthorizedTeamsMeetingState = nil
-        guard let state = pendingTeamsMeetingState else { return }
-
-        switch status {
-        case .inMeeting:
-            guard state.isInMeeting else { return }
-        case .ready:
-            guard !state.isInMeeting else { return }
-        default:
-            return
-        }
-
-        lastAuthorizedTeamsMeetingState = state
-        guard teamsAutoMeetingEnabled else { return }
-        teamsAutoMeetingCoordinator.handleMeetingState(
-            isInMeeting: state.isInMeeting
-        )
-        if state.isInMeeting {
-            suppressAutomationForActiveManualRecording()
-        }
     }
 
     private func suppressAutomationForActiveManualRecording() {
@@ -1864,7 +1572,6 @@ final class AppModel: ObservableObject {
     ) {
         localMicMuted = snapshot.localMuted
         nativeInputMicMuted = snapshot.nativeInputMuted
-        teamsMicMuted = snapshot.teamsInMeeting && snapshot.teamsMuted
         recorder.updateMicMuteDisplay(snapshot.effectiveMuted)
     }
 

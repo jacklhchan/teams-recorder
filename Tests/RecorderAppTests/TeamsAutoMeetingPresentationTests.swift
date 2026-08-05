@@ -5,32 +5,13 @@ import XCTest
 final class TeamsAutoMeetingPresentationTests: XCTestCase {
     func testCountdownPresentationShowsRemainingSecondsAndCancel() {
         let presentation = TeamsAutoMeetingPresentation.make(
-            state: .startCountdown(secondsRemaining: 3),
-            connectionStatus: .inMeeting(muted: false)
+            state: .startCountdown(secondsRemaining: 3)
         )
 
         XCTAssertEqual(presentation.title, "Recording starts in 3s")
         XCTAssertEqual(presentation.detail, "Teams meeting detected")
         XCTAssertEqual(presentation.systemImage, "record.circle")
         XCTAssertTrue(presentation.showsCancel)
-    }
-
-    func testDisconnectedWaitingPresentationDoesNotClaimMeetingEnded() {
-        let presentation = TeamsAutoMeetingPresentation.make(
-            state: .waitingForMeeting,
-            connectionStatus: .waitingForTeamsAPI
-        )
-
-        XCTAssertEqual(presentation.title, "Teams API unavailable")
-        XCTAssertEqual(
-            presentation.detail,
-            "Automatic recording remains armed"
-        )
-        XCTAssertEqual(
-            presentation.systemImage,
-            "exclamationmark.triangle.fill"
-        )
-        XCTAssertFalse(presentation.showsCancel)
     }
 
     func testEveryAutoMeetingStateHasTheExpectedPresentation() {
@@ -51,7 +32,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
             (
                 .waitingForMeeting,
                 "Waiting for meeting",
-                "Automatic recording is armed",
+                "Watching Teams meeting windows locally",
                 "clock",
                 false
             ),
@@ -113,41 +94,13 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
             expectedImage,
             expectedCancel
         ) in cases {
-            let presentation = TeamsAutoMeetingPresentation.make(
-                state: state,
-                connectionStatus: .ready
-            )
+            let presentation = TeamsAutoMeetingPresentation.make(state: state)
 
             XCTAssertEqual(presentation.title, expectedTitle)
             XCTAssertEqual(presentation.detail, expectedDetail)
             XCTAssertEqual(presentation.systemImage, expectedImage)
             XCTAssertEqual(presentation.showsCancel, expectedCancel)
         }
-    }
-
-    func testWaitingPresentationReflectsTeamsConnectionProgress() {
-        let connecting = TeamsAutoMeetingPresentation.make(
-            state: .waitingForMeeting,
-            connectionStatus: .connecting
-        )
-        let awaitingApproval = TeamsAutoMeetingPresentation.make(
-            state: .waitingForMeeting,
-            connectionStatus: .waitingForPairingApproval
-        )
-        let failed = TeamsAutoMeetingPresentation.make(
-            state: .waitingForMeeting,
-            connectionStatus: .failed("Teams connection lost")
-        )
-
-        XCTAssertEqual(connecting.title, "Connecting to Teams")
-        XCTAssertEqual(connecting.detail, "Automatic recording remains armed")
-        XCTAssertEqual(awaitingApproval.title, "Waiting for Teams approval")
-        XCTAssertEqual(
-            awaitingApproval.detail,
-            "Automatic recording remains armed"
-        )
-        XCTAssertEqual(failed.title, "Teams connection error")
-        XCTAssertEqual(failed.detail, "Teams connection lost")
     }
 
     func testSameEpisodeTickCannotRearmConsumedCancelOrReorderPanel() {

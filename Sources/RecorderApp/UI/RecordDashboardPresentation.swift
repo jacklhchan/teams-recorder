@@ -13,8 +13,7 @@ struct RecordDashboardPresentation: Equatable {
         isCaptureLifecycleWorking: Bool,
         isRunningTestRecording: Bool,
         localMicMuted: Bool,
-        nativeInputMicMuted: Bool,
-        teamsMicMuted: Bool
+        nativeInputMicMuted: Bool
     ) -> Self {
         let seconds = max(0, Int(now.timeIntervalSince(startedAt ?? now)))
         return .init(
@@ -26,7 +25,7 @@ struct RecordDashboardPresentation: Equatable {
             ),
             startStopDisabled: !isRecording && isCaptureLifecycleWorking,
             testDisabled: isRecording || isRunningTestRecording || isCaptureLifecycleWorking,
-            muteDisabled: (teamsMicMuted || nativeInputMicMuted) && !localMicMuted
+            muteDisabled: false
         )
     }
 }

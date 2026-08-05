@@ -7,6 +7,7 @@ import XCTest
 final class RecordingControllerRenderTests: XCTestCase {
     func testActiveControllerRendersFixedBoundsAndInvokesStopOnce() throws {
         var stops = 0
+        var microphoneMuteToggles = 0
         var screenRequests: [Bool] = []
         let presentation = RecordingControllerPresentation.make(
             snapshot: .init(isRecording: true, isFinalizing: false, startedAt: Date(), showsTeamsScreenControl: true, screenRequested: true, screenStatusText: TeamsScreenStatusText.capturing, screenToggleDisabled: false),
@@ -16,12 +17,14 @@ final class RecordingControllerRenderTests: XCTestCase {
             rootView: RecordingControllerPanelContent(
                 presentation: presentation,
                 stop: { stops += 1 },
+                toggleMicrophoneMute: { microphoneMuteToggles += 1 },
                 setScreenRequested: { screenRequests.append($0) },
                 systemLevel: .init(rms: -24, peak: -12, samples: [0.25, 0.5]),
                 microphoneLevel: .init(rms: -18, peak: -6, samples: [0.35, 0.65]),
                 isSystemConnected: true,
                 isMicrophoneConnected: true,
-                isMicrophoneMuted: false
+                isMicrophoneMuted: false,
+                isLocalMicrophoneMuted: false
             ),
             size: .init(width: 390, height: 180)
         )
@@ -32,11 +35,14 @@ final class RecordingControllerRenderTests: XCTestCase {
         XCTAssertTrue(host.contains(RecordingControllerAccessibility.microphoneWaveformID))
         XCTAssertTrue(host.boundsContain(RecordingControllerAccessibility.systemWaveformID))
         XCTAssertTrue(host.boundsContain(RecordingControllerAccessibility.microphoneWaveformID))
+        XCTAssertTrue(host.boundsContain(RecordingControllerAccessibility.microphoneMuteID))
         for identifier in RecordingControllerAccessibility.allIDs {
             XCTAssertTrue(host.boundsContain(identifier), identifier)
         }
         try host.click(RecordingControllerAccessibility.stopID)
+        try host.click(RecordingControllerAccessibility.microphoneMuteID)
         XCTAssertEqual(stops, 1)
+        XCTAssertEqual(microphoneMuteToggles, 1)
         XCTAssertTrue(screenRequests.isEmpty)
     }
 
@@ -51,12 +57,14 @@ final class RecordingControllerRenderTests: XCTestCase {
             rootView: RecordingControllerPanelContent(
                 presentation: presentation,
                 stop: { stops += 1 },
+                toggleMicrophoneMute: {},
                 setScreenRequested: { screenRequests.append($0) },
                 systemLevel: .init(rms: -24, peak: -12, samples: [0.25, 0.5]),
                 microphoneLevel: .init(rms: -18, peak: -6, samples: [0.35, 0.65]),
                 isSystemConnected: true,
                 isMicrophoneConnected: true,
-                isMicrophoneMuted: false
+                isMicrophoneMuted: false,
+                isLocalMicrophoneMuted: false
             ),
             size: .init(width: 390, height: 180)
         )
@@ -83,12 +91,14 @@ final class RecordingControllerRenderTests: XCTestCase {
                 rootView: RecordingControllerPanelContent(
                     presentation: presentation,
                     stop: {},
+                    toggleMicrophoneMute: {},
                     setScreenRequested: { _ in },
                     systemLevel: .init(rms: -24, peak: -12, samples: [0.25, 0.5]),
                     microphoneLevel: .init(rms: -18, peak: -6, samples: [0.35, 0.65]),
                     isSystemConnected: true,
                     isMicrophoneConnected: true,
-                    isMicrophoneMuted: false
+                    isMicrophoneMuted: false,
+                    isLocalMicrophoneMuted: false
                 )
                 .environment(\.recorderReduceMotionOverride, motion)
                 .environment(\.recorderReduceTransparencyOverride, transparency),

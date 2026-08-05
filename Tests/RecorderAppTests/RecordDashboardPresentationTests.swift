@@ -12,8 +12,7 @@ final class RecordDashboardPresentationTests: XCTestCase {
             isCaptureLifecycleWorking: false,
             isRunningTestRecording: false,
             localMicMuted: false,
-            nativeInputMicMuted: false,
-            teamsMicMuted: false
+            nativeInputMicMuted: false
         )
 
         XCTAssertEqual(presentation.elapsedText, "01:01:01")
@@ -28,11 +27,10 @@ final class RecordDashboardPresentationTests: XCTestCase {
                 isCaptureLifecycleWorking: true,
                 isRunningTestRecording: false,
                 localMicMuted: false,
-                nativeInputMicMuted: false,
-                teamsMicMuted: false
+                nativeInputMicMuted: false
             ).startStopDisabled
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             RecordDashboardPresentation.make(
                 isRecording: false,
                 startedAt: nil,
@@ -40,8 +38,7 @@ final class RecordDashboardPresentationTests: XCTestCase {
                 isCaptureLifecycleWorking: false,
                 isRunningTestRecording: false,
                 localMicMuted: false,
-                nativeInputMicMuted: false,
-                teamsMicMuted: true
+                nativeInputMicMuted: true
             ).muteDisabled
         )
     }

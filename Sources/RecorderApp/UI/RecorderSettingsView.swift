@@ -122,6 +122,17 @@ struct RecorderSettingsView: View {
                         )
                     }
                 }
+                Text(
+                    "Recorder and native input mute silence the mic track and Local Recorder Virtual Mic. The Teams mute icon may differ."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("virtual-mic-privacy-mute-detail")
+                .background(
+                    RecorderSettingsAccessibilityMarker(
+                        identifier: "virtual-mic-privacy-mute-detail"
+                    )
+                )
             }
             .accessibilityIdentifier("recorder.settings.audio-integration-section")
             .background(
@@ -146,7 +157,7 @@ struct RecorderSettingsView: View {
                         }
                     }
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("Teams Auto Recording", systemImage: "record.circle")
+                        Label("Teams Window Auto Mode (Beta)", systemImage: "record.circle")
                             .font(.headline)
                         TeamsAutoMeetingDetailView(
                             presentation: autoMeetingPresentation,
@@ -158,22 +169,6 @@ struct RecorderSettingsView: View {
                         TeamsAutoMeetingStateView(
                             presentation: autoMeetingPresentation,
                             cancel: model.cancelTeamsAutoMeetingCountdown
-                        )
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Teams Mute Sync", systemImage: "person.2.wave.2")
-                            .font(.headline)
-                        TeamsMuteSyncDetailView(
-                            status: model.teamsMuteSyncStatus,
-                            isEnabled: Binding(
-                                get: { model.teamsMuteSyncEnabled },
-                                set: { model.setTeamsMuteSyncEnabled($0) }
-                            )
-                        )
-                        TeamsMuteSyncStateView(
-                            status: model.teamsMuteSyncStatus,
-                            retry: model.retryTeamsMuteSync,
-                            requestPairing: model.requestTeamsPairing
                         )
                     }
                 }
@@ -215,10 +210,7 @@ struct RecorderSettingsView: View {
     }
 
     private var autoMeetingPresentation: TeamsAutoMeetingPresentation {
-        .make(
-            state: model.teamsAutoMeetingState,
-            connectionStatus: model.teamsConnectionStatus
-        )
+        .make(state: model.teamsAutoMeetingState)
     }
 }
 
@@ -407,10 +399,10 @@ private struct TeamsAutoMeetingDetailView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
             Spacer(minLength: 8)
-            Toggle("Teams Auto Recording", isOn: $isEnabled)
+            Toggle("Teams Window Auto Mode (Beta)", isOn: $isEnabled)
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .help("Start recording automatically for Teams meetings")
+                .help("Detect Teams meeting windows locally and start recording automatically")
                 .accessibilityIdentifier("teams-auto-recording-toggle")
                 .background(
                     RecorderSettingsAccessibilityMarker(
@@ -452,111 +444,6 @@ private struct TeamsAutoMeetingStateView: View {
         case "record.circle.fill": .red
         case "exclamationmark.triangle.fill": .orange
         default: .secondary
-        }
-    }
-}
-
-private struct TeamsMuteSyncDetailView: View {
-    let status: TeamsMuteSyncStatus
-    @Binding var isEnabled: Bool
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-            Spacer(minLength: 8)
-            Toggle("Teams mute sync", isOn: $isEnabled)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .help("Follow Microsoft Teams microphone mute state")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var detail: String {
-        switch status {
-        case .disabled: "Recorder mute is local only"
-        case .connecting: "Connecting to Microsoft Teams"
-        case .waitingForTeamsAPI: "Enable Third-party app API in Teams"
-        case .waitingForMeeting: "Join a Teams call to complete pairing"
-        case .waitingForPairingApproval: "Approve Local Meeting Recorder in Teams"
-        case .ready: "Paired with Microsoft Teams"
-        case .inMeeting: "AirPods mute sync is active"
-        case .failed(let message): message
-        }
-    }
-}
-
-private struct TeamsMuteSyncStateView: View {
-    let status: TeamsMuteSyncStatus
-    let retry: () -> Void
-    let requestPairing: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Label(title, systemImage: iconName)
-                .foregroundStyle(statusColor)
-                .lineLimit(1)
-                .accessibilityIdentifier("teams-mute-sync-status")
-                .background(
-                    RecorderSettingsAccessibilityMarker(
-                        identifier: "teams-mute-sync-status"
-                    )
-                )
-            if status == .waitingForPairingApproval {
-                Button(action: requestPairing) { Image(systemName: "link.badge.plus") }
-                    .buttonStyle(.bordered)
-                    .help("Request Teams pairing again")
-                    .accessibilityLabel("Request Teams pairing again")
-            } else if needsRetry {
-                Button(action: retry) { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.bordered)
-                    .help("Retry Teams mute sync")
-                    .accessibilityLabel("Retry Teams mute sync")
-            }
-        }
-    }
-
-    private var title: String {
-        if status == .pairingResetRequired { return "Reset pairing" }
-        return switch status {
-        case .disabled: "Off"
-        case .connecting: "Connecting"
-        case .waitingForTeamsAPI: "Teams API unavailable"
-        case .waitingForMeeting: "Ready to pair"
-        case .waitingForPairingApproval: "Waiting for Allow"
-        case .ready: "Connected"
-        case .inMeeting(let muted): muted ? "Teams muted" : "Teams active"
-        case .failed: "Sync error"
-        }
-    }
-
-    private var iconName: String {
-        switch status {
-        case .ready, .inMeeting(muted: false): "checkmark.circle.fill"
-        case .inMeeting(muted: true): "mic.slash.circle.fill"
-        case .waitingForTeamsAPI, .waitingForPairingApproval, .failed: "exclamationmark.triangle.fill"
-        case .connecting: "arrow.triangle.2.circlepath"
-        case .disabled, .waitingForMeeting: "circle.dashed"
-        }
-    }
-
-    private var statusColor: Color {
-        if status == .pairingResetRequired { return .orange }
-        return switch status {
-        case .ready, .inMeeting(muted: false): .green
-        case .waitingForTeamsAPI, .waitingForPairingApproval, .inMeeting(muted: true): .orange
-        case .failed: .red
-        case .disabled, .connecting, .waitingForMeeting: .secondary
-        }
-    }
-
-    private var needsRetry: Bool {
-        switch status {
-        case .waitingForTeamsAPI, .failed: true
-        default: false
         }
     }
 }

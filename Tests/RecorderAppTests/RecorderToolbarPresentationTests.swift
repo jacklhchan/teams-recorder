@@ -10,8 +10,7 @@ final class RecorderToolbarPresentationTests: XCTestCase {
             isCaptureLifecycleWorking: false,
             isRunningTestRecording: false,
             localMicMuted: false,
-            nativeInputMicMuted: false,
-            teamsMicMuted: false
+            nativeInputMicMuted: false
         )
         XCTAssertEqual(
             RecordToolbarPresentation.make(
@@ -34,8 +33,7 @@ final class RecorderToolbarPresentationTests: XCTestCase {
             isCaptureLifecycleWorking: true,
             isRunningTestRecording: true,
             localMicMuted: false,
-            nativeInputMicMuted: false,
-            teamsMicMuted: true
+            nativeInputMicMuted: true
         )
         XCTAssertEqual(
             RecordToolbarPresentation.make(
@@ -45,7 +43,7 @@ final class RecorderToolbarPresentationTests: XCTestCase {
             ),
             .init(
                 refreshDisabled: true,
-                muteDisabled: true,
+                muteDisabled: false,
                 testDisabled: true,
                 chooseOutputFolderDisabled: true
             )

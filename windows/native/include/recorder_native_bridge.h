@@ -131,6 +131,40 @@ typedef struct RecorderNativeSelectedAudioStartOptions {
     uint64_t expected_process_creation_time_100ns;
 } RecorderNativeSelectedAudioStartOptions;
 
+/*
+ * Starts an optional, independent MP4 capture of one already-selected window.
+ * The handle is an HWND represented as an unsigned 64-bit value so this C ABI
+ * is unambiguous for both C and managed callers.  The primary recording remains
+ * the M4A started through recorder_native_start_mixed/selected_audio: a video
+ * start, encode, or publish failure never stops or faults that audio session.
+ */
+typedef struct RecorderNativeWindowVideoStartOptions {
+    uint32_t struct_size;
+    /* A live, top-level HWND cast to uint64_t by the caller. */
+    uint64_t target_window_handle;
+    /* Required final .mp4 path. The writer owns <path>.partial while active. */
+    const char* output_path_utf8;
+    /* Target constant frame rate, from 1 through 60. */
+    uint32_t frames_per_second;
+    /* H.264 target bitrate, from 100,000 through 50,000,000 bits/sec. */
+    uint32_t video_bitrate_bps;
+    uint32_t reserved;
+} RecorderNativeWindowVideoStartOptions;
+
+typedef struct RecorderNativeWindowVideoStats {
+    uint32_t struct_size;
+    uint32_t running;
+    uint64_t received_frames;
+    uint64_t delivered_frames;
+    uint64_t dropped_frames;
+    uint64_t frame_pool_recreates;
+    /* RECORDER_NATIVE_OK while healthy, otherwise the independent video error. */
+    RecorderNativeResult result;
+    uint32_t reserved;
+    uint64_t first_accepted_video_pts_100ns;
+    uint64_t last_accepted_video_end_100ns;
+} RecorderNativeWindowVideoStats;
+
 typedef struct RecorderNativeStats {
     /* Set to sizeof(RecorderNativeStats) before calling get_stats. */
     uint32_t struct_size;
@@ -228,6 +262,28 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_mixed(
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_selected_audio(
     RecorderNativeBridge* bridge,
     const RecorderNativeSelectedAudioStartOptions* options);
+
+/*
+ * Starts the optional Teams/window video companion while primary M4A audio is
+ * recording. It never starts audio, never replaces the selected audio source,
+ * and it never makes an active audio session fail. A failed video companion is
+ * observable through recorder_native_get_window_video_stats/last_error.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_window_video(
+    RecorderNativeBridge* bridge,
+    const RecorderNativeWindowVideoStartOptions* options);
+
+/* Stops/finalizes only the optional MP4 companion. Audio keeps recording. */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_stop_window_video(
+    RecorderNativeBridge* bridge);
+
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_get_window_video_stats(
+    const RecorderNativeBridge* bridge,
+    RecorderNativeWindowVideoStats* stats);
+
+/* Independent video diagnostic; follows the same lifetime rules as last_error. */
+RECORDER_NATIVE_API const char* recorder_native_get_window_video_last_error(
+    const RecorderNativeBridge* bridge);
 
 /*
  * Sets the microphone contribution to a mixed M4A capture to an absolute

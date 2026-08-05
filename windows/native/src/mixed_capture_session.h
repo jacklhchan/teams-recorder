@@ -1,6 +1,7 @@
 #pragma once
 #include "recorder_native_bridge.h"
 #include <filesystem>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -27,6 +28,12 @@ public:
     RecorderNativeResult Start(MixedCaptureSessionConfig config);
     RecorderNativeResult Stop();
     RecorderNativeResult SetMicrophoneMuted(bool muted);
+    // Optional companion fan-out. The callback runs on the mixer thread after
+    // the canonical M4A writer accepted the PCM block. Implementations must be
+    // bounded and non-blocking; any companion fault is intentionally isolated.
+    void SetCompanionAudioSink(std::function<void(const float*, std::uint32_t, std::uint64_t)> sink);
+    void ClearCompanionAudioSink();
+    std::uint64_t timeline_origin_100ns() const;
     RecorderNativeResult health_result() const;
     RecorderNativeStats stats() const;
     std::string last_error() const;

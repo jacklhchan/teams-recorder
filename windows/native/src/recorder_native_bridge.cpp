@@ -4,6 +4,7 @@
 #include <audiopolicy.h>
 #include "capture_session.h"
 #include "mixed_capture_session.h"
+#include "window_video_session.h"
 #include "wasapi_capture.h"
 
 #include <propkey.h>
@@ -73,6 +74,9 @@ struct RecorderNativeBridge {
     MediaFoundationRuntime media_foundation;
     std::unique_ptr<recorder::bridge::CaptureSession> session;
     std::unique_ptr<recorder::bridge::MixedCaptureSession> mixed_session;
+    std::shared_ptr<recorder::bridge::WindowVideoSession> window_video_session;
+    RecorderNativeWindowVideoStats last_window_video_stats{};
+    mutable std::string last_window_video_error;
 #endif
 };
 
@@ -333,6 +337,7 @@ extern "C" void recorder_native_destroy(RecorderNativeBridge* bridge) {
         std::lock_guard<std::mutex> lock(bridge->mutex);
         bridge->session.reset();
         bridge->mixed_session.reset();
+        bridge->window_video_session.reset();
     }
     bridge->media_foundation.Shutdown();
 #endif
@@ -527,6 +532,148 @@ extern "C" RecorderNativeResult recorder_native_start_selected_audio(
         return RECORDER_NATIVE_INTERNAL_ERROR;
     }
 #endif
+}
+
+extern "C" RecorderNativeResult recorder_native_start_window_video(
+    RecorderNativeBridge* bridge,
+    const RecorderNativeWindowVideoStartOptions* options) {
+    if (bridge == nullptr) return RECORDER_NATIVE_INVALID_ARGUMENT;
+    if (options == nullptr || options->struct_size < sizeof(RecorderNativeWindowVideoStartOptions) ||
+        options->target_window_handle == 0 || IsNullOrEmpty(options->output_path_utf8) || options->reserved != 0 ||
+        options->frames_per_second == 0 || options->frames_per_second > 60 ||
+        options->video_bitrate_bps < 100'000 || options->video_bitrate_bps > 50'000'000) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT,
+                      "Window video options require a HWND, .mp4 path, 1-60 FPS, valid bitrate, and zero reserved field.");
+    }
+#if !defined(_WIN32)
+    return Reject(bridge, RECORDER_NATIVE_NOT_IMPLEMENTED, "Window video capture is implemented only on Windows.");
+#else
+    std::wstring output;
+    if (!Utf8ToWide(options->output_path_utf8, &output) || output.size() < 4 ||
+        _wcsicmp(output.c_str() + output.size() - 4, L".mp4") != 0) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "Window video output must be valid UTF-8 with a .mp4 extension.");
+    }
+    recorder::bridge::MixedCaptureSession* audio = nullptr;
+    std::uint64_t audio_timeline_origin = 0;
+    std::shared_ptr<recorder::bridge::WindowVideoSession> video;
+    {
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        if (bridge->state != RECORDER_NATIVE_STATE_RECORDING || !bridge->mixed_session) {
+            SetErrorLocked(bridge, "Window video requires an active mixed M4A recording.");
+            return RECORDER_NATIVE_INVALID_STATE;
+        }
+        if (bridge->window_video_session) {
+            SetErrorLocked(bridge, "A window video companion is already active.");
+            return RECORDER_NATIVE_INVALID_STATE;
+        }
+        audio = bridge->mixed_session.get();
+        audio_timeline_origin = audio->timeline_origin_100ns();
+        video = std::make_shared<recorder::bridge::WindowVideoSession>();
+    }
+    recorder::bridge::WindowVideoSessionConfig config;
+    config.target_window_handle = options->target_window_handle;
+    config.output_path = output;
+    config.frames_per_second = options->frames_per_second;
+    config.video_bitrate_bps = options->video_bitrate_bps;
+    config.session_qpc_origin_100ns = audio_timeline_origin;
+    const RecorderNativeResult result = video->Start(std::move(config));
+    if (result != RECORDER_NATIVE_OK) {
+        return Reject(bridge, result, video->last_error().c_str());
+    }
+    {
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        // Audio may have stopped while WGC was initializing. Do not reanimate
+        // it; close only the companion and keep its diagnostic independent.
+        if (bridge->state != RECORDER_NATIVE_STATE_RECORDING || bridge->mixed_session.get() != audio) {
+        } else {
+            bridge->mixed_session->SetCompanionAudioSink([video](const float* samples, std::uint32_t frames, std::uint64_t start) {
+                video->EnqueueAudio(samples, frames, start);
+            });
+            bridge->window_video_session = std::move(video);
+            return RECORDER_NATIVE_OK;
+        }
+    }
+    (void)video->Stop();
+    return Reject(bridge, RECORDER_NATIVE_INVALID_STATE, "The primary M4A recording stopped while window video was starting.");
+#endif
+}
+
+extern "C" RecorderNativeResult recorder_native_stop_window_video(RecorderNativeBridge* bridge) {
+    if (bridge == nullptr) return RECORDER_NATIVE_INVALID_ARGUMENT;
+#if !defined(_WIN32)
+    return Reject(bridge, RECORDER_NATIVE_NOT_IMPLEMENTED, "Window video capture is implemented only on Windows.");
+#else
+    std::shared_ptr<recorder::bridge::WindowVideoSession> video;
+    {
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        if (!bridge->window_video_session) {
+            SetErrorLocked(bridge, "No window video companion is active.");
+            return RECORDER_NATIVE_INVALID_STATE;
+        }
+        video = std::move(bridge->window_video_session);
+        if (bridge->mixed_session) bridge->mixed_session->ClearCompanionAudioSink();
+    }
+    const RecorderNativeResult result = video->Stop();
+    {
+        std::lock_guard<std::mutex> lock(bridge->mutex);
+        bridge->last_window_video_stats = video->stats();
+        bridge->last_window_video_error = video->last_error();
+    }
+    // Deliberately do not overwrite primary bridge error/state: video status is
+    // queried separately and an MP4 failure must not look like M4A failure.
+    return result;
+#endif
+}
+
+extern "C" RecorderNativeResult recorder_native_get_window_video_stats(
+    const RecorderNativeBridge* bridge, RecorderNativeWindowVideoStats* stats) {
+    if (bridge == nullptr || stats == nullptr || stats->struct_size < sizeof(RecorderNativeWindowVideoStats))
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    std::lock_guard<std::mutex> lock(bridge->mutex);
+#if defined(_WIN32)
+    if (bridge->window_video_session) {
+        const auto value = bridge->window_video_session->stats();
+        std::memcpy(stats, &value, sizeof(value));
+        return RECORDER_NATIVE_OK;
+    }
+    if (bridge->last_window_video_stats.struct_size == sizeof(RecorderNativeWindowVideoStats)) {
+        std::memcpy(stats, &bridge->last_window_video_stats, sizeof(*stats));
+        return RECORDER_NATIVE_OK;
+    }
+#endif
+    RecorderNativeWindowVideoStats empty{};
+    empty.struct_size = sizeof(empty);
+    empty.result = RECORDER_NATIVE_INVALID_STATE;
+    std::memcpy(stats, &empty, sizeof(empty));
+    return RECORDER_NATIVE_OK;
+}
+
+extern "C" const char* recorder_native_get_window_video_last_error(const RecorderNativeBridge* bridge) {
+    static constexpr char kNoVideo[] = "No window video companion is active.";
+    static constexpr char kUnknownTerminalVideoFailure[] =
+        "Window video companion stopped without a diagnostic.";
+    if (bridge == nullptr) return kInvalidHandleError;
+    std::lock_guard<std::mutex> lock(bridge->mutex);
+#if defined(_WIN32)
+    if (bridge->window_video_session) {
+        bridge->last_window_video_error = bridge->window_video_session->last_error();
+        return bridge->last_window_video_error.c_str();
+    }
+#endif
+    // A completed companion remains observable after Stop/Finalize through its
+    // frozen stats and diagnostic.  In particular, a successful published MP4
+    // has an intentionally empty diagnostic; do not replace that success with
+    // the misleading "not active" text merely because its live session was
+    // released.
+    if (bridge->last_window_video_stats.struct_size ==
+        sizeof(RecorderNativeWindowVideoStats)) {
+        if (!bridge->last_window_video_error.empty()) {
+            return bridge->last_window_video_error.c_str();
+        }
+        return bridge->last_window_video_stats.result == RECORDER_NATIVE_OK
+            ? "" : kUnknownTerminalVideoFailure;
+    }
+    return kNoVideo;
 }
 
 extern "C" RecorderNativeResult recorder_native_set_microphone_muted(
@@ -726,6 +873,8 @@ extern "C" RecorderNativeResult recorder_native_stop(
     return RECORDER_NATIVE_INVALID_STATE;
 #else
     recorder::bridge::CaptureSession* session = nullptr;
+    recorder::bridge::MixedCaptureSession* mixed = nullptr;
+    std::shared_ptr<recorder::bridge::WindowVideoSession> video;
     {
         std::lock_guard<std::mutex> lock(bridge->mutex);
         if (bridge->state == RECORDER_NATIVE_STATE_READY ||
@@ -742,19 +891,31 @@ extern "C" RecorderNativeResult recorder_native_stop(
         }
         bridge->state = RECORDER_NATIVE_STATE_STOPPING;
         session = bridge->session.get();
+        mixed = bridge->mixed_session.get();
+        video = std::move(bridge->window_video_session);
     }
     RecorderNativeResult result = RECORDER_NATIVE_OK;
     RecorderNativeStats stats{};
     std::string error;
+    // Freeze both companion ingresses at the same bridge boundary, then let
+    // M4A finish its primary drain before MP4 finalization. Video errors stay
+    // independently queryable and never alter `result` below.
+    if (video) (void)video->StopIngress();
     if (session != nullptr) {
         result = session->Stop(); stats = session->stats(); error = session->last_error();
     } else {
-        recorder::bridge::MixedCaptureSession* mixed = nullptr;
-        { std::lock_guard<std::mutex> lock(bridge->mutex); mixed = bridge->mixed_session.get(); }
         result = mixed->Stop(); stats = mixed->stats(); error = mixed->last_error();
     }
 
+    // MixedCaptureSession is fully stopped, so no copied callback can still
+    // enqueue PCM. Detach only after its final bounded audio drain.
+    if (mixed != nullptr) mixed->ClearCompanionAudioSink();
+    if (video) (void)video->Finalize();
     std::lock_guard<std::mutex> lock(bridge->mutex);
+    if (video) {
+        bridge->last_window_video_stats = video->stats();
+        bridge->last_window_video_error = video->last_error();
+    }
     bridge->last_stats = stats;
     bridge->session.reset();
     bridge->mixed_session.reset();

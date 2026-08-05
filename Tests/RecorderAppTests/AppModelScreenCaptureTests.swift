@@ -114,6 +114,31 @@ final class AppModelScreenCaptureTests: XCTestCase {
         XCTAssertTrue(fixture.model.teamsAutoMeetingEnabled)
     }
 
+    func testAutoModeRestartsWindowPollingAfterRecordingStops() async {
+        let ticker = TeamsScreenTestTicker()
+        let fixture = makeFixture(
+            provider: .normal,
+            teamsTicker: ticker,
+            autoMeetingEnabled: true
+        )
+        await selectTeams(in: fixture)
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+
+        fixture.model.startOrStop()
+        await waitUntil {
+            !fixture.engine.isRecording
+                && !fixture.model.isCaptureLifecycleWorking
+        }
+        let baseline = fixture.source.teamsRefreshCount
+
+        await ticker.fire()
+        await ticker.fire()
+        await waitUntil {
+            fixture.source.teamsRefreshCount > baseline
+        }
+    }
+
     func testSelectedTeamsProcessTerminationConfirmsMeetingEnd() async {
         let fixture = makeFixture(
             provider: .normal,

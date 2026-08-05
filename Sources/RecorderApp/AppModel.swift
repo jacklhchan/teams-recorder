@@ -2005,6 +2005,7 @@ final class AppModel: ObservableObject {
                 self.isTeamsScreenCaptureRequested = false
                 self.clearTestRecordingRuntimeState()
                 self.completeAutomaticStopIntent()
+                self.restartTeamsScreenRefreshIfNeeded()
                 guard let ownership = self.recordingOwnership else { return }
                 self.recordingOwnership = nil
                 if ownership == .teamsAutomatic {

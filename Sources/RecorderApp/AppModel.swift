@@ -143,6 +143,8 @@ final class AppModel: ObservableObject {
     ) -> Void
     private let defaults: UserDefaults
     private var cancellables: Set<AnyCancellable> = []
+    private var teamsApplicationLifecycleCancellables:
+        Set<AnyCancellable> = []
     private var captureLifecycleTask: Task<Void, Never>? {
         get { recordingSessionCoordinator.task }
         set { recordingSessionCoordinator.task = newValue }
@@ -502,6 +504,7 @@ final class AppModel: ObservableObject {
         observeRecorderRecordingState()
         refreshDevices()
         guard performStartupWork else { return }
+        installTeamsApplicationLifecycleMonitoring()
         do {
             try LegacyTeamsIntegrationCleaner(
                 secureStore: KeychainSecureValueStore(),
@@ -644,6 +647,8 @@ final class AppModel: ObservableObject {
     func shutdown() {
         guard !isShutDown else { return }
         isShutDown = true
+        invalidateTeamsScreenRefresh()
+        teamsApplicationLifecycleCancellables.removeAll()
         prbFeatureBridge?.shutdown()
         playbackFeature.shutdown()
         transcriptionFeature.shutdown()
@@ -936,6 +941,7 @@ final class AppModel: ObservableObject {
         teamsScreenCaptureCandidates = []
         recorder.resetTeamsWindowResolution()
         guard selectedTeamsApplication != nil else { return }
+        restartTeamsScreenRefreshIfNeeded()
         Task { @MainActor [weak self] in
             await self?.refreshTeamsScreenCaptureNow()
         }
@@ -966,6 +972,45 @@ final class AppModel: ObservableObject {
                 await self.refreshTeamsScreenCaptureNow()
             }
         }
+    }
+
+    private func installTeamsApplicationLifecycleMonitoring() {
+        guard teamsApplicationLifecycleCancellables.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        Publishers.Merge(
+            center.publisher(
+                for: NSWorkspace.didLaunchApplicationNotification
+            ),
+            center.publisher(
+                for: NSWorkspace.didTerminateApplicationNotification
+            )
+        )
+        .compactMap { notification in
+            notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+        }
+        .filter {
+            $0.bundleIdentifier == "com.microsoft.teams2"
+        }
+        .receive(on: RunLoop.main)
+        .sink { [weak self] application in
+            self?.handleTeamsApplicationLifecycleChange(
+                processID: application.processIdentifier,
+                isTerminated: application.isTerminated
+            )
+        }
+        .store(in: &teamsApplicationLifecycleCancellables)
+    }
+
+    func handleTeamsApplicationLifecycleChange(
+        processID: pid_t,
+        isTerminated: Bool
+    ) {
+        if isTerminated,
+           selectedTeamsApplication?.processID == processID {
+            teamsAutoMeetingCoordinator.handleConfirmedMeetingEnd()
+        }
+        refreshCaptureApplications()
     }
 
     private func invalidateTeamsScreenRefresh() {

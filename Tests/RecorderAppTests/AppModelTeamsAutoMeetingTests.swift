@@ -73,6 +73,59 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         XCTAssertEqual(fixture.model.teamsAutoMeetingState, .waitingForMeeting)
     }
 
+    func testCalendarEndRearmsASecondMeetingUsingTheSameWindowIdentity() async {
+        let fixture = makeRecordingFixture()
+        let teamsApplication = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        fixture.model.captureSelection = .init(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: teamsApplication.bundleIdentifier
+        )
+        fixture.model.availableCaptureApplications = [teamsApplication]
+        fixture.model.resolvedCaptureSelection = .application(teamsApplication)
+        fixture.source.teamsWindows = [localTeamsWindow(id: 71)]
+        fixture.model.setTeamsAutoMeetingEnabled(true)
+        await waitUntil {
+            fixture.model.teamsLocalMeetingDetectionState
+                == .confirming(secondsRemaining: 2)
+        }
+        for _ in 0..<2 {
+            await fixture.model.refreshTeamsScreenCaptureNow()
+        }
+        fixture.model.cancelTeamsAutoMeetingCountdown()
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .suppressedUntilMeetingEnd
+        )
+
+        fixture.source.teamsWindows = [localTeamsWindow(
+            id: 71,
+            title: "Calendar | pccw.com | Microsoft Teams"
+        )]
+        for _ in 0..<30 {
+            await fixture.model.refreshTeamsScreenCaptureNow()
+        }
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .waitingForMeeting
+        )
+
+        fixture.source.teamsWindows = [localTeamsWindow(
+            id: 71,
+            title: "Second sync | pccw.com | Microsoft Teams"
+        )]
+        for _ in 0..<3 {
+            await fixture.model.refreshTeamsScreenCaptureNow()
+        }
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .startCountdown(secondsRemaining: 5)
+        )
+    }
+
     func testAutoModeDefaultsOffAndPersistsChanges() {
         withDefaults { defaults in
             let model = makeModel(defaults: defaults)
@@ -858,10 +911,13 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
     }
 
 
-    private func localTeamsWindow(id: CGWindowID) -> TeamsWindowSnapshot {
+    private func localTeamsWindow(
+        id: CGWindowID,
+        title: String = "Weekly sync"
+    ) -> TeamsWindowSnapshot {
         TeamsWindowSnapshot(
             identity: .init(processID: 42, windowID: id),
-            title: "Weekly sync",
+            title: title,
             frame: CGRect(x: 0, y: 0, width: 1_280, height: 720),
             isOnScreen: true,
             layer: 0

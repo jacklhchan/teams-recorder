@@ -90,6 +90,58 @@ final class AppModelScreenCaptureTests: XCTestCase {
         XCTAssertEqual(fixture.source.teamsRefreshCount, stoppedAt)
     }
 
+    func testPersistedAutoModeStartsWindowPollingWhenTeamsSelectionResolves() async {
+        let ticker = TeamsScreenTestTicker()
+        let fixture = makeFixture(
+            provider: .normal,
+            teamsTicker: ticker,
+            autoMeetingEnabled: true
+        )
+        fixture.source.applications = [teamsApplication]
+        fixture.model.captureSelection = .init(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: teamsApplication.bundleIdentifier
+        )
+
+        fixture.model.refreshCaptureApplications()
+        await waitUntil { fixture.source.teamsRefreshCount >= 1 }
+        let baseline = fixture.source.teamsRefreshCount
+        await ticker.fire()
+        await waitUntil {
+            fixture.source.teamsRefreshCount == baseline + 1
+        }
+
+        XCTAssertTrue(fixture.model.teamsAutoMeetingEnabled)
+    }
+
+    func testSelectedTeamsProcessTerminationConfirmsMeetingEnd() async {
+        let fixture = makeFixture(
+            provider: .normal,
+            windows: [teamsWindow(id: 72)],
+            autoMeetingEnabled: true
+        )
+        await selectTeams(in: fixture)
+        for _ in 0..<2 {
+            await fixture.model.refreshTeamsScreenCaptureNow()
+        }
+        fixture.model.cancelTeamsAutoMeetingCountdown()
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .suppressedUntilMeetingEnd
+        )
+
+        fixture.source.applications = []
+        fixture.model.handleTeamsApplicationLifecycleChange(
+            processID: teamsApplication.processID,
+            isTerminated: true
+        )
+
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .waitingForMeeting
+        )
+    }
+
     func testAmbiguityShowsWaitingAndDoesNotCaptureEitherWindow() async throws {
         let first = teamsWindow(id: 3)
         let second = TeamsWindowSnapshot(identity: .init(processID: teamsApplication.processID, windowID: 4), title: "Other call", frame: first.frame, isOnScreen: true, layer: 0)
@@ -961,6 +1013,7 @@ final class AppModelScreenCaptureTests: XCTestCase {
         ticker: StorageTestTicker = StorageTestTicker(),
         teamsTicker: TeamsScreenTestTicker = TeamsScreenTestTicker(),
         windows: [TeamsWindowSnapshot] = [],
+        autoMeetingEnabled: Bool = false,
         disconnectCleanupScheduler: @escaping (
             @escaping @MainActor @Sendable () async -> Void
         ) -> Void = { operation in
@@ -979,6 +1032,10 @@ final class AppModelScreenCaptureTests: XCTestCase {
         defaultsSuiteNames.append(suiteName)
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(
+            autoMeetingEnabled,
+            forKey: "teamsAutoMeetingEnabled"
+        )
         let microphone = AudioDevice(
             id: 1,
             uid: "test-microphone",

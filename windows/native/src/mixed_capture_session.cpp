@@ -8,6 +8,7 @@
 #include "selected_audio_session_facade.h"
 #include "wasapi_capture.h"
 #include "canonical_timeline.h"
+#include "discontinuity_fade.h"
 #include "session_duration_clock.h"
 
 #include <windows.h>
@@ -583,6 +584,18 @@ private:
                         normalized.begin() + static_cast<std::ptrdiff_t>(
                             placement.late_frames_dropped * 2U));
                 }
+                // Canonical timeline placement routinely trims isolated
+                // frames as the QPC/device clocks align. Those corrections
+                // are not audible discontinuities and must remain bit-exact.
+                // Only a discontinuity explicitly reported by WASAPI gets a
+                // bounded de-click fade.
+                const auto discontinuity_edge = block.discontinuity
+                    ? recorder::timeline::DiscontinuityEdge::SourceDiscontinuity
+                    : recorder::timeline::DiscontinuityEdge::None;
+                recorder::timeline::ApplyFadeInAtDiscontinuity(
+                    normalized.data(),
+                    normalized.size() / 2U,
+                    discontinuity_edge);
                 const std::size_t accepted_frame_count = normalized.size() / 2U;
                 while (source.queued_frames + accepted_frame_count > kMaxQueuedFrames &&
                        !source.queue.empty()) {

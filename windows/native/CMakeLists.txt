@@ -275,6 +275,14 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         recorder_enable_strict_warnings(Recorder.Timeline.Tests)
         add_test(NAME Recorder.Timeline.Tests COMMAND Recorder.Timeline.Tests)
 
+        add_executable(Recorder.DiscontinuityFade.Tests
+            timeline/tests/discontinuity_fade_tests.cpp
+        )
+        target_compile_features(Recorder.DiscontinuityFade.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.DiscontinuityFade.Tests PRIVATE timeline)
+        recorder_enable_strict_warnings(Recorder.DiscontinuityFade.Tests)
+        add_test(NAME Recorder.DiscontinuityFade.Tests COMMAND Recorder.DiscontinuityFade.Tests)
+
         add_executable(Recorder.SelectedAudioSessionFacade.Tests
             tests/selected_audio_session_facade_tests.cpp
         )

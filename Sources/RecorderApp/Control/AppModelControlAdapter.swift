@@ -19,10 +19,19 @@ final class AppModelControlAdapter {
 
         switch request.command {
         case .status:
+            guard request.argument == nil else {
+                return invalidArgumentResponse(request)
+            }
             return response(request: request, ok: true)
         case .start:
+            guard request.argument == nil else {
+                return invalidArgumentResponse(request)
+            }
             return response(for: model.startRecordingFromControl(), request: request)
         case .stop:
+            guard request.argument == nil else {
+                return invalidArgumentResponse(request)
+            }
             return response(for: model.stopRecordingFromControl(), request: request)
         case .setAuto:
             guard let enabled = autoArgument(request.argument) else {

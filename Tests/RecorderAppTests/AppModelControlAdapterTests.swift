@@ -30,6 +30,58 @@ final class AppModelControlAdapterTests: XCTestCase {
         XCTAssertNil(response.error)
     }
 
+    func testStopDuringActiveAutomaticRecordingSuppressesCurrentMeeting() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AppModelControlAdapterTests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let ticker = ControlAdapterManualTicker()
+        let coordinator = TeamsAutoMeetingCoordinator(
+            startCountdownSeconds: 1,
+            tick: { await ticker.waitForTick() }
+        )
+        let source = ControlAdapterCaptureSource()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in ControlAdapterWriter() }
+        )
+        let microphone = AudioDevice(
+            id: 2,
+            uid: "control-auto-stop-mic",
+            name: "Control Auto Stop Microphone",
+            manufacturer: "Tests",
+            channelCount: 1
+        )
+        let model = makeModel(
+            microphone: microphone,
+            outputFolder: folder,
+            recorder: engine,
+            teamsAutoMeetingCoordinator: coordinator
+        )
+        model.systemAudioPermission = .granted
+        model.microphonePermission = .granted
+        let adapter = AppModelControlAdapter(model: model)
+
+        _ = await adapter.handle(.init(
+            requestID: "auto-on", command: .setAuto, argument: "on"
+        ))
+        coordinator.handleMeetingState(isInMeeting: true)
+        await ticker.fireAndWaitForAcknowledgement()
+        await waitUntil {
+            engine.isRecording
+                && model.recordingOwnership == .teamsAutomatic
+                && !model.isCaptureLifecycleWorking
+        }
+
+        let response = await adapter.handle(.init(requestID: "auto-stop", command: .stop))
+        await waitUntil { !engine.isRecording && !model.isCaptureLifecycleWorking }
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(model.teamsAutoMeetingState, .suppressedUntilMeetingEnd)
+    }
+
     func testStartWhileAlreadyRecordingDoesNotStartCaptureTwice() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(
             "AppModelControlAdapterTests-\(UUID().uuidString)",
@@ -105,14 +157,18 @@ final class AppModelControlAdapterTests: XCTestCase {
         XCTAssertFalse(model.teamsAutoMeetingEnabled)
     }
 
-    func testInvalidArgumentReturnsStableError() async {
+    func testStatusStartAndStopRejectNonNilArguments() async {
         let model = makeModel()
-        let response = await AppModelControlAdapter(model: model).handle(.init(
-            requestID: "bad-mic", command: .setMic, argument: "toggle"
-        ))
+        let adapter = AppModelControlAdapter(model: model)
 
-        XCTAssertFalse(response.ok)
-        XCTAssertEqual(response.error?.code, "invalid_argument")
+        for command in [RecorderControlCommand.status, .start, .stop] {
+            let response = await adapter.handle(.init(
+                requestID: "bad-\(command)", command: command, argument: "unexpected"
+            ))
+
+            XCTAssertFalse(response.ok, "\(command) should reject an argument")
+            XCTAssertEqual(response.error?.code, "invalid_argument")
+        }
     }
 
     func testStatusProjectsControlSafeAppState() async throws {
@@ -152,7 +208,8 @@ final class AppModelControlAdapterTests: XCTestCase {
     private func makeModel(
         microphone: AudioDevice? = nil,
         outputFolder: URL = URL(fileURLWithPath: "/tmp", isDirectory: true),
-        recorder: RecordingEngine? = nil
+        recorder: RecordingEngine? = nil,
+        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
     ) -> AppModel {
         let suiteName = "AppModelControlAdapterTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -164,7 +221,8 @@ final class AppModelControlAdapterTests: XCTestCase {
             defaultInputDeviceID: { microphone?.id },
             performStartupWork: false,
             initialOutputFolder: outputFolder,
-            volumeCapacityProvider: ControlAdapterStorageProvider()
+            volumeCapacityProvider: ControlAdapterStorageProvider(),
+            teamsAutoMeetingCoordinator: teamsAutoMeetingCoordinator
         )
     }
 
@@ -208,5 +266,20 @@ private final class ControlAdapterWriter: MixedAudioWriting {
 private struct ControlAdapterStorageProvider: VolumeCapacityProviding {
     func availableBytes(onVolumeContaining _: URL) throws -> Int64 {
         Int64(10) * 1_024 * 1_024 * 1_024
+    }
+}
+
+private actor ControlAdapterManualTicker {
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func waitForTick() async {
+        await withCheckedContinuation { continuations.append($0) }
+    }
+
+    func fireAndWaitForAcknowledgement() async {
+        while continuations.isEmpty {
+            await Task.yield()
+        }
+        continuations.removeFirst().resume()
     }
 }

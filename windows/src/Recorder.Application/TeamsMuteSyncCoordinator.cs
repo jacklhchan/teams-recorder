@@ -46,6 +46,7 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
     private readonly IRecorderMicrophoneMuteSink microphone;
     private TeamsMuteSyncSnapshot snapshot = TeamsMuteSyncSnapshot.Initial;
     private bool pairingRequestPending;
+    private long meetingEvidenceRevision;
     private bool enabled;
     private bool microphoneRoutingEngaged;
     private bool disposed;
@@ -59,6 +60,9 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
     }
 
     public event EventHandler<TeamsMuteSyncSnapshot>? SnapshotChanged;
+    public event EventHandler<TeamsMeetingEvidence>? MeetingEvidenceChanged;
+    // Retained for source compatibility. It reports only confirmed paired state;
+    // transport loss is intentionally conveyed through MeetingEvidenceChanged.
     public event EventHandler<bool>? MeetingPresenceChanged;
     public TeamsMuteSyncSnapshot Snapshot { get { lock (gate) return snapshot; } }
 
@@ -179,6 +183,9 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
                             IsMicrophoneRoutingEngaged = microphoneRoutingEngaged,
                             IsPairingKnown = true,
                         });
+                        PublishMeetingEvidenceLocked(revision => state.IsInMeeting
+                            ? new TeamsMeetingEvidence.JoinedConfirmed(client.TransportSnapshot.Generation, revision)
+                            : new TeamsMeetingEvidence.LeftConfirmed(client.TransportSnapshot.Generation, revision));
                         MeetingPresenceChanged?.Invoke(this, state.IsInMeeting);
                     }
                     else
@@ -254,8 +261,13 @@ public sealed class TeamsMuteSyncCoordinator : IDisposable
     {
         var wasTrustedMeeting = snapshot.IsPairingAuthenticated && snapshot.LastMeetingState is { IsInMeeting: true };
         if (microphoneRoutingEngaged) microphone.SetMuted(true);
-        if (wasTrustedMeeting) MeetingPresenceChanged?.Invoke(this, false);
+        if (wasTrustedMeeting)
+            PublishMeetingEvidenceLocked(revision => new TeamsMeetingEvidence.StateUnavailable(
+                client.TransportSnapshot.Generation, revision));
     }
+
+    private void PublishMeetingEvidenceLocked(Func<long, TeamsMeetingEvidence> create) =>
+        MeetingEvidenceChanged?.Invoke(this, create(checked(++meetingEvidenceRevision)));
 
     private static bool IsAlreadyPairedResponse(string message) =>
         message.Contains("already paired", StringComparison.OrdinalIgnoreCase);

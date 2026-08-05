@@ -376,6 +376,29 @@ public sealed record NativeTeamsRenderEndpointProbeResult(
     public bool IsSuccess => Operation.IsSuccess;
 }
 
+/// <summary>Optional MP4 companion for an already-active audio-first M4A session.</summary>
+public sealed record NativeWindowVideoRecordingRequest(
+    ulong WindowHandle,
+    string OutputPath,
+    uint FramesPerSecond = 30,
+    uint VideoBitRate = 4_000_000)
+{
+    public void Validate()
+    {
+        if (WindowHandle == 0) throw new ArgumentOutOfRangeException(nameof(WindowHandle));
+        if (string.IsNullOrWhiteSpace(OutputPath) || OutputPath.IndexOf('\0') >= 0 ||
+            !string.Equals(Path.GetExtension(OutputPath), ".mp4", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Window video output must be an .mp4 path.", nameof(OutputPath));
+        if (FramesPerSecond is 0 or > 60) throw new ArgumentOutOfRangeException(nameof(FramesPerSecond));
+        if (VideoBitRate is < 100_000 or > 50_000_000) throw new ArgumentOutOfRangeException(nameof(VideoBitRate));
+    }
+}
+
+public sealed record NativeWindowVideoSnapshot(
+    NativeOperationResult Operation, bool IsRunning, ulong ReceivedFrames,
+    ulong DeliveredFrames, ulong DroppedFrames, ulong FramePoolRecreates,
+    ulong FirstAcceptedVideoPts100Nanoseconds, ulong LastAcceptedVideoEnd100Nanoseconds);
+
 public interface INativeRecorderBridge : IDisposable
 {
     NativeOperationResult Start(NativeRecordingRequest request);
@@ -415,4 +438,12 @@ public interface INativeSelectedAudioRecorderBridge
 public interface INativeTeamsRenderEndpointProbe
 {
     NativeTeamsRenderEndpointProbeResult ProbeTeamsRenderEndpoints();
+}
+
+/// <summary>Optional, independently fault-contained WGC/MP4 companion capability.</summary>
+public interface INativeWindowVideoRecorderBridge
+{
+    NativeOperationResult StartWindowVideo(NativeWindowVideoRecordingRequest request);
+    NativeOperationResult StopWindowVideo();
+    NativeWindowVideoSnapshot GetWindowVideoSnapshot();
 }

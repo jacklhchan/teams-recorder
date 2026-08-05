@@ -7,6 +7,14 @@ public enum RecordingSessionKind { Meeting, Test, Manual }
 
 public enum RecordingRecoveryState { None, VideoLostAudioPreserved, RecoveredAfterInterruption }
 
+public enum VideoPublicationOutcome { None, Completed, LostAudioPreserved }
+
+/// <summary>Actual accepted MP4 timeline bounds, measured from the recording start.</summary>
+public readonly record struct VideoPublicationInterval(TimeSpan Start, TimeSpan End)
+{
+    public bool IsValid => Start >= TimeSpan.Zero && End > Start;
+}
+
 /// <summary>
 /// The deliberately small, portable description of a Windows audio capture.
 /// It identifies a capture *kind*, never the transient process that supplied it.
@@ -32,6 +40,8 @@ public static class RecordingSessionLayout
     public const string FinalAudioFileName = "recording.m4a";
     public const string BackupAudioFileName = "recording.audio-backup.m4a";
     public const string PartialAudioFileName = "recording.audio-backup.m4a.partial";
+    /// <summary>Optional WGC companion; the canonical session artifact remains M4A audio.</summary>
+    public const string FinalVideoFileName = "recording.mp4";
     public const string MetadataFileName = "recording-info.json";
 
     public static string Prefix(RecordingSessionKind kind) => kind switch
@@ -180,6 +190,33 @@ public static class RecordingInfoJson
     {
         var trimmed = value.Trim();
         return trimmed.Length == 0 ? null : trimmed;
+    }
+
+    public static RecordingInfo CreateVideo(
+        JsonObject? source,
+        string? titleOverride,
+        RecordingSessionKind sessionKind,
+        VideoPublicationInterval interval)
+    {
+        if (!interval.IsValid) throw new ArgumentOutOfRangeException(nameof(interval));
+        var sourceWasMissing = source?["source"] is null;
+        var participantsWereMissing = source?["participants"] is not JsonArray;
+        var normalized = Normalize(source, titleOverride, RecordingRecoveryState.None);
+        var document = normalized.Document.DeepClone() as JsonObject ?? new JsonObject();
+        document["mediaKind"] = "video";
+        document["recoveryState"] = "none";
+        document["screenIntervals"] = new JsonArray(new JsonObject
+        {
+            ["startSeconds"] = interval.Start.TotalSeconds,
+            ["endSeconds"] = interval.End.TotalSeconds,
+        });
+        document.Remove("capturedTeamsWindow");
+        if (sourceWasMissing) document["source"] = SessionSource(sessionKind);
+        if (participantsWereMissing) document["participants"] = new JsonArray();
+        return new RecordingInfo(normalized.Title, normalized.Tags, normalized.IsFavorite, "video",
+            RecordingRecoveryState.None, StringValue(document["source"]) ?? SessionSource(sessionKind),
+            document["participants"]?.DeepClone() as JsonArray ?? new JsonArray(),
+            normalized.SchemaVersion, document, normalized.WindowsCapture);
     }
 
     /// <summary>Applies the bounded Windows capture envelope to compatible metadata.</summary>

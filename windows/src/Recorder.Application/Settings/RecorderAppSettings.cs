@@ -21,6 +21,9 @@ public sealed record RecorderAppSettings
     // These are local opt-ins only. Pairing material remains in the separate DPAPI store.
     [JsonPropertyName("teamsMuteSyncEnabled")] public bool TeamsMuteSyncEnabled { get; init; }
     [JsonPropertyName("teamsAutomaticRecordingEnabled")] public bool TeamsAutomaticRecordingEnabled { get; init; }
+    // This is a local, explicitly chosen heuristic. It carries no Teams token,
+    // no meeting identity, and must never be interpreted as mute-state access.
+    [JsonPropertyName("localHeuristicAutoStartEnabled")] public bool LocalHeuristicAutoStartEnabled { get; init; }
 
     public static RecorderAppSettings Validate(RecorderAppSettings value)
     {

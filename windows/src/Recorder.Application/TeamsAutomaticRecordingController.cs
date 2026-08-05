@@ -29,6 +29,8 @@ public sealed class TeamsAutomaticRecordingController : IAsyncDisposable
     private TaskCompletionSource? operationsIdle;
     private int activeOperations;
     private Task? deferredDispose;
+    private long latestMeetingEvidenceGeneration = -1;
+    private long latestMeetingEvidenceRevision = -1;
     private bool disposed;
 
     public TeamsAutomaticRecordingController(
@@ -53,6 +55,37 @@ public sealed class TeamsAutomaticRecordingController : IAsyncDisposable
 
     public Task SetMeetingPresenceAsync(bool inMeeting, CancellationToken cancellationToken = default) =>
         DispatchAsync(new TeamsAutoMeetingEvent.MeetingPresenceChanged(inMeeting), cancellationToken);
+
+    /// <summary>
+    /// Accepts one user-authorized local heuristic candidate. This deliberately
+    /// bypasses, and never updates, authoritative Teams generation/revision state.
+    /// It can only propose presence=true; there is no local meeting-left path.
+    /// </summary>
+    public Task SetLocalMeetingCandidateAsync(CancellationToken cancellationToken = default) =>
+        DispatchAsync(new TeamsAutoMeetingEvent.MeetingPresenceChanged(true), cancellationToken);
+
+    /// <summary>Accepts only non-stale, paired-transport meeting evidence.</summary>
+    public Task SetMeetingEvidenceAsync(TeamsMeetingEvidence evidence, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        lock (gate)
+        {
+            if (evidence.ConnectionGeneration < latestMeetingEvidenceGeneration ||
+                (evidence.ConnectionGeneration == latestMeetingEvidenceGeneration &&
+                 evidence.Revision <= latestMeetingEvidenceRevision))
+                return Task.CompletedTask;
+            latestMeetingEvidenceGeneration = evidence.ConnectionGeneration;
+            latestMeetingEvidenceRevision = evidence.Revision;
+        }
+        TeamsAutoMeetingEvent @event = evidence switch
+        {
+            TeamsMeetingEvidence.JoinedConfirmed => new TeamsAutoMeetingEvent.MeetingPresenceChanged(true),
+            TeamsMeetingEvidence.LeftConfirmed => new TeamsAutoMeetingEvent.MeetingPresenceChanged(false),
+            TeamsMeetingEvidence.StateUnavailable => new TeamsAutoMeetingEvent.MeetingStateUnavailable(),
+            _ => throw new ArgumentOutOfRangeException(nameof(evidence)),
+        };
+        return DispatchAsync(@event, cancellationToken);
+    }
 
     public Task NotifyManualRecordingStartedAsync(CancellationToken cancellationToken = default) =>
         DispatchAsync(new TeamsAutoMeetingEvent.ManualRecordingStarted(), cancellationToken);

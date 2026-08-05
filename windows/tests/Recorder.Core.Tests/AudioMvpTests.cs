@@ -166,10 +166,46 @@ internal static class AudioMvpTests
         lifecycle.StopAsync().GetAwaiter().GetResult();
     }
 
+    public static void WindowVideoLifecyclePublishesFinalNativeIntervalAndFailsClosed()
+    {
+        using var root = new TemporaryRoot();
+        var successBridge = new MixedBridge { WriteOutputOnStart = true, WriteVideoOutputOnStart = true };
+        using (var lifecycle = new RecordingLifecycleService(successBridge, root.Path))
+        {
+            var started = lifecycle.StartMixedAsync(RecordingSessionKind.Manual, null, null).GetAwaiter().GetResult();
+            var videoStart = lifecycle.StartWindowVideo(new NativeWindowVideoRecordingRequest(
+                1, Path.Combine(started.Session.FolderPath, RecordingSessionLayout.FinalVideoFileName)));
+            if (!videoStart.IsSuccess) throw new InvalidOperationException("The fake video companion did not start.");
+            lifecycle.StopAsync().GetAwaiter().GetResult();
+            var published = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
+            var info = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
+            var interval = info.Document["screenIntervals"] as System.Text.Json.Nodes.JsonArray;
+            if (!published.Published || successBridge.StopCalls != 1 || successBridge.StopWindowVideoCalls != 0 ||
+                info.MediaKind != "video" || interval is not { Count: 1 } ||
+                interval[0]?["startSeconds"]?.GetValue<double>() != 1.25 ||
+                interval[0]?["endSeconds"]?.GetValue<double>() != 4.5)
+                throw new InvalidOperationException("Lifecycle did not publish the final native MP4 interval through unified stop.");
+        }
+
+        var failedBridge = new MixedBridge { WriteOutputOnStart = true, WriteVideoOutputOnStart = true, FinalVideoStatsAreValid = false };
+        using (var lifecycle = new RecordingLifecycleService(failedBridge, root.Path))
+        {
+            var started = lifecycle.StartMixedAsync(RecordingSessionKind.Manual, null, null).GetAwaiter().GetResult();
+            lifecycle.StartWindowVideo(new NativeWindowVideoRecordingRequest(
+                1, Path.Combine(started.Session.FolderPath, RecordingSessionLayout.FinalVideoFileName)));
+            lifecycle.StopAsync().GetAwaiter().GetResult();
+            var published = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
+            var info = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
+            if (!published.Published || failedBridge.StopWindowVideoCalls != 0 ||
+                info.MediaKind != "audio" || info.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved)
+                throw new InvalidOperationException("Invalid final video stats did not retain audio with the video-loss recovery marker.");
+        }
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private static void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new InvalidOperationException($"Expected {typeof(T).Name}."); }
 
-    private sealed class MixedBridge : INativeRecorderBridge, INativeSelectedAudioRecorderBridge
+    private sealed class MixedBridge : INativeRecorderBridge, INativeSelectedAudioRecorderBridge, INativeWindowVideoRecorderBridge
     {
         public NativeOperationResult MixedStartResult { get; set; } = NativeOperationResult.Success();
         public NativeMixedRecordingRequest? LastMixedRequest { get; private set; }
@@ -178,8 +214,12 @@ internal static class AudioMvpTests
         public int SelectedStartCalls { get; private set; }
         public int RegularStartCalls { get; private set; }
         public int StopCalls { get; private set; }
+        public int StopWindowVideoCalls { get; private set; }
         public bool SourceFaulted { get; set; }
         public bool WriteOutputOnStart { get; init; }
+        public bool WriteVideoOutputOnStart { get; init; }
+        public bool FinalVideoStatsAreValid { get; init; } = true;
+        private bool videoRunning;
         private NativeRecorderState state = NativeRecorderState.Ready;
         public NativeOperationResult Start(NativeRecordingRequest request) { RegularStartCalls++; state = NativeRecorderState.Recording; return NativeOperationResult.Success(); }
         public NativeOperationResult StartMixed(NativeMixedRecordingRequest request)
@@ -195,7 +235,22 @@ internal static class AudioMvpTests
             return MixedStartResult;
         }
         public NativeOperationResult StartSelectedAudio(NativeSelectedAudioRequest request) { request.Validate(); LastSelectedRequest = request; SelectedStartCalls++; state = NativeRecorderState.Recording; return NativeOperationResult.Success(); }
-        public NativeOperationResult Stop() { StopCalls++; state = NativeRecorderState.Stopped; return NativeOperationResult.Success(); }
+        public NativeOperationResult Stop() { StopCalls++; state = NativeRecorderState.Stopped; videoRunning = false; return NativeOperationResult.Success(); }
+        public NativeOperationResult StartWindowVideo(NativeWindowVideoRecordingRequest request)
+        {
+            request.Validate();
+            if (WriteVideoOutputOnStart) File.WriteAllBytes(request.OutputPath, [9, 8, 7]);
+            videoRunning = true;
+            return NativeOperationResult.Success();
+        }
+        public NativeOperationResult StopWindowVideo() { StopWindowVideoCalls++; videoRunning = false; return NativeOperationResult.Success(); }
+        public NativeWindowVideoSnapshot GetWindowVideoSnapshot()
+        {
+            var operation = FinalVideoStatsAreValid ? NativeOperationResult.Success() :
+                NativeOperationResult.Failure(NativeRecorderResult.CaptureError, "final MP4 flush failed");
+            return new NativeWindowVideoSnapshot(operation, videoRunning, 2, 2, 0, 0,
+                12_500_000, FinalVideoStatsAreValid ? 45_000_000UL : 0UL);
+        }
         public NativeRecorderSnapshot GetSnapshot() => SourceFaulted
             ? new(
                 NativeRecorderResult.CaptureError,

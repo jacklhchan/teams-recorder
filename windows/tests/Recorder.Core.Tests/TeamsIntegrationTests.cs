@@ -29,12 +29,15 @@ internal static class TeamsIntegrationTests
         var client = new FakeTeamsClient(); var microphone = new RecordingMuteSink();
         using var coordinator = new TeamsMuteSyncCoordinator(client, microphone);
         var presence = new List<bool>(); coordinator.MeetingPresenceChanged += (_, inMeeting) => presence.Add(inMeeting);
+        var evidence = new List<TeamsMeetingEvidence>(); coordinator.MeetingEvidenceChanged += (_, value) => evidence.Add(value);
         coordinator.SetEnabledAsync(true).GetAwaiter().GetResult();
         client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, false), true, false), true));
         client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, true, true, false), true, false), true));
         client.Publish(new TeamsThirdPartyApiEvent.MeetingUpdate(new(new(true, false, true, false), true, false), true));
         client.Disconnect("Teams API unavailable");
-        if (!microphone.Calls.SequenceEqual([true, false, true]) || !presence.SequenceEqual([true, true, true, false])) throw new InvalidOperationException("Mute routing or meeting updates were not ordered and fail-closed.");
+        if (!microphone.Calls.SequenceEqual([true, false, true]) || !presence.SequenceEqual([true, true, true])) throw new InvalidOperationException("Mute routing or confirmed meeting updates were not ordered and fail-closed.");
+        if (evidence.LastOrDefault() is not TeamsMeetingEvidence.StateUnavailable)
+            throw new InvalidOperationException("A lost Teams connection must publish unavailable evidence, not a confirmed leave.");
         Equal(TeamsMuteSyncStatus.WaitingForTeamsApi, coordinator.Snapshot.Status); Equal("Teams API unavailable", coordinator.Snapshot.Detail!);
         Equal(false, coordinator.Snapshot.IsPairingAuthenticated);
         if (coordinator.Snapshot.LastMeetingState is not null) throw new InvalidOperationException("A disconnected meeting state must not remain trusted.");

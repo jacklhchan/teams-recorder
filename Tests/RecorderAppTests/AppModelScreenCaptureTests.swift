@@ -1033,12 +1033,52 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
+    func testRefreshDevicesDuringRecordingUpdatesDevicesWithoutChangingActiveMicrophone() async throws {
+        let initialMicrophone = AudioDevice(
+            id: 1,
+            uid: "test-microphone",
+            name: "Test Microphone",
+            manufacturer: "Tests",
+            channelCount: 1
+        )
+        let refreshedMicrophone = AudioDevice(
+            id: 2,
+            uid: "refreshed-microphone",
+            name: "Refreshed Microphone",
+            manufacturer: "Tests",
+            channelCount: 2
+        )
+        var inputDevices = [initialMicrophone]
+        let fixture = makeFixture(
+            provider: .normal,
+            inputDevices: { inputDevices }
+        )
+
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording }
+        let activeMicrophoneUID = fixture.engine.continuitySnapshot.microphoneUID
+
+        inputDevices = [refreshedMicrophone]
+        fixture.model.refreshDevices()
+
+        XCTAssertEqual(fixture.model.devices, [refreshedMicrophone])
+        XCTAssertEqual(
+            fixture.engine.continuitySnapshot.microphoneUID,
+            activeMicrophoneUID
+        )
+        XCTAssertTrue(fixture.engine.isRecording)
+
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
     private func makeFixture(
         provider: StorageCapacityTestProvider,
         ticker: StorageTestTicker = StorageTestTicker(),
         teamsTicker: TeamsScreenTestTicker = TeamsScreenTestTicker(),
         windows: [TeamsWindowSnapshot] = [],
         autoMeetingEnabled: Bool = false,
+        inputDevices: (() -> [AudioDevice])? = nil,
         disconnectCleanupScheduler: @escaping (
             @escaping @MainActor @Sendable () async -> Void
         ) -> Void = { operation in
@@ -1071,7 +1111,7 @@ final class AppModelScreenCaptureTests: XCTestCase {
         let model = AppModel(
             defaults: defaults,
             recorder: engine,
-            inputDevices: { [microphone] },
+            inputDevices: inputDevices ?? { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
             permissionRequestHandler: { _, _ in },

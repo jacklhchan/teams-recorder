@@ -371,6 +371,13 @@ private struct CaptureSourceControlsView: View {
                 )
             )
             .disabled(!model.sourceControlsEnabled)
+            Button { model.refreshDevices() } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .help("Refresh microphones")
+            .accessibilityLabel("Refresh microphones")
+            .accessibilityIdentifier("recorder.settings.microphone-refresh")
             Text(model.selectedMicDevice?.channelText ?? "Unavailable").foregroundStyle(.secondary)
         }
     }

@@ -1542,6 +1542,34 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertFalse(try host.isEnabled("recorder.settings.microphone-picker"))
     }
 
+    func testMicrophoneRefreshRemainsEnabledWhileRecording() async throws {
+        let fixture = makeLifecycleWorkingFixture()
+        let recordingFolder = URL(
+            fileURLWithPath: NSTemporaryDirectory(),
+            isDirectory: true
+        )
+        _ = try await fixture.model.recorder.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: recordingFolder
+        )
+        defer {
+            Task { @MainActor in
+                _ = await fixture.model.recorder.stop()
+            }
+        }
+
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.settings)
+
+        XCTAssertFalse(try host.isEnabled("recorder.settings.microphone-picker"))
+        XCTAssertTrue(try host.isEnabled("recorder.settings.microphone-refresh"))
+    }
+
     func testDirectionASettingsKeepsEveryExistingControlReachable() throws {
         let fixture = makeStartupDisabledFixture(
             systemPermission: .granted,
@@ -1562,6 +1590,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             ("audio", [
                 "recorder.settings.capture-section",
                 "recorder.settings.microphone-picker",
+                "recorder.settings.microphone-refresh",
                 "recorder.settings.audio-integration-section",
                 "virtual-mic-privacy-mute-detail"
             ]),
@@ -1677,7 +1706,10 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         let source = PausedRefreshCaptureSource()
-        let recorder = RecordingEngine(captureSource: source)
+        let recorder = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in RenderTestWriter() }
+        )
         let model = AppModel(
             defaults: defaults,
             recorder: recorder,
@@ -2532,6 +2564,11 @@ private final class PausedRefreshCaptureSource: CaptureSourceProtocol {
         refreshContinuation?.resume()
         refreshContinuation = nil
     }
+}
+
+private final class RenderTestWriter: MixedAudioWriting {
+    func write(_: MixedAudioBlock) throws {}
+    func close() throws {}
 }
 
 private final class RenderBlockingTranscriptionAudioPreparer: TranscriptionAudioPreparing, @unchecked Sendable {

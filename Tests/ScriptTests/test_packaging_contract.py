@@ -288,6 +288,59 @@ class PackagingContractTests(unittest.TestCase):
             self.assertEqual(destination.read_text(encoding="utf-8"), "preserve me")
             self.assertFalse((destination / "recorderctl").exists())
 
+    def test_cli_installer_rejects_test_hook_before_real_destination_access(self):
+        installer = ROOT / "scripts/install-recorder-cli.sh"
+        script = installer.read_text(encoding="utf-8")
+        python_blocks = script.split("<<'PY'\n")
+        self.assertEqual(len(python_blocks), 3)
+        safe_link_program = python_blocks[2].split("\nPY\n", 1)[0]
+        destination_stubs = """
+def forbidden_destination_access(*args, **kwargs):
+    raise AssertionError("real destination access reached")
+
+os.lstat = forbidden_destination_access
+os.unlink = forbidden_destination_access
+os.symlink = forbidden_destination_access
+os.link = forbidden_destination_access
+"""
+        safe_link_program = safe_link_program.replace(
+            "removed_existing = False",
+            f"{destination_stubs}\nremoved_existing = False",
+            1,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            helper = root / "Local Meeting Recorder.app/Contents/Helpers/recorderctl"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("#!/bin/sh\n", encoding="utf-8")
+            helper.chmod(0o755)
+            hook_source = root / "hook-source"
+            hook_source.write_text("must not move", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    "/usr/bin/python3",
+                    "-c",
+                    safe_link_program,
+                    "/usr/local/bin/recorderctl",
+                    str(helper),
+                    "local.meeting.recorder.build-app.v1",
+                    "/",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "RECORDER_CLI_TEST_POST_UNLINK_SOURCE": str(hook_source),
+                },
+            )
+            self.assertEqual(result.returncode, 73, result.stderr)
+            self.assertIn("redirected test install root", result.stderr)
+            self.assertNotIn("real destination access reached", result.stderr)
+            self.assertEqual(hook_source.read_text(encoding="utf-8"), "must not move")
+
     def test_readme_describes_current_provider_and_license(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         normalized_readme = " ".join(readme.split())

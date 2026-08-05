@@ -90,6 +90,16 @@ try:
 except (OSError, RuntimeError):
     refuse("Recorder helper cannot be resolved.")
 
+test_source = os.environ.get("RECORDER_CLI_TEST_POST_UNLINK_SOURCE")
+if test_source:
+    try:
+        canonical_install_root = Path(install_root or "/").resolve(strict=True)
+    except (OSError, RuntimeError):
+        refuse("The post-unlink test seam requires a redirected test install root.")
+    real_destination = Path("/usr/local/bin/recorderctl")
+    if canonical_install_root == Path("/") or link == real_destination:
+        refuse("The post-unlink test seam requires a redirected test install root.")
+
 removed_existing = False
 try:
     checked = os.lstat(link)
@@ -147,11 +157,8 @@ if checked is not None:
         refuse("Could not remove the validated Recorder CLI symlink.")
     removed_existing = True
 
-# Deterministic test seam, accepted only under a redirected test install root.
-test_source = os.environ.get("RECORDER_CLI_TEST_POST_UNLINK_SOURCE")
+# Deterministic test seam, guarded above before any destination mutation.
 if test_source and removed_existing:
-    if not install_root:
-        refuse("The post-unlink test seam requires a redirected install root.")
     try:
         os.link(test_source, link, follow_symlinks=False)
     except OSError:

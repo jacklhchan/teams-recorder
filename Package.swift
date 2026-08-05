@@ -9,10 +9,15 @@ let package = Package(
     ],
     products: [
         .library(name: "RecorderControl", targets: ["RecorderControl"]),
+        .executable(name: "recorderctl", targets: ["RecorderControlCLI"]),
         .executable(name: "LocalMeetingRecorder", targets: ["RecorderApp"])
     ],
     targets: [
         .target(name: "RecorderControl"),
+        .executableTarget(
+            name: "RecorderControlCLI",
+            dependencies: ["RecorderControl"]
+        ),
         .target(
             name: "VirtualMicBridge",
             path: "Sources/VirtualMicBridge"
@@ -39,6 +44,10 @@ let package = Package(
         .testTarget(
             name: "RecorderControlTests",
             dependencies: ["RecorderControl"]
+        ),
+        .testTarget(
+            name: "RecorderControlCLITests",
+            dependencies: ["RecorderControlCLI", "RecorderControl"]
         )
     ],
     cxxLanguageStandard: .cxx17

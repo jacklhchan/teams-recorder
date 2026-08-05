@@ -1,6 +1,17 @@
 import AppKit
 import SwiftUI
 
+enum AppLaunchMode: Equatable {
+    case interactive
+    case backgroundControl
+
+    init(arguments: [String]) {
+        self = arguments.contains("--background-control")
+            ? .backgroundControl
+            : .interactive
+    }
+}
+
 @main
 struct LocalMeetingRecorderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -36,6 +47,7 @@ private protocol AppCommands {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var runtimeStorage: AppRuntime?
+    private let launchMode = AppLaunchMode(arguments: CommandLine.arguments)
 
     @MainActor
     var runtime: AppRuntime {
@@ -48,11 +60,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-
-        DispatchQueue.main.async {
-            self.mainWindow?.makeKeyAndOrderFront(nil)
+        switch launchMode {
+        case .interactive:
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.async {
+                self.mainWindow?.makeKeyAndOrderFront(nil)
+            }
+        case .backgroundControl:
+            NSApp.setActivationPolicy(.accessory)
+            DispatchQueue.main.async {
+                self.mainWindow?.orderOut(nil)
+            }
         }
     }
 
@@ -60,6 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
+        sender.setActivationPolicy(.regular)
+        sender.activate(ignoringOtherApps: true)
         mainWindow?.makeKeyAndOrderFront(nil)
         return true
     }

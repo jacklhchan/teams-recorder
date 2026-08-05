@@ -194,6 +194,13 @@ struct TeamsMeetingWindowResolver {
         return .ready(TeamsWindowMatch(window: first.window, confidence: confidence(for: first.meetingEraScore)))
     }
 
+    mutating func observeLocal(
+        _ windows: [TeamsWindowSnapshot],
+        now: Date
+    ) -> TeamsWindowResolution {
+        observe(windows, meetingActive: true, now: now)
+    }
+
     mutating func selectManualOverride(_ identity: TeamsWindowIdentity?) {
         guard identity != manualOverride else { return }
         manualOverride = identity

@@ -142,6 +142,20 @@
                         </ListView>
                         <TextBlock Text="{Binding ProcessCatalogStatusText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     </StackPanel>
+                    <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
+                        <StackPanel Spacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <TextBlock Text="Teams 畫面錄製（選用）" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" />
+                                <Button Command="{Binding RefreshTeamsWindowCaptureCommand}" Content="重新整理 Teams 視窗" />
+                            </StackPanel>
+                            <TextBlock Text="只顯示可擷取的 Teams 頂層視窗。視窗標題只供顯示；重新整理後只有同一程序實例及同一視窗才會保留選取。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding TeamsWindowCaptures}" SelectedItem="{Binding SelectedTeamsWindowCapture, Mode=TwoWay}" />
+                            <TextBlock Text="{Binding SelectedTeamsWindowCapture.Description}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <ToggleSwitch Header="錄製 Teams 畫面" IsOn="{Binding IsTeamsWindowCaptureRequested, Mode=TwoWay}" IsEnabled="{Binding CanRequestTeamsWindowCapture}" />
+                            <TextBlock Text="{Binding TeamsWindowCaptureStatusText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="影片伴隨檔" Message="{Binding TeamsWindowCaptureRequestWarning}" />
+                        </StackPanel>
+                    </Border>
                     <StackPanel Spacing="5">
                         <TextBlock Text="工作階段資料庫" />
                         <TextBox IsEnabled="{Binding IsDeviceSelectionEnabled}" PlaceholderText="選擇儲存工作階段的資料夾" Text="{Binding OutputFolder, Mode=TwoWay}" />
@@ -164,6 +178,12 @@
                     <InfoBar IsOpen="{Binding IsTeamsPairingRepairRecommended}" IsClosable="False" Severity="Warning" Title="Teams API 未提供會議狀態" Message="{Binding TeamsPairingHealthText}" />
                     <TextBlock Text="{Binding TeamsPairingHealthText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     <TextBlock Text="{Binding TeamsMuteRoutingText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
+                        <StackPanel Spacing="6">
+                            <ToggleSwitch Header="以本機 Teams 狀態推測自動開始（選用）" IsOn="{Binding IsLocalHeuristicAutoStartEnabled, Mode=TwoWay}" />
+                            <InfoBar IsOpen="True" IsClosable="False" Severity="Warning" Title="不等同 Teams API" Message="{Binding LocalHeuristicAutoStartWarning}" />
+                        </StackPanel>
+                    </Border>
                     <StackPanel Orientation="Horizontal" Spacing="10">
                         <Button Command="{Binding EnableTeamsMuteSyncCommand}" Content="啟用 Teams 靜音同步" />
                         <Button Command="{Binding DisableTeamsMuteSyncCommand}" Content="停用" />

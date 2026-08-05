@@ -12,7 +12,8 @@
 | recording-session metadata | 共享 root session contract | 已使用 root Draft 2020-12 contract；selected capture 只寫 `audioSource`、安全 `processName`、`includedProcessTree`，不寫 PID、路徑、命令列、token | schema validation、cross-platform fixture 與 privacy round-trip tests | 檢查產生的 session metadata 不含敏感欄位 | 真實錄製 metadata 通過 schema 且 privacy review | PR #1 contract；本 branch 加 selected metadata |
 | 手動／10 秒測試／Teams 自動擁有權 | manual 不被 auto stop；Teams 自動有 countdown/debounce | manual、test、Teams-automatic 皆進 application lifecycle；10 秒 selected test 可取消且只 stop 一次 | coordinator/lifecycle/Teams state-machine tests | 手動開始、10 秒取消、Teams Preview pairing 狀態 | 記錄 ownership 與取消 smoke；Teams 仍不是 Selected App 的隔離證據 | PR #1 基礎；本 branch 追加 selected path |
 | Teams API／mute／自動錄製 | macOS Third-party App API 功能 | Windows 僅 Preview，非本 PR 交付或 release 主張 | protocol/transport state tests | per-tenant pairing 與 meeting-state probe | 另立 Teams API gate；不可作為 Teams-only isolation 或 GA 證明 | PR #1 Preview，非本 branch scope |
-| 視訊、WGC product capture、虛擬麥克風、轉錄、signed distribution | macOS 有較完整的對應功能 | Deferred／非目標 | 僅有各自的 probe 或 feature gate | 不適用 | 不可標示 feature complete | 不在本 branch |
+| Teams 視窗 WGC + MP4 companion | macOS 視窗影像／影音 session | **Draft implemented，非 GA**：只枚舉 exact `ms-teams` 的安全 top-level HWND，並以 process start time + HWND fail-closed 重驗；WGC BGRA frame 經 bounded queue 寫 H.264/AAC MP4，失敗保留 M4A audio | window-policy、A/V timeline、MP4 writer、metadata/privacy tests | 受控兩帳號 Teams call、window close、resize、DPI/多螢幕、最少一小時錄影 | MP4 可重開、影音 timestamp/區段正確、video failure 不傷 audio；所有人工 gate 完成前不可稱 GA | 本 branch Draft |
+| 虛擬麥克風、signed distribution | macOS 有較完整的對應功能 | Deferred／非目標 | 各自既有 probe 或 feature gate | 不適用 | 不可標示 feature complete | 不在本 branch |
 
 ## Selected App 的範圍與隱私界線
 
@@ -29,4 +30,4 @@
 
 ## 明確非目標
 
-本 Draft 不包含 waveform UI、ASR/轉錄、video/WGC product capture、virtual microphone driver、signed distribution，或任何「一般可用 Teams-only isolation」主張。Teams pairing、mute sync 與自動錄製仍然是獨立 Preview，不能取代 selected-app dual-tone gate。
+本 Draft 不包含一般可用的 Teams 視窗錄影、virtual microphone driver、signed distribution，或任何「一般可用 Teams-only isolation」主張。Teams-window WGC/MP4 僅為 Draft implemented，尚待兩帳號、resize/DPI 與長時間實機 gate。Teams Third-party App API、mute sync 與自動錄製仍是 optional Preview；本機 Teams 音訊 heuristic 必須由使用者 opt-in、只可在 authoritative transport degraded/unavailable 時提出一次開始候選，且不能作為 Teams mute sync 或 meeting-left 證據。

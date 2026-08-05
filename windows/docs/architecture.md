@@ -1,11 +1,11 @@
 # 實作狀態更新（2026-07-29）
 
-本文件原為實作前架構規格，部分 Phase 0/1 文字不代表目前的產品承諾。請先以 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md) 為準：它記錄已完成的 system-loopback／可選麥克風 AAC M4A 路徑，以及已接入 WinUI 的 storage、無覆寫 promotion、library、capacity gate 與保守 recovery 流程；實機 release gate 仍未完成。Teams API、程序隔離錄製、視訊、虛擬麥克風與轉寫均不在此 MVP 範圍。
+本文件原為實作前架構規格，部分 Phase 0/1 文字不代表目前的產品承諾。請先以 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md) 為準：它記錄已完成的 system-loopback／可選麥克風 AAC M4A 路徑，以及已接入 WinUI 的 storage、無覆寫 promotion、library、capacity gate 與保守 recovery 流程；實機 release gate 仍未完成。另有 Draft implemented 的 exact Teams top-level window WGC + H.264/AAC MP4 companion；它不是 GA，仍待兩帳號、resize/DPI 和長時間實機 gate。Third-party API 仍是 optional Preview；本機 heuristic 必須 opt-in，且不提供 Teams mute sync。
 
 # Windows Migration：Phase 0/1 架構規格
 
 **狀態：** 實作前規格
-**範圍：** Windows audio-first MVP；Teams 視窗影像、虛擬麥克風和轉寫不在本階段。
+**範圍：** Windows audio-first MVP；另含非 GA 的 Teams exact-window WGC/MP4 Draft。虛擬麥克風和轉寫不在本階段。
 
 ## Solution 邊界
 
@@ -51,7 +51,7 @@ WASAPI callback / capture worker
 - native queue 必須有上限與明確 overflow policy；丟棄數量累計到 health report，不可悄悄丟失。
 - managed 層只能收到 scalar meter/health snapshot、狀態事件、已完成 session URL 和已複製的錯誤字串。若需交給 managed 做 waveform，傳送經固定速率下採樣的數值，而非 PCM buffer。
 - PCM 寫檔與 backup writer 使用同一 native session generation。停止時先停止 ingress、等待 bounded drain、只 finalize 一次；若 primary writer 失敗，安全 audio backup 繼續嘗試完成。
-- Phase 1 不引入 `Windows.Graphics.Capture`。未來影像實作同樣要在 native side 保持 `ID3D11Texture2D`/MF sample，managed 只收 frame telemetry、影像區段與 preview 的安全複本。
+- Draft WGC path 已在 native side 使用 `Windows.Graphics.Capture`、D3D11 BGRA copy、bounded queue 與 Media Foundation H.264/AAC MP4 companion；managed 只保留 target identity、scalar telemetry 和安全的 metadata。它只能選 exact `ms-teams` 的安全 top-level HWND，且須在開始前以 process start time + HWND 重新驗證。此路徑尚未通過實機 GA gate。
 
 此決策對應 macOS `RecordingMediaCoordinator` 的核心成果：影音 mux 失敗時要保留音訊，而不是讓 managed callback 或 video 失敗破壞整個 session。
 
@@ -95,7 +95,7 @@ Windows 必須讀寫 macOS 的資料夾型 session contract，並採取向前相
 }
 ```
 
-`mediaKind` 是 `audio` 或 `video`；`recoveryState` 是 `none`、`videoLostAudioPreserved`、`recoveredAfterInterruption`。只有 `recording.mp4` 且有非空 `screenIntervals` 時才向 UI 投影為 video；其他情況一律 audio，並清除 stale screen metadata。Phase 1 不得寫 `capturedTeamsWindow` 或非空 `screenIntervals`。
+`mediaKind` 是 `audio` 或 `video`；`recoveryState` 是 `none`、`videoLostAudioPreserved`、`recoveredAfterInterruption`。只有已驗證的 `recording.mp4` 且有非空 `screenIntervals` 時才向 UI 投影為 video；其他情況一律 audio，並清除 stale screen metadata。Draft WGC 不寫 `capturedTeamsWindow`、window title、路徑、PID 或 Teams token。
 
 finalize 採同一目錄內的 temporary/partial → validate → no-replace promotion。若 final 已存在，復原和完成路徑都必須失敗保留證據，絕不覆寫。啟動復原僅提升可驗證的同目錄 audio backup，成功後才標記 `recoveredAfterInterruption`。
 

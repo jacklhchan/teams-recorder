@@ -25,6 +25,11 @@ The repository now contains:
   layout with a backup M4A, no-replace promotion, library discovery, capacity
   decisions, and conservative interrupted-session recovery;
 - local M4A library discovery and playback controls in the WinUI shell.
+- a **Draft implemented** Teams-window companion path: it enumerates only
+  exact `ms-teams` top-level windows, rejects hidden/cloaked/tool/child/owned
+  and zero-size windows, and keeps process-start-time/HWND identity in memory
+  for revalidation. Native WGC frames feed an independently bounded H.264/AAC
+  MP4 companion; an MP4 failure preserves the primary M4A audio session.
 - an explicit OpenAI-compatible ASR workflow for one selected, completed M4A
   session at a time, plus a separately confirmed transcript-only LLM meeting
   summary. The API key is held only in the current Windows user's DPAPI store;
@@ -47,8 +52,14 @@ unverified Preview and must not be presented as working, reliable, or capable of
 controlling Teams mute. The integration relies on supported pushed events and
 uses one best-effort `query-state` request after its receive loop is active, so
 an authenticated connection can obtain its current meeting state even when Teams
-does not emit a new transition push. Video capture and a
-virtual microphone driver are not available. Aggregate
+does not emit a new transition push. The Third-party App API remains an
+optional Preview. The local Teams-audio heuristic is separately opt-in, is
+only permitted while authoritative transport is degraded/unavailable, can
+propose a one-time recording start, and never reads or changes Teams mute.
+The Draft WGC/MP4 path has automated contract and timeline evidence, but is
+not GA: it still requires controlled two-account Teams, resize/DPI, and
+long-duration validation before any availability claim. A virtual microphone
+driver is not available. Aggregate
 health is available, but source-specific health statistics are not yet exposed.
 
 The AI workflow never uploads media automatically: each ASR request requires

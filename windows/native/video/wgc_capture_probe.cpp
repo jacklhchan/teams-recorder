@@ -114,6 +114,14 @@ public:
 
     ~ProbeApartment() {
         if (initialized_by_probe_) {
+            // C++/WinRT caches activation factories process-wide.  A probe can
+            // be the first WinRT caller in a command-line or unpackaged host,
+            // in which case this apartment owns the matching RoInitialize.
+            // Drop factories obtained in that apartment before RoUninitialize;
+            // otherwise a later capture worker can reuse a proxy whose module
+            // was torn down with the probe apartment (observed as an AV while
+            // AddRef'ing IGraphicsCaptureItemInterop).
+            winrt::clear_factory_cache();
             RoUninitialize();
         }
     }

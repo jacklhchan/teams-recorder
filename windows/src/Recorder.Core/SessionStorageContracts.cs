@@ -7,6 +7,24 @@ public enum RecordingSessionKind { Meeting, Test, Manual }
 
 public enum RecordingRecoveryState { None, VideoLostAudioPreserved, RecoveredAfterInterruption }
 
+public enum VideoPublicationOutcome { None, Completed, LostAudioPreserved }
+
+/// <summary>Actual accepted MP4 timeline bounds, measured from the recording start.</summary>
+public readonly record struct VideoPublicationInterval(TimeSpan Start, TimeSpan End)
+{
+    public bool IsValid => Start >= TimeSpan.Zero && End > Start;
+}
+
+/// <summary>One independently finalized MP4 companion segment.</summary>
+public sealed record VideoPublicationSegment(string FileName, VideoPublicationInterval Interval)
+{
+    public bool IsValid => Interval.IsValid &&
+        !string.IsNullOrWhiteSpace(FileName) &&
+        FileName.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 &&
+        string.Equals(Path.GetExtension(FileName), ".mp4", StringComparison.OrdinalIgnoreCase) &&
+        !FileName.Contains(Path.DirectorySeparatorChar) && !FileName.Contains(Path.AltDirectorySeparatorChar);
+}
+
 /// <summary>
 /// The deliberately small, portable description of a Windows audio capture.
 /// It identifies a capture *kind*, never the transient process that supplied it.
@@ -32,6 +50,15 @@ public static class RecordingSessionLayout
     public const string FinalAudioFileName = "recording.m4a";
     public const string BackupAudioFileName = "recording.audio-backup.m4a";
     public const string PartialAudioFileName = "recording.audio-backup.m4a.partial";
+    /// <summary>Optional WGC companion; the canonical session artifact remains M4A audio.</summary>
+    public const string FinalVideoFileName = "recording.mp4";
+    /// <summary>First segment retains the historical name; every restart uses a new owned artifact.</summary>
+    public static string VideoSegmentFileName(int ordinal) => ordinal switch
+    {
+        1 => FinalVideoFileName,
+        > 1 => $"recording.video-{ordinal:D4}.mp4",
+        _ => throw new ArgumentOutOfRangeException(nameof(ordinal)),
+    };
     public const string MetadataFileName = "recording-info.json";
 
     public static string Prefix(RecordingSessionKind kind) => kind switch
@@ -135,6 +162,7 @@ public static class RecordingInfoJson
         var document = normalized.Document.DeepClone() as JsonObject ?? new JsonObject();
         document["mediaKind"] = "audio";
         document["screenIntervals"] = new JsonArray();
+        document.Remove("windowsVideoSegments");
         document.Remove("capturedTeamsWindow");
         if (sourceWasMissing) document["source"] = SessionSource(sessionKind);
         if (participantsWereMissing) document["participants"] = new JsonArray();
@@ -180,6 +208,44 @@ public static class RecordingInfoJson
     {
         var trimmed = value.Trim();
         return trimmed.Length == 0 ? null : trimmed;
+    }
+
+    public static RecordingInfo CreateVideo(
+        JsonObject? source,
+        string? titleOverride,
+        RecordingSessionKind sessionKind,
+        IReadOnlyList<VideoPublicationSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        if (segments.Count == 0 || segments.Any(static segment => !segment.IsValid))
+            throw new ArgumentException("At least one valid video segment is required.", nameof(segments));
+        var sourceWasMissing = source?["source"] is null;
+        var participantsWereMissing = source?["participants"] is not JsonArray;
+        var normalized = Normalize(source, titleOverride, RecordingRecoveryState.None);
+        var document = normalized.Document.DeepClone() as JsonObject ?? new JsonObject();
+        document["mediaKind"] = "video";
+        document["recoveryState"] = "none";
+        // screenIntervals is part of the cross-platform Draft 2020-12 contract
+        // and accepts only start/end. Segment artifact names are Windows-only
+        // extension data so schema validation remains portable.
+        document["screenIntervals"] = new JsonArray(segments.Select(segment => new JsonObject
+        {
+            ["startSeconds"] = segment.Interval.Start.TotalSeconds,
+            ["endSeconds"] = segment.Interval.End.TotalSeconds,
+        }).ToArray());
+        document["windowsVideoSegments"] = new JsonArray(segments.Select(segment => new JsonObject
+        {
+            ["fileName"] = segment.FileName,
+            ["startSeconds"] = segment.Interval.Start.TotalSeconds,
+            ["endSeconds"] = segment.Interval.End.TotalSeconds,
+        }).ToArray());
+        document.Remove("capturedTeamsWindow");
+        if (sourceWasMissing) document["source"] = SessionSource(sessionKind);
+        if (participantsWereMissing) document["participants"] = new JsonArray();
+        return new RecordingInfo(normalized.Title, normalized.Tags, normalized.IsFavorite, "video",
+            RecordingRecoveryState.None, StringValue(document["source"]) ?? SessionSource(sessionKind),
+            document["participants"]?.DeepClone() as JsonArray ?? new JsonArray(),
+            normalized.SchemaVersion, document, normalized.WindowsCapture);
     }
 
     /// <summary>Applies the bounded Windows capture envelope to compatible metadata.</summary>

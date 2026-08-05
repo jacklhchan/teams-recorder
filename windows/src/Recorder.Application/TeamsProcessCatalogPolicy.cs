@@ -24,7 +24,8 @@ public static class TeamsProcessCatalogPolicy
         return IsTeamsExecutable(entry.ProcessName) || IsTeamsExecutable(entry.ApplicationName);
     }
 
-    private static bool IsTeamsExecutable(string value) =>
+    public static bool IsTeamsExecutable(string value) =>
         WindowsExecutableBasename.TryCreateExecutableBasename(value, out var executable) &&
-        string.Equals(executable, "ms-teams.exe", StringComparison.OrdinalIgnoreCase);
+        (string.Equals(executable, "ms-teams.exe", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(executable, "teams.exe", StringComparison.OrdinalIgnoreCase));
 }

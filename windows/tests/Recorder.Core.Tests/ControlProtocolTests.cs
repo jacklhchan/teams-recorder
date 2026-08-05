@@ -21,9 +21,6 @@ internal static class ControlProtocolTests
         {
             RecorderControlProtocol.Status,
             RecorderControlProtocol.RefreshDevices,
-            RecorderControlProtocol.RefreshTeams,
-            RecorderControlProtocol.PairTeams,
-            RecorderControlProtocol.ResetTeamsPairing,
             RecorderControlProtocol.Start,
             RecorderControlProtocol.Test,
             RecorderControlProtocol.Stop,

@@ -21,6 +21,9 @@ public abstract record TeamsAutoMeetingEvent
 {
     public sealed record AutoMeetingEnabled(bool Enabled) : TeamsAutoMeetingEvent;
     public sealed record MeetingPresenceChanged(bool IsInMeeting) : TeamsAutoMeetingEvent;
+    // A disconnected, expired, or otherwise untrusted transport is not evidence that
+    // the meeting ended. It may cancel a pending start but must not stop a capture.
+    public sealed record MeetingStateUnavailable : TeamsAutoMeetingEvent;
     public sealed record StartCountdownTicked : TeamsAutoMeetingEvent;
     public sealed record StopDebounceTicked : TeamsAutoMeetingEvent;
     public sealed record AutomaticStartSucceeded : TeamsAutoMeetingEvent;
@@ -79,6 +82,7 @@ public sealed class TeamsAutoMeetingMachine
     {
         TeamsAutoMeetingEvent.AutoMeetingEnabled enabled => SetEnabled(snapshot, enabled.Enabled),
         TeamsAutoMeetingEvent.MeetingPresenceChanged presence => MeetingChanged(snapshot, presence.IsInMeeting),
+        TeamsAutoMeetingEvent.MeetingStateUnavailable => MeetingStateUnavailable(snapshot),
         TeamsAutoMeetingEvent.StartCountdownTicked => StartTick(snapshot),
         TeamsAutoMeetingEvent.StopDebounceTicked => StopTick(snapshot),
         TeamsAutoMeetingEvent.AutomaticStartSucceeded => snapshot.State is TeamsAutoMeetingState.Starting
@@ -136,6 +140,25 @@ public sealed class TeamsAutoMeetingMachine
             TeamsAutoMeetingState.AutomaticRecording or TeamsAutoMeetingState.ManualRecording => TeamsAutoMeetingTransition.NoCommand(snapshot with { State = new TeamsAutoMeetingState.StopCountdown(stopDebounceSeconds) }),
             TeamsAutoMeetingState.SuppressedUntilMeetingEnd or TeamsAutoMeetingState.StartBlocked or TeamsAutoMeetingState.StartFailed => TeamsAutoMeetingTransition.NoCommand(snapshot with { State = new TeamsAutoMeetingState.WaitingForMeeting() }),
             _ => TeamsAutoMeetingTransition.NoCommand(snapshot)
+        };
+    }
+
+    private TeamsAutoMeetingTransition MeetingStateUnavailable(TeamsAutoMeetingSnapshot snapshot)
+    {
+        // Clear presence so enabling automation while state is unavailable cannot reuse
+        // an old positive observation. Keep an already-running capture in place: only a
+        // confirmed leave may enter the stop debounce.
+        snapshot = snapshot with { IsInMeeting = false };
+        return snapshot.State switch
+        {
+            TeamsAutoMeetingState.StartCountdown => TeamsAutoMeetingTransition.NoCommand(
+                snapshot with { State = new TeamsAutoMeetingState.WaitingForMeeting() }),
+            TeamsAutoMeetingState.Starting => new(
+                snapshot with { State = new TeamsAutoMeetingState.WaitingForMeeting() },
+                new TeamsAutoMeetingCommand[] { new TeamsAutoMeetingCommand.CancelAutomaticStart() }),
+            TeamsAutoMeetingState.StopCountdown => TeamsAutoMeetingTransition.NoCommand(
+                snapshot with { State = RecordingStateForOwner(snapshot.RecordingOwner), SuppressesStopUntilEndDebounce = false }),
+            _ => TeamsAutoMeetingTransition.NoCommand(snapshot),
         };
     }
 

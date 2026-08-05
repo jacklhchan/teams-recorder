@@ -93,6 +93,7 @@
                                 <TextBlock Text="{Binding RecordingMicrophoneMuteText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center" />
                             </StackPanel>
                             <TextBlock Text="{Binding GlobalMuteHotKeyStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding RecorderMicrophoneControlText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                     </Grid>
                     <StackPanel Spacing="6">
@@ -142,6 +143,20 @@
                         </ListView>
                         <TextBlock Text="{Binding ProcessCatalogStatusText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     </StackPanel>
+                    <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
+                        <StackPanel Spacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <TextBlock Text="Teams 畫面錄製（選用）" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" />
+                                <Button Command="{Binding RefreshTeamsWindowCaptureCommand}" Content="重新整理 Teams 視窗" />
+                            </StackPanel>
+                            <TextBlock Text="只顯示可擷取的 Teams 頂層視窗。視窗標題只供顯示；重新整理後只有同一程序實例及同一視窗才會保留選取。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding TeamsWindowCaptures}" SelectedItem="{Binding SelectedTeamsWindowCapture, Mode=TwoWay}" />
+                            <TextBlock Text="{Binding SelectedTeamsWindowCapture.Description}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <ToggleSwitch Header="錄製 Teams 畫面" IsOn="{Binding IsTeamsWindowCaptureRequested, Mode=TwoWay}" IsEnabled="{Binding CanRequestTeamsWindowCapture}" />
+                            <TextBlock Text="{Binding TeamsWindowCaptureStatusText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="影片伴隨檔" Message="{Binding TeamsWindowCaptureRequestWarning}" />
+                        </StackPanel>
+                    </Border>
                     <StackPanel Spacing="5">
                         <TextBlock Text="工作階段資料庫" />
                         <TextBox IsEnabled="{Binding IsDeviceSelectionEnabled}" PlaceholderText="選擇儲存工作階段的資料夾" Text="{Binding OutputFolder, Mode=TwoWay}" />
@@ -158,23 +173,19 @@
 
             <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
                 <StackPanel Spacing="10">
-                    <TextBlock Text="Teams 會議／靜音 Preview（選用）" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock Text="此區會持續檢查 Teams token 與會議狀態是否真正同步。僅有已儲存憑證或 WebSocket 連線並不代表同步健康；沒有收到完整會議狀態時，自動錄音會保持關閉。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                    <TextBlock Text="{Binding TeamsMuteStatusText}" TextWrapping="Wrap" />
-                    <InfoBar IsOpen="{Binding IsTeamsPairingRepairRecommended}" IsClosable="False" Severity="Warning" Title="Teams API 未提供會議狀態" Message="{Binding TeamsPairingHealthText}" />
-                    <TextBlock Text="{Binding TeamsPairingHealthText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                    <TextBlock Text="{Binding TeamsMuteRoutingText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                    <StackPanel Orientation="Horizontal" Spacing="10">
-                        <Button Command="{Binding EnableTeamsMuteSyncCommand}" Content="啟用 Teams 靜音同步" />
-                        <Button Command="{Binding DisableTeamsMuteSyncCommand}" Content="停用" />
-                        <Button Command="{Binding RequestTeamsPairingCommand}" Content="在 Teams 中要求配對" />
-                        <Button Command="{Binding RepairTeamsPairingCommand}" Content="修復 Teams 配對" />
-                    </StackPanel>
+                    <TextBlock Text="Teams 本機推測自動錄音（選用）" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="不需 Teams API、token、配對或系統管理員核准。Recorder 只觀察本機 Teams 程序與 WASAPI 播放工作階段；無法讀取或猜測 Teams 靜音狀態。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
+                        <StackPanel Spacing="6">
+                            <ToggleSwitch Header="允許本機 Teams 推測控制自動開始／停止" IsOn="{Binding IsLocalHeuristicAutoStartEnabled, Mode=TwoWay}" />
+                            <InfoBar IsOpen="True" IsClosable="False" Severity="Warning" Title="本機推測限制" Message="{Binding LocalHeuristicAutoStartWarning}" />
+                        </StackPanel>
+                    </Border>
                     <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Teams 自動錄音（選用）" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="預設關閉。配對連線可先由使用者明確啟用；只有收到完整可信的會議狀態後才會開始倒數。此功能只控制本機 M4A 工作階段，絕不向 Teams 發出錄音或靜音命令。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-                            <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="故障安全限制" Message="未收到可信 Teams 會議狀態時，Recorder 不會觸發自動錄音。「修復 Teams 配對」會清除本機舊 token 並重新握手；只有新的 token 與完整 meeting state 都到達才算修復完成。" />
+                            <TextBlock Text="自動錄音控制" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="開始需要連續 Teams 播放工作階段訊號；播放訊號消失可能只是會議沉默，不會停止。只有 Teams 程序連續 3 次不存在才提出停止；探針故障不會停止。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <InfoBar IsOpen="True" IsClosable="False" Severity="Informational" Title="可隨時手動控制" Message="浮動視窗會顯示錄音狀態，使用者可在倒數期間取消，或在錄音期間手動停止並保留 M4A。" />
                             <TextBlock Text="{Binding TeamsAutomaticRecordingStatusText}" TextWrapping="Wrap" />
                             <StackPanel Orientation="Horizontal" Spacing="10">
                                 <Button Command="{Binding EnableTeamsAutomaticRecordingCommand}" Content="啟用自動錄音" />

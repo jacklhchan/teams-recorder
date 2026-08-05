@@ -26,12 +26,13 @@ public sealed partial class RecordingOverlayWindow : Window
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer indicatorTimer;
     private bool indicatorVisible = true;
     private bool isClosing;
+    private bool isApplyingPresentation;
 
     public RecordingOverlayWindow()
     {
         InitializeComponent();
 
-        AppWindow.Resize(new SizeInt32(360, 108));
+        AppWindow.Resize(new SizeInt32(420, 158));
         AppWindow.IsShownInSwitchers = false;
         MoveToWorkingAreaCorner();
         if (AppWindow.Presenter is OverlappedPresenter presenter)
@@ -55,15 +56,31 @@ public sealed partial class RecordingOverlayWindow : Window
 
     public event EventHandler? StopRequested;
 
+    public event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+
     internal void ApplyPresentation(RecordingOverlayPresentation presentation)
     {
         var isRecording = presentation.Mode == RecordingOverlayMode.Recording;
+        isApplyingPresentation = true;
+        try
+        {
         StatusText.Text = isRecording ? "錄音中" : "自動錄音即將開始";
         CountdownText.Visibility = isRecording ? Visibility.Collapsed : Visibility.Visible;
         CountdownText.Text = $"倒數 {presentation.RemainingSeconds} 秒";
         ActionButton.Content = isRecording ? "停止" : "取消";
         ActionButton.AccessKey = isRecording ? "停止錄音" : "取消自動錄音";
         AutomationProperties.SetName(ActionButton, isRecording ? "停止錄音" : "取消自動錄音");
+        TeamsWindowCaptureToggle.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
+        TeamsWindowCaptureToggle.IsEnabled = isRecording && presentation.CanToggleTeamsWindowCapture;
+        TeamsWindowCaptureToggle.IsOn = presentation.IsTeamsWindowCaptureEnabled;
+        TeamsWindowCaptureStatusText.Visibility = isRecording && !string.IsNullOrWhiteSpace(presentation.TeamsWindowCaptureStatus)
+            ? Visibility.Visible : Visibility.Collapsed;
+        TeamsWindowCaptureStatusText.Text = presentation.TeamsWindowCaptureStatus ?? string.Empty;
+        }
+        finally
+        {
+            isApplyingPresentation = false;
+        }
 
         if (isRecording)
         {
@@ -124,6 +141,15 @@ public sealed partial class RecordingOverlayWindow : Window
         }
 
         CancelRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnTeamsWindowCaptureToggleToggled(object sender, RoutedEventArgs e)
+    {
+        if (!isApplyingPresentation)
+        {
+            TeamsWindowCaptureToggleRequested?.Invoke(this,
+                new TeamsWindowCaptureToggleRequestedEventArgs(TeamsWindowCaptureToggle.IsOn));
+        }
     }
 
     private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)

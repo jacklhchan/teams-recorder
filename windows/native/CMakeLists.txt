@@ -60,6 +60,7 @@ if(WIN32)
 
     add_library(Recorder.Timeline STATIC
         timeline/canonical_timeline.cpp
+        timeline/av_sync_timeline.cpp
     )
     target_compile_features(Recorder.Timeline PUBLIC cxx_std_17)
     target_include_directories(Recorder.Timeline PUBLIC timeline)
@@ -90,6 +91,8 @@ target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadw
         src/capture_session.cpp
         src/mixed_capture_session.cpp
         src/m4a_writer.cpp
+        src/mp4_av_writer.cpp
+        src/window_video_session.cpp
     )
     target_include_directories(Recorder.NativeBridge PRIVATE src)
     target_link_libraries(Recorder.NativeBridge
@@ -99,6 +102,7 @@ target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadw
             Recorder.Resample
             Recorder.Timeline
             Recorder.WasapiCapture
+            Recorder.WgcWindowCapture
             Recorder.Wav
             mfplat
             mfreadwrite
@@ -128,10 +132,24 @@ target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadw
     target_link_libraries(Recorder.WgcCaptureProbe PUBLIC dwmapi windowsapp)
     recorder_enable_strict_warnings(Recorder.WgcCaptureProbe)
 
+    add_library(Recorder.WgcWindowCapture STATIC
+        video/wgc_window_capture.cpp
+    )
+    target_compile_features(Recorder.WgcWindowCapture PUBLIC cxx_std_17)
+    target_include_directories(Recorder.WgcWindowCapture PUBLIC video)
+    target_link_libraries(Recorder.WgcWindowCapture PUBLIC
+        d3d11 dxgi windowsapp)
+    recorder_enable_strict_warnings(Recorder.WgcWindowCapture)
+
     add_executable(Recorder.WgcCaptureProbe.Tool tools/wgc_capture_probe_main.cpp)
     target_compile_features(Recorder.WgcCaptureProbe.Tool PRIVATE cxx_std_17)
     target_link_libraries(Recorder.WgcCaptureProbe.Tool PRIVATE Recorder.WgcCaptureProbe)
     recorder_enable_strict_warnings(Recorder.WgcCaptureProbe.Tool)
+
+    add_executable(Recorder.WgcWindowCapture.Tool tools/wgc_window_capture_main.cpp)
+    target_compile_features(Recorder.WgcWindowCapture.Tool PRIVATE cxx_std_17)
+    target_link_libraries(Recorder.WgcWindowCapture.Tool PRIVATE Recorder.WgcWindowCapture)
+    recorder_enable_strict_warnings(Recorder.WgcWindowCapture.Tool)
 
     add_executable(Recorder.ProcessLoopbackProbe
         process_loopback/process_loopback_probe.cpp
@@ -226,6 +244,27 @@ if(RECORDER_NATIVE_BUILD_TESTS)
             TIMEOUT 90
     )
 
+        add_executable(Recorder.Mp4AvWriter.Tests
+            tests/mp4_av_writer_tests.cpp
+            src/mp4_av_writer.cpp
+        )
+    target_compile_features(Recorder.Mp4AvWriter.Tests PRIVATE cxx_std_17)
+    target_include_directories(Recorder.Mp4AvWriter.Tests PRIVATE src)
+    target_link_libraries(Recorder.Mp4AvWriter.Tests PRIVATE mfplat mfreadwrite mfuuid)
+    recorder_enable_strict_warnings(Recorder.Mp4AvWriter.Tests)
+        add_test(NAME Recorder.Mp4AvWriter.Synthetic COMMAND Recorder.Mp4AvWriter.Tests)
+
+        add_executable(Recorder.WindowVideoPublicationPolicy.Tests
+            tests/window_video_publication_policy_tests.cpp
+        )
+        target_compile_features(Recorder.WindowVideoPublicationPolicy.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.WindowVideoPublicationPolicy.Tests PRIVATE src)
+        target_link_libraries(Recorder.WindowVideoPublicationPolicy.Tests PRIVATE Recorder.Timeline)
+        recorder_enable_strict_warnings(Recorder.WindowVideoPublicationPolicy.Tests)
+        add_test(NAME Recorder.WindowVideoPublicationPolicy.Tests COMMAND Recorder.WindowVideoPublicationPolicy.Tests)
+    set_tests_properties(Recorder.Mp4AvWriter.Synthetic PROPERTIES
+        LABELS "mp4;media-foundation" RUN_SERIAL TRUE TIMEOUT 90)
+
     if(WIN32)
         add_executable(Recorder.WasapiCapture.EndpointProbe
             audio/tests/wasapi_capture_probe.cpp
@@ -234,6 +273,12 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         target_link_libraries(Recorder.WasapiCapture.EndpointProbe PRIVATE Recorder.WasapiCapture)
         recorder_enable_strict_warnings(Recorder.WasapiCapture.EndpointProbe)
         add_test(NAME Recorder.WasapiCapture.EndpointProbe COMMAND Recorder.WasapiCapture.EndpointProbe)
+
+        add_executable(Recorder.WgcFrameHelpers.Tests video/tests/wgc_frame_helpers_tests.cpp)
+        target_compile_features(Recorder.WgcFrameHelpers.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.WgcFrameHelpers.Tests PRIVATE video)
+        recorder_enable_strict_warnings(Recorder.WgcFrameHelpers.Tests)
+        add_test(NAME Recorder.WgcFrameHelpers.Tests COMMAND Recorder.WgcFrameHelpers.Tests)
 
         add_executable(Recorder.ProcessLoopback.Tests
             process_loopback/process_loopback_tests.cpp
@@ -274,6 +319,14 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         target_link_libraries(Recorder.Timeline.Tests PRIVATE Recorder.Timeline)
         recorder_enable_strict_warnings(Recorder.Timeline.Tests)
         add_test(NAME Recorder.Timeline.Tests COMMAND Recorder.Timeline.Tests)
+
+        add_executable(Recorder.AvSyncTimeline.Tests
+            timeline/tests/av_sync_timeline_tests.cpp
+        )
+        target_compile_features(Recorder.AvSyncTimeline.Tests PRIVATE cxx_std_17)
+        target_link_libraries(Recorder.AvSyncTimeline.Tests PRIVATE Recorder.Timeline)
+        recorder_enable_strict_warnings(Recorder.AvSyncTimeline.Tests)
+        add_test(NAME Recorder.AvSyncTimeline.Tests COMMAND Recorder.AvSyncTimeline.Tests)
 
         add_executable(Recorder.DiscontinuityFade.Tests
             timeline/tests/discontinuity_fade_tests.cpp

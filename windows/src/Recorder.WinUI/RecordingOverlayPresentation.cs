@@ -10,7 +10,10 @@ public sealed record RecordingOverlayState(
     bool IsTeamsAutomaticStartCountdown,
     int? CountdownSeconds,
     bool CanCancelAutomaticStart,
-    bool CanStopRecording);
+    bool CanStopRecording,
+    bool CanToggleTeamsWindowCapture = false,
+    bool IsTeamsWindowCaptureEnabled = false,
+    string? TeamsWindowCaptureStatus = null);
 
 /// <summary>
 /// Optional adapter boundary for a ViewModel. The overlay itself needs no
@@ -52,13 +55,28 @@ public enum RecordingOverlayRecordingKind
 public sealed record RecordingOverlayPresentation(
     RecordingOverlayMode Mode,
     int RemainingSeconds = 0,
-    RecordingOverlayRecordingKind? RecordingKind = null)
+    RecordingOverlayRecordingKind? RecordingKind = null,
+    bool CanToggleTeamsWindowCapture = false,
+    bool IsTeamsWindowCaptureEnabled = false,
+    string? TeamsWindowCaptureStatus = null)
 {
     public static RecordingOverlayPresentation Countdown(int remainingSeconds) =>
         new(RecordingOverlayMode.Countdown, Math.Max(0, remainingSeconds));
 
-    public static RecordingOverlayPresentation Recording(RecordingOverlayRecordingKind kind) =>
-        new(RecordingOverlayMode.Recording, RecordingKind: kind);
+    public static RecordingOverlayPresentation Recording(
+        RecordingOverlayRecordingKind kind,
+        bool canToggleTeamsWindowCapture = false,
+        bool isTeamsWindowCaptureEnabled = false,
+        string? teamsWindowCaptureStatus = null) =>
+        new(RecordingOverlayMode.Recording, RecordingKind: kind,
+            CanToggleTeamsWindowCapture: canToggleTeamsWindowCapture,
+            IsTeamsWindowCaptureEnabled: isTeamsWindowCaptureEnabled,
+            TeamsWindowCaptureStatus: teamsWindowCaptureStatus);
+}
+
+public sealed class TeamsWindowCaptureToggleRequestedEventArgs(bool enabled) : EventArgs
+{
+    public bool Enabled { get; } = enabled;
 }
 
 /// <summary>
@@ -71,11 +89,14 @@ public interface IRecordingOverlayPresenter : IDisposable
 
     event EventHandler? StopRequested;
 
+    event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+
     /// <summary>Shows the Teams automatic-recording cancellation countdown.</summary>
     void ShowCountdown(int remainingSeconds);
 
     /// <summary>Shows the recording state after any source successfully starts.</summary>
-    void ShowRecording(RecordingOverlayRecordingKind kind);
+    void ShowRecording(RecordingOverlayRecordingKind kind, bool canToggleTeamsWindowCapture,
+        bool isTeamsWindowCaptureEnabled, string? teamsWindowCaptureStatus);
 
     void Hide();
 }
@@ -95,17 +116,22 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter
         window = new RecordingOverlayWindow();
         window.CancelRequested += (_, _) => CancelRequested?.Invoke(this, EventArgs.Empty);
         window.StopRequested += (_, _) => StopRequested?.Invoke(this, EventArgs.Empty);
+        window.TeamsWindowCaptureToggleRequested += (_, args) => TeamsWindowCaptureToggleRequested?.Invoke(this, args);
     }
 
     public event EventHandler? CancelRequested;
 
     public event EventHandler? StopRequested;
 
+    public event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+
     public void ShowCountdown(int remainingSeconds) =>
         Update(RecordingOverlayPresentation.Countdown(remainingSeconds));
 
-    public void ShowRecording(RecordingOverlayRecordingKind kind) =>
-        Update(RecordingOverlayPresentation.Recording(kind));
+    public void ShowRecording(RecordingOverlayRecordingKind kind, bool canToggleTeamsWindowCapture,
+        bool isTeamsWindowCaptureEnabled, string? teamsWindowCaptureStatus) =>
+        Update(RecordingOverlayPresentation.Recording(kind, canToggleTeamsWindowCapture,
+            isTeamsWindowCaptureEnabled, teamsWindowCaptureStatus));
 
     public void Hide()
     {

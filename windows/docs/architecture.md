@@ -1,11 +1,11 @@
 # 實作狀態更新（2026-07-29）
 
-本文件原為實作前架構規格，部分 Phase 0/1 文字不代表目前的產品承諾。請先以 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md) 為準：它記錄已完成的 system-loopback／可選麥克風 AAC M4A 路徑，以及已接入 WinUI 的 storage、無覆寫 promotion、library、capacity gate 與保守 recovery 流程；實機 release gate 仍未完成。Teams API、程序隔離錄製、視訊、虛擬麥克風與轉寫均不在此 MVP 範圍。
+本文件原為實作前架構規格，部分 Phase 0/1 文字不代表目前的產品承諾。請先以 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md) 為準：它記錄已完成的 system-loopback／可選麥克風 AAC M4A 路徑，以及已接入 WinUI 的 storage、無覆寫 promotion、library、capacity gate 與保守 recovery 流程；實機 release gate 仍未完成。另有 Draft implemented 的 exact Teams top-level window WGC + H.264/AAC MP4 companion；它不是 GA，仍待兩帳號、resize/DPI 和長時間實機 gate。app/CLI 不使用 Teams Third-party API pairing；自動錄音是明確 opt-in 的本機 WASAPI session heuristic，且不提供 Teams mute sync。
 
 # Windows Migration：Phase 0/1 架構規格
 
 **狀態：** 實作前規格
-**範圍：** Windows audio-first MVP；Teams 視窗影像、虛擬麥克風和轉寫不在本階段。
+**範圍：** Windows audio-first MVP；另含非 GA 的 Teams exact-window WGC/MP4 Draft。虛擬麥克風和轉寫不在本階段。
 
 ## Solution 邊界
 
@@ -51,7 +51,9 @@ WASAPI callback / capture worker
 - native queue 必須有上限與明確 overflow policy；丟棄數量累計到 health report，不可悄悄丟失。
 - managed 層只能收到 scalar meter/health snapshot、狀態事件、已完成 session URL 和已複製的錯誤字串。若需交給 managed 做 waveform，傳送經固定速率下採樣的數值，而非 PCM buffer。
 - PCM 寫檔與 backup writer 使用同一 native session generation。停止時先停止 ingress、等待 bounded drain、只 finalize 一次；若 primary writer 失敗，安全 audio backup 繼續嘗試完成。
-- Phase 1 不引入 `Windows.Graphics.Capture`。未來影像實作同樣要在 native side 保持 `ID3D11Texture2D`/MF sample，managed 只收 frame telemetry、影像區段與 preview 的安全複本。
+- Draft WGC path 已在 native side 使用 `Windows.Graphics.Capture`、D3D11 BGRA copy、bounded queue 與 Media Foundation H.264/AAC MP4 companion；managed 只保留 target identity、scalar telemetry 和安全的 metadata。它只能選 exact `ms-teams` 的安全 top-level HWND，且須在開始前以 process start time + HWND 重新驗證。此路徑尚未通過實機 GA gate。
+- 視訊 companion 可在一個 audio session 期間由主視窗或 non-activating overlay 開啟、關閉及再次開啟。每次成功的 native video span 都以 accepted PTS interval 發佈；關閉 companion 不停止 M4A，整個 session 停止則走同一 native stop boundary，先 drain audio 再 finalize MP4。
+- 本機 automatic heuristic 只以 sustained Teams playback activity 提出開始。錄音後 render session 缺失必須視為可能的安靜會議，絕不自停；只有 Teams process 連續三次 poll 缺失才可自停。一般離會由浮動視窗的 Stop 明確完成。
 
 此決策對應 macOS `RecordingMediaCoordinator` 的核心成果：影音 mux 失敗時要保留音訊，而不是讓 managed callback 或 video 失敗破壞整個 session。
 
@@ -62,7 +64,7 @@ WASAPI callback / capture worker
 3. 第一個已接受 audio block 建立 source anchor；寫入 PTS 是 `block.startFrame - anchorFrame`。不能以負數、NaN、倒退或 overflow PTS 寫入。
 4. 系統與麥克風同時存在時，mixer 只在兩者已知範圍內輸出；其中一來源斷線後，清掉該來源 pending data，剩餘來源可繼續。mic mute 應輸出靜音而不是改寫時間軸。
 5. 任何 block gap 都是 health/timeline discontinuity，不能被呈現為連續錄音時間。晚到 block 計為 late frame；queue overflow、格式轉換失敗與來源 disconnect 均記 counters。
-6. 未來 video 的 source PTS 必須映射到相同 anchor；重複、倒退及超出 audio 尾端兩秒的畫面一律 drop。此為既有 `RecordingTimeline`（96,000 frames lead）語意的 Windows 對等要求，非 Phase 1 功能。
+6. video 的 source PTS 必須映射到相同 anchor；重複、倒退及超出 audio 尾端兩秒的畫面一律 drop。每個已接受 video span 的 start/end 必須滿足 `start >= 0` 與 `end > start`；metadata 不得以 UI wall clock 代替 native accepted PTS。
 
 ## Session compatibility contract
 
@@ -95,7 +97,7 @@ Windows 必須讀寫 macOS 的資料夾型 session contract，並採取向前相
 }
 ```
 
-`mediaKind` 是 `audio` 或 `video`；`recoveryState` 是 `none`、`videoLostAudioPreserved`、`recoveredAfterInterruption`。只有 `recording.mp4` 且有非空 `screenIntervals` 時才向 UI 投影為 video；其他情況一律 audio，並清除 stale screen metadata。Phase 1 不得寫 `capturedTeamsWindow` 或非空 `screenIntervals`。
+`mediaKind` 是 `audio` 或 `video`；`recoveryState` 是 `none`、`videoLostAudioPreserved`、`recoveredAfterInterruption`。只有已驗證的 `recording.mp4` 且有非空、有效的 native accepted-PTS `screenIntervals` 時才向 UI 投影為 video；其他情況一律 audio，並清除 stale screen metadata。Draft WGC 不寫 `capturedTeamsWindow`、window title、路徑、PID 或 Teams token。
 
 finalize 採同一目錄內的 temporary/partial → validate → no-replace promotion。若 final 已存在，復原和完成路徑都必須失敗保留證據，絕不覆寫。啟動復原僅提升可驗證的同目錄 audio backup，成功後才標記 `recoveredAfterInterruption`。
 
@@ -118,7 +120,7 @@ finalize 採同一目錄內的 temporary/partial → validate → no-replace pro
 
 - 錄音預設完全本機；Phase 1 不上傳媒體、telemetry、transcript 或 endpoint inventory。
 - 資料夾、檔案開啟、刪除與復原均以 canonical path 驗證在使用者選定 output root 內；拒絕 reparse point、非 regular file 與 path traversal。刪除走 Recycle Bin，且僅針對使用者選取 session。
-- 不把 Teams pairing token（目前 macOS 暫存於 UserDefaults 的已知限制）複製到 Windows。日後若啟用 Teams，token 需使用 Windows credential protection 並從 log/redaction 清單排除。
+- Windows app/CLI 不保存或使用 Teams pairing token。本機 automatic heuristic 只處理本機 WASAPI audio-session evidence，絕不讀寫 Teams 狀態或 mute。
 - 虛擬麥克風屬 driver 安全邊界；在有簽章、最小權限、安裝／卸載及音訊隔離設計前，禁止納入應用程式權限或 Phase 1 安裝器。
 
 ## Phase 0/1 測試責任

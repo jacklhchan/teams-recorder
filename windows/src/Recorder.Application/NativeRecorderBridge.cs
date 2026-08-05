@@ -12,7 +12,7 @@ public sealed class NativeRecorderInteropException : Exception
     }
 }
 
-public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge, INativeTeamsRenderEndpointProbe
+public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge, INativeTeamsRenderEndpointProbe, INativeWindowVideoRecorderBridge
 {
     private const string RequiredAbiVersion = "0.8.0";
     private readonly object gate = new();
@@ -317,6 +317,8 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         if (Marshal.SizeOf<NativeStartOptions>() != 32 ||
             Marshal.SizeOf<NativeMixedStartOptions>() != 40 ||
             Marshal.SizeOf<NativeSelectedAudioStartOptions>() != 56 ||
+            Marshal.SizeOf<NativeWindowVideoStartOptions>() != 40 ||
+            Marshal.SizeOf<NativeWindowVideoStats>() != 64 ||
             Marshal.SizeOf<NativeStats>() != 272)
         {
             throw new NativeRecorderInteropException(
@@ -434,6 +436,62 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         public uint Reserved;
     }
 
+    public NativeOperationResult StartWindowVideo(NativeWindowVideoRecordingRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request); request.Validate();
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            var path = Marshal.StringToCoTaskMemUTF8(request.OutputPath);
+            try
+            {
+                var options = new NativeWindowVideoStartOptions { StructSize = checked((uint)Marshal.SizeOf<NativeWindowVideoStartOptions>()), TargetWindowHandle = request.WindowHandle, OutputPathUtf8 = path, FramesPerSecond = request.FramesPerSecond, VideoBitRateBps = request.VideoBitRate };
+                return ToOperationResult(NativeMethods.StartWindowVideo(handle, ref options));
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return NativeOperationResult.Failure(NativeRecorderResult.NotImplemented,
+                    "The installed native recorder bridge does not support Teams window video capture.");
+            }
+            finally { Marshal.FreeCoTaskMem(path); }
+        }
+    }
+
+    public NativeOperationResult StopWindowVideo()
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            try { return ToOperationResult(NativeMethods.StopWindowVideo(handle)); }
+            catch (EntryPointNotFoundException)
+            {
+                return NativeOperationResult.Failure(NativeRecorderResult.NotImplemented,
+                    "The installed native recorder bridge does not support Teams window video capture.");
+            }
+        }
+    }
+
+    public NativeWindowVideoSnapshot GetWindowVideoSnapshot()
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            try
+            {
+                var stats = new NativeWindowVideoStats { StructSize = checked((uint)Marshal.SizeOf<NativeWindowVideoStats>()) };
+                var result = NativeMethods.GetWindowVideoStats(handle, ref stats);
+                var operation = result == NativeRecorderResult.Ok && stats.Result == NativeRecorderResult.Ok ? NativeOperationResult.Success() : NativeOperationResult.Failure(result == NativeRecorderResult.Ok ? stats.Result : result, Marshal.PtrToStringUTF8(NativeMethods.GetWindowVideoLastError(handle)));
+            return new NativeWindowVideoSnapshot(operation, stats.Running != 0, stats.ReceivedFrames, stats.DeliveredFrames, stats.DroppedFrames, stats.FramePoolRecreates,
+                stats.FirstAcceptedVideoPts100Nanoseconds, stats.LastAcceptedVideoEnd100Nanoseconds);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return new NativeWindowVideoSnapshot(NativeOperationResult.Failure(NativeRecorderResult.NotImplemented,
+                    "The installed native recorder bridge does not support Teams window video capture."), false, 0, 0, 0, 0, 0, 0);
+            }
+        }
+    }
+
     public NativeTeamsRenderEndpointProbeResult ProbeTeamsRenderEndpoints()
     {
         lock (gate)
@@ -531,6 +589,32 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         public uint AacBitRateBps;
         public uint Reserved;
         public ulong ExpectedProcessCreationTime100Nanoseconds;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
+    private struct NativeWindowVideoStartOptions
+    {
+        public uint StructSize;
+        public ulong TargetWindowHandle;
+        public IntPtr OutputPathUtf8;
+        public uint FramesPerSecond;
+        public uint VideoBitRateBps;
+        public uint Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
+    private struct NativeWindowVideoStats
+    {
+        public uint StructSize;
+        public uint Running;
+        public ulong ReceivedFrames;
+        public ulong DeliveredFrames;
+        public ulong DroppedFrames;
+        public ulong FramePoolRecreates;
+        public NativeRecorderResult Result;
+        public uint Reserved;
+        public ulong FirstAcceptedVideoPts100Nanoseconds;
+        public ulong LastAcceptedVideoEnd100Nanoseconds;
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -670,6 +754,22 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         internal static partial NativeRecorderResult SetMicrophoneMuted(
             NativeBridgeHandle bridge,
             uint muted);
+
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_start_window_video")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial NativeRecorderResult StartWindowVideo(NativeBridgeHandle bridge, ref NativeWindowVideoStartOptions options);
+
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_stop_window_video")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial NativeRecorderResult StopWindowVideo(NativeBridgeHandle bridge);
+
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_get_window_video_stats")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial NativeRecorderResult GetWindowVideoStats(NativeBridgeHandle bridge, ref NativeWindowVideoStats stats);
+
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_get_window_video_last_error")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial IntPtr GetWindowVideoLastError(NativeBridgeHandle bridge);
 
         [LibraryImport(LibraryName, EntryPoint = "recorder_native_stop")]
         [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

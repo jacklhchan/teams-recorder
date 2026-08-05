@@ -9,15 +9,17 @@ internal static class TeamsProcessCatalogPolicyTests
         {
             Entry(10, started, "ms-teams", "Microsoft Teams"),
             Entry(11, started, "MS-TEAMS.EXE", "Microsoft Teams helper"),
+            Entry(14, started, "Teams", "Classic Microsoft Teams"),
             Entry(12, started, "notepad", "Teams meeting notes"),
             Entry(13, started, "teams-updater", "Microsoft Teams"),
         };
 
         var filtered = TeamsProcessCatalogPolicy.FilterForTeams(entries);
 
-        Equal(2, filtered.Count);
+        Equal(3, filtered.Count);
         Equal((uint)10, filtered[0].ProcessId);
         Equal((uint)11, filtered[1].ProcessId);
+        Equal((uint)14, filtered[2].ProcessId);
     }
 
     private static ProcessCatalogEntry Entry(

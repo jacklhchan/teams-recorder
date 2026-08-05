@@ -14,9 +14,6 @@ public static class RecorderControlProtocol
     public const string Status = "status";
     public const string Watch = "watch";
     public const string RefreshDevices = "devices.refresh";
-    public const string RefreshTeams = "teams.refresh";
-    public const string PairTeams = "teams.pair";
-    public const string ResetTeamsPairing = "teams.resetPairing";
     public const string Start = "recording.start";
     public const string Test = "recording.test";
     public const string Stop = "recording.stop";
@@ -27,9 +24,6 @@ public static class RecorderControlProtocol
     {
         Status,
         RefreshDevices,
-        RefreshTeams,
-        PairTeams,
-        ResetTeamsPairing,
         Start,
         Test,
         Stop,
@@ -114,15 +108,13 @@ public sealed record RecorderControlAudioStatus(
     ulong MicrophoneTimestampErrors);
 
 public sealed record RecorderControlTeamsStatus(
-    bool Enabled,
-    string Status,
-    bool PairingKnown,
-    bool PairingAuthenticated,
-    bool? IsInMeeting,
-    bool? IsMuted,
+    bool LocalHeuristicEnabled,
+    string LocalEvidenceHealth,
+    int ConsecutiveActiveObservations,
+    int ConsecutiveMissingObservations,
     bool AutomaticRecordingEnabled,
     string AutomaticState,
-    TeamsTransportDiagnosticSnapshot Transport);
+    bool CanReadTeamsMute);
 
 public sealed record RecorderControlStatus(
     DateTimeOffset TimestampUtc,

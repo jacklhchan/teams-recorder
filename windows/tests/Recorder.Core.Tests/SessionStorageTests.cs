@@ -405,6 +405,85 @@ internal static class SessionStorageTests
         }
     }
 
+    public static void VideoPublicationVerifiesCompanionAndFallsBackToAudio()
+    {
+        using var root = new TestRoot();
+        var service = new SessionStorageService(root.Path);
+
+        var completed = service.CreateSessionPlan(RecordingSessionKind.Meeting);
+        File.WriteAllBytes(completed.BackupAudioPath, [1, 2, 3]);
+        var completedVideo = Path.Combine(completed.FolderPath, RecordingSessionLayout.FinalVideoFileName);
+        File.WriteAllBytes(completedVideo, [9, 8, 7]);
+        service.PublishCompletedMediaAsync(completed, null, null,
+            VideoPublicationOutcome.Completed,
+            new VideoPublicationInterval(TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(3))).GetAwaiter().GetResult();
+        var video = RecordingInfoJson.Parse(File.ReadAllText(completed.MetadataPath));
+        var intervals = video.Document["screenIntervals"] as System.Text.Json.Nodes.JsonArray;
+        if (video.MediaKind != "video" || video.RecoveryState != RecordingRecoveryState.None ||
+            intervals is not { Count: 1 } ||
+            intervals[0]?["startSeconds"]?.GetValue<double>() != 0.25 ||
+            intervals[0]?["endSeconds"]?.GetValue<double>() != 3.0 ||
+            !File.Exists(completed.FinalAudioPath) || !File.Exists(completedVideo))
+            throw new InvalidOperationException("Verified MP4 was not published as a video session with its audio.");
+        Throws<IOException>(() => service.PublishCompletedMediaAsync(completed, null, null,
+            VideoPublicationOutcome.Completed,
+            new VideoPublicationInterval(TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(3))).GetAwaiter().GetResult());
+        if (!File.Exists(completed.FinalAudioPath) || !File.Exists(completedVideo))
+            throw new InvalidOperationException("A second publication altered already-published media.");
+
+        var lost = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(lost.BackupAudioPath, [4, 5, 6]);
+        File.WriteAllText(lost.MetadataPath,
+            "{\"mediaKind\":\"video\",\"screenIntervals\":[{\"startSeconds\":0,\"endSeconds\":1}],\"capturedTeamsWindow\":\"stale\"}");
+        service.PublishCompletedMediaAsync(lost, null, null,
+            VideoPublicationOutcome.LostAudioPreserved).GetAwaiter().GetResult();
+        var audio = RecordingInfoJson.Parse(File.ReadAllText(lost.MetadataPath));
+        if (audio.MediaKind != "audio" || audio.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved ||
+            audio.Document["screenIntervals"] is not System.Text.Json.Nodes.JsonArray { Count: 0 } ||
+            audio.Document["capturedTeamsWindow"] is not null || !File.Exists(lost.FinalAudioPath))
+            throw new InvalidOperationException("Video failure did not retain safe audio-only metadata.");
+
+        var missing = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(missing.BackupAudioPath, [7]);
+        service.PublishCompletedMediaAsync(missing, null, null,
+            VideoPublicationOutcome.Completed,
+            new VideoPublicationInterval(TimeSpan.Zero, TimeSpan.FromSeconds(1))).GetAwaiter().GetResult();
+        var missingVideo = RecordingInfoJson.Parse(File.ReadAllText(missing.MetadataPath));
+        if (missingVideo.MediaKind != "audio" ||
+            missingVideo.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved ||
+            !File.Exists(missing.FinalAudioPath))
+            throw new InvalidOperationException("A missing claimed MP4 did not fall back to M4A.");
+
+        var invalidInterval = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(invalidInterval.BackupAudioPath, [7, 7]);
+        File.WriteAllBytes(Path.Combine(invalidInterval.FolderPath, RecordingSessionLayout.FinalVideoFileName), [7, 7]);
+        service.PublishCompletedMediaAsync(invalidInterval, null, null,
+            VideoPublicationOutcome.Completed,
+            new VideoPublicationInterval(TimeSpan.FromSeconds(-1), TimeSpan.FromSeconds(1))).GetAwaiter().GetResult();
+        var invalidIntervalInfo = RecordingInfoJson.Parse(File.ReadAllText(invalidInterval.MetadataPath));
+        if (invalidIntervalInfo.MediaKind != "audio" ||
+            invalidIntervalInfo.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved)
+            throw new InvalidOperationException("An invalid native video interval did not fail closed to audio.");
+
+        var metadataFailure = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(metadataFailure.BackupAudioPath, [8, 8, 8]);
+        var metadataFailureVideo = Path.Combine(metadataFailure.FolderPath, RecordingSessionLayout.FinalVideoFileName);
+        File.WriteAllBytes(metadataFailureVideo, [6, 6, 6]);
+        Directory.CreateDirectory(metadataFailure.MetadataPath);
+        try
+        {
+            service.PublishCompletedMediaAsync(metadataFailure, null, null,
+                VideoPublicationOutcome.Completed,
+                new VideoPublicationInterval(TimeSpan.Zero, TimeSpan.FromSeconds(1))).GetAwaiter().GetResult();
+            throw new InvalidOperationException("Expected metadata publication to fail for a directory target.");
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        if (!File.Exists(metadataFailure.BackupAudioPath) || File.Exists(metadataFailure.FinalAudioPath) ||
+            !File.Exists(metadataFailureVideo))
+            throw new InvalidOperationException("A metadata failure did not retain all retryable media evidence.");
+    }
+
     private sealed class FixedCapacity(long? available) : IStorageCapacityProvider { public long? GetAvailableBytes(string _) => available; }
     private sealed class FixedClock(DateTimeOffset now) : IClock { public DateTimeOffset UtcNow => now; }
     private sealed class AlwaysValidValidator : IAudioBackupValidator { public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0; }

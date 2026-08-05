@@ -1,4 +1,16 @@
+using System.Text.Json.Serialization;
+
 namespace Recorder.Core;
+
+/// <summary>Transient process-instance identity; it intentionally contains no title or path.</summary>
+public sealed record VideoCaptureTargetIdentity(
+    int ProcessId,
+    long ProcessStartTimeUtcTicks,
+    nint WindowHandle)
+{
+    public bool IsUsable => ProcessId > 0 && ProcessStartTimeUtcTicks > 0 &&
+                            WindowHandle != nint.Zero;
+}
 
 /// <summary>
 /// A stable description of a top-level Windows window that may be offered to a
@@ -6,12 +18,14 @@ namespace Recorder.Core;
 /// it: protected/elevated windows can still be rejected by the platform.
 /// </summary>
 public sealed record VideoCaptureTarget(
-    int ProcessId,
-    nint WindowHandle,
+    VideoCaptureTargetIdentity Identity,
     string ProcessName,
-    string WindowTitle)
+    [property: JsonIgnore] string WindowTitle)
 {
-    public bool IsUsable => ProcessId > 0 && WindowHandle != nint.Zero &&
+    public int ProcessId => Identity.ProcessId;
+    public long ProcessStartTimeUtcTicks => Identity.ProcessStartTimeUtcTicks;
+    public nint WindowHandle => Identity.WindowHandle;
+    public bool IsUsable => Identity.IsUsable &&
                             !string.IsNullOrWhiteSpace(ProcessName);
 }
 
@@ -60,15 +74,14 @@ public static class VideoCaptureFeatureGate
 
 public static class VideoCaptureTargetSelection
 {
-    /// <summary>Returns a current target only when the selected HWND still belongs to the same process.</summary>
+    /// <summary>Returns a current target only when its HWND and process instance still match.</summary>
     public static VideoCaptureTarget? Resolve(
         VideoCaptureTarget? selected,
         IEnumerable<VideoCaptureTarget> available)
     {
         if (selected is null || !selected.IsUsable) return null;
         return available.FirstOrDefault(candidate => candidate.IsUsable &&
-            candidate.ProcessId == selected.ProcessId &&
-            candidate.WindowHandle == selected.WindowHandle);
+            candidate.Identity == selected.Identity);
     }
 }
 

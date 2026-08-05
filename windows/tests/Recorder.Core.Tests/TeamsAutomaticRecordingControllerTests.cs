@@ -223,6 +223,132 @@ internal static class TeamsAutomaticRecordingControllerTests
         controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    public static void UnavailableEvidenceCancelsCountdownWithoutStarting()
+    {
+        var delay = new ControllableDelay();
+        var starts = 0;
+        var controller = new TeamsAutomaticRecordingController(
+            _ => { Interlocked.Increment(ref starts); return Task.FromResult(TeamsAutomaticStartResult.Succeeded()); },
+            _ => Task.CompletedTask,
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.JoinedConfirmed(4)).GetAwaiter().GetResult();
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.StateUnavailable(5)).GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.WaitingForMeeting || controller.Snapshot.IsInMeeting)
+            throw new InvalidOperationException("Unavailable evidence did not fail closed before automatic start.");
+        delay.Tick();
+        Thread.Sleep(50);
+        if (Volatile.Read(ref starts) != 0)
+            throw new InvalidOperationException("Unavailable evidence allowed a countdown to start recording.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void UnavailableEvidenceDoesNotStopRecordingButConfirmedLeaveDoes()
+    {
+        var delay = new ControllableDelay();
+        var stops = 0;
+        var controller = new TeamsAutomaticRecordingController(
+            _ => Task.FromResult(TeamsAutomaticStartResult.Succeeded()),
+            _ => { Interlocked.Increment(ref stops); return Task.CompletedTask; },
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1, stopDebounceSeconds: 1),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.JoinedConfirmed(7, 1)).GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => controller.Snapshot.State is TeamsAutoMeetingState.AutomaticRecording, "Confirmed join did not start recording.");
+
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.StateUnavailable(8, 1)).GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.AutomaticRecording)
+            throw new InvalidOperationException("Unavailable evidence stopped an active recording.");
+        Thread.Sleep(50);
+        if (Volatile.Read(ref stops) != 0)
+            throw new InvalidOperationException("Unavailable evidence scheduled a stop.");
+
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.LeftConfirmed(8, 2)).GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => Volatile.Read(ref stops) == 1, "Confirmed leave did not stop recording after debounce.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void SameGenerationLateJoinCannotReverseConfirmedLeave()
+    {
+        var delay = new ControllableDelay();
+        var controller = new TeamsAutomaticRecordingController(
+            _ => Task.FromResult(TeamsAutomaticStartResult.Succeeded()),
+            _ => Task.CompletedTask,
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1, stopDebounceSeconds: 2),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.JoinedConfirmed(12, 4)).GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => controller.Snapshot.State is TeamsAutoMeetingState.AutomaticRecording, "Confirmed join did not start recording.");
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.LeftConfirmed(12, 5)).GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.StopCountdown)
+            throw new InvalidOperationException("Confirmed leave did not begin stop debounce.");
+
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.JoinedConfirmed(12, 4)).GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.StopCountdown || controller.Snapshot.IsInMeeting)
+            throw new InvalidOperationException("A same-generation late join reversed a confirmed leave.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void LocalCandidateDoesNotMutateAuthoritativeEvidenceRevision()
+    {
+        var delay = new ControllableDelay();
+        var starts = 0;
+        var controller = new TeamsAutomaticRecordingController(
+            _ => { Interlocked.Increment(ref starts); return Task.FromResult(TeamsAutomaticStartResult.Succeeded()); },
+            _ => Task.CompletedTask,
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1, stopDebounceSeconds: 1),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.StateUnavailable(21, 8)).GetAwaiter().GetResult();
+        controller.SetLocalMeetingCandidateAsync().GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.StartCountdown)
+            throw new InvalidOperationException("A user-authorized local candidate did not enter the countdown.");
+        delay.Tick();
+        WaitUntil(() => Volatile.Read(ref starts) == 1, "The local candidate did not start recording.");
+
+        // A later confirmed Teams event in the same generation remains authoritative,
+        // proving that the local candidate did not overwrite generation/revision state.
+        controller.SetMeetingEvidenceAsync(new TeamsMeetingEvidence.LeftConfirmed(21, 9)).GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.StopCountdown)
+            throw new InvalidOperationException("A confirmed Teams leave was ignored after a local candidate.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public static void LocalSignalReturnCancelsLocalStopDebounce()
+    {
+        var delay = new ControllableDelay();
+        var stops = 0;
+        var controller = new TeamsAutomaticRecordingController(
+            _ => Task.FromResult(TeamsAutomaticStartResult.Succeeded()),
+            _ => { Interlocked.Increment(ref stops); return Task.CompletedTask; },
+            new TeamsAutoMeetingMachine(startCountdownSeconds: 1, stopDebounceSeconds: 2),
+            delay);
+
+        controller.SetEnabledAsync(true).GetAwaiter().GetResult();
+        controller.SetLocalMeetingCandidateAsync().GetAwaiter().GetResult();
+        delay.Tick();
+        WaitUntil(() => controller.Snapshot.State is TeamsAutoMeetingState.AutomaticRecording, "Local candidate did not start recording.");
+        controller.SetLocalMeetingEndedAsync().GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.StopCountdown)
+            throw new InvalidOperationException("Bounded local leave did not begin stop debounce.");
+        controller.SetLocalMeetingCandidateAsync().GetAwaiter().GetResult();
+        if (controller.Snapshot.State is not TeamsAutoMeetingState.AutomaticRecording)
+            throw new InvalidOperationException("Returned local evidence did not cancel stop debounce.");
+        delay.Tick();
+        Thread.Sleep(50);
+        if (Volatile.Read(ref stops) != 0)
+            throw new InvalidOperationException("A cancelled local stop debounce still stopped recording.");
+        controller.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     private static void WaitUntil(Func<bool> condition, string message)
     {
         var deadline = DateTime.UtcNow.AddSeconds(2);

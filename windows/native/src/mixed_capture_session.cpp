@@ -101,6 +101,8 @@ struct Source {
     std::deque<recorder::timeline::AudioChunk> queue;
     std::size_t queued_frames = 0;
     bool received_audio = false;
+    selected_audio::CaptureLifecycle lifecycle =
+        selected_audio::CaptureLifecycle::NotCreated;
     bool disconnect_accounted = false;
     float level_peak = 0.0F;
     float level_rms = 0.0F;
@@ -241,6 +243,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             const auto qpc_origin = CurrentQpc100ns();
+            timeline_origin_100ns_ = qpc_origin;
             if (qpc_origin != 0) timeline_.SetOrigin(qpc_origin);
             duration_clock_.Start();
         }
@@ -331,6 +334,17 @@ public:
         return RECORDER_NATIVE_OK;
     }
 
+    void SetCompanionAudioSink(
+        std::function<void(const float*, std::uint32_t, std::uint64_t)> sink) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        companion_audio_sink_ = std::move(sink);
+    }
+
+    std::uint64_t timeline_origin_100ns() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return timeline_origin_100ns_;
+    }
+
     RecorderNativeResult health_result() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return failure_;
@@ -386,38 +400,59 @@ private:
         Source& source,
         recorder::audio::EndpointFlow flow,
         const std::wstring& endpoint_id) {
-        source.capture = std::make_unique<recorder::audio::WasapiCapture>();
+        auto capture = std::make_unique<recorder::audio::WasapiCapture>();
         recorder::audio::CaptureRequest request;
         request.flow = flow;
         request.endpoint_id = endpoint_id;
         Source* const source_pointer = &source;
         const std::uint64_t generation = session_generation_;
-        source.generation = generation;
-        return source.capture->Start(
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            source.capture = std::move(capture);
+            source.lifecycle = selected_audio::CaptureLifecycle::Starting;
+            source.generation = generation;
+        }
+        const bool started = source.capture->Start(
             std::move(request),
             [this, source_pointer, generation](recorder::audio::AudioBlock&& block) {
                 ProcessBlock(*source_pointer, generation, ToRaw(std::move(block)));
             });
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            source.lifecycle = started ? selected_audio::CaptureLifecycle::Active
+                                       : selected_audio::CaptureLifecycle::StartFailed;
+        }
+        return started;
     }
 
     bool StartProcessSource(
         Source& source,
         std::uint32_t target_process_id,
         std::uint64_t expected_process_creation_time_100ns) {
-        source.process_capture =
-            std::make_unique<teams_recorder::process_loopback::ProcessLoopbackCapture>();
+        auto capture = std::make_unique<teams_recorder::process_loopback::ProcessLoopbackCapture>();
         teams_recorder::process_loopback::ProcessLoopbackCaptureRequest request;
         request.target_process_id = target_process_id;
         request.expected_process_creation_time_100ns = expected_process_creation_time_100ns;
         Source* const source_pointer = &source;
         const std::uint64_t generation = session_generation_;
-        source.generation = generation;
-        return source.process_capture->Start(
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            source.process_capture = std::move(capture);
+            source.lifecycle = selected_audio::CaptureLifecycle::Starting;
+            source.generation = generation;
+        }
+        const bool started = source.process_capture->Start(
             request,
             [this, source_pointer, generation](
                 teams_recorder::process_loopback::ProcessLoopbackAudioBlock&& block) {
                 ProcessBlock(*source_pointer, generation, ToRaw(std::move(block)));
             });
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            source.lifecycle = started ? selected_audio::CaptureLifecycle::Active
+                                       : selected_audio::CaptureLifecycle::StartFailed;
+        }
+        return started;
     }
 
     std::string SourceErrorText(const Source& source) const {
@@ -699,7 +734,9 @@ private:
     void DetectUnexpectedDisconnectLocked(Source& source) {
         const bool running = source.capture ? source.capture->is_running()
             : source.process_capture && source.process_capture->is_running();
-        if ((!source.capture && !source.process_capture) || running || stop_requested_ ||
+        if ((!source.capture && !source.process_capture) ||
+            !selected_audio::ShouldInspectForUnexpectedDisconnect(source.lifecycle) ||
+            running || stop_requested_ ||
             source.disconnect_accounted) {
             return;
         }
@@ -790,6 +827,22 @@ private:
                 break;
             }
 
+            // The optional visual companion never participates in the M4A
+            // fault domain. Copy only the callable under the mixer lock, then
+            // let its own bounded worker decide whether it can accept a block.
+            std::function<void(const float*, std::uint32_t, std::uint64_t)> companion_audio_sink;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                companion_audio_sink = companion_audio_sink_;
+            }
+            if (companion_audio_sink) {
+                try {
+                    companion_audio_sink(block.data(), kFramesPerBlock, output_time_100ns);
+                } catch (...) {
+                    // Never allow an optional MP4 artifact to end primary M4A.
+                }
+            }
+
             wrote_block = true;
             output_time_100ns += kBlock100ns;
             {
@@ -873,6 +926,8 @@ private:
     bool stop_requested_ = false;
     bool writer_ready_ = false;
     bool microphone_muted_ = false;
+    std::function<void(const float*, std::uint32_t, std::uint64_t)> companion_audio_sink_;
+    std::uint64_t timeline_origin_100ns_ = 0;
 };
 
 MixedCaptureSession::MixedCaptureSession()
@@ -890,6 +945,19 @@ RecorderNativeResult MixedCaptureSession::Stop() {
 
 RecorderNativeResult MixedCaptureSession::SetMicrophoneMuted(bool muted) {
     return impl_->SetMicrophoneMuted(muted);
+}
+
+void MixedCaptureSession::SetCompanionAudioSink(
+    std::function<void(const float*, std::uint32_t, std::uint64_t)> sink) {
+    impl_->SetCompanionAudioSink(std::move(sink));
+}
+
+void MixedCaptureSession::ClearCompanionAudioSink() {
+    SetCompanionAudioSink({});
+}
+
+std::uint64_t MixedCaptureSession::timeline_origin_100ns() const {
+    return impl_->timeline_origin_100ns();
 }
 
 RecorderNativeResult MixedCaptureSession::health_result() const {

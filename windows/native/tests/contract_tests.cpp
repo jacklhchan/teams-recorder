@@ -8,6 +8,7 @@
 static_assert(std::is_standard_layout<RecorderNativeStartOptions>::value, "start options must remain C ABI safe");
 static_assert(std::is_standard_layout<RecorderNativeMixedStartOptions>::value, "mixed start options must remain C ABI safe");
 static_assert(std::is_standard_layout<RecorderNativeSelectedAudioStartOptions>::value, "selected-audio start options must remain C ABI safe");
+static_assert(std::is_standard_layout<RecorderNativeWindowVideoStartOptions>::value, "window-video options must remain C ABI safe");
 static_assert(std::is_standard_layout<RecorderNativeStats>::value, "stats must remain C ABI safe");
 static_assert(sizeof(RecorderNativeStartOptions) == 32U, "x64 start options layout changed");
 static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8U, "output path offset changed");
@@ -45,6 +46,10 @@ static_assert(RECORDER_NATIVE_ENDPOINT_FLOW_CAPTURE == 1U, "capture flow ABI val
 static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_CONSOLE == 1U, "console default ABI value changed");
 static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_MULTIMEDIA == 2U, "multimedia default ABI value changed");
 static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_COMMUNICATIONS == 4U, "communications default ABI value changed");
+static_assert(sizeof(RecorderNativeWindowVideoStartOptions) == 40U, "x64 window-video options layout changed");
+static_assert(offsetof(RecorderNativeWindowVideoStartOptions, target_window_handle) == 8U, "window video HWND offset changed");
+static_assert(offsetof(RecorderNativeWindowVideoStartOptions, output_path_utf8) == 16U, "window video output offset changed");
+static_assert(sizeof(RecorderNativeWindowVideoStats) == 64U, "x64 window-video stats layout changed");
 
 namespace {
 
@@ -108,10 +113,31 @@ int main() {
     mixed.output_path_utf8 = "contract-test.m4a";
     mixed.aac_bitrate_bps = 128000U;
     RecorderNativeSelectedAudioStartOptions selected = ValidSelectedAudioOptions();
+    RecorderNativeWindowVideoStartOptions video{};
+    video.struct_size = sizeof(video);
+    video.target_window_handle = 1U;
+    video.output_path_utf8 = "contract-test.mp4";
+    video.frames_per_second = 30U;
+    video.video_bitrate_bps = 4'000'000U;
+    RecorderNativeWindowVideoStats video_stats{};
+    video_stats.struct_size = sizeof(video_stats);
     const bool passed =
         Expect(recorder_native_get_state(bridge) == RECORDER_NATIVE_STATE_READY) &&
         Expect(recorder_native_start(bridge) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_start_with_options(bridge, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_start_window_video(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((video.struct_size = 0U, recorder_native_start_window_video(bridge, &video)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((video.struct_size = sizeof(video), video.target_window_handle = 0U,
+                recorder_native_start_window_video(bridge, &video)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((video.target_window_handle = 1U, video.output_path_utf8 = "not-mp4.m4a",
+                recorder_native_start_window_video(bridge, &video)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((video.output_path_utf8 = "contract-test.mp4",
+                recorder_native_start_window_video(bridge, &video)) == RECORDER_NATIVE_INVALID_STATE) &&
+        Expect(recorder_native_stop_window_video(bridge) == RECORDER_NATIVE_INVALID_STATE) &&
+        Expect(recorder_native_get_window_video_stats(bridge, &video_stats) == RECORDER_NATIVE_OK) &&
+        Expect(video_stats.result == RECORDER_NATIVE_INVALID_STATE) &&
+        Expect(std::strstr(recorder_native_get_window_video_last_error(bridge),
+                           "No window video companion") != nullptr) &&
         Expect((selected.struct_size = 0U, recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect((selected = ValidSelectedAudioOptions(), selected.audio_source = static_cast<RecorderNativeSelectedAudioSource>(99),
                 recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&

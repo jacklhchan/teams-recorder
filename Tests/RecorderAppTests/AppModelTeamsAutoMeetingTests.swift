@@ -4,6 +4,75 @@ import XCTest
 
 @MainActor
 final class AppModelTeamsAutoMeetingTests: XCTestCase {
+    func testThreeEligibleWindowRefreshesBeginExistingCountdown() async {
+        let fixture = makeRecordingFixture()
+        let teamsApplication = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        fixture.model.captureSelection = .init(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: teamsApplication.bundleIdentifier
+        )
+        fixture.model.availableCaptureApplications = [teamsApplication]
+        fixture.model.resolvedCaptureSelection = .application(teamsApplication)
+        fixture.source.teamsWindows = [localTeamsWindow(id: 71)]
+        fixture.model.setTeamsAutoMeetingEnabled(true)
+        await waitUntil {
+            fixture.model.teamsLocalMeetingDetectionState
+                == .confirming(secondsRemaining: 2)
+        }
+
+        for _ in 0..<2 {
+            await fixture.model.refreshTeamsScreenCaptureNow()
+        }
+
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .startCountdown(secondsRemaining: 5)
+        )
+        XCTAssertEqual(
+            fixture.model.teamsLocalMeetingDetectionState,
+            .detected(.high)
+        )
+    }
+
+    func testThirtyMissingWindowRefreshesCancelDetectedMeeting() async {
+        let fixture = makeRecordingFixture()
+        let teamsApplication = CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        fixture.model.captureSelection = .init(
+            mode: .selectedApplication,
+            selectedBundleIdentifier: teamsApplication.bundleIdentifier
+        )
+        fixture.model.availableCaptureApplications = [teamsApplication]
+        fixture.model.resolvedCaptureSelection = .application(teamsApplication)
+        fixture.source.teamsWindows = [localTeamsWindow(id: 71)]
+        fixture.model.setTeamsAutoMeetingEnabled(true)
+        await waitUntil {
+            fixture.model.teamsLocalMeetingDetectionState
+                == .confirming(secondsRemaining: 2)
+        }
+        for _ in 0..<2 {
+            await fixture.model.refreshTeamsScreenCaptureNow()
+        }
+        fixture.source.teamsWindows = []
+
+        for _ in 0..<30 {
+            await fixture.model.refreshTeamsScreenCaptureNow()
+        }
+
+        XCTAssertEqual(
+            fixture.model.teamsLocalMeetingDetectionState,
+            .waiting
+        )
+        XCTAssertEqual(fixture.model.teamsAutoMeetingState, .waitingForMeeting)
+    }
+
     func testAutoModeDefaultsOffAndPersistsChanges() {
         withDefaults { defaults in
             let model = makeModel(defaults: defaults)
@@ -1323,6 +1392,16 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         )
     }
 
+    private func localTeamsWindow(id: CGWindowID) -> TeamsWindowSnapshot {
+        TeamsWindowSnapshot(
+            identity: .init(processID: 42, windowID: id),
+            title: "Weekly sync",
+            frame: CGRect(x: 0, y: 0, width: 1_280, height: 720),
+            isOnScreen: true,
+            layer: 0
+        )
+    }
+
     private func settle() async {
         await Task.yield()
         await Task.yield()
@@ -1544,6 +1623,7 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
         pixelFormat: 0
     )
     var startError: Error?
+    var teamsWindows: [TeamsWindowSnapshot] = []
     var pauseStart: Bool {
         get { startPauseGate.isPauseRequested }
         set { startPauseGate.setPauseRequested(newValue) }
@@ -1616,7 +1696,7 @@ private final class AutoMeetingRecordingCaptureSource: CaptureSourceProtocol {
                 self.resumeTeamsRefresh()
             }
         }
-        return []
+        return teamsWindows
     }
 
     func reconnect(selection _: ResolvedCaptureSelection) async throws {}

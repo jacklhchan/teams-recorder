@@ -3,6 +3,41 @@ import XCTest
 
 final class TeamsAutoMeetingCoordinatorTests: XCTestCase {
     @MainActor
+    func testConfirmedEndStopsAutomaticRecordingWithoutSecondDebounce() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = TeamsAutoMeetingCoordinator(
+            startCountdownSeconds: 1,
+            tick: { await ticker.waitForTick() }
+        )
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onCommand = { commands.append($0) }
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await ticker.fireAndWaitForAcknowledgement()
+        coordinator.automaticStartSucceeded()
+
+        coordinator.handleConfirmedMeetingEnd()
+
+        XCTAssertEqual(commands, [.startRecording, .stopRecording])
+        XCTAssertFalse(coordinator.hasPendingTimer)
+    }
+
+    @MainActor
+    func testConfirmedEndDoesNotStopSuppressedManualRecording() {
+        let coordinator = TeamsAutoMeetingCoordinator()
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onCommand = { commands.append($0) }
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        coordinator.manualRecordingStarted()
+
+        coordinator.handleConfirmedMeetingEnd()
+
+        XCTAssertEqual(coordinator.state, .waitingForMeeting)
+        XCTAssertEqual(commands, [])
+    }
+
+    @MainActor
     func testPendingTimerObservabilityTracksOwnership() {
         let coordinator = TeamsAutoMeetingCoordinator()
 

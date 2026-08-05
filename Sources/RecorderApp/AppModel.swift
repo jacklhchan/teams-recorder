@@ -86,6 +86,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var teamsMuteSyncEnabled: Bool
     @Published private(set) var teamsAutoMeetingEnabled: Bool
     @Published private(set) var teamsAutoMeetingState: TeamsAutoMeetingState
+    @Published private(set) var teamsLocalMeetingDetectionState:
+        TeamsLocalMeetingDetectionState = .waiting
     @Published private(set) var teamsConnectionStatus: TeamsMuteSyncStatus = .disabled
     @Published private(set) var localMicMuted = false
     @Published private(set) var nativeInputMicMuted = false
@@ -238,6 +240,7 @@ final class AppModel: ObservableObject {
     private var teamsScreenRefreshGeneration: UInt64 = 0
     private var teamsScreenCaptureIntentGeneration: UInt64 = 0
     private var teamsMeetingActive = false
+    private var teamsLocalMeetingDetector = TeamsLocalMeetingDetector()
     private var workspacePublicationFence: WorkspacePublicationFence = .initial
     private var isShutDown = false
 
@@ -951,14 +954,45 @@ final class AppModel: ObservableObject {
     func refreshTeamsScreenCaptureNow() async {
         guard let selectedTeamsApplication else { return }
         let generation = teamsScreenRefreshGeneration
-        await recorder.refreshTeamsWindows(
-            selectedTeamsProcessID: selectedTeamsApplication.processID,
-            meetingActive: teamsMeetingActive,
-            manualOverride: teamsManualWindowIdentity
-        )
+        if teamsAutoMeetingEnabled {
+            let outcome = await recorder.refreshTeamsWindows(
+                selectedTeamsProcessID: selectedTeamsApplication.processID,
+                mode: .localDetection,
+                manualOverride: teamsManualWindowIdentity
+            )
+            guard generation == teamsScreenRefreshGeneration else { return }
+            let observation: TeamsLocalMeetingObservation
+            switch outcome {
+            case .resolved(let resolution):
+                observation = .resolved(resolution)
+            case .unknown:
+                observation = .unknown
+            }
+            applyLocalMeetingUpdate(
+                teamsLocalMeetingDetector.observe(observation)
+            )
+        } else {
+            await recorder.refreshTeamsWindows(
+                selectedTeamsProcessID: selectedTeamsApplication.processID,
+                meetingActive: teamsMeetingActive,
+                manualOverride: teamsManualWindowIdentity
+            )
+        }
         guard generation == teamsScreenRefreshGeneration else { return }
         reconcileTeamsManualWindowIdentity()
         refreshTeamsScreenCandidateProjection()
+    }
+
+    private func applyLocalMeetingUpdate(_ update: TeamsLocalMeetingUpdate) {
+        teamsLocalMeetingDetectionState = update.state
+        guard let transition = update.meetingTransition else { return }
+        teamsMeetingActive = transition
+        if transition {
+            teamsAutoMeetingCoordinator.handleMeetingState(isInMeeting: true)
+            suppressAutomationForActiveManualRecording()
+        } else {
+            teamsAutoMeetingCoordinator.handleConfirmedMeetingEnd()
+        }
     }
 
     private func reconcileTeamsManualWindowIdentity() {
@@ -978,6 +1012,7 @@ final class AppModel: ObservableObject {
         invalidateTeamsScreenCaptureIntent()
         isTeamsScreenCaptureRequested = false
         teamsMeetingActive = false
+        teamsLocalMeetingDetectionState = teamsLocalMeetingDetector.reset().state
         teamsManualWindowIdentity = nil
         teamsScreenCaptureCandidates = []
         recorder.resetTeamsWindowResolution()
@@ -1000,7 +1035,8 @@ final class AppModel: ObservableObject {
     private func restartTeamsScreenRefreshIfNeeded() {
         invalidateTeamsScreenRefresh()
         guard selectedTeamsApplication != nil,
-              recorder.isRecording || isTeamsScreenCaptureRequested else { return }
+              teamsAutoMeetingEnabled || recorder.isRecording
+                || isTeamsScreenCaptureRequested else { return }
         let generation = teamsScreenRefreshGeneration
         let tick = teamsScreenRefreshTick
         teamsScreenRefreshTask = Task { @MainActor [weak self, tick] in
@@ -1712,7 +1748,14 @@ final class AppModel: ObservableObject {
                 suppressAutomationForActiveManualRecording()
             }
         } else {
+            teamsMeetingActive = false
+            teamsLocalMeetingDetectionState = teamsLocalMeetingDetector.reset().state
             stopTeamsIntegrationIfUnused()
+        }
+        restartTeamsScreenRefreshIfNeeded()
+        guard selectedTeamsApplication != nil else { return }
+        Task { @MainActor [weak self] in
+            await self?.refreshTeamsScreenCaptureNow()
         }
     }
 

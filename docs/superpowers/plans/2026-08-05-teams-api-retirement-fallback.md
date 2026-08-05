@@ -468,8 +468,10 @@ git commit -m "refactor: retire Teams control API runtime"
 **Files:**
 - Modify: `Sources/RecorderApp/UI/RecorderSettingsView.swift`
 - Modify: `Sources/RecorderApp/Views/TeamsAutoMeetingCountdownPanel.swift`
+- Modify: `Sources/RecorderApp/Views/RecordingControllerPanel.swift`
 - Modify: `Tests/RecorderAppTests/RecorderWorkspaceRenderTests.swift`
 - Modify: `Tests/RecorderAppTests/TeamsAutoMeetingPresentationTests.swift`
+- Modify: `Tests/RecorderAppTests/RecordingControllerRenderTests.swift`
 - Create: `docs/testing/2026-08-05-teams-api-retirement-fallback-uat.md`
 - Modify: `README.md`
 
@@ -477,7 +479,7 @@ git commit -m "refactor: retire Teams control API runtime"
 - Consumes: `teamsAutoMeetingEnabled`, `teamsAutoMeetingState`, and `teamsLocalMeetingDetectionState`.
 - Produces: truthful `Teams Window Auto Mode (Beta)` and `Virtual Mic Privacy Mute` UI with no pairing controls.
 
-- [ ] **Step 1: Write two UI RED tests**
+- [ ] **Step 1: Write focused UI RED tests**
 
 ```swift
 func testRecordingSettingsExposeWindowAutoModeAndNoRetiredPairingControls() throws {
@@ -496,6 +498,20 @@ func testAudioSettingsExplainVirtualMicPrivacyBoundary() throws {
     XCTAssertTrue(host.containsText("Virtual Mic Privacy Mute"))
     XCTAssertTrue(host.containsText("Teams mute icon may differ"))
 }
+
+func testFloatingMicrophoneIconInvokesLocalPrivacyMute() throws {
+    var muteRequests = 0
+    let host = makeRecordingPanelHost(
+        isMicrophoneMuted: false,
+        toggleMicrophoneMute: { muteRequests += 1 }
+    )
+    try host.click(RecordingControllerAccessibility.microphoneMuteID)
+    XCTAssertEqual(muteRequests, 1)
+    XCTAssertEqual(
+        host.accessibilityLabel(RecordingControllerAccessibility.microphoneMuteID),
+        "Mute microphone"
+    )
+}
 ```
 
 Update the existing presentation test to construct from auto/detector state only and assert `Waiting for Teams meeting window`, `Confirming Teams meeting`, `Teams meeting detected`, `Waiting for meeting window to return`, and `Choose a Teams meeting window`.
@@ -505,7 +521,7 @@ Update the existing presentation test to construct from auto/detector state only
 Run:
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecorderWorkspaceRenderTests|TeamsAutoMeetingPresentationTests'
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'RecorderWorkspaceRenderTests|TeamsAutoMeetingPresentationTests|RecordingControllerRenderTests'
 ```
 
 Expected: new labels are absent and presentation still requires `TeamsMuteSyncStatus`.
@@ -527,6 +543,12 @@ Text("Recorder and native input mute silence the mic track and Local Recorder Vi
 
 Remove the entire pairing/retry/mute-sync view tree. Change the floating panel title to `Teams Window Auto Recording`. Map detector state into presentation without adding another observable model.
 
+Turn only the existing recording-panel microphone icon into a compact button.
+Its action calls `model.toggleRecorderMicMute(source: "Floating panel")`; use
+`mic.fill` / `mic.slash.fill` and `Mute microphone` / `Unmute microphone` from
+the current Recorder mute state. Do not add a second toggle, a countdown-panel
+mute control, or Teams-icon synchronization.
+
 - [ ] **Step 4: Add the independently drafted lean acceptance document**
 
 Copy the seven cases from `docs/testing/2026-08-05-teams-api-retirement-fallback-uat.md`: real-window countdown, cancel/re-arm, short window loss, confirmed leave, manual ownership, actual virtual-mic audio, and zero port-8124 traffic. Keep one evidence package and explicitly exclude observation matrices, Graph/TeamsJS/AX, pixel diffs, and duplicate audio paths.
@@ -536,7 +558,7 @@ Copy the seven cases from `docs/testing/2026-08-05-teams-api-retirement-fallback
 Run:
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'TeamsAutoMeetingPresentationTests|RecorderWorkspaceRenderTests'
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter 'TeamsAutoMeetingPresentationTests|RecorderWorkspaceRenderTests|RecordingControllerRenderTests'
 ```
 
 Expected: selected tests pass with zero failures.
@@ -558,7 +580,7 @@ Expected: full test suite, release build, bundle verification, and diff check al
 - [ ] **Step 7: Commit Task 4**
 
 ```bash
-git add Sources/RecorderApp/UI/RecorderSettingsView.swift Sources/RecorderApp/Views/TeamsAutoMeetingCountdownPanel.swift Tests/RecorderAppTests/RecorderWorkspaceRenderTests.swift Tests/RecorderAppTests/TeamsAutoMeetingPresentationTests.swift docs/testing/2026-08-05-teams-api-retirement-fallback-uat.md README.md
+git add Sources/RecorderApp/UI/RecorderSettingsView.swift Sources/RecorderApp/Views/TeamsAutoMeetingCountdownPanel.swift Sources/RecorderApp/Views/RecordingControllerPanel.swift Tests/RecorderAppTests/RecorderWorkspaceRenderTests.swift Tests/RecorderAppTests/TeamsAutoMeetingPresentationTests.swift Tests/RecorderAppTests/RecordingControllerRenderTests.swift docs/testing/2026-08-05-teams-api-retirement-fallback-uat.md README.md
 git commit -m "feat: present local Teams fallback controls"
 ```
 

@@ -181,6 +181,19 @@ Audio settings:
 Countdown panel title becomes `Teams Window Auto Recording` while retaining
 the existing Cancel action and five-second countdown.
 
+Recording floating panel:
+
+- Turn the existing microphone icon in the `Microphone` row into the local
+  privacy-mute button; do not add a second toggle or another mute state.
+- Route the button through `AppModel.toggleRecorderMicMute` so the same
+  Recorder-local authority gates both the recorded mic and
+  `Local Recorder Virtual Mic`.
+- Show `mic.fill` when active and `mic.slash.fill` when muted, with an explicit
+  `Mute microphone` / `Unmute microphone` accessibility label and current
+  value. Native input mute may keep effective output muted after local unmute.
+- Do not add the button to the pre-recording countdown panel; that panel keeps
+  only countdown and Cancel responsibilities.
+
 ## Persistence and Migration
 
 - Continue reading `teamsAutoMeetingEnabled` so existing users keep their
@@ -221,6 +234,8 @@ TDD coverage must include:
 - tests proving enabling auto mode never starts the retired Teams client;
 - mute-gate tests proving local and native input mute are the only production
   authorities and still gate the virtual mic;
+- one recording-panel render test proving the existing microphone icon invokes
+  the local mute action and exposes its active/muted accessibility state;
 - migration tests proving old pairing/mute-sync preferences cannot reconnect or
   mute the Recorder;
 - render/accessibility tests for the new labels, statuses, Beta disclosure, and
@@ -241,8 +256,9 @@ Installed-app acceptance must separately demonstrate:
 3. an auto-owned recording starts and survives a short pop-out/window switch;
 4. closing/leaving the meeting stops it only after the grace period;
 5. a manual recording is not stopped;
-6. Recorder mute and native/AirPods mute produce near-silence from the actual
-   `Local Recorder Virtual Mic`; and
+6. clicking the recording floating panel's microphone icon mutes/unmutes the
+   actual `Local Recorder Virtual Mic`, while native/AirPods mute remains the
+   second independent authority; and
 7. the app makes no connection attempt to port `8124`.
 
 Until those installed-app checks pass, label the feature Beta and describe the

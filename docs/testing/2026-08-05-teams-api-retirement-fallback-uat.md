@@ -69,18 +69,22 @@ Pass: the manual recording remains active until the user presses Stop.
 
 Evidence: screen recording and the retained manual library entry.
 
-### 6. Both privacy-mute authorities silence the actual virtual mic
+### 6. Floating mic control and native mute silence the actual virtual mic
 
 In QuickTime New Audio Recording, explicitly select `Local Recorder Virtual
-Mic`. Record one uncut sequence: speak five seconds, Recorder mute and speak
-five seconds, unmute, native input/AirPods mute and speak five seconds, then
+Mic`. Record one uncut sequence: speak five seconds; click the microphone icon
+on the floating recording window and speak five seconds; click it again and
+speak five seconds; then native input/AirPods mute, speak five seconds, and
 unmute.
 
-Pass: both muted sections contain near-silence/no intelligible speech and both
-unmuted sections recover. Teams mute-icon agreement is not a pass condition.
+Pass: the icon shows the muted/unmuted transition; both muted sections contain
+near-silence/no intelligible speech; and both unmuted sections recover. The
+floating icon state must agree with the actual virtual-mic output. Teams
+mute-icon agreement is not a pass condition.
 
-Evidence: the unedited QuickTime audio artifact and one screenshot showing the
-selected input plus Recorder/native mute state.
+Evidence: one unedited QuickTime audio artifact and one synchronized screen
+recording showing the selected input, both icon clicks/state changes, and the
+native mute state. Do not add another audio artifact.
 
 ### 7. The retired local port receives no traffic
 

@@ -8,6 +8,10 @@ enum RecordingControllerAccessibility {
     static let systemWaveformID = "recording-controller-system-waveform"
     static let microphoneWaveformID = "recording-controller-microphone-waveform"
     static let microphoneMuteID = "recording-controller-microphone-mute"
+    static let teamsMicrophoneStatusID =
+        "recording-controller-teams-microphone-status"
+    static let teamsAccessibilityID =
+        "recording-controller-enable-teams-accessibility"
     static let screenStatusID = "recording-controller-screen-status"
     static let screenToggleID = "recording-controller-screen-toggle"
     static let stopID = "recording-controller-stop"
@@ -132,6 +136,7 @@ final class RecordingControllerCoordinator {
         isShutdown = true
         observation?.cancel()
         observation = nil
+        model.setFloatingRecordingPanelActive(false)
         presenter.dismiss()
     }
 
@@ -140,8 +145,10 @@ final class RecordingControllerCoordinator {
         case .none:
             break
         case .present:
+            model.setFloatingRecordingPanelActive(true)
             presenter.present(model: model)
         case .dismiss:
+            model.setFloatingRecordingPanelActive(false)
             presenter.dismiss()
         }
     }
@@ -238,7 +245,7 @@ struct RecordingControllerView: View {
                 presentation: presentation,
                 stop: model.startOrStop,
                 toggleMicrophoneMute: {
-                    model.toggleRecorderMicMute(source: "Floating panel")
+                    model.toggleTeamsAndRecorderMicMute()
                 },
                 setScreenRequested: { requested in
                     Task {
@@ -250,7 +257,14 @@ struct RecordingControllerView: View {
                 isSystemConnected: recorder.isSystemCaptureConnected,
                 isMicrophoneConnected: recorder.isMicrophoneCaptureConnected,
                 isMicrophoneMuted: recorder.micMuted,
-                isLocalMicrophoneMuted: model.localMicMuted
+                isLocalMicrophoneMuted: model.localMicMuted,
+                microphonePresentation:
+                    RecordingControllerMicrophonePresentation.make(
+                        recorderMuted: recorder.micMuted,
+                        teamsState: model.teamsMicMuteState
+                    ),
+                requestTeamsAccessibilityPermission:
+                    model.requestTeamsAccessibilityPermission
             )
         }
     }
@@ -281,6 +295,12 @@ struct RecordingControllerPanelContent: View {
     let isMicrophoneConnected: Bool
     let isMicrophoneMuted: Bool
     let isLocalMicrophoneMuted: Bool
+    var microphonePresentation =
+        RecordingControllerMicrophonePresentation.make(
+            recorderMuted: false,
+            teamsState: .unknown(.inactive)
+        )
+    var requestTeamsAccessibilityPermission: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 10) {
@@ -329,7 +349,10 @@ struct RecordingControllerPanelContent: View {
                 tint: RecorderVisualStyle.microphone,
                 accessibilityID: RecordingControllerAccessibility.microphoneWaveformID,
                 iconAction: toggleMicrophoneMute,
-                iconIsMuted: isLocalMicrophoneMuted
+                iconIsMuted: isLocalMicrophoneMuted,
+                microphonePresentation: microphonePresentation,
+                requestTeamsAccessibilityPermission:
+                    requestTeamsAccessibilityPermission
             )
 
             HStack(spacing: 10) {
@@ -368,6 +391,9 @@ private struct RecordingControllerInputRow: View {
     let accessibilityID: String
     let iconAction: (() -> Void)?
     var iconIsMuted: Bool? = nil
+    var microphonePresentation: RecordingControllerMicrophonePresentation?
+        = nil
+    var requestTeamsAccessibilityPermission: (() -> Void)? = nil
 
     private var status: RecordingControllerInputStatus {
         RecordingControllerInputStatus.make(
@@ -429,14 +455,52 @@ private struct RecordingControllerInputRow: View {
                     )
                 )
                 .background(RecorderPanelRenderLocationMarker(productionIdentifier: accessibilityID))
-            Circle()
-                .fill(statusColor)
-                .frame(width: 6, height: 6)
-            Text(status.rawValue)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(width: 72, alignment: .trailing)
+            if let microphonePresentation {
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(microphonePresentation.recorderStatusText)
+                        .font(.caption2)
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(microphonePresentation.teamsStatusText)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .foregroundStyle(
+                                microphonePresentation.hasMismatch
+                                    ? .orange
+                                    : .secondary
+                            )
+                            .accessibilityIdentifier(
+                                RecordingControllerAccessibility
+                                    .teamsMicrophoneStatusID
+                            )
+                        if microphonePresentation
+                            .showsEnableAccessibilityAction,
+                           let requestTeamsAccessibilityPermission {
+                            Button("Enable") {
+                                requestTeamsAccessibilityPermission()
+                            }
+                            .buttonStyle(.link)
+                            .font(.caption2)
+                            .help("Enable Accessibility")
+                            .accessibilityLabel("Enable Accessibility")
+                            .accessibilityIdentifier(
+                                RecordingControllerAccessibility
+                                    .teamsAccessibilityID
+                            )
+                        }
+                    }
+                }
+                .frame(width: 150, alignment: .trailing)
+            } else {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 6, height: 6)
+                Text(status.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 72, alignment: .trailing)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)

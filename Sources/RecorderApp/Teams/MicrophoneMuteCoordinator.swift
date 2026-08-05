@@ -3,13 +3,14 @@ import Foundation
 struct MicrophoneMuteCoordinator {
     private(set) var localMuted: Bool
     private(set) var nativeInputMuted = false
+    private(set) var teamsMuted = false
 
     init(localMuted: Bool = false) {
         self.localMuted = localMuted
     }
 
     var effectiveMuted: Bool {
-        localMuted || nativeInputMuted
+        localMuted || nativeInputMuted || teamsMuted
     }
 
     @discardableResult
@@ -26,6 +27,13 @@ struct MicrophoneMuteCoordinator {
         return transition(from: previous)
     }
 
+    @discardableResult
+    mutating func setTeamsMuted(_ muted: Bool) -> Bool? {
+        let previous = effectiveMuted
+        teamsMuted = muted
+        return transition(from: previous)
+    }
+
     private func transition(from previous: Bool) -> Bool? {
         let current = effectiveMuted
         return current == previous ? nil : current
@@ -35,6 +43,7 @@ struct MicrophoneMuteCoordinator {
 struct MicrophoneMuteSnapshot: Equatable, Sendable {
     let localMuted: Bool
     let nativeInputMuted: Bool
+    let teamsMuted: Bool
     let effectiveMuted: Bool
 }
 
@@ -79,6 +88,17 @@ final class MicrophoneMuteGate: @unchecked Sendable {
     ) -> MicrophoneMuteSnapshot {
         applyTransition {
             let transition = coordinator.setNativeInputMuted(muted)
+            return (transition, ensureAudioGateIsApplied)
+        }
+    }
+
+    @discardableResult
+    func setTeamsMuted(
+        _ muted: Bool,
+        ensureAudioGateIsApplied: Bool = false
+    ) -> MicrophoneMuteSnapshot {
+        applyTransition {
+            let transition = coordinator.setTeamsMuted(muted)
             return (transition, ensureAudioGateIsApplied)
         }
     }
@@ -133,6 +153,7 @@ final class MicrophoneMuteGate: @unchecked Sendable {
         MicrophoneMuteSnapshot(
             localMuted: coordinator.localMuted,
             nativeInputMuted: coordinator.nativeInputMuted,
+            teamsMuted: coordinator.teamsMuted,
             effectiveMuted: coordinator.effectiveMuted
         )
     }

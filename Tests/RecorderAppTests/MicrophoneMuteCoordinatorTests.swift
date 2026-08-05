@@ -13,7 +13,41 @@ final class LocalMicrophoneMuteCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.effectiveMuted)
     }
 
-    func testSnapshotContainsOnlyLocalNativeAndEffectiveMuteState() {
+    func testLocalNativeAndTeamsMuteRemainIndependentAuthorities() {
+        let gate = MicrophoneMuteGate { _ in }
+
+        gate.setLocalMuted(true)
+        gate.setTeamsMuted(false)
+        XCTAssertTrue(gate.snapshot.effectiveMuted)
+
+        gate.setLocalMuted(false)
+        gate.setNativeInputMuted(true)
+        gate.setTeamsMuted(false)
+        XCTAssertTrue(gate.snapshot.effectiveMuted)
+
+        gate.setNativeInputMuted(false)
+        gate.setTeamsMuted(true)
+        XCTAssertTrue(gate.snapshot.effectiveMuted)
+    }
+
+    func testClearingTeamsMuteCannotClearLocalOrNativeMute() {
+        let gate = MicrophoneMuteGate { _ in }
+
+        gate.setTeamsMuted(true)
+        gate.setLocalMuted(true)
+        gate.setTeamsMuted(false)
+        XCTAssertTrue(gate.snapshot.localMuted)
+        XCTAssertTrue(gate.snapshot.effectiveMuted)
+
+        gate.setLocalMuted(false)
+        gate.setNativeInputMuted(true)
+        gate.setTeamsMuted(true)
+        gate.setTeamsMuted(false)
+        XCTAssertTrue(gate.snapshot.nativeInputMuted)
+        XCTAssertTrue(gate.snapshot.effectiveMuted)
+    }
+
+    func testSnapshotContainsLocalNativeTeamsAndEffectiveMuteState() {
         let snapshot = MicrophoneMuteGate { _ in }.snapshot
 
         XCTAssertEqual(
@@ -21,6 +55,7 @@ final class LocalMicrophoneMuteCoordinatorTests: XCTestCase {
             MicrophoneMuteSnapshot(
                 localMuted: false,
                 nativeInputMuted: false,
+                teamsMuted: false,
                 effectiveMuted: false
             )
         )

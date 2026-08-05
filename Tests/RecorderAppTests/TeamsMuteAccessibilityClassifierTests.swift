@@ -16,6 +16,17 @@ final class TeamsMuteAccessibilityClassifierTests: XCTestCase {
         )
     }
 
+    func testCurrentEnglishMicActionsAreTrimmedAndCaseInsensitive() {
+        XCTAssertEqual(
+            classify(title: "  uNmUtE MiC\n"),
+            .muted
+        )
+        XCTAssertEqual(
+            classify(title: "\tMUTE MIC  "),
+            .unmuted
+        )
+    }
+
     func testSupportedChineseMuteAndUnmuteActions() {
         for title in ["靜音", "静音"] {
             XCTAssertEqual(classify(title: title), .unmuted)
@@ -46,12 +57,16 @@ final class TeamsMuteAccessibilityClassifierTests: XCTestCase {
     }
 
     func testUnsupportedSemanticEvidenceDoesNotGuess() {
-        XCTAssertEqual(
-            TeamsMuteAccessibilityClassifier.classify([
-                descriptor(title: "Microphone settings")
-            ]),
-            .unknown(.controlNotFound)
-        )
+        for title in [
+            "Microphone settings",
+            "Mute mic settings",
+            "Please Unmute mic"
+        ] {
+            XCTAssertEqual(
+                classify(title: title),
+                .unknown(.controlNotFound)
+            )
+        }
     }
 
     private func classify(title: String) -> TeamsMicMuteState {

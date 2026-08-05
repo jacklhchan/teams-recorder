@@ -74,12 +74,14 @@ enum TeamsMuteAccessibilityClassifier {
 
     private static func isMuteAction(_ value: String) -> Bool {
         value.caseInsensitiveCompare("Mute") == .orderedSame
+            || value.caseInsensitiveCompare("Mute mic") == .orderedSame
             || value == "靜音"
             || value == "静音"
     }
 
     private static func isUnmuteAction(_ value: String) -> Bool {
         value.caseInsensitiveCompare("Unmute") == .orderedSame
+            || value.caseInsensitiveCompare("Unmute mic") == .orderedSame
             || value == "取消靜音"
             || value == "取消静音"
     }

@@ -48,6 +48,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
     public let statusMessage: String
     public let autoModeEnabled: Bool
     public let autoMeetingState: String
+    public let autoMeetingCountdownSeconds: Int?
     public let meetingDetectionState: String
     public let selectedMicrophoneName: String?
     public let selectedMicrophoneUID: String?
@@ -56,6 +57,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
     public let teamsMicState: String
     public let effectiveMicMuted: Bool
     public let virtualMicState: String
+    public let virtualMicPublisherState: String?
     public let systemAudioPermission: String
     public let microphonePermission: String
     public let outputFolder: String
@@ -71,6 +73,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         statusMessage: String,
         autoModeEnabled: Bool,
         autoMeetingState: String,
+        autoMeetingCountdownSeconds: Int? = nil,
         meetingDetectionState: String,
         selectedMicrophoneName: String?,
         selectedMicrophoneUID: String?,
@@ -79,6 +82,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         teamsMicState: String,
         effectiveMicMuted: Bool,
         virtualMicState: String,
+        virtualMicPublisherState: String? = nil,
         systemAudioPermission: String,
         microphonePermission: String,
         outputFolder: String
@@ -93,6 +97,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         self.statusMessage = statusMessage
         self.autoModeEnabled = autoModeEnabled
         self.autoMeetingState = autoMeetingState
+        self.autoMeetingCountdownSeconds = autoMeetingCountdownSeconds
         self.meetingDetectionState = meetingDetectionState
         self.selectedMicrophoneName = selectedMicrophoneName
         self.selectedMicrophoneUID = selectedMicrophoneUID
@@ -101,6 +106,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         self.teamsMicState = teamsMicState
         self.effectiveMicMuted = effectiveMicMuted
         self.virtualMicState = virtualMicState
+        self.virtualMicPublisherState = virtualMicPublisherState
         self.systemAudioPermission = systemAudioPermission
         self.microphonePermission = microphonePermission
         self.outputFolder = outputFolder

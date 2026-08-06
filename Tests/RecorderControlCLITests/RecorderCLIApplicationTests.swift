@@ -122,7 +122,9 @@ final class RecorderCLIApplicationTests: XCTestCase {
         XCTAssertEqual(exitCode, 0)
         XCTAssertEqual(output.lines.first, "App: running (1.2.3)")
         XCTAssertTrue(output.lines.contains("Recording: idle"))
+        XCTAssertTrue(output.lines.contains("Auto meeting countdown seconds: 5"))
         XCTAssertTrue(output.lines.contains("Recorder mic muted: no"))
+        XCTAssertTrue(output.lines.contains("Virtual Mic publisher: unavailable"))
         XCTAssertEqual(output.lines.last, "Output folder: /tmp/Recordings")
     }
 
@@ -145,6 +147,21 @@ final class RecorderCLIApplicationTests: XCTestCase {
             ),
             makeStatus()
         )
+    }
+
+    func testHumanStatusUsesUnknownForLegacyMissingPublisherState() async {
+        let output = OutputRecorder()
+        let application = makeApplication(
+            client: FakeClient(results: [.success(makeResponse(status: makeStatus(
+                virtualMicPublisherState: nil
+            )))]),
+            output: output
+        )
+
+        let exitCode = await application.run(arguments: ["status"])
+
+        XCTAssertEqual(exitCode, 0)
+        XCTAssertTrue(output.lines.contains("Virtual Mic publisher: unknown"))
     }
 
     func testWatchJSONEmitsFirstAndOnlyLaterChangedStatuses() async {
@@ -318,7 +335,10 @@ private func makeResponse(status: RecorderControlStatus) -> RecorderControlRespo
     )
 }
 
-private func makeStatus(statusMessage: String = "Ready") -> RecorderControlStatus {
+private func makeStatus(
+    statusMessage: String = "Ready",
+    virtualMicPublisherState: String? = "unavailable"
+) -> RecorderControlStatus {
     RecorderControlStatus(
         appRunning: true,
         appVersion: "1.2.3",
@@ -329,7 +349,8 @@ private func makeStatus(statusMessage: String = "Ready") -> RecorderControlStatu
         activeRecordingFolder: nil,
         statusMessage: statusMessage,
         autoModeEnabled: false,
-        autoMeetingState: "idle",
+        autoMeetingState: "startCountdown",
+        autoMeetingCountdownSeconds: 5,
         meetingDetectionState: "not-in-meeting",
         selectedMicrophoneName: "Studio Mic",
         selectedMicrophoneUID: "mic-1",
@@ -338,6 +359,7 @@ private func makeStatus(statusMessage: String = "Ready") -> RecorderControlStatu
         teamsMicState: "unknown",
         effectiveMicMuted: false,
         virtualMicState: "ready",
+        virtualMicPublisherState: virtualMicPublisherState,
         systemAudioPermission: "granted",
         microphonePermission: "granted",
         outputFolder: "/tmp/Recordings"

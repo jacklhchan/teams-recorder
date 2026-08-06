@@ -228,6 +228,7 @@ struct RecorderCLIApplication {
             "Status message: \(status.statusMessage)",
             "Auto Mode enabled: \(yesNo(status.autoModeEnabled))",
             "Auto meeting state: \(status.autoMeetingState)",
+            "Auto meeting countdown seconds: \(status.autoMeetingCountdownSeconds.map(String.init) ?? "-")",
             "Meeting detection: \(status.meetingDetectionState)",
             "Selected microphone: \(status.selectedMicrophoneName ?? "-")",
             "Selected microphone UID: \(status.selectedMicrophoneUID ?? "-")",
@@ -236,6 +237,7 @@ struct RecorderCLIApplication {
             "Teams mic state: \(status.teamsMicState)",
             "Effective mic muted: \(yesNo(status.effectiveMicMuted))",
             "Virtual Mic: \(status.virtualMicState)",
+            "Virtual Mic publisher: \(status.virtualMicPublisherState ?? "unknown")",
             "System Audio permission: \(status.systemAudioPermission)",
             "Microphone permission: \(status.microphonePermission)",
             "Output folder: \(status.outputFolder)"

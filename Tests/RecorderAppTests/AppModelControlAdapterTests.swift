@@ -205,15 +205,136 @@ final class AppModelControlAdapterTests: XCTestCase {
         XCTAssertEqual(status.outputFolder, output.path)
     }
 
+    func testStatusProjectsKnownTeamsMicStates() async throws {
+        let model = makeModel(
+            teamsMuteController: ControlAdapterTeamsMuteController()
+        )
+        model.resolvedCaptureSelection = .application(CaptureApplication(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        ))
+        let adapter = AppModelControlAdapter(model: model)
+
+        var status = try await controlStatus(
+            adapter,
+            requestID: "teams-unknown"
+        )
+        XCTAssertEqual(status.teamsMicState, "unknown")
+
+        await model.setTeamsAndRecorderMicMuted(true)
+        status = try await controlStatus(
+            adapter,
+            requestID: "teams-muted"
+        )
+        XCTAssertEqual(status.teamsMicState, "muted")
+
+        await model.setTeamsAndRecorderMicMuted(false)
+        status = try await controlStatus(
+            adapter,
+            requestID: "teams-unmuted"
+        )
+        XCTAssertEqual(status.teamsMicState, "unmuted")
+    }
+
+    func testStatusProjectsCountdownSecondsOnlyDuringCountdowns() async throws {
+        let idleModel = makeModel()
+        let idleStatus = try await controlStatus(
+            AppModelControlAdapter(model: idleModel),
+            requestID: "countdown-idle"
+        )
+        XCTAssertNil(idleStatus.autoMeetingCountdownSeconds)
+
+        let startTicker = ControlAdapterManualTicker()
+        let startCoordinator = TeamsAutoMeetingCoordinator(
+            startCountdownSeconds: 4,
+            tick: { await startTicker.waitForTick() }
+        )
+        startCoordinator.setEnabled(true)
+        startCoordinator.handleMeetingState(isInMeeting: true)
+        let startModel = makeModel(
+            teamsAutoMeetingCoordinator: startCoordinator,
+            autoModeEnabled: true
+        )
+        let startStatus = try await controlStatus(
+            AppModelControlAdapter(model: startModel),
+            requestID: "countdown-start"
+        )
+        XCTAssertEqual(startStatus.autoMeetingState, "startCountdown")
+        XCTAssertEqual(startStatus.autoMeetingCountdownSeconds, 4)
+
+        let ticker = ControlAdapterManualTicker()
+        let stopCoordinator = TeamsAutoMeetingCoordinator(
+            startCountdownSeconds: 1,
+            stopDebounceSeconds: 7,
+            tick: { await ticker.waitForTick() }
+        )
+        stopCoordinator.setEnabled(true)
+        stopCoordinator.handleMeetingState(isInMeeting: true)
+        await ticker.fireAndWaitForAcknowledgement()
+        await waitUntil { stopCoordinator.state == .starting }
+        stopCoordinator.automaticStartSucceeded()
+        let stopModel = makeModel(
+            teamsAutoMeetingCoordinator: stopCoordinator,
+            autoModeEnabled: true
+        )
+        stopCoordinator.handleMeetingState(isInMeeting: false)
+
+        let stopStatus = try await controlStatus(
+            AppModelControlAdapter(model: stopModel),
+            requestID: "countdown-stop"
+        )
+        XCTAssertEqual(stopStatus.autoMeetingState, "stopCountdown")
+        XCTAssertEqual(stopStatus.autoMeetingCountdownSeconds, 7)
+    }
+
+    func testStatusProjectsVirtualMicPublisherStateSeparatelyFromInstallation() async throws {
+        let stoppedModel = makeModel()
+        let stoppedStatus = try await controlStatus(
+            AppModelControlAdapter(model: stoppedModel),
+            requestID: "publisher-stopped"
+        )
+        XCTAssertEqual(stoppedStatus.virtualMicState, "absent")
+        XCTAssertEqual(stoppedStatus.virtualMicPublisherState, "stopped")
+
+        for (state, expected) in [
+            (VirtualMicPublisherState.ready, "ready"),
+            (.unavailable, "unavailable")
+        ] {
+            let publisher = ControlAdapterVirtualMicPublisher(startState: state)
+            let engine = RecordingEngine(
+                captureSource: ControlAdapterCaptureSource(),
+                virtualMicPublisher: publisher
+            )
+            try await engine.startMonitoring(
+                selection: .allSystemAudio,
+                microphoneUID: nil
+            )
+            let model = makeModel(recorder: engine)
+            let status = try await controlStatus(
+                AppModelControlAdapter(model: model),
+                requestID: "publisher-\(expected)"
+            )
+
+            XCTAssertEqual(status.virtualMicState, "absent")
+            XCTAssertEqual(status.virtualMicPublisherState, expected)
+            await engine.stopMonitoring()
+        }
+    }
+
     private func makeModel(
         microphone: AudioDevice? = nil,
         outputFolder: URL = URL(fileURLWithPath: "/tmp", isDirectory: true),
         recorder: RecordingEngine? = nil,
-        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
+        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
+        teamsMuteController: any TeamsMuteControlling =
+            ControlAdapterTeamsMuteController(),
+        autoModeEnabled: Bool = false
     ) -> AppModel {
         let suiteName = "AppModelControlAdapterTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(autoModeEnabled, forKey: "teamsAutoMeetingEnabled")
         return AppModel(
             defaults: defaults,
             recorder: recorder,
@@ -221,9 +342,22 @@ final class AppModelControlAdapterTests: XCTestCase {
             defaultInputDeviceID: { microphone?.id },
             performStartupWork: false,
             initialOutputFolder: outputFolder,
+            virtualMicStateProvider: { .absent },
             volumeCapacityProvider: ControlAdapterStorageProvider(),
-            teamsAutoMeetingCoordinator: teamsAutoMeetingCoordinator
+            teamsAutoMeetingCoordinator: teamsAutoMeetingCoordinator,
+            teamsMuteController: teamsMuteController
         )
+    }
+
+    private func controlStatus(
+        _ adapter: AppModelControlAdapter,
+        requestID: String
+    ) async throws -> RecorderControlStatus {
+        let response = await adapter.handle(.init(
+            requestID: requestID,
+            command: .status
+        ))
+        return try XCTUnwrap(response.status)
     }
 
     private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async {
@@ -266,6 +400,44 @@ private final class ControlAdapterWriter: MixedAudioWriting {
 private struct ControlAdapterStorageProvider: VolumeCapacityProviding {
     func availableBytes(onVolumeContaining _: URL) throws -> Int64 {
         Int64(10) * 1_024 * 1_024 * 1_024
+    }
+}
+
+private final class ControlAdapterTeamsMuteController: TeamsMuteControlling,
+    @unchecked Sendable
+{
+    func readState(processID _: pid_t) async -> TeamsMicMuteState {
+        .unknown(.inactive)
+    }
+
+    func setMuted(
+        _ muted: Bool,
+        processID _: pid_t
+    ) async -> TeamsMicMuteState {
+        muted ? .muted : .unmuted
+    }
+
+    @MainActor
+    func requestPermission() {}
+}
+
+private final class ControlAdapterVirtualMicPublisher: VirtualMicPublishing {
+    private let startState: VirtualMicPublisherState
+    private(set) var state: VirtualMicPublisherState = .stopped
+
+    init(startState: VirtualMicPublisherState) {
+        self.startState = startState
+    }
+
+    func start() {
+        state = startState
+    }
+
+    func publishMicrophone(left _: [Float], right _: [Float]) {}
+    func setMuted(_: Bool) {}
+
+    func stop() {
+        state = .stopped
     }
 }
 

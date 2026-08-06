@@ -110,15 +110,17 @@ final class AppModelControlAdapter {
             statusMessage: model.statusMessage,
             autoModeEnabled: model.teamsAutoMeetingEnabled,
             autoMeetingState: autoMeetingState(),
+            autoMeetingCountdownSeconds: autoMeetingCountdownSeconds(),
             meetingDetectionState: meetingDetectionState(),
             selectedMicrophoneName: model.selectedMicDevice?.name,
             selectedMicrophoneUID: model.selectedMicDevice?.uid
                 ?? model.selectedMicrophoneUID,
             localMicMuted: snapshot.localMuted,
             nativeInputMicMuted: snapshot.nativeInputMuted,
-            teamsMicState: "unknown",
+            teamsMicState: teamsMicState(),
             effectiveMicMuted: snapshot.effectiveMuted,
             virtualMicState: virtualMicState(),
+            virtualMicPublisherState: virtualMicPublisherState(),
             systemAudioPermission: permission(model.systemAudioPermission),
             microphonePermission: permission(model.microphonePermission),
             outputFolder: model.outputFolder.path
@@ -170,6 +172,16 @@ final class AppModelControlAdapter {
         }
     }
 
+    private func autoMeetingCountdownSeconds() -> Int? {
+        switch model.teamsAutoMeetingState {
+        case let .startCountdown(secondsRemaining),
+             let .stopCountdown(secondsRemaining):
+            secondsRemaining
+        default:
+            nil
+        }
+    }
+
     private func meetingDetectionState() -> String {
         switch model.teamsLocalMeetingDetectionState {
         case .waiting: "waiting"
@@ -186,6 +198,22 @@ final class AppModelControlAdapter {
         case .installedNeedsReboot: "installedNeedsReboot"
         case .ready: "ready"
         case .removalNeedsReboot: "removalNeedsReboot"
+        }
+    }
+
+    private func teamsMicState() -> String {
+        switch model.teamsMicMuteState {
+        case .muted: "muted"
+        case .unmuted: "unmuted"
+        case .unknown: "unknown"
+        }
+    }
+
+    private func virtualMicPublisherState() -> String {
+        switch model.recorder.virtualMicPublisherState {
+        case .stopped: "stopped"
+        case .ready: "ready"
+        case .unavailable: "unavailable"
         }
     }
 

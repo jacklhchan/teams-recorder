@@ -119,6 +119,16 @@ final class PlaybackFeatureModel: ObservableObject {
         }
     }
 
+    func setVolume(_ volume: Float) {
+        guard activeSessionID != nil, !isShutdown else { return }
+        coordinator.setVolume(volume)
+    }
+
+    func setRate(_ rate: Float) {
+        guard activeSessionID != nil, !isShutdown else { return }
+        coordinator.setRate(rate)
+    }
+
     func stop() {
         guard !isShutdown else { return }
         stopOwnedPlayback()

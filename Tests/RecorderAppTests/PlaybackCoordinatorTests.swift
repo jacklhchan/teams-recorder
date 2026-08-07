@@ -4,6 +4,30 @@ import XCTest
 
 @MainActor
 final class PlaybackCoordinatorTests: XCTestCase {
+    func testVolumeAndRateControlsClampAndApplySelectedRateWhenPlaybackStarts() async throws {
+        let fixture = try makeFixture(extension: "m4a")
+        let coordinator = PlaybackCoordinator(
+            player: AVPlayer(),
+            observer: TestPlaybackObserver()
+        )
+
+        coordinator.setVolume(1.4)
+        XCTAssertEqual(coordinator.player.volume, 1)
+        coordinator.setVolume(-0.2)
+        XCTAssertEqual(coordinator.player.volume, 0)
+
+        coordinator.setRate(1.5)
+        XCTAssertEqual(coordinator.player.defaultRate, 1.5)
+        coordinator.setRate(1.3)
+        XCTAssertEqual(coordinator.player.defaultRate, 1.5)
+
+        try await coordinator.load(fixture.session)
+        coordinator.play()
+
+        XCTAssertEqual(coordinator.player.defaultRate, 1.5)
+        XCTAssertEqual(coordinator.player.rate, 1.5)
+    }
+
     func testLoadPlayPauseSeekAndStopPublishesClampedSnapshotsForM4A() async throws {
         let fixture = try makeFixture(extension: "m4a")
         let observer = TestPlaybackObserver()

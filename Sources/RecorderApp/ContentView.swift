@@ -61,7 +61,8 @@ struct ContentView: View {
             of: playbackFeature.activeSessionID,
             initial: true
         ) { _, sessionID in
-            guard sessionID != nil else {
+            guard sessionID != nil,
+                  let session = playbackFeature.presentation.session else {
                 playbackWindow.dismiss()
                 return
             }
@@ -71,7 +72,12 @@ struct ContentView: View {
                 stopPlayback: {
                     model.stopPlayback()
                 },
-                seekPlayback: model.seekPlayback
+                seekPlayback: model.seekPlayback,
+                revealRecording: {
+                    model.revealRecording(session)
+                },
+                setVolume: model.setPlaybackVolume,
+                setRate: model.setPlaybackRate
             )
         }
         .onReceive(

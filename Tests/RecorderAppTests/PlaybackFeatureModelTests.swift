@@ -5,6 +5,31 @@ import Combine
 
 @MainActor
 final class PlaybackFeatureModelTests: XCTestCase {
+    func testVolumeAndRateForwardOnlyWhileActiveAndBeforeShutdown() async {
+        let coordinator = FeaturePlaybackCoordinator()
+        let feature = PlaybackFeatureModel(coordinator: coordinator)
+
+        feature.setVolume(0.4)
+        feature.setRate(1.25)
+        XCTAssertTrue(coordinator.volumeRequests.isEmpty)
+        XCTAssertTrue(coordinator.rateRequests.isEmpty)
+
+        feature.play(makeSession(), successStatus: "Playing")
+        await Task.yield()
+        feature.setVolume(0.6)
+        feature.setRate(1.5)
+
+        XCTAssertEqual(coordinator.volumeRequests, [0.6])
+        XCTAssertEqual(coordinator.rateRequests, [1.5])
+
+        feature.shutdown()
+        feature.setVolume(0.8)
+        feature.setRate(2)
+
+        XCTAssertEqual(coordinator.volumeRequests, [0.6])
+        XCTAssertEqual(coordinator.rateRequests, [1.5])
+    }
+
     func testPlaybackFeatureAcceptsOnlyCurrentLoadAndSnapshotGeneration() async {
         let coordinator = FeaturePlaybackCoordinator()
         let feature = PlaybackFeatureModel(coordinator: coordinator)
@@ -295,6 +320,8 @@ private final class FeaturePlaybackCoordinator: PlaybackCoordinating {
     var onSnapshot: ((PlaybackSnapshot) -> Void)?
     var loadError: Error?
     private(set) var stopCount = 0
+    private(set) var volumeRequests: [Float] = []
+    private(set) var rateRequests: [Float] = []
 
     func load(_: RecordingSession) async throws {
         if let loadError { throw loadError }
@@ -303,6 +330,8 @@ private final class FeaturePlaybackCoordinator: PlaybackCoordinating {
     func play() {}
     func pause() {}
     func seek(to _: TimeInterval) async {}
+    func setVolume(_ volume: Float) { volumeRequests.append(volume) }
+    func setRate(_ rate: Float) { rateRequests.append(rate) }
     func stop() { stopCount += 1 }
     func emit(_ snapshot: PlaybackSnapshot) { onSnapshot?(snapshot) }
 }
@@ -336,6 +365,8 @@ private final class DelayedPlaybackCoordinator: PlaybackCoordinating {
 
     func play() { playCount += 1 }
     func pause() {}
+    func setVolume(_: Float) {}
+    func setRate(_: Float) {}
 
     func seek(to _: TimeInterval) async {
         pendingSeekCount += 1

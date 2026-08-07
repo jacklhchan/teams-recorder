@@ -201,6 +201,11 @@ final class AppModelPlaybackTests: XCTestCase {
 
         model.play(session: session)
         await waitUntil { playbackFactory.presenter.presentCount == 1 }
+        XCTAssertNotNil(playbackFactory.presenter.revealRecording)
+        playbackFactory.presenter.setVolume?(0.35)
+        playbackFactory.presenter.setRate?(1.25)
+        XCTAssertEqual(coordinator.volumeRequests, [0.35])
+        XCTAssertEqual(coordinator.rateRequests, [1.25])
         XCTAssertFalse(
             containsAVPlayerView(in: hostingView),
             "The exercised video presentation must remain outside ContentView's workspace hierarchy"
@@ -539,6 +544,8 @@ private final class FakePlaybackCoordinator: PlaybackCoordinating {
     private(set) var pauseCount = 0
     private(set) var stopCount = 0
     private(set) var seekRequests: [TimeInterval] = []
+    private(set) var volumeRequests: [Float] = []
+    private(set) var rateRequests: [Float] = []
     var loadError: Error?
 
     func load(_ session: RecordingSession) async throws {
@@ -549,6 +556,8 @@ private final class FakePlaybackCoordinator: PlaybackCoordinating {
     func play() { playCount += 1 }
     func pause() { pauseCount += 1 }
     func seek(to seconds: TimeInterval) async { seekRequests.append(seconds) }
+    func setVolume(_ volume: Float) { volumeRequests.append(volume) }
+    func setRate(_ rate: Float) { rateRequests.append(rate) }
     func stop() { stopCount += 1 }
     func emit(_ snapshot: PlaybackSnapshot) { onSnapshot?(snapshot) }
 }
@@ -593,6 +602,9 @@ private final class PlaybackPresenterFactorySpy: PlaybackWindowPresenterFactory 
 private final class PlaybackPresenterSpy: PlaybackWindowPresenting {
     private(set) var presentCount = 0
     private(set) var dismissCount = 0
+    private(set) var revealRecording: (@MainActor () -> Void)?
+    private(set) var setVolume: (@MainActor (Float) -> Void)?
+    private(set) var setRate: (@MainActor (Float) -> Void)?
 
     func present(
         presentation _: PlaybackPresentationModel,
@@ -601,6 +613,21 @@ private final class PlaybackPresenterSpy: PlaybackWindowPresenting {
         seekPlayback _: @escaping @MainActor (TimeInterval) -> Void
     ) {
         presentCount += 1
+    }
+
+    func present(
+        presentation _: PlaybackPresentationModel,
+        togglePlayback _: @escaping @MainActor () -> Void,
+        stopPlayback _: @escaping @MainActor () -> Void,
+        seekPlayback _: @escaping @MainActor (TimeInterval) -> Void,
+        revealRecording: @escaping @MainActor () -> Void,
+        setVolume: @escaping @MainActor (Float) -> Void,
+        setRate: @escaping @MainActor (Float) -> Void
+    ) {
+        presentCount += 1
+        self.revealRecording = revealRecording
+        self.setVolume = setVolume
+        self.setRate = setRate
     }
 
     func dismiss() {

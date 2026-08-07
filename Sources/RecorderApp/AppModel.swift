@@ -1566,6 +1566,18 @@ final class AppModel: ObservableObject {
         playbackFeature.seek(to: time)
     }
 
+    func setPlaybackVolume(_ volume: Float) {
+        playbackFeature.setVolume(volume)
+    }
+
+    func setPlaybackRate(_ rate: Float) {
+        playbackFeature.setRate(rate)
+    }
+
+    func revealRecording(_ session: RecordingSession) {
+        NSWorkspace.shared.activateFileViewerSelecting([session.recordingURL])
+    }
+
     func open(session: RecordingSession) {
         NSWorkspace.shared.open(session.folderURL)
     }

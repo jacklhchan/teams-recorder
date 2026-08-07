@@ -1,9 +1,27 @@
 @preconcurrency import AVFoundation
+import Combine
 import XCTest
 @testable import RecorderApp
 
 @MainActor
 final class PlaybackCoordinatorTests: XCTestCase {
+    func testBeginningSameSessionTwiceAdvancesObservableLoadRevision() throws {
+        let session = try makeFixture(extension: "m4a").session
+        let presentation = PlaybackPresentationModel(player: AVPlayer())
+        var revisions: [UInt64] = []
+        let observation = presentation.$loadRevision
+            .dropFirst()
+            .sink { revisions.append($0) }
+
+        presentation.begin(session: session)
+        presentation.begin(session: session)
+
+        XCTAssertEqual(revisions, [1, 2])
+        XCTAssertEqual(presentation.loadRevision, 2)
+        XCTAssertEqual(presentation.session?.id, session.id)
+        withExtendedLifetime(observation) {}
+    }
+
     func testVolumeAndRateControlsClampAndApplySelectedRateWhenPlaybackStarts() async throws {
         let fixture = try makeFixture(extension: "m4a")
         let coordinator = PlaybackCoordinator(

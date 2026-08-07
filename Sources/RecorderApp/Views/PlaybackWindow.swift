@@ -183,6 +183,7 @@ private struct PlaybackWindowView: View {
                     setVolume: setVolume,
                     setRate: setRate
                 )
+                .id(presentation.loadRevision)
                 .frame(
                     minWidth: playbackPresentation.minimumContentSize.width,
                     minHeight: playbackPresentation.minimumContentSize.height

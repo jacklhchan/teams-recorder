@@ -17,6 +17,7 @@ final class PlaybackPresentationModel: ObservableObject {
 
     @Published private(set) var session: RecordingSession?
     @Published private(set) var snapshot = PlaybackSnapshot.empty
+    @Published private(set) var loadRevision: UInt64 = 0
 
     var progress: TimeInterval { snapshot.progress }
     var duration: TimeInterval { snapshot.duration }
@@ -27,6 +28,7 @@ final class PlaybackPresentationModel: ObservableObject {
     }
 
     func begin(session: RecordingSession) {
+        loadRevision &+= 1
         self.session = session
         snapshot = PlaybackSnapshot(
             sessionID: session.id,

@@ -10,6 +10,7 @@ final class PlaybackCoordinatorTests: XCTestCase {
             player: AVPlayer(),
             observer: TestPlaybackObserver()
         )
+        try await coordinator.load(fixture.session)
 
         coordinator.setVolume(1.4)
         XCTAssertEqual(coordinator.player.volume, 1)
@@ -21,11 +22,36 @@ final class PlaybackCoordinatorTests: XCTestCase {
         coordinator.setRate(1.3)
         XCTAssertEqual(coordinator.player.defaultRate, 1.5)
 
-        try await coordinator.load(fixture.session)
         coordinator.play()
 
         XCTAssertEqual(coordinator.player.defaultRate, 1.5)
         XCTAssertEqual(coordinator.player.rate, 1.5)
+    }
+
+    func testLoadingReplacementSessionResetsControlsToUIPresentationDefaults() async throws {
+        let first = try makeFixture(extension: "m4a")
+        let second = try makeFixture(extension: "mp4")
+        let coordinator = PlaybackCoordinator(
+            player: AVPlayer(),
+            observer: TestPlaybackObserver()
+        )
+
+        try await coordinator.load(first.session)
+        coordinator.setVolume(0.35)
+        coordinator.setRate(1.5)
+        coordinator.play()
+        XCTAssertEqual(coordinator.player.volume, 0.35)
+        XCTAssertEqual(coordinator.player.rate, 1.5)
+
+        try await coordinator.load(second.session)
+
+        XCTAssertEqual(coordinator.player.volume, 1)
+        XCTAssertEqual(coordinator.player.defaultRate, 1)
+        XCTAssertEqual(coordinator.player.rate, 0)
+
+        coordinator.play()
+        XCTAssertEqual(coordinator.player.defaultRate, 1)
+        XCTAssertEqual(coordinator.player.rate, 1)
     }
 
     func testLoadPlayPauseSeekAndStopPublishesClampedSnapshotsForM4A() async throws {

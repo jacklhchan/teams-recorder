@@ -66,6 +66,12 @@ struct RecordingsLibraryView: View {
             lastTranscriptionStatus: transcription.lastTranscriptionStatus,
             lastTranscriptionDidFail: transcription.lastTranscriptionDidFail,
             hasSavedProviderProfile: model.aiProviderSettingsModel.hasSavedProfile,
+            currentHasSavedProviderProfile: {
+                model.aiProviderSettingsModel.hasSavedProfile
+            },
+            currentTranscribingSessionID: {
+                transcriptionFeature.presentation.transcribingSessionID
+            },
             transcriptionStatesBySessionID: transcription.transcriptionStatesBySessionID,
             play: model.play,
             open: model.open,
@@ -161,6 +167,8 @@ private struct SessionListView: View {
     let lastTranscriptionStatus: String
     let lastTranscriptionDidFail: Bool
     let hasSavedProviderProfile: Bool
+    let currentHasSavedProviderProfile: () -> Bool
+    let currentTranscribingSessionID: () -> RecordingSession.ID?
     let transcriptionStatesBySessionID: [RecordingSession.ID: TranscriptionState]
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
@@ -550,7 +558,9 @@ private struct SessionListView: View {
                     identifier: "recorder.row.transcription-cancel.\(rowID)"
                 ) {
                     _ = admission.perform(sessionID: session.id) { canonical in
-                        guard transcribingSessionID == canonical.id else { return }
+                        guard currentTranscribingSessionID() == canonical.id else {
+                            return
+                        }
                         cancelTranscription()
                     }
                 }
@@ -562,7 +572,13 @@ private struct SessionListView: View {
                     identifier: "recorder.row.transcribe.\(rowID)",
                     enabled: transcribingSessionID == nil && hasSavedProviderProfile
                 ) {
-                    _ = admission.perform(sessionID: session.id, action: transcribe)
+                    _ = admission.perform(sessionID: session.id) { canonical in
+                        guard currentHasSavedProviderProfile(),
+                              currentTranscribingSessionID() == nil else {
+                            return
+                        }
+                        transcribe(canonical)
+                    }
                 }
             )
         }
@@ -929,7 +945,7 @@ private struct RecordingSessionMenuButton: NSViewRepresentable {
     let accessibilityLabel: String
     let items: [Item]
 
-    func makeCoordinator() -> Coordinator { Coordinator(items: items) }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSButton {
         let button = NSButton(
@@ -947,10 +963,9 @@ private struct RecordingSessionMenuButton: NSViewRepresentable {
     }
 
     func updateNSView(_ button: NSButton, context: Context) {
-        context.coordinator.items = items
         let menu = NSMenu()
         menu.autoenablesItems = false
-        for (index, item) in items.enumerated() {
+        for item in items {
             if item.isSeparator {
                 menu.addItem(.separator())
                 continue
@@ -961,7 +976,7 @@ private struct RecordingSessionMenuButton: NSViewRepresentable {
                 keyEquivalent: ""
             )
             menuItem.target = context.coordinator
-            menuItem.representedObject = index
+            menuItem.representedObject = ActionToken(action: item.action)
             menuItem.isEnabled = item.enabled
             menuItem.setAccessibilityIdentifier(item.identifier)
             menu.addItem(menuItem)
@@ -973,11 +988,16 @@ private struct RecordingSessionMenuButton: NSViewRepresentable {
         button.toolTip = "More Actions"
     }
 
-    final class Coordinator: NSObject {
-        var items: [Item]
-        var menu = NSMenu()
+    private final class ActionToken: NSObject {
+        let action: () -> Void
 
-        init(items: [Item]) { self.items = items }
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var menu = NSMenu()
 
         @objc func showMenu(_ sender: NSButton) {
             menu.popUp(
@@ -988,9 +1008,10 @@ private struct RecordingSessionMenuButton: NSViewRepresentable {
         }
 
         @objc func performAction(_ sender: NSMenuItem) {
-            guard let index = sender.representedObject as? Int,
-                  items.indices.contains(index) else { return }
-            items[index].action()
+            guard let token = sender.representedObject as? ActionToken else {
+                return
+            }
+            token.action()
         }
     }
 }

@@ -940,6 +940,100 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.metadataTitle))
     }
 
+    func testRecordingsCapturedTranscribeActionCannotBecomeCancelAfterMenuUpdate() throws {
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+        defer { fixture.remove() }
+        fixture.model.aiProviderSettingsModel.reload()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        let moreID = "recorder.row.more.\(rowID)"
+        let transcribeID = "recorder.row.transcribe.\(rowID)"
+        let capturedTranscribe = try XCTUnwrap(host.captureNativeMenuAction(
+            forButton: moreID,
+            itemIdentifier: transcribeID
+        ))
+
+        XCTAssertTrue(host.invokeCapturedNativeMenuAction(capturedTranscribe))
+        XCTAssertEqual(
+            fixture.model.transcriptionFeature.presentation.transcribingSessionID,
+            fixture.session.id
+        )
+        XCTAssertEqual(
+            host.nativeMenuItems(forButton: moreID)?.first(where: {
+                $0.title == "Cancel Transcription"
+            })?.identifier,
+            "recorder.row.transcription-cancel.\(rowID)"
+        )
+
+        XCTAssertTrue(host.invokeCapturedNativeMenuAction(capturedTranscribe))
+        XCTAssertEqual(capturedTranscribe.item.accessibilityIdentifier(), transcribeID)
+        XCTAssertEqual(
+            fixture.model.transcriptionFeature.presentation.transcribingSessionID,
+            fixture.session.id,
+            "A stale Transcribe item must not dispatch the latest Cancel closure."
+        )
+        XCTAssertNotEqual(
+            fixture.model.transcriptionFeature.presentation
+                .transcriptionStatesBySessionID[fixture.session.id]?.phase,
+            .cancelled
+        )
+    }
+
+    func testRecordingsCapturedCancelActionCannotBecomeTranscribeAfterMenuUpdate() throws {
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+        defer { fixture.remove() }
+        fixture.model.aiProviderSettingsModel.reload()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        let moreID = "recorder.row.more.\(rowID)"
+        let cancelID = "recorder.row.transcription-cancel.\(rowID)"
+        XCTAssertTrue(host.invokeNativeMenuItem(
+            forButton: moreID,
+            itemIdentifier: "recorder.row.transcribe.\(rowID)"
+        ))
+        let capturedCancel = try XCTUnwrap(host.captureNativeMenuAction(
+            forButton: moreID,
+            itemIdentifier: cancelID
+        ))
+
+        XCTAssertTrue(host.invokeCapturedNativeMenuAction(capturedCancel))
+        try waitUntil(timeout: 1, message: "captured Cancel to settle") {
+            fixture.model.transcriptionFeature.presentation.transcribingSessionID == nil
+                && fixture.model.transcriptionFeature.presentation
+                    .transcriptionStatesBySessionID[fixture.session.id]?.phase == .cancelled
+        }
+        XCTAssertEqual(
+            host.nativeMenuItems(forButton: moreID)?.first(where: {
+                $0.title == "Transcribe"
+            })?.identifier,
+            "recorder.row.transcribe.\(rowID)"
+        )
+
+        XCTAssertTrue(host.invokeCapturedNativeMenuAction(capturedCancel))
+        XCTAssertEqual(capturedCancel.item.accessibilityIdentifier(), cancelID)
+        XCTAssertNil(
+            fixture.model.transcriptionFeature.presentation.transcribingSessionID,
+            "A stale Cancel item must not dispatch the latest Transcribe closure."
+        )
+        XCTAssertEqual(
+            fixture.model.transcriptionFeature.presentation
+                .transcriptionStatesBySessionID[fixture.session.id]?.phase,
+            .cancelled
+        )
+    }
+
     func testMinimumRecordingsKeepsSessionActionsInsideWindow() throws {
         let fixture = makeFixtureWithOneSession()
         let host = try makeWorkspaceHost(

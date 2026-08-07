@@ -804,6 +804,142 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         }
     }
 
+    func testRecordingsNativeMenuPreservesExplicitEnablementAndStableActions() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        let items = try XCTUnwrap(
+            host.nativeMenuItems(forButton: "recorder.row.more.\(rowID)")
+        )
+
+        XCTAssertEqual(items.map(\.title), [
+            "Open Folder",
+            "Edit Details",
+            "Transcribe",
+            "Open Transcript",
+            "Open ASR Log",
+            "Move to Trash"
+        ])
+        XCTAssertEqual(items.map(\.identifier), [
+            "recorder.row.open.\(rowID).menu",
+            "recorder.row.edit.\(rowID)",
+            "recorder.row.transcribe.\(rowID)",
+            "recorder.row.transcript.\(rowID).menu",
+            "recorder.row.log.\(rowID)",
+            "recorder.row.trash.\(rowID)"
+        ])
+        XCTAssertEqual(
+            Dictionary(uniqueKeysWithValues: items.map { ($0.title, $0.isEnabled) }),
+            [
+                "Open Folder": true,
+                "Edit Details": true,
+                "Transcribe": false,
+                "Open Transcript": false,
+                "Open ASR Log": false,
+                "Move to Trash": true
+            ]
+        )
+    }
+
+    func testRecordingsNativeMenuRoutesEnabledTranscriptionAndTranscriptActions() throws {
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+        defer { fixture.remove() }
+        try Data("ASR log".utf8).write(
+            to: fixture.session.folderURL.appendingPathComponent(
+                TranscriptDocumentStore.logFileName
+            )
+        )
+        fixture.model.aiProviderSettingsModel.reload()
+        XCTAssertTrue(fixture.model.aiProviderSettingsModel.hasSavedProfile)
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        let moreID = "recorder.row.more.\(rowID)"
+        let initialItems = try XCTUnwrap(host.nativeMenuItems(forButton: moreID))
+        for title in [
+            "Open Folder", "Edit Details", "Transcribe",
+            "Open Transcript", "Open ASR Log", "Move to Trash"
+        ] {
+            XCTAssertEqual(
+                initialItems.first(where: { $0.title == title })?.isEnabled,
+                true,
+                "Expected enabled native menu action: \(title)"
+            )
+        }
+
+        XCTAssertTrue(host.invokeNativeMenuItem(
+            forButton: moreID,
+            itemIdentifier: "recorder.row.transcribe.\(rowID)"
+        ))
+        XCTAssertEqual(
+            fixture.model.transcriptionFeature.presentation.transcribingSessionID,
+            fixture.session.id
+        )
+        let activeItems = try XCTUnwrap(host.nativeMenuItems(forButton: moreID))
+        XCTAssertNil(activeItems.first(where: { $0.title == "Transcribe" }))
+        XCTAssertEqual(
+            activeItems.first(where: { $0.title == "Cancel Transcription" }),
+            .init(
+                title: "Cancel Transcription",
+                identifier: "recorder.row.transcription-cancel.\(rowID)",
+                isEnabled: true
+            )
+        )
+        XCTAssertTrue(host.invokeNativeMenuItem(
+            forButton: moreID,
+            itemIdentifier: "recorder.row.transcription-cancel.\(rowID)"
+        ))
+        try waitUntil(timeout: 1, message: "native menu cancellation to settle") {
+            fixture.model.transcriptionFeature.presentation.transcribingSessionID == nil
+                && fixture.model.transcriptionFeature.presentation
+                    .transcriptionStatesBySessionID[fixture.session.id]?.phase == .cancelled
+        }
+
+        XCTAssertTrue(host.invokeNativeMenuItem(
+            forButton: moreID,
+            itemIdentifier: "recorder.row.transcript.\(rowID).menu"
+        ))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.transcript.detail.root"))
+    }
+
+    func testRecordingsCapturedNativeMenuActionFailsClosedAfterSessionRemoval() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"))
+        let action = try XCTUnwrap(host.captureNativeMenuAction(
+            forButton: "recorder.row.more.\(rowID)",
+            itemIdentifier: "recorder.row.edit.\(rowID)"
+        ))
+
+        fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
+            [],
+            workspace: fixture.model.outputFolder,
+            fence: .initial
+        )
+        host.render()
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.selected.\(rowID)"))
+        XCTAssertTrue(host.invokeCapturedNativeMenuAction(action))
+        XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.metadataTitle))
+    }
+
     func testMinimumRecordingsKeepsSessionActionsInsideWindow() throws {
         let fixture = makeFixtureWithOneSession()
         let host = try makeWorkspaceHost(
@@ -1871,6 +2007,17 @@ private struct WorkspaceHostRoot: View {
     }
 }
 
+fileprivate struct NativeMenuItemSnapshot: Equatable {
+    let title: String
+    let identifier: String
+    let isEnabled: Bool
+}
+
+fileprivate struct CapturedNativeMenuAction {
+    let item: NSMenuItem
+    let target: AnyObject
+}
+
 @MainActor
 final class WorkspaceHost {
     private let navigationDriver = WorkspaceNavigationDriver()
@@ -2140,6 +2287,67 @@ final class WorkspaceHost {
 
     func nativeButtonAccessibilityLabel(for identifier: String) -> String? {
         nativeButtons(for: identifier).first?.accessibilityLabel()
+    }
+
+    fileprivate func nativeMenuItems(
+        forButton identifier: String
+    ) -> [NativeMenuItemSnapshot]? {
+        guard let menu = nativeButtons(for: identifier).first?.menu else {
+            return nil
+        }
+        menu.update()
+        return menu.items.compactMap { item in
+            guard !item.isSeparatorItem else { return nil }
+            return NativeMenuItemSnapshot(
+                title: item.title,
+                identifier: item.accessibilityIdentifier(),
+                isEnabled: item.isEnabled
+            )
+        }
+    }
+
+    fileprivate func captureNativeMenuAction(
+        forButton buttonIdentifier: String,
+        itemIdentifier: String
+    ) -> CapturedNativeMenuAction? {
+        guard let menu = nativeButtons(for: buttonIdentifier).first?.menu else {
+            return nil
+        }
+        menu.update()
+        guard let item = menu.items.first(where: {
+            $0.accessibilityIdentifier() == itemIdentifier
+        }), let target = item.target else {
+            return nil
+        }
+        return CapturedNativeMenuAction(item: item, target: target)
+    }
+
+    @discardableResult
+    func invokeNativeMenuItem(
+        forButton buttonIdentifier: String,
+        itemIdentifier: String
+    ) -> Bool {
+        guard let action = captureNativeMenuAction(
+            forButton: buttonIdentifier,
+            itemIdentifier: itemIdentifier
+        ), action.item.isEnabled else {
+            return false
+        }
+        return invokeCapturedNativeMenuAction(action)
+    }
+
+    @discardableResult
+    fileprivate func invokeCapturedNativeMenuAction(
+        _ action: CapturedNativeMenuAction
+    ) -> Bool {
+        guard let selector = action.item.action else { return false }
+        let didSend = NSApp.sendAction(
+            selector,
+            to: action.target,
+            from: action.item
+        )
+        render()
+        return didSend
     }
 
     func nonButtonAccessibilityIdentifierCount(_ identifier: String) -> Int {

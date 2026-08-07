@@ -949,6 +949,7 @@ private struct RecordingSessionMenuButton: NSViewRepresentable {
     func updateNSView(_ button: NSButton, context: Context) {
         context.coordinator.items = items
         let menu = NSMenu()
+        menu.autoenablesItems = false
         for (index, item) in items.enumerated() {
             if item.isSeparator {
                 menu.addItem(.separator())

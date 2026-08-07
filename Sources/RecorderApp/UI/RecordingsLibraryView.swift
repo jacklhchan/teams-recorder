@@ -8,9 +8,10 @@ struct RecordingsLibraryView: View {
     @ObservedObject private var transcriptionFeature: TranscriptionFeatureModel
     @ObservedObject private var meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
     @State private var searchText = ""
-    @State private var favoritesOnly = false
+    @State private var libraryFilter: RecordingLibraryFilter = .all
+    @State private var librarySort: RecordingLibrarySort = .newestFirst
     @State private var route: RecordingsPresentationRoute = .list
-    @State private var expandedSessionID: RecordingSession.ID?
+    @State private var selectedSessionID: RecordingSession.ID?
     @State private var metadataSession: RecordingSession?
     @State private var sessionPendingTrash: RecordingSession?
 
@@ -27,13 +28,9 @@ struct RecordingsLibraryView: View {
 
     var body: some View {
         let transcription = transcriptionFeature.presentation
-        let query = RecordingLibraryQuery(
-            text: searchText,
-            favoritesOnly: favoritesOnly
-        )
+        let query = RecordingLibraryQuery(text: searchText)
         let librarySnapshot = libraryFeature.snapshot
         let librarySessions = librarySnapshot.sessions
-        let visibleSessions = query.filter(librarySessions)
         // Capture exactly one immutable projection for this body evaluation.
         // The UI never reconstructs meeting-intelligence state in AppModel.
         let meetingIntelligenceSnapshot = meetingIntelligenceFeature.snapshot
@@ -41,11 +38,26 @@ struct RecordingsLibraryView: View {
             isTranscribing: transcription.transcribingSessionID != nil
         )
         let palette = RecordingsPalette(colorScheme: systemColorScheme)
+        let presentation = RecordingsLibraryPresentation.make(
+            sessions: librarySessions,
+            query: query,
+            filter: libraryFilter,
+            sort: librarySort,
+            now: Date(),
+            calendar: .current,
+            hasTranscript: {
+                TranscriptDocumentStore.resolvedURL(in: $0.folderURL) != nil
+            },
+            transcriptionPhase: {
+                transcription.transcriptionStatesBySessionID[$0.id]?.phase
+            }
+        )
 
         SessionListView(
             palette: palette,
-            sessions: visibleSessions,
+            presentation: presentation,
             allSessions: librarySessions,
+            outputFolder: model.outputFolder,
             libraryRevision: librarySnapshot.revision,
             query: query,
             transcribingSessionID: transcription.transcribingSessionID,
@@ -89,7 +101,9 @@ struct RecordingsLibraryView: View {
             saveMetadata: model.saveMetadata,
             moveToTrash: model.moveSessionToTrash,
             route: $route,
-            expandedSessionID: $expandedSessionID,
+            selectedSessionID: $selectedSessionID,
+            libraryFilter: $libraryFilter,
+            librarySort: $librarySort,
             metadataSession: $metadataSession,
             sessionPendingTrash: $sessionPendingTrash,
             canonicalSessions: { libraryFeature.snapshot.sessions },
@@ -118,17 +132,6 @@ struct RecordingsLibraryView: View {
                 }
                 .accessibilityIdentifier(RecorderActionID.refreshRecordings)
             }
-
-            ToolbarSpacer(.fixed)
-
-            ToolbarItem(placement: .primaryAction) {
-                Toggle(isOn: $favoritesOnly) {
-                    Label("Favorites", systemImage: "star.fill")
-                }
-                .toggleStyle(.button)
-                .help("Show favorites only")
-                .accessibilityIdentifier(RecorderActionID.filterFavorites)
-            }
         }
         .background(
             RecorderDestinationAccessibilityMarker(
@@ -147,8 +150,9 @@ struct RecordingsLibraryView: View {
 
 private struct SessionListView: View {
     let palette: RecordingsPalette
-    let sessions: [RecordingSession]
+    let presentation: RecordingsLibraryPresentation
     let allSessions: [RecordingSession]
+    let outputFolder: URL
     let libraryRevision: UInt64
     let query: RecordingLibraryQuery
     let transcribingSessionID: RecordingSession.ID?
@@ -186,7 +190,9 @@ private struct SessionListView: View {
     let saveMetadata: (String, String, Bool, RecordingSession) async -> LibrarySaveOutcome
     let moveToTrash: (RecordingSession) async -> Void
     @Binding var route: RecordingsPresentationRoute
-    @Binding var expandedSessionID: RecordingSession.ID?
+    @Binding var selectedSessionID: RecordingSession.ID?
+    @Binding var libraryFilter: RecordingLibraryFilter
+    @Binding var librarySort: RecordingLibrarySort
     @Binding var metadataSession: RecordingSession?
     @Binding var sessionPendingTrash: RecordingSession?
     let canonicalSessions: () -> [RecordingSession]
@@ -194,86 +200,6 @@ private struct SessionListView: View {
 
     private var admission: RecordingsCanonicalActionAdmission {
         .init(currentSessions: canonicalSessions)
-    }
-
-    private func expansionBinding(for sessionID: RecordingSession.ID) -> Binding<Bool> {
-        Binding(
-            get: { expandedSessionID == sessionID },
-            set: { expandedSessionID = $0 ? sessionID : nil }
-        )
-    }
-
-    @ViewBuilder
-    private func sessionActionStrip(
-        session: RecordingSession,
-        compact: Bool
-    ) -> some View {
-        HStack(spacing: compact ? 6 : 10) {
-            actionButton(
-                "Play", symbol: "play.fill", marker: "play",
-                accessibilityLabel: "Play \(session.displayName)",
-                help: "Play recording in a separate window",
-                session: session, compact: compact
-            ) {
-                _ = admission.perform(sessionID: session.id, action: play)
-            }
-            actionButton(
-                "Open", symbol: "folder", marker: "open",
-                accessibilityLabel: "Open \(session.displayName)",
-                session: session, compact: compact
-            ) {
-                _ = admission.perform(sessionID: session.id, action: open)
-            }
-            actionButton(
-                "Edit", symbol: session.isFavorite ? "star.fill" : "slider.horizontal.3",
-                marker: "edit",
-                accessibilityLabel: "Edit details for \(session.displayName)",
-                help: "Edit recording details",
-                session: session, compact: compact
-            ) {
-                _ = admission.perform(sessionID: session.id) { metadataSession = $0 }
-            }
-            actionButton(
-                "Transcribe",
-                symbol: transcribingSessionID == session.id ? "waveform" : "text.badge.plus",
-                marker: "transcribe",
-                accessibilityLabel: "Transcribe \(session.displayName)",
-                help: hasSavedProviderProfile
-                    ? "Transcribe with the configured AI provider"
-                    : "Configure an AI provider first",
-                session: session, compact: compact,
-                disabled: transcribingSessionID != nil || !hasSavedProviderProfile
-            ) {
-                _ = admission.perform(sessionID: session.id, action: transcribe)
-            }
-            actionButton(
-                "Transcript", symbol: "doc.text.fill", marker: "transcript",
-                accessibilityLabel: "Open Transcript for \(session.displayName)",
-                actionIdentifier: RecorderActionID.openTranscript,
-                help: "View and edit transcript",
-                session: session, compact: compact,
-                disabled: !hasTranscript(for: session)
-            ) {
-                _ = admission.perform(sessionID: session.id) { route = .transcript($0.id) }
-            }
-            actionButton(
-                "Trash", symbol: "trash", marker: "trash",
-                accessibilityLabel: "Move \(session.displayName) to Trash",
-                help: "Move recording to Trash",
-                session: session, compact: compact
-            ) {
-                _ = admission.perform(sessionID: session.id) { sessionPendingTrash = $0 }
-            }
-            actionButton(
-                "ASR Log", symbol: "terminal", marker: "log",
-                accessibilityLabel: "Open ASR log for \(session.displayName)",
-                help: "Open ASR log",
-                session: session, compact: compact,
-                disabled: !hasTranscriptLog(for: session)
-            ) {
-                _ = admission.perform(sessionID: session.id, action: openTranscriptLog)
-            }
-        }
     }
 
     @ViewBuilder
@@ -307,6 +233,428 @@ private struct SessionListView: View {
                 label: accessibilityLabel
             )
         )
+    }
+
+    private var librarySummaryHeader: some View {
+        HStack(spacing: 10) {
+            Text(presentation.itemCountText)
+                .font(.headline)
+            Text(presentation.totalDurationText)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(palette.card)
+        .accessibilityIdentifier("recorder.library.summary")
+    }
+
+    private var filterAndSortBar: some View {
+        HStack(spacing: 6) {
+            filterButton(.all, title: "All", identifier: "all")
+            filterButton(
+                .favorites,
+                title: "Favorites",
+                identifier: "favorites",
+                actionIdentifier: RecorderActionID.filterFavorites
+            )
+            filterButton(
+                .hasTranscript,
+                title: "Has transcript",
+                identifier: "has-transcript"
+            )
+            filterButton(
+                .needsAttention,
+                title: "Needs attention",
+                identifier: "needs-attention"
+            )
+            Spacer(minLength: 8)
+            Menu {
+                Button("Newest first") { librarySort = .newestFirst }
+                Button("Oldest first") { librarySort = .oldestFirst }
+            } label: {
+                Label(sortTitle, systemImage: "arrow.up.arrow.down")
+            }
+            .accessibilityIdentifier("recorder.library.sort")
+            .accessibilityLabel("Sort recordings")
+            .background(
+                RecorderDestinationAccessibilityMarker(
+                    identifier: "recorder.library.sort",
+                    label: "Sort recordings"
+                )
+            )
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(palette.card.opacity(0.7))
+    }
+
+    private func filterButton(
+        _ filter: RecordingLibraryFilter,
+        title: String,
+        identifier: String,
+        actionIdentifier: String? = nil
+    ) -> some View {
+        Button(title) { libraryFilter = filter }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                libraryFilter == filter
+                    ? RecorderVisualStyle.actionBlue.opacity(0.22)
+                    : Color.clear,
+                in: Capsule()
+            )
+            .overlay(Capsule().stroke(palette.hairline))
+            .accessibilityIdentifier(
+                actionIdentifier ?? "recorder.library.filter.\(identifier)"
+            )
+            .accessibilityValue(libraryFilter == filter ? "Selected" : "Not selected")
+            .background(
+                RecorderDestinationAccessibilityMarker(
+                    identifier: "recorder.library.filter.\(identifier)",
+                    label: title
+                )
+            )
+    }
+
+    private var sortTitle: String {
+        librarySort == .newestFirst ? "Newest first" : "Oldest first"
+    }
+
+    @ViewBuilder
+    private func compactLibraryList() -> some View {
+        VStack(spacing: 0) {
+            librarySummaryHeader
+            filterAndSortBar
+            if presentation.sections.isEmpty {
+                ContentUnavailableView(
+                    "No Recordings",
+                    systemImage: "list.bullet.rectangle",
+                    description: Text(
+                        "No recordings match the current folder and filters."
+                    )
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(presentation.sections) { section in
+                            Text(section.title)
+                                .font(.headline)
+                                .padding(.horizontal, 16)
+                                .padding(.top, 10)
+                                .padding(.bottom, 4)
+                                .background(
+                                    RecorderDestinationAccessibilityMarker(
+                                        identifier: "recorder.library.section.\(section.id)"
+                                    )
+                                )
+                            ForEach(section.sessions) { session in
+                                recordingRow(session: session)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 8)
+                }
+            }
+            libraryFooter
+        }
+    }
+
+    private var libraryFooter: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder")
+            Text(outputFolder.path)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Text(presentation.itemCountText)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(palette.card)
+        .accessibilityIdentifier("recorder.library.footer")
+    }
+
+    @ViewBuilder
+    private func recordingRow(session: RecordingSession) -> some View {
+        let rowID = session.id.lastPathComponent
+        let selected = selectedSessionID == session.id
+        VStack(spacing: 5) {
+            HStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(palette.status)
+                        Image(systemName: mediaSymbol(for: session))
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: 54, height: 42)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 5) {
+                            if session.isFavorite {
+                                Image(systemName: "star.fill")
+                                    .foregroundStyle(.yellow)
+                                    .accessibilityLabel("Favorite")
+                            }
+                            Text(session.displayName)
+                                .font(.callout.weight(.medium))
+                                .lineLimit(1)
+                        }
+                        Text(
+                            "\(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(session.durationText) · \(session.fileSizeText)"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        HStack(spacing: 5) {
+                            chip(sourceTitle(for: session))
+                            chip(mediaTitle(for: session))
+                            if session.recoveryState != .none {
+                                chip("Needs attention")
+                            }
+                            if !session.tags.isEmpty {
+                                Text(session.tags.map { "#\($0)" }.joined(separator: "  "))
+                                    .font(.caption2)
+                                    .foregroundStyle(.tint)
+                                    .lineLimit(1)
+                            }
+                        }
+                        if let snippet = query.transcriptSnippet(for: session) {
+                            Text(snippet)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RecordingSessionSelectionButton(
+                        identifier: "recorder.row.card.\(rowID)",
+                        accessibilityLabel: "Select \(session.displayName)",
+                        selected: selected
+                    ) {
+                        _ = admission.perform(sessionID: session.id) {
+                            selectedSessionID = $0.id
+                        }
+                    }
+                )
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: "recorder.row.\(session.mediaKind == .video ? "video" : "audio").\(rowID)",
+                        label: session.displayName
+                    )
+                )
+
+                actionButton(
+                    "Play",
+                    symbol: "play.fill",
+                    marker: "play",
+                    accessibilityLabel: "Play \(session.displayName)",
+                    help: "Play recording in a separate window",
+                    session: session,
+                    compact: true
+                ) {
+                    _ = admission.perform(sessionID: session.id, action: play)
+                }
+
+                recordingActionsMenu(session: session)
+            }
+
+            if selected {
+                HStack(spacing: 8) {
+                    Spacer()
+                    if hasTranscript(for: session) {
+                        actionButton(
+                            "Open Transcript",
+                            symbol: "doc.text.fill",
+                            marker: "transcript",
+                            accessibilityLabel: "Open Transcript for \(session.displayName)",
+                            actionIdentifier: RecorderActionID.openTranscript,
+                            help: "View and edit transcript",
+                            session: session,
+                            compact: false
+                        ) {
+                            _ = admission.perform(sessionID: session.id) {
+                                route = .transcript($0.id)
+                            }
+                        }
+                        .background(
+                            RecorderDestinationAccessibilityMarker(
+                                identifier: RecorderActionID.openTranscript,
+                                label: "Open Transcript for \(session.displayName)"
+                            )
+                        )
+                    }
+                    actionButton(
+                        "Show in Finder",
+                        symbol: "folder",
+                        marker: "open",
+                        accessibilityLabel: "Open \(session.displayName)",
+                        help: "Show recording in Finder",
+                        session: session,
+                        compact: false
+                    ) {
+                        _ = admission.perform(sessionID: session.id, action: open)
+                    }
+                }
+            }
+
+            transcriptionStatusRow(session: session)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(selected ? RecorderVisualStyle.actionBlue.opacity(0.14) : Color.clear)
+        .background(
+            selected
+                ? RecorderDestinationAccessibilityMarker(
+                    identifier: "recorder.row.selected.\(rowID)",
+                    label: "Selected \(session.displayName)"
+                )
+                : nil
+        )
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(palette.hairline).frame(height: 1)
+        }
+    }
+
+    private func chip(_ title: String) -> some View {
+        Text(title)
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(palette.status, in: Capsule())
+    }
+
+    private func recordingActionsMenu(session: RecordingSession) -> some View {
+        let rowID = session.id.lastPathComponent
+        var items: [RecordingSessionMenuButton.Item] = [
+            .init(title: "Open Folder", identifier: "recorder.row.open.\(rowID).menu") {
+                _ = admission.perform(sessionID: session.id, action: open)
+            },
+            .init(title: "Edit Details", identifier: "recorder.row.edit.\(rowID)") {
+                _ = admission.perform(sessionID: session.id) { metadataSession = $0 }
+            }
+        ]
+        if transcribingSessionID == session.id {
+            items.append(
+                .init(
+                    title: "Cancel Transcription",
+                    identifier: "recorder.row.transcription-cancel.\(rowID)"
+                ) {
+                    _ = admission.perform(sessionID: session.id) { canonical in
+                        guard transcribingSessionID == canonical.id else { return }
+                        cancelTranscription()
+                    }
+                }
+            )
+        } else {
+            items.append(
+                .init(
+                    title: "Transcribe",
+                    identifier: "recorder.row.transcribe.\(rowID)",
+                    enabled: transcribingSessionID == nil && hasSavedProviderProfile
+                ) {
+                    _ = admission.perform(sessionID: session.id, action: transcribe)
+                }
+            )
+        }
+        items.append(contentsOf: [
+            .init(
+                title: "Open Transcript",
+                identifier: "recorder.row.transcript.\(rowID).menu",
+                enabled: hasTranscript(for: session)
+            ) {
+                _ = admission.perform(sessionID: session.id) {
+                    route = .transcript($0.id)
+                }
+            },
+            .init(
+                title: "Open ASR Log",
+                identifier: "recorder.row.log.\(rowID)",
+                enabled: hasTranscriptLog(for: session)
+            ) {
+                _ = admission.perform(sessionID: session.id, action: openTranscriptLog)
+            },
+            .separator,
+            .init(
+                title: "Move to Trash",
+                identifier: "recorder.row.trash.\(rowID)"
+            ) {
+                _ = admission.perform(sessionID: session.id) {
+                    sessionPendingTrash = $0
+                }
+            }
+        ])
+        return RecordingSessionMenuButton(
+            identifier: "recorder.row.more.\(rowID)",
+            accessibilityLabel: "More Actions for \(session.displayName)",
+            items: items
+        )
+        .frame(width: 28, height: 24)
+        .background(
+            RecorderDestinationAccessibilityMarker(
+                identifier: "recorder.row.more.\(rowID).marker",
+                label: "More Actions for \(session.displayName)"
+            )
+        )
+    }
+
+    @ViewBuilder
+    private func transcriptionStatusRow(session: RecordingSession) -> some View {
+        if transcribingSessionID == session.id
+            || lastTranscriptionSessionID == session.id
+            || transcriptionStatesBySessionID[session.id] != nil {
+            HStack(spacing: 7) {
+                if transcribingSessionID == session.id {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: statusIcon(for: session))
+                        .foregroundStyle(statusColor(for: session))
+                }
+                Text(statusText(for: session))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(palette.status, in: RoundedRectangle(cornerRadius: 5))
+            .background(
+                RecorderDestinationAccessibilityMarker(
+                    identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)"
+                )
+            )
+            .background(
+                RecorderDestinationAccessibilityMarker(
+                    identifier: palette.statusAppearance.accessibilityIdentifier
+                )
+            )
+        }
+    }
+
+    private func mediaSymbol(for session: RecordingSession) -> String {
+        session.mediaKind == .video ? "video.fill" : "waveform"
+    }
+
+    private func mediaTitle(for session: RecordingSession) -> String {
+        session.mediaKind == .video ? "Video" : "Audio only"
+    }
+
+    private func sourceTitle(for session: RecordingSession) -> String {
+        switch session.metadata.source {
+        case .teamsAutomatic: "Teams"
+        case .manual: "Manual"
+        case .imported: "Imported"
+        }
     }
 
     var body: some View {
@@ -362,106 +710,7 @@ private struct SessionListView: View {
             )
             .environment(\.colorScheme, systemColorScheme)
         } else {
-        Group {
-            if sessions.isEmpty {
-                ContentUnavailableView(
-                    "No Recordings",
-                    systemImage: "list.bullet.rectangle",
-                    description: Text(
-                        "No recordings match the current folder and filters."
-                    )
-                )
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(sessions) { session in
-                    RecordingSessionCardView(
-                        session: session,
-                        palette: palette,
-                        isExpanded: expansionBinding(for: session.id)
-                    ) {
-                    VStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(session.displayName).font(.callout.weight(.medium))
-                                Text("\(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(session.durationText) · \(session.fileSizeText)")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                if !session.tags.isEmpty {
-                                    Text(session.tags.map { "#\($0)" }.joined(separator: "  "))
-                                        .font(.caption).foregroundStyle(.tint).lineLimit(1)
-                                }
-                                if let snippet = query.transcriptSnippet(for: session) {
-                                    Text(snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                }
-                            }
-                            ViewThatFits(in: .horizontal) {
-                                sessionActionStrip(session: session, compact: false)
-                                sessionActionStrip(session: session, compact: true)
-                            }
-                        }
-
-                        if transcribingSessionID == session.id || lastTranscriptionSessionID == session.id || transcriptionStatesBySessionID[session.id] != nil {
-                            HStack(spacing: 8) {
-                                if transcribingSessionID == session.id {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: statusIcon(for: session)).foregroundStyle(statusColor(for: session))
-                                }
-                                Text(statusText(for: session)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                Spacer()
-                                if transcribingSessionID == session.id {
-                                    RecordingSessionActionButton(
-                                        title: "Cancel",
-                                        symbol: nil,
-                                        identifier: "recorder.row.transcription-cancel.\(session.id.lastPathComponent)",
-                                        accessibilityLabel: "Cancel",
-                                        help: nil,
-                                        compact: false,
-                                        disabled: false
-                                    ) {
-                                        _ = admission.perform(sessionID: session.id) { canonical in
-                                            guard transcribingSessionID == canonical.id else { return }
-                                            cancelTranscription()
-                                        }
-                                    }
-                                    .fixedSize()
-                                }
-                                RecordingSessionActionButton(
-                                    title: "ASR Log",
-                                    symbol: "terminal",
-                                    identifier: "recorder.row.transcription-log.\(session.id.lastPathComponent)",
-                                    accessibilityLabel: "Open ASR log for \(session.displayName)",
-                                    help: "Open ASR log",
-                                    compact: true,
-                                    disabled: false
-                                ) {
-                                    _ = admission.perform(
-                                        sessionID: session.id,
-                                        action: openTranscriptLog
-                                    )
-                                }
-                                .fixedSize()
-                            }
-                            .padding(10)
-                            .background(palette.status, in: RoundedRectangle(cornerRadius: 6))
-                            .background(
-                                RecorderDestinationAccessibilityMarker(
-                                    identifier: "recorder.row.transcription-status.\(session.id.lastPathComponent)"
-                                )
-                            )
-                            .background(
-                                RecorderDestinationAccessibilityMarker(
-                                    identifier: palette.statusAppearance.accessibilityIdentifier
-                                )
-                            )
-                        }
-                    }
-                    }
-                    }
-                    }
-                }
-            }
-        }
+            compactLibraryList()
         }
         }
         .background(
@@ -469,8 +718,8 @@ private struct SessionListView: View {
         )
         .onChange(of: libraryRevision) { _, _ in
             route.invalidateIfMissing(from: allSessions)
-            if let expandedSessionID, !allSessions.contains(where: { $0.id == expandedSessionID }) {
-                self.expandedSessionID = nil
+            if let selectedSessionID, !allSessions.contains(where: { $0.id == selectedSessionID }) {
+                self.selectedSessionID = nil
             }
             if let metadataSession, !allSessions.contains(where: { $0.id == metadataSession.id }) {
                 self.metadataSession = nil
@@ -606,6 +855,142 @@ private struct RecordingSessionActionButton: NSViewRepresentable {
         init(action: @escaping () -> Void) { self.action = action }
 
         @objc func performAction() { action() }
+    }
+}
+
+private struct RecordingSessionSelectionButton: NSViewRepresentable {
+    let identifier: String
+    let accessibilityLabel: String
+    let selected: Bool
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(
+            title: "",
+            target: context.coordinator,
+            action: #selector(Coordinator.performAction)
+        )
+        button.isBordered = false
+        button.imagePosition = .noImage
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.action = action
+        button.setAccessibilityIdentifier(identifier)
+        button.setAccessibilityLabel(accessibilityLabel)
+        button.setAccessibilityValue(selected ? "Selected" : "Not selected")
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) { self.action = action }
+
+        @objc func performAction() { action() }
+    }
+}
+
+private struct RecordingSessionMenuButton: NSViewRepresentable {
+    struct Item {
+        let title: String
+        let identifier: String
+        let enabled: Bool
+        let isSeparator: Bool
+        let action: () -> Void
+
+        init(
+            title: String,
+            identifier: String,
+            enabled: Bool = true,
+            action: @escaping () -> Void
+        ) {
+            self.title = title
+            self.identifier = identifier
+            self.enabled = enabled
+            isSeparator = false
+            self.action = action
+        }
+
+        private init(isSeparator: Bool) {
+            title = ""
+            identifier = ""
+            enabled = false
+            self.isSeparator = isSeparator
+            action = {}
+        }
+
+        static let separator = Item(isSeparator: true)
+    }
+
+    let identifier: String
+    let accessibilityLabel: String
+    let items: [Item]
+
+    func makeCoordinator() -> Coordinator { Coordinator(items: items) }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(
+            title: "",
+            target: context.coordinator,
+            action: #selector(Coordinator.showMenu(_:))
+        )
+        button.bezelStyle = .accessoryBarAction
+        button.imagePosition = .imageOnly
+        button.image = NSImage(
+            systemSymbolName: "ellipsis.circle",
+            accessibilityDescription: accessibilityLabel
+        )
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.items = items
+        let menu = NSMenu()
+        for (index, item) in items.enumerated() {
+            if item.isSeparator {
+                menu.addItem(.separator())
+                continue
+            }
+            let menuItem = NSMenuItem(
+                title: item.title,
+                action: #selector(Coordinator.performAction(_:)),
+                keyEquivalent: ""
+            )
+            menuItem.target = context.coordinator
+            menuItem.representedObject = index
+            menuItem.isEnabled = item.enabled
+            menuItem.setAccessibilityIdentifier(item.identifier)
+            menu.addItem(menuItem)
+        }
+        context.coordinator.menu = menu
+        button.menu = menu
+        button.setAccessibilityIdentifier(identifier)
+        button.setAccessibilityLabel(accessibilityLabel)
+        button.toolTip = "More Actions"
+    }
+
+    final class Coordinator: NSObject {
+        var items: [Item]
+        var menu = NSMenu()
+
+        init(items: [Item]) { self.items = items }
+
+        @objc func showMenu(_ sender: NSButton) {
+            menu.popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: sender.bounds.minY),
+                in: sender
+            )
+        }
+
+        @objc func performAction(_ sender: NSMenuItem) {
+            guard let index = sender.representedObject as? Int,
+                  items.indices.contains(index) else { return }
+            items[index].action()
+        }
     }
 }
 

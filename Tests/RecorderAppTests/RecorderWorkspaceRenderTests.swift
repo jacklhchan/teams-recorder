@@ -10,13 +10,6 @@ private enum RecordingsSurfaceTestMarker {
     static let recordingsStatusLight = RecorderSurfaceAppearance.recordingsStatusLight.accessibilityIdentifier
     static let recordingsStatusDark = RecorderSurfaceAppearance.recordingsStatusDark.accessibilityIdentifier
 
-    static func transcriptionCancel(_ rowID: String) -> String {
-        "recorder.row.transcription-cancel.\(rowID)"
-    }
-
-    static func transcriptionLog(_ rowID: String) -> String {
-        "recorder.row.transcription-log.\(rowID)"
-    }
 }
 
 @MainActor
@@ -121,36 +114,16 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         assertOnlyRecordingsMarker(host, expected: expectedRecordingsMarker)
         for identifier in [
             "recorder.row.play.\(rowID)",
+            "recorder.row.more.\(rowID)",
             "recorder.row.open.\(rowID)",
-            "recorder.row.edit.\(rowID)",
-            "recorder.row.transcribe.\(rowID)",
-            "recorder.row.trash.\(rowID)",
-            "recorder.row.log.\(rowID)",
             RecorderActionID.openTranscript
         ] {
             XCTAssertEqual(
                 host.nativeButtonColorSchemeAppearance(for: identifier),
                 expectedNativeAppearance,
-                "Expanded Recordings action must follow the system appearance: \(identifier)"
+                "Compact Recordings action must follow the system appearance: \(identifier)"
             )
         }
-
-        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.edit.\(rowID)"))
-        try waitUntil(timeout: 1, message: "metadata editor text fields to render") {
-            host.nativeTextFieldColorSchemeAppearance(for: RecorderActionID.metadataTitle)
-                == expectedNativeAppearance
-                && host.nativeTextFieldColorSchemeAppearance(for: RecorderActionID.metadataTags)
-                    == expectedNativeAppearance
-        }
-        XCTAssertEqual(
-            host.nativeTextFieldColorSchemeAppearance(for: RecorderActionID.metadataTitle),
-            expectedNativeAppearance
-        )
-        XCTAssertEqual(
-            host.nativeTextFieldColorSchemeAppearance(for: RecorderActionID.metadataTags),
-            expectedNativeAppearance
-        )
-        host.dismissSheets()
 
         fixture.model.transcriptionFeature.replaceLoadedStates([
             fixture.session.id: .init(
@@ -167,13 +140,6 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         }
         assertOnlyRecordingsMarker(host, expected: expectedRecordingsMarker)
         assertOnlyRecordingsStatusMarker(host, expected: expectedStatusMarker)
-        XCTAssertEqual(
-            host.nativeButtonColorSchemeAppearance(
-                for: RecordingsSurfaceTestMarker.transcriptionLog(rowID)
-            ),
-            expectedNativeAppearance
-        )
-
         fixture.model.transcriptionFeature.replaceLoadedStates([
             fixture.session.id: .init(
                 phase: .failed,
@@ -192,7 +158,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         assertOnlyRecordingsMarker(host, expected: expectedRecordingsMarker)
         assertOnlyRecordingsStatusMarker(host, expected: expectedStatusMarker)
 
-        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.openTranscript))
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.transcript.\(rowID)"))
         XCTAssertTrue(host.containsAccessibilityIdentifier(
             expectedTranscriptMarker.accessibilityIdentifier
         ))
@@ -261,8 +227,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         host.select(.recordings)
         let rowID = fixture.session.id.lastPathComponent
         let statusID = "recorder.row.transcription-status.\(rowID)"
-        let cancelID = RecordingsSurfaceTestMarker.transcriptionCancel(rowID)
-        let logID = RecordingsSurfaceTestMarker.transcriptionLog(rowID)
+        let moreID = "recorder.row.more.\(rowID)"
         XCTAssertTrue(
             host.click(atAccessibilityFrame: "recorder.row.card.\(rowID)"),
             file: file,
@@ -314,53 +279,20 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             line: line
         )
         XCTAssertEqual(
-            host.nativeButtonCount(for: cancelID),
+            host.nativeButtonCount(for: moreID),
             1,
-            "Cancel must be one real NSButton with its per-row identifier",
+            "More Actions must be one real NSButton with its per-row identifier",
             file: file,
             line: line
         )
         XCTAssertEqual(
-            host.nativeButtonCount(for: logID),
-            1,
-            "Status Log must be one real NSButton with its per-row identifier",
+            host.nativeButtonAccessibilityLabel(for: moreID),
+            "More Actions for \(fixture.session.displayName)",
             file: file,
             line: line
         )
         XCTAssertEqual(
-            host.nonButtonAccessibilityIdentifierCount(cancelID),
-            0,
-            "Cancel identifier must not be carried by a fake marker view",
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(
-            host.nonButtonAccessibilityIdentifierCount(logID),
-            0,
-            "Log identifier must not be carried by a fake marker view",
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(
-            host.nativeButtonAccessibilityLabel(for: cancelID),
-            "Cancel",
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(
-            host.nativeButtonAccessibilityLabel(for: logID),
-            "Open ASR log for \(fixture.session.displayName)",
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(
-            host.nativeButtonColorSchemeAppearance(for: cancelID),
-            expectedNativeAppearance,
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(
-            host.nativeButtonColorSchemeAppearance(for: logID),
+            host.nativeButtonColorSchemeAppearance(for: moreID),
             expectedNativeAppearance,
             file: file,
             line: line
@@ -372,22 +304,15 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             file: file,
             line: line
         )
-        let cancelFrame = try XCTUnwrap(
-            host.nativeButtonFrame(for: cancelID),
-            "Missing real Cancel button frame",
-            file: file,
-            line: line
-        )
-        let logFrame = try XCTUnwrap(
-            host.nativeButtonFrame(for: logID),
-            "Missing real status Log button frame",
+        let moreFrame = try XCTUnwrap(
+            host.nativeButtonFrame(for: moreID),
+            "Missing real More Actions button frame",
             file: file,
             line: line
         )
         for (name, frame) in [
             ("status", statusFrame),
-            ("Cancel", cancelFrame),
-            ("Log", logFrame)
+            ("More Actions", moreFrame)
         ] {
             XCTAssertTrue(
                 host.visibleContentRect.contains(frame),
@@ -403,52 +328,12 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             )
         }
 
-        let expectedLogStatus = "No ASR log found for \(fixture.session.displayName)"
-        fixture.model.statusMessage = "Awaiting status Log action"
-        var logCallbackCount = 0
-        let logObserver = fixture.model.$statusMessage
-            .dropFirst()
-            .sink { message in
-                if message == expectedLogStatus {
-                    logCallbackCount += 1
-                }
-            }
-        defer { logObserver.cancel() }
-        XCTAssertTrue(
-            host.pressNativeButton(for: logID),
-            "Status Log action must be exercised through the real NSButton",
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(fixture.model.statusMessage, expectedLogStatus, file: file, line: line)
-        XCTAssertEqual(logCallbackCount, 1, file: file, line: line)
-
         XCTAssertEqual(
             fixture.model.transcriptionFeature.presentation.transcribingSessionID,
             fixture.session.id,
             file: file,
             line: line
         )
-        XCTAssertTrue(
-            host.pressNativeButton(for: cancelID),
-            "Cancel action must be exercised through the real NSButton",
-            file: file,
-            line: line
-        )
-        try waitUntil(timeout: 1, message: "real Cancel button to settle active transcription") {
-            let presentation = fixture.model.transcriptionFeature.presentation
-            return presentation.transcribingSessionID == nil
-                && presentation.transcriptionStatesBySessionID[fixture.session.id]?.phase
-                    == .cancelled
-        }
-        XCTAssertEqual(
-            fixture.model.transcriptionFeature.presentation
-                .transcriptionStatesBySessionID[fixture.session.id]?.phase,
-            .cancelled,
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(logCallbackCount, 1, file: file, line: line)
     }
 
     private func assertOnlyRecordingsMarker(
@@ -508,7 +393,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         }
     }
 
-    func testDirectionARecordingsCardsAllowExactlyOneExpandedSession() throws {
+    func testDirectionARecordingsRendersCompactGroupedMediaRowsAndSelectsExactlyOne() throws {
         let fixture = try RecordingsMeetingIntelligenceRenderFixture()
         defer { fixture.remove() }
         let secondFolder = fixture.workspace.appendingPathComponent("second", isDirectory: true)
@@ -516,7 +401,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             id: secondFolder, folderURL: secondFolder,
             recordingURL: secondFolder.appendingPathComponent("recording.m4a"),
             createdAt: .now, duration: 20, fileSize: 1,
-            metadata: .init(title: "Second recording")
+            metadata: .init(title: "Second recording", mediaKind: .video)
         )
         fixture.model.libraryFeature.seedCanonicalSessionsForTesting(
             [fixture.session, second], workspace: fixture.workspace, fence: .initial
@@ -526,22 +411,34 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         host.select(.recordings)
         let firstID = fixture.session.id.lastPathComponent
         let secondID = second.id.lastPathComponent
-        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.card.\(firstID)"))
-        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.card.\(secondID)"))
-        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(firstID)") as? String, "Collapsed")
-        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(secondID)") as? String, "Collapsed")
-        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(firstID)"))
-        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(secondID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.library.section.today"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.library.filter.all"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.library.filter.favorites"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.library.filter.has-transcript"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.library.filter.needs-attention"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.library.sort"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.audio.\(firstID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.video.\(secondID)"))
+        for rowID in [firstID, secondID] {
+            XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.play.\(rowID)"))
+            XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.more.\(rowID)"))
+        }
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.selected.\(firstID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.selected.\(secondID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.transcript.\(firstID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.transcript.\(secondID)"))
         XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(firstID)"))
-        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(firstID)") as? String, "Expanded")
-        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(secondID)") as? String, "Collapsed")
-        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.expanded.\(firstID)"))
-        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(secondID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.selected.\(firstID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.selected.\(secondID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.open.\(firstID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.transcript.\(firstID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.transcript.\(secondID)"))
         XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(secondID)"))
-        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(firstID)") as? String, "Collapsed")
-        XCTAssertEqual(host.accessibilityValue(for: "recorder.row.card.\(secondID)") as? String, "Expanded")
-        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.expanded.\(firstID)"))
-        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.expanded.\(secondID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.selected.\(firstID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.selected.\(secondID)"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.row.open.\(secondID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.transcript.\(firstID)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.row.transcript.\(secondID)"))
     }
 
     func testInFlightSaveCannotReopenInvalidatedRecordingsDetail() async throws {
@@ -888,17 +785,13 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"))
 
         XCTAssertTrue(host.containsAccessibilityLabel("Play \(fixture.session.displayName)"))
-        XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(fixture.session.displayName)"))
-        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.openTranscript))
+        XCTAssertTrue(host.containsAccessibilityLabel("More Actions for \(fixture.session.displayName)"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.openTranscript))
         let rowID = fixture.session.id.lastPathComponent
         for identifier in [
             "recorder.row.play.\(rowID)",
-            "recorder.row.open.\(rowID)",
-            "recorder.row.edit.\(rowID)",
-            "recorder.row.transcribe.\(rowID)",
-            "recorder.row.transcript.\(rowID)",
-            "recorder.row.trash.\(rowID)",
-            "recorder.row.log.\(rowID)"
+            "recorder.row.more.\(rowID)",
+            "recorder.row.open.\(rowID)"
         ] {
             let frame = try XCTUnwrap(
                 host.frame(forAccessibilityIdentifier: identifier),
@@ -920,17 +813,11 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         defer { host.close() }
 
         host.select(.recordings)
-        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.row.card.\(fixture.session.id.lastPathComponent)"))
 
         let rowID = fixture.session.id.lastPathComponent
         for identifier in [
             "recorder.row.play.\(rowID)",
-            "recorder.row.open.\(rowID)",
-            "recorder.row.edit.\(rowID)",
-            "recorder.row.transcribe.\(rowID)",
-            "recorder.row.transcript.\(rowID)",
-            "recorder.row.trash.\(rowID)",
-            "recorder.row.log.\(rowID)"
+            "recorder.row.more.\(rowID)"
         ] {
             let frame = try XCTUnwrap(
                 host.frame(forAccessibilityIdentifier: identifier),
@@ -956,7 +843,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         let originalName = fixture.session.displayName
         let renamedName = "Renamed workspace recording"
         XCTAssertTrue(host.containsAccessibilityLabel("Play \(originalName)"))
-        XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(originalName)"))
+        XCTAssertTrue(host.containsAccessibilityLabel("More Actions for \(originalName)"))
 
         fixture.model.seedLibrarySessionsForTesting([
             RecordingSession(
@@ -973,9 +860,9 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         host.render()
 
         XCTAssertTrue(host.containsAccessibilityLabel("Play \(renamedName)"))
-        XCTAssertTrue(host.containsAccessibilityLabel("Edit details for \(renamedName)"))
+        XCTAssertTrue(host.containsAccessibilityLabel("More Actions for \(renamedName)"))
         XCTAssertFalse(host.containsAccessibilityLabel("Play \(originalName)"))
-        XCTAssertFalse(host.containsAccessibilityLabel("Edit details for \(originalName)"))
+        XCTAssertFalse(host.containsAccessibilityLabel("More Actions for \(originalName)"))
     }
 
     func testRecordingsRendersDirectLibraryFeatureSnapshotWithoutAppModelRelay() throws {

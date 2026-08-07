@@ -3,7 +3,7 @@ import XCTest
 @testable import RecorderApp
 
 final class RecordingLibraryQueryTests: XCTestCase {
-    func testEmptyQueryReturnsAllThirteenSessions() {
+    func testEmptyQueryReturnsAllThirteenSessionsInStableInputOrder() {
         let sessions = (0..<13).map { index in
             makeSession(
                 name: "meeting-\(index)",
@@ -14,13 +14,13 @@ final class RecordingLibraryQueryTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(
-            RecordingLibraryQuery(
-                text: "",
-                favoritesOnly: false
-            ).filter(sessions).count,
-            13
-        )
+        let filtered = RecordingLibraryQuery(
+            text: "",
+            favoritesOnly: false
+        ).filter(sessions)
+
+        XCTAssertEqual(filtered.count, 13)
+        XCTAssertEqual(filtered.map(\.id), sessions.map(\.id))
     }
 
     func testQueryMatchesTranscriptParticipantDateSourceAndMeetingType() {

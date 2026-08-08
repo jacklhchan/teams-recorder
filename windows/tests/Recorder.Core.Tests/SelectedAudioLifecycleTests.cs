@@ -15,7 +15,8 @@ internal static class SelectedAudioLifecycleTests
             bridge,
             root.Path,
             new CurrentProcessCatalog(target),
-            delay);
+            delay,
+            audioValidator: new AlwaysValidAudio());
 
         var started = lifecycle.StartAsync(new RecordingStartRequest(
             RecordingSessionKind.Test,

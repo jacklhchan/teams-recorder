@@ -32,6 +32,8 @@ public static class RecordingSessionLayout
     public const string FinalAudioFileName = "recording.m4a";
     public const string BackupAudioFileName = "recording.audio-backup.m4a";
     public const string PartialAudioFileName = "recording.audio-backup.m4a.partial";
+    public const string FinalVideoFileName = "recording.mp4";
+    public const string PartialVideoFileName = "recording.partial.mp4";
     public const string MetadataFileName = "recording-info.json";
 
     public static string Prefix(RecordingSessionKind kind) => kind switch
@@ -135,7 +137,7 @@ public static class RecordingInfoJson
         var document = normalized.Document.DeepClone() as JsonObject ?? new JsonObject();
         document["mediaKind"] = "audio";
         document["screenIntervals"] = new JsonArray();
-        document.Remove("capturedTeamsWindow");
+        RemoveRuntimeVideoIdentity(document);
         if (sourceWasMissing) document["source"] = SessionSource(sessionKind);
         if (participantsWereMissing) document["participants"] = new JsonArray();
         return new RecordingInfo(
@@ -143,6 +145,43 @@ public static class RecordingInfoJson
             normalized.Tags,
             normalized.IsFavorite,
             "audio",
+            recoveryState,
+            StringValue(document["source"]) ?? SessionSource(sessionKind),
+            document["participants"]?.DeepClone() as JsonArray ?? new JsonArray(),
+            normalized.SchemaVersion,
+            document,
+            normalized.WindowsCapture);
+    }
+
+    /// <summary>
+    /// Produces the intentionally minimal Windows video description.  A
+    /// selected HWND is useful only while capture is live; it must never become
+    /// durable session metadata.  In particular this method has no target,
+    /// process, title, or screen-image argument.  The fact that the completed
+    /// artifact is video is the only Windows video provenance persisted here.
+    /// </summary>
+    public static RecordingInfo CreateVideo(
+        JsonObject? source,
+        string? titleOverride,
+        RecordingRecoveryState recoveryState,
+        RecordingSessionKind sessionKind = RecordingSessionKind.Manual)
+    {
+        var sourceWasMissing = source?["source"] is null;
+        var participantsWereMissing = source?["participants"] is not JsonArray;
+        var normalized = Normalize(source, titleOverride, recoveryState);
+        var document = normalized.Document.DeepClone() as JsonObject ?? new JsonObject();
+        RemoveRuntimeVideoIdentity(document);
+        document["mediaKind"] = "video";
+        // Windows does not infer or persist a shared-content crop/timeline in
+        // Phase 1.  Keeping this empty is both truthful and schema-compatible.
+        document["screenIntervals"] = new JsonArray();
+        if (sourceWasMissing) document["source"] = SessionSource(sessionKind);
+        if (participantsWereMissing) document["participants"] = new JsonArray();
+        return new RecordingInfo(
+            normalized.Title,
+            normalized.Tags,
+            normalized.IsFavorite,
+            "video",
             recoveryState,
             StringValue(document["source"]) ?? SessionSource(sessionKind),
             document["participants"]?.DeepClone() as JsonArray ?? new JsonArray(),
@@ -181,6 +220,71 @@ public static class RecordingInfoJson
         var trimmed = value.Trim();
         return trimmed.Length == 0 ? null : trimmed;
     }
+
+    private static void RemoveRuntimeVideoIdentity(JsonObject document)
+    {
+        // Do not recurse into windowsCapture: it is the separately bounded
+        // audio-capture envelope and may legitimately contain a safe executable
+        // basename.  Every other known runtime video identity is stripped,
+        // including values nested below a legacy/custom capture object.
+        RemoveRuntimeVideoIdentity(document, isWindowsCaptureEnvelope: false);
+    }
+
+    private static void RemoveRuntimeVideoIdentity(JsonNode? node, bool isWindowsCaptureEnvelope)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var (name, child) in obj.ToArray())
+                {
+                    if (isWindowsCaptureEnvelope)
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(name, "windowsCapture", StringComparison.Ordinal))
+                    {
+                        // This limited audio envelope is normalized elsewhere.
+                        continue;
+                    }
+
+                    if (IsRuntimeVideoIdentityField(name))
+                    {
+                        obj.Remove(name);
+                        continue;
+                    }
+
+                    RemoveRuntimeVideoIdentity(child, isWindowsCaptureEnvelope: false);
+                }
+                break;
+            case JsonArray array when !isWindowsCaptureEnvelope:
+                foreach (var child in array)
+                {
+                    RemoveRuntimeVideoIdentity(child, isWindowsCaptureEnvelope: false);
+                }
+                break;
+        }
+    }
+
+    private static bool IsRuntimeVideoIdentityField(string name) =>
+        name.Equals("capturedTeamsWindow", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("videoCapture", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("videoTarget", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("captureTarget", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("windowTitle", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("windowHandle", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("hwnd", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("windowId", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("processId", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("pid", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("processName", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("processCreationTime", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("processCreationTimeUtcTicks", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("executablePath", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("commandLine", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("thumbnail", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("screenshot", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("imagePath", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Applies the bounded Windows capture envelope to compatible metadata.</summary>
     public static RecordingInfo WithWindowsCapture(RecordingInfo info, WindowsCaptureMetadata? windowsCapture)

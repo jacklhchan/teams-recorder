@@ -1,3 +1,4 @@
+using Recorder.Core;
 using TeamsRecorder.Windows.Application;
 
 namespace TeamsRecorder.Windows.WinUI;
@@ -79,4 +80,13 @@ public sealed record ProcessSelectionChoice(
         other is not null &&
         ProcessId == other.ProcessId &&
         StartedAtUtc == other.StartedAtUtc;
+}
+
+/// <summary>Presentation-only wrapper for an admitted exact Teams HWND.</summary>
+public sealed record VideoCaptureWindowChoice(VideoCaptureTarget Target)
+{
+    public string DisplayName => string.IsNullOrWhiteSpace(Target.WindowTitle)
+        ? Target.ProcessName
+        : Target.WindowTitle;
+    public string Description => $"{Target.ProcessName} — selected Teams window";
 }

@@ -18,6 +18,17 @@ struct MixedCaptureSessionConfig {
     // UTC FILETIME identity of the selected root process. Required whenever
     // target_process_id is non-zero so a reused PID cannot become capture.
     std::uint64_t expected_process_creation_time_100ns = 0;
+    // When video_output_path is set this remains the independently playable
+    // M4A recovery artifact while the session muxes exact-HWND WGC video to
+    // MP4. An empty path preserves the established audio-only behaviour.
+    std::filesystem::path video_output_path;
+    std::uintptr_t target_window_handle = 0;
+    std::uint32_t target_window_process_id = 0;
+    std::uint64_t target_window_process_creation_time_100ns = 0;
+    std::uint32_t video_width = 0;
+    std::uint32_t video_height = 0;
+    std::uint32_t video_frame_rate = 30;
+    std::uint32_t video_bitrate_bps = 0;
 };
 class MixedCaptureSession final {
 public:

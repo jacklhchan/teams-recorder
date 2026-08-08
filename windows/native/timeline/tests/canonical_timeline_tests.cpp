@@ -1,5 +1,6 @@
 #include "canonical_timeline.h"
 #include "session_duration_clock.h"
+#include "video_pts_mapper.h"
 
 #include <array>
 #include <deque>
@@ -131,15 +132,28 @@ void SelectedProcessUsesCanonicalGapsAndCounters() {
                counters.queue_overflows == 1 && counters.source_disconnects == 1,
            "selected-process counters incomplete");
 }
+
+void VideoPtsUsesTheAudioQpcOriginAndDropsUnsafeFrames() {
+    recorder::timeline::VideoPtsMapper mapper(1'000'000);
+    const auto first = mapper.Map(1'200'000, 0);
+    Expect(first.has_value() && *first == 200'000, "video PTS did not use the shared QPC origin");
+    Expect(!mapper.Map(1'200'000, 0).has_value(), "duplicate video PTS was accepted");
+    Expect(!mapper.Map(1'100'000, 0).has_value(), "backward video PTS was accepted");
+    Expect(!mapper.Map(22'000'001, 0).has_value(), "video frame too far ahead of audio was accepted");
+    const auto caughtUp = mapper.Map(22'000'000, 2'000'000);
+    Expect(caughtUp.has_value() && *caughtUp == 21'000'000, "video PTS was not admitted after audio caught up");
+    Expect(mapper.rejected_non_monotonic() == 2 && mapper.rejected_too_far_ahead() == 1,
+           "video PTS rejection counters were incomplete");
+}
 }  // namespace
 
 int main() {
-    const std::array<void (*)(), 10> tests = {LongDurationHasNoTimelineCompression,
+    const std::array<void (*)(), 11> tests = {LongDurationHasNoTimelineCompression,
         SilenceGapsArePreserved, ExplicitSessionOriginPreservesInitialSilence,
         SessionClockAdvancesAcrossPacketlessSilence, MicrophoneMuteGapMapsToSilence,
         LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
         SourceWatermarksRequireBothInputsBeforeMixCommit, DriftLateAndFaultCountersAreBounded,
-        SelectedProcessUsesCanonicalGapsAndCounters};
+        SelectedProcessUsesCanonicalGapsAndCounters, VideoPtsUsesTheAudioQpcOriginAndDropsUnsafeFrames};
     try { for (const auto test : tests) test(); }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
     std::cout << "PASS canonical timeline\n";

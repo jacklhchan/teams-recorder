@@ -39,6 +39,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     // state to WinUI properties and commands.
     private RecordingLifecycleService? recordingLifecycle;
     private readonly IProcessCatalog processCatalog = new ProcessCatalog();
+    private readonly IVideoCaptureTargetCatalog videoTargetCatalog = new WindowsVideoCaptureTargetCatalog();
     private RecordingLibraryService? libraryService;
     private string? libraryServiceRoot;
     private readonly IRecorderAppSettingsStore appSettingsStore = new JsonRecorderAppSettingsStore();
@@ -60,6 +61,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private EndpointChoice? selectedMicrophoneEndpoint;
     private CaptureSourceChoice? selectedCaptureSource;
     private ProcessSelectionChoice? selectedProcess;
+    private VideoCaptureWindowChoice? selectedVideoCaptureWindow;
+    private bool isSharedContentCaptureEnabled;
     private LibraryRecording? selectedLibraryItem;
     private string? loadedPlaybackPath;
     private string outputFolder;
@@ -143,6 +146,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OpenDiagnosticsFolderCommand = new AsyncRelayCommand(OpenDiagnosticsFolderAsync, () => CanOpenDiagnosticsFolder);
         RefreshDevicesCommand = new AsyncRelayCommand(RefreshEndpointsAsync, () => CanRefreshDevices);
         RefreshProcessCatalogCommand = new AsyncRelayCommand(RefreshProcessCatalogAsync, () => CanRefreshProcessCatalog);
+        RefreshTeamsWindowsCommand = new AsyncRelayCommand(RefreshTeamsWindowsAsync, () => CanRefreshTeamsWindows);
         RefreshLibraryCommand = new AsyncRelayCommand(RefreshLibraryAsync, () => CanRefreshLibrary);
         PlayCommand = new AsyncRelayCommand(PlayAsync, () => CanPlay);
         PauseCommand = new AsyncRelayCommand(PauseAsync, () => CanPause);
@@ -184,6 +188,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public ObservableCollection<ProcessSelectionChoice> ProcessCatalog { get; } = [];
 
+    public ObservableCollection<VideoCaptureWindowChoice> TeamsCaptureWindows { get; } = [];
+
     public ObservableCollection<LibraryRecording> LibraryItems { get; } = [];
 
     /// <summary>Model IDs discovered by the explicitly requested provider connection test.</summary>
@@ -210,6 +216,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public AsyncRelayCommand RefreshDevicesCommand { get; }
 
     public AsyncRelayCommand RefreshProcessCatalogCommand { get; }
+
+    public AsyncRelayCommand RefreshTeamsWindowsCommand { get; }
 
     public AsyncRelayCommand RefreshLibraryCommand { get; }
 
@@ -459,6 +467,30 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             if (SetProperty(ref selectedProcess, value))
             {
                 OnPropertyChanged(nameof(SelectedCaptureSourceDescription));
+                UpdateCommandStates();
+            }
+        }
+    }
+
+    public bool IsSharedContentCaptureEnabled
+    {
+        get => isSharedContentCaptureEnabled;
+        set
+        {
+            if (SetProperty(ref isSharedContentCaptureEnabled, value))
+            {
+                UpdateCommandStates();
+            }
+        }
+    }
+
+    public VideoCaptureWindowChoice? SelectedVideoCaptureWindow
+    {
+        get => selectedVideoCaptureWindow;
+        set
+        {
+            if (SetProperty(ref selectedVideoCaptureWindow, value))
+            {
                 UpdateCommandStates();
             }
         }
@@ -1768,11 +1800,15 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         SelectedCaptureSource?.Kind != CaptureSourceKind.SelectedApplication ||
         SelectedProcess is { IsAvailable: true };
 
+    private bool SelectedVideoWindowReady =>
+        !IsSharedContentCaptureEnabled || SelectedVideoCaptureWindow is not null;
+
     private bool CanStart =>
         IsSetupEditable &&
         storageCanStart &&
         SelectedDevicesReady &&
         SelectedProcessReady &&
+        SelectedVideoWindowReady &&
         recordingLifecycle is not { HasPublicationInProgress: true };
 
     private bool CanStop =>
@@ -1787,6 +1823,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private bool CanRefreshDevices => IsSetupEditable;
 
     private bool CanRefreshProcessCatalog => IsSetupEditable;
+
+    private bool CanRefreshTeamsWindows => IsSetupEditable;
 
     private bool CanRefreshLibrary => !IsBusy && !isShuttingDown;
 
@@ -1973,6 +2011,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         () => RefreshEndpointsCoreAsync(announce: true));
 
     private Task RefreshProcessCatalogAsync() => RunOperationAsync(RefreshProcessCatalogCoreAsync);
+
+    private Task RefreshTeamsWindowsAsync() => RunOperationAsync(RefreshTeamsWindowsCoreAsync);
+
+    private async Task RefreshTeamsWindowsCoreAsync()
+    {
+        var previous = SelectedVideoCaptureWindow?.Target;
+        var targets = await Task.Run(videoTargetCatalog.ListTargets);
+        TeamsCaptureWindows.Clear();
+        foreach (var target in targets) TeamsCaptureWindows.Add(new VideoCaptureWindowChoice(target));
+        SelectedVideoCaptureWindow = previous is null
+            ? TeamsCaptureWindows.FirstOrDefault()
+            : TeamsCaptureWindows.FirstOrDefault(choice =>
+                VideoCaptureTargetSelection.Resolve(previous, [choice.Target]) is not null);
+    }
 
     private async Task RefreshProcessCatalogCoreAsync()
     {
@@ -2177,7 +2229,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                     process.StartedAtUtc,
                     process.ProcessName),
                 IncludeProcessTree: true,
-                TestDuration: testDuration));
+                TestDuration: testDuration,
+                VideoTarget: SelectedVideoTargetOrNull()));
         }
         else
         {
@@ -2186,10 +2239,11 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 RecordingAudioSource.SystemLoopback,
                 RenderEndpointId: SelectedRenderEndpoint?.EndpointId,
                 MicrophoneEndpointId: SelectedMicrophoneEndpoint?.EndpointId,
-                TestDuration: testDuration));
+                TestDuration: testDuration,
+                VideoTarget: SelectedVideoTargetOrNull()));
         }
         var plan = started.Session;
-        NextOutputPath = plan.FinalAudioPath;
+        NextOutputPath = IsSharedContentCaptureEnabled ? plan.FinalVideoPath : plan.FinalAudioPath;
         lastResultText = $"正在建立工作階段：{plan.FinalAudioPath}";
         OnPropertyChanged(nameof(ResultText));
         UpdateCommandStates();
@@ -2201,6 +2255,11 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         ApplySnapshot(started.Snapshot);
         return started.Snapshot;
     }
+
+    private VideoCaptureTarget? SelectedVideoTargetOrNull() =>
+        IsSharedContentCaptureEnabled
+            ? SelectedVideoCaptureWindow?.Target ?? throw new InvalidOperationException("Select a Teams shared-content window before recording.")
+            : null;
 
     private async Task RefreshEndpointsCoreAsync(bool announce = false)
     {
@@ -2755,6 +2814,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OpenDiagnosticsFolderCommand.RaiseCanExecuteChanged();
         RefreshDevicesCommand.RaiseCanExecuteChanged();
         RefreshProcessCatalogCommand.RaiseCanExecuteChanged();
+        RefreshTeamsWindowsCommand.RaiseCanExecuteChanged();
         RefreshLibraryCommand.RaiseCanExecuteChanged();
         PlayCommand.RaiseCanExecuteChanged();
         PauseCommand.RaiseCanExecuteChanged();

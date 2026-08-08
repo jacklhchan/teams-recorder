@@ -36,6 +36,27 @@ internal static class LocalDiagnosticLogTests
         if (result.EntryCount != 200) throw new InvalidOperationException("Diagnostic export was not bounded.");
     }
 
+    public static void RedactsTransientWindowIdentity()
+    {
+        using var root = new TestRoot();
+        var log = new LocalDiagnosticLog(Path.Combine(root.Path, "diagnostics"));
+        const string title = "TOP-SECRET-TEAMS-MEETING-741";
+        const string processId = "481516";
+        const string windowHandle = "0x00C0FFEE";
+        const string creationTime = "133742424242424242";
+
+        log.RecordFailure("wgc-preflight", message:
+            $"window title={title}; pid={processId}; hwnd={windowHandle}; process creation time={creationTime}");
+        var result = log.ExportAsync(Path.Combine(root.Path, "export")).GetAwaiter().GetResult();
+        var exported = File.ReadAllText(Path.Combine(root.Path, "export", result.FileName));
+
+        if (result.EntryCount != 1 || exported.Contains(title) || exported.Contains(processId) ||
+            exported.Contains(windowHandle) || exported.Contains(creationTime))
+        {
+            throw new InvalidOperationException("Diagnostic export retained a transient window identity.");
+        }
+    }
+
     private sealed class TestRoot : IDisposable
     {
         public TestRoot()

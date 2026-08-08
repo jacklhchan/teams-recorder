@@ -122,6 +122,12 @@ public sealed class LocalDiagnosticLog : IRecordingDiagnostics
         private static readonly Regex Secret = new("(?ix)\\b(?:access[_-]?token|refresh[_-]?token|token|authorization)\\b\\s*[:=]\\s*(?:bearer\\s+)?[^\\s,;\\\"']+|\\bbearer\\s+[a-z0-9._~+\\-/=]+", RegexOptions.Compiled);
         private static readonly Regex QuerySecret = new(@"(?i)([?&](?:access[_-]?token|refresh[_-]?token|token)=[^&\s]+)", RegexOptions.Compiled);
         private static readonly Regex WindowsPath = new(@"(?i)(?:[a-z]:\\|\\\\)[^\r\n\t ]+", RegexOptions.Compiled);
+        private static readonly Regex TransientWindowIdentity = new(
+            @"(?ix)\b(?:pid|process\s+id|hwnd|window\s+handle|process\s+creation\s+time|creation\s+time|filetime)\b\s*[:=]\s*(?:0x[0-9a-f]+|\d+)",
+            RegexOptions.Compiled);
+        private static readonly Regex WindowTitle = new(
+            "(?ix)\\b(?:window\\s+title|meeting\\s+(?:title|name)|title)\\b\\s*[:=]\\s*(?:\\\"[^\\\"]*\\\"|'[^']*'|[^,;\\r\\n]+)",
+            RegexOptions.Compiled);
 
         public static string Stage(string? value) => string.IsNullOrWhiteSpace(value) ? "unknown" : value.Trim()[..Math.Min(64, value.Trim().Length)];
         public static string? Message(string? value)
@@ -130,6 +136,8 @@ public sealed class LocalDiagnosticLog : IRecordingDiagnostics
             var sanitized = Secret.Replace(value, "[redacted-secret]");
             sanitized = QuerySecret.Replace(sanitized, "[redacted-secret]");
             sanitized = WindowsPath.Replace(sanitized, "[redacted-path]");
+            sanitized = WindowTitle.Replace(sanitized, "window-title=[redacted-window-title]");
+            sanitized = TransientWindowIdentity.Replace(sanitized, "[redacted-window-identity]");
             sanitized = sanitized.Replace('\0', ' ').Replace('\r', ' ').Replace('\n', ' ').Trim();
             return sanitized[..Math.Min(MaximumMessageLength, sanitized.Length)];
         }

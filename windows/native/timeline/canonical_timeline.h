@@ -59,6 +59,9 @@ public:
     // faster callback must not make the other source late by one block.
     std::uint64_t end_frame(Source source) const noexcept;
     bool has_origin() const noexcept { return has_origin_; }
+    // Exposes the immutable session QPC origin for video PTS mapping.  The
+    // caller must still reject frames until has_origin() is true.
+    std::uint64_t origin_qpc_100ns() const noexcept { return origin_qpc_100ns_; }
 
 private:
     struct State {

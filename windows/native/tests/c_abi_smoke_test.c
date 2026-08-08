@@ -9,6 +9,7 @@ _Static_assert(RECORDER_NATIVE_CAPTURE_MICROPHONE == 1, "capture mode ABI change
 _Static_assert(RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK == 2, "capture mode ABI changed");
 _Static_assert(RECORDER_NATIVE_CAPTURE_MIXED == 3, "mixed capture mode ABI changed");
 _Static_assert(RECORDER_NATIVE_CAPTURE_SELECTED_APP_MIXED == 4, "selected-audio capture mode ABI changed");
+_Static_assert(RECORDER_NATIVE_CAPTURE_SELECTED_WINDOW_AV == 5, "selected-window A/V capture mode ABI changed");
 _Static_assert(RECORDER_NATIVE_SELECTED_AUDIO_SYSTEM_LOOPBACK == 0, "selected-audio system source ABI changed");
 _Static_assert(RECORDER_NATIVE_SELECTED_AUDIO_PROCESS_TREE_LOOPBACK == 1, "selected-audio process-tree source ABI changed");
 _Static_assert(RECORDER_NATIVE_STATE_STARTING == 4, "state ABI changed");
@@ -35,6 +36,9 @@ _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, render_endpoint
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, microphone_endpoint_id_utf8) == 24u, "selected-audio microphone offset changed");
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, target_process_id) == 32u, "selected-audio target PID offset changed");
 _Static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, expected_process_creation_time_100ns) == 48u, "selected-audio creation time offset changed");
+_Static_assert(sizeof(RecorderNativeSelectedWindowAvStartOptions) == 104u, "selected-window A/V options layout changed");
+_Static_assert(offsetof(RecorderNativeSelectedWindowAvStartOptions, target_window_handle) == 40u, "selected-window A/V HWND offset changed");
+_Static_assert(offsetof(RecorderNativeSelectedWindowAvStartOptions, target_window_process_creation_time_100ns) == 96u, "selected-window A/V target identity offset changed");
 
 static int expect(int condition, const char* message) {
     if (!condition) {
@@ -75,13 +79,19 @@ int main(void) {
 
     recorder_native_endpoint_list_destroy(NULL);
 
-    if (!expect(strcmp(recorder_native_version(), "0.7.0") == 0, "version must be exported") ||
+    if (!expect(strcmp(recorder_native_version(), "0.8.0") == 0, "version must be exported") ||
         !expect(recorder_native_start(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "legacy start(NULL) must reject the handle") ||
         !expect(recorder_native_start_with_options(NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "options start(NULL) must reject the handle") ||
         !expect(recorder_native_start_selected_audio(NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "selected-audio start(NULL) must reject the handle") ||
+        !expect(recorder_native_start_selected_window_av(NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "selected-window A/V start(NULL) must reject the handle") ||
+        !expect(recorder_native_validate_h264_aac_mp4(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "MP4 validation(NULL) must reject the path") ||
+        !expect(recorder_native_validate_aac_m4a(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "M4A validation(NULL) must reject the path") ||
         !expect(recorder_native_set_microphone_muted(NULL, 0U) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "mute(NULL) must reject the handle") ||
         !expect(recorder_native_stop(NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,

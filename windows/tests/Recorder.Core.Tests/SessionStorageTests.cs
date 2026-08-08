@@ -28,7 +28,7 @@ internal static class SessionStorageTests
     {
         using var root = new TestRoot();
         var now = new DateTimeOffset(2026, 7, 29, 12, 0, 0, TimeSpan.Zero);
-        var service = new SessionStorageService(root.Path, capacityProvider: new FixedCapacity(RecordingStoragePolicy.WarningBytes), clock: new FixedClock(now));
+        var service = new SessionStorageService(root.Path, capacityProvider: new FixedCapacity(RecordingStoragePolicy.WarningBytes), clock: new FixedClock(now), audioValidator: new AlwaysValidValidator());
         var first = service.CreateSessionPlan(RecordingSessionKind.Manual);
         File.WriteAllBytes(first.BackupAudioPath, [1, 2, 3]);
         File.WriteAllBytes(first.FinalAudioPath, [9]);
@@ -45,7 +45,7 @@ internal static class SessionStorageTests
     public static void LibraryIgnoresUnsafeIncompleteAndMalformedEntries()
     {
         using var root = new TestRoot();
-        var service = new SessionStorageService(root.Path);
+        var service = new SessionStorageService(root.Path, audioValidator: new AlwaysValidValidator());
         var valid = Path.Combine(root.Path, "manual-20260729-120000000");
         var backupOnly = Path.Combine(root.Path, "meeting-20260729-120000000");
         var malformed = Path.Combine(root.Path, "meeting-");
@@ -61,6 +61,184 @@ internal static class SessionStorageTests
         var items = service.ListSessions();
         if (items.Count != 1 || !string.Equals(items[0].FolderPath, valid, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The library included incomplete, malformed, or foreign entries.");
         if (items[0].Metadata.MediaKind != "audio") throw new InvalidOperationException("Malformed metadata was not safely normalized.");
+    }
+
+    public static void LibraryIncludesOnlyPublishedVideoMedia()
+    {
+        using var root = new TestRoot();
+        var service = VideoTestService(root.Path);
+        var published = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        WriteMp4File(published.FinalVideoPath);
+        File.WriteAllBytes(published.FinalAudioPath, [1, 2, 3]);
+        File.WriteAllText(published.MetadataPath, "{\"mediaKind\":\"video\",\"screenIntervals\":[{\"start\":0,\"end\":1}]}");
+
+        var partial = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(Path.Combine(partial.FolderPath, RecordingSessionLayout.PartialVideoFileName), [4, 5, 6]);
+        File.WriteAllText(partial.MetadataPath, "{\"mediaKind\":\"video\"}");
+
+        var items = service.ListSessions();
+        if (items.Count != 1 || items[0].AudioPath != Path.Combine(published.FolderPath, RecordingSessionLayout.FinalVideoFileName) ||
+            items[0].Metadata.MediaKind != "video")
+        {
+            throw new InvalidOperationException("Only a published video recording may appear in the library.");
+        }
+    }
+
+    public static void VideoPublicationPromotesMp4AndRetainsM4aFallback()
+    {
+        using var root = new TestRoot();
+        var service = VideoTestService(root.Path);
+        var plan = service.CreateSessionPlan(RecordingSessionKind.Meeting);
+        WriteMp4File(plan.PartialVideoPath);
+        File.WriteAllBytes(plan.BackupAudioPath, [1, 2, 3]);
+
+        var result = service.PublishCompletedVideoAsync(
+                plan,
+                "Shared content",
+                WindowsCaptureMetadata.ForSelectedProcessLoopback("ms-teams.exe"))
+            .GetAwaiter().GetResult();
+
+        if (!result.VideoPublished || !result.AudioPreserved || result.RecoveryState != RecordingRecoveryState.None ||
+            !File.Exists(plan.FinalVideoPath) || !File.Exists(plan.FinalAudioPath) ||
+            File.Exists(plan.PartialVideoPath) || File.Exists(plan.BackupAudioPath))
+        {
+            throw new InvalidOperationException("Completed video publication did not promote both final media files safely.");
+        }
+
+        var metadataText = File.ReadAllText(plan.MetadataPath);
+        var metadata = RecordingInfoJson.Parse(metadataText);
+        if (metadata.MediaKind != "video" || metadata.RecoveryState != RecordingRecoveryState.None ||
+            metadata.Source != "teamsAutomatic" || metadata.WindowsCapture?.ProcessName != "ms-teams.exe" ||
+            metadataText.Contains("capturedTeamsWindow", StringComparison.Ordinal) ||
+            metadataText.Contains("windowHandle", StringComparison.Ordinal) ||
+            metadataText.Contains("processId", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Published video metadata retained a runtime window identity or lost bounded audio provenance.");
+        }
+
+        var updated = service.UpdateMetadataAsync(plan.FolderPath, "Renamed shared content", ["demo"], true)
+            .GetAwaiter().GetResult();
+        if (updated.MediaKind != "video" || updated.Title != "Renamed shared content" ||
+            !File.Exists(plan.FinalVideoPath) || !File.Exists(plan.FinalAudioPath))
+        {
+            throw new InvalidOperationException("A published video session could not retain its primary/fallback media during metadata editing.");
+        }
+
+        var item = service.ListSessions().Single();
+        if (item.AudioPath != plan.FinalVideoPath || item.Metadata.MediaKind != "video" ||
+            item.Metadata.Title != "Renamed shared content")
+        {
+            throw new InvalidOperationException("The published MP4 was not the library primary media.");
+        }
+    }
+
+    public static void VideoPublicationFallsBackToM4aAndNeverPublishesAnInvalidPartialMp4()
+    {
+        using var root = new TestRoot();
+        var service = VideoTestService(root.Path);
+        var plan = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(plan.PartialVideoPath, [9, 9, 9]);
+        File.WriteAllBytes(plan.BackupAudioPath, [1, 2, 3]);
+
+        var result = service.PublishCompletedVideoAsync(plan).GetAwaiter().GetResult();
+        if (result.VideoPublished || !result.AudioPreserved ||
+            result.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved ||
+            File.Exists(plan.FinalVideoPath) || !File.Exists(plan.FinalAudioPath) ||
+            !File.Exists(plan.PartialVideoPath) || File.Exists(plan.BackupAudioPath))
+        {
+            throw new InvalidOperationException($"A failed video publication did not preserve the M4A fallback safely: video={result.VideoPublished}, audio={result.AudioPreserved}, state={result.RecoveryState}, finalVideo={File.Exists(plan.FinalVideoPath)}, finalAudio={File.Exists(plan.FinalAudioPath)}, partialVideo={File.Exists(plan.PartialVideoPath)}, backupAudio={File.Exists(plan.BackupAudioPath)}.");
+        }
+
+        var item = service.ListSessions().Single();
+        if (item.AudioPath != plan.FinalAudioPath || item.Metadata.MediaKind != "audio" ||
+            item.Metadata.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved)
+        {
+            throw new InvalidOperationException("An invalid partial MP4 appeared in the library instead of the preserved audio.");
+        }
+    }
+
+    public static void DefaultMp4ValidatorRejectsStructuralForgery()
+    {
+        using var root = new TestRoot();
+        var path = Path.Combine(root.Path, "forged.mp4");
+        WriteMp4File(path);
+        if (new Mp4VideoMediaValidator().IsValidNonEmptyVideo(path))
+            throw new InvalidOperationException("Box-name-only MP4 was accepted without native decode proof.");
+    }
+
+    public static void RecoveryPromotesOnlyValidatedMp4WithAnM4aFallback()
+    {
+        using var root = new TestRoot();
+        var service = VideoTestService(root.Path);
+        var recovered = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        WriteMp4File(recovered.PartialVideoPath);
+        File.WriteAllBytes(recovered.BackupAudioPath, [1, 2, 3]);
+
+        var noAudio = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        WriteMp4File(noAudio.PartialVideoPath);
+
+        var invalidVideo = service.CreateSessionPlan(RecordingSessionKind.Manual);
+        File.WriteAllBytes(invalidVideo.PartialVideoPath, [8, 8, 8]);
+        File.WriteAllBytes(invalidVideo.BackupAudioPath, [4, 5, 6]);
+
+        var results = new SessionRecoveryService(service, new AlwaysValidValidator()).RecoverAsync().GetAwaiter().GetResult();
+        if (!results.Single(x => x.FolderPath == recovered.FolderPath).Recovered ||
+            !File.Exists(recovered.FinalVideoPath) || !File.Exists(recovered.FinalAudioPath) ||
+            File.Exists(recovered.PartialVideoPath) || File.Exists(recovered.BackupAudioPath))
+        {
+            throw new InvalidOperationException("Recovery did not publish a validated MP4 with its final M4A fallback.");
+        }
+
+        var recoveredMetadata = RecordingInfoJson.Parse(File.ReadAllText(recovered.MetadataPath));
+        if (recoveredMetadata.MediaKind != "video" ||
+            recoveredMetadata.RecoveryState != RecordingRecoveryState.RecoveredAfterInterruption)
+        {
+            throw new InvalidOperationException("Recovered video metadata was not marked as an interrupted recording without window identity.");
+        }
+
+        if (File.Exists(noAudio.FinalVideoPath) || service.ListSessions().Any(x => x.FolderPath == noAudio.FolderPath))
+        {
+            throw new InvalidOperationException("Recovery published video without a separately preserved M4A fallback.");
+        }
+
+        var invalidResult = results.Single(x => x.FolderPath == invalidVideo.FolderPath);
+        var invalidMetadata = RecordingInfoJson.Parse(File.ReadAllText(invalidVideo.MetadataPath));
+        if (!invalidResult.Recovered || File.Exists(invalidVideo.FinalVideoPath) ||
+            !File.Exists(invalidVideo.FinalAudioPath) || !File.Exists(invalidVideo.PartialVideoPath) ||
+            invalidMetadata.MediaKind != "audio" ||
+            invalidMetadata.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved)
+        {
+            throw new InvalidOperationException($"Recovery did not retain invalid MP4 evidence while preserving playable audio: recovered={invalidResult.Recovered}, finalVideo={File.Exists(invalidVideo.FinalVideoPath)}, finalAudio={File.Exists(invalidVideo.FinalAudioPath)}, partialVideo={File.Exists(invalidVideo.PartialVideoPath)}, kind={invalidMetadata.MediaKind}, state={invalidMetadata.RecoveryState}.");
+        }
+    }
+
+    public static void RecoverySanitizesExistingVideoMetadataWithoutChangingMedia()
+    {
+        using var root = new TestRoot();
+        var service = VideoTestService(root.Path);
+        var plan = service.CreateSessionPlan(RecordingSessionKind.Meeting);
+        WriteMp4File(plan.FinalVideoPath);
+        File.WriteAllBytes(plan.FinalAudioPath, [1, 2, 3]);
+        File.WriteAllText(plan.MetadataPath, """
+            {
+              "mediaKind":"video",
+              "recoveryState":"none",
+              "capturedTeamsWindow":{"processID":71,"windowID":42,"title":"Private meeting"},
+              "videoCapture":{"windowHandle":"0x2A","processId":71}
+            }
+            """);
+
+        var result = new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult().Single();
+        var metadataText = File.ReadAllText(plan.MetadataPath);
+        var metadata = RecordingInfoJson.Parse(metadataText);
+        if (result.Recovered || metadata.MediaKind != "video" ||
+            !File.Exists(plan.FinalVideoPath) || !File.Exists(plan.FinalAudioPath) ||
+            metadataText.Contains("Private meeting", StringComparison.Ordinal) ||
+            metadataText.Contains("windowHandle", StringComparison.Ordinal) ||
+            metadataText.Contains("processID", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Recovery did not sanitize final video metadata without touching completed media.");
+        }
     }
 
     public static void RecoveryIsIdempotentAndNeverClobbers()
@@ -104,7 +282,7 @@ internal static class SessionStorageTests
     public static void MetadataEditsPreserveMediaAndUnknownFields()
     {
         using var root = new TestRoot();
-        var service = new SessionStorageService(root.Path);
+        var service = new SessionStorageService(root.Path, audioValidator: new AlwaysValidValidator());
         var folder = Path.Combine(root.Path, "manual-20260729-120000000");
         Directory.CreateDirectory(folder);
         var audioPath = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
@@ -135,7 +313,7 @@ internal static class SessionStorageTests
     private static void ConcurrentMetadataWritesDoNotShareTemporaryFiles()
     {
         using var root = new TestRoot();
-        var service = new SessionStorageService(root.Path);
+        var service = new SessionStorageService(root.Path, audioValidator: new AlwaysValidValidator());
         var folder = Path.Combine(root.Path, "manual-20260729-120000000");
         Directory.CreateDirectory(folder);
         File.WriteAllBytes(Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName), [1]);
@@ -223,7 +401,7 @@ internal static class SessionStorageTests
     public static void NewSessionsWriteCanonicalSourceAndParticipants()
     {
         using var root = new TestRoot();
-        var service = new SessionStorageService(root.Path);
+        var service = new SessionStorageService(root.Path, audioValidator: new AlwaysValidValidator());
         var manual = service.CreateSessionPlan(RecordingSessionKind.Manual);
         var test = service.CreateSessionPlan(RecordingSessionKind.Test);
         var teams = service.CreateSessionPlan(RecordingSessionKind.Meeting);
@@ -257,7 +435,7 @@ internal static class SessionStorageTests
     public static void FutureSchemaVersionSurvivesRoundTrip()
     {
         using var root = new TestRoot();
-        var service = new SessionStorageService(root.Path);
+        var service = new SessionStorageService(root.Path, audioValidator: new AlwaysValidValidator());
         var folder = Path.Combine(root.Path, "manual-20260729-120000000");
         Directory.CreateDirectory(folder);
         File.WriteAllBytes(Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName), [1]);
@@ -310,7 +488,7 @@ internal static class SessionStorageTests
     public static void RecoveryPromotesCompletePartialM4aOnly()
     {
         using var root = new TestRoot();
-        var service = new SessionStorageService(root.Path);
+        var service = new SessionStorageService(root.Path, audioValidator: new AlwaysValidValidator());
         var complete = Path.Combine(root.Path, "manual-20260729-120000000");
         var incomplete = Path.Combine(root.Path, "test-20260729-120000000");
         Directory.CreateDirectory(complete);
@@ -318,7 +496,7 @@ internal static class SessionStorageTests
         WriteBoxFile(Path.Combine(complete, RecordingSessionLayout.PartialAudioFileName), ("ftyp", 12), ("moov", 8));
         WriteBoxFile(Path.Combine(incomplete, RecordingSessionLayout.PartialAudioFileName), ("ftyp", 12));
 
-        var result = new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult();
+        var result = new SessionRecoveryService(service, new CompleteFixtureAudioValidator()).RecoverAsync().GetAwaiter().GetResult();
         if (!result.Single(item => item.FolderPath == complete).Recovered ||
             !File.Exists(Path.Combine(complete, RecordingSessionLayout.FinalAudioFileName)))
         {
@@ -348,7 +526,7 @@ internal static class SessionStorageTests
     public static void MetadataFailuresRetainRetryableMedia()
     {
         using var root = new TestRoot();
-        var service = new SessionStorageService(root.Path);
+        var service = new SessionStorageService(root.Path, audioValidator: new AlwaysValidValidator());
         var publish = service.CreateSessionPlan(RecordingSessionKind.Manual);
         File.WriteAllBytes(publish.BackupAudioPath, [1, 2, 3]);
         Directory.CreateDirectory(publish.MetadataPath);
@@ -370,12 +548,12 @@ internal static class SessionStorageTests
         var partial = service.CreateSessionPlan(RecordingSessionKind.Manual);
         WriteBoxFile(Path.Combine(partial.FolderPath, RecordingSessionLayout.PartialAudioFileName), ("ftyp", 12), ("moov", 8));
         Directory.CreateDirectory(partial.MetadataPath);
-        var firstAttempt = new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult();
+        var firstAttempt = new SessionRecoveryService(service, new AlwaysValidValidator()).RecoverAsync().GetAwaiter().GetResult();
         if (firstAttempt.Single(item => item.FolderPath == partial.FolderPath).Recovered ||
             !File.Exists(Path.Combine(partial.FolderPath, RecordingSessionLayout.PartialAudioFileName)) || File.Exists(partial.FinalAudioPath))
             throw new InvalidOperationException("Recovery metadata failure did not retain partial evidence for retry.");
         Directory.Delete(partial.MetadataPath);
-        var retry = new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult();
+        var retry = new SessionRecoveryService(service, new AlwaysValidValidator()).RecoverAsync().GetAwaiter().GetResult();
         if (!retry.Single(item => item.FolderPath == partial.FolderPath).Recovered || !File.Exists(partial.FinalAudioPath))
             throw new InvalidOperationException("Partial media was not recoverable after metadata storage became available.");
 
@@ -383,7 +561,7 @@ internal static class SessionStorageTests
         // before its metadata write failed, so it is not skipped forever.
         var orphanFinal = service.CreateSessionPlan(RecordingSessionKind.Meeting);
         File.WriteAllBytes(orphanFinal.FinalAudioPath, [9, 8, 7]);
-        new SessionRecoveryService(service).RecoverAsync().GetAwaiter().GetResult();
+        new SessionRecoveryService(service, new AlwaysValidValidator()).RecoverAsync().GetAwaiter().GetResult();
         if (!File.Exists(orphanFinal.MetadataPath) ||
             RecordingInfoJson.Parse(File.ReadAllText(orphanFinal.MetadataPath)).Source != "teamsAutomatic")
         {
@@ -408,12 +586,37 @@ internal static class SessionStorageTests
     private sealed class FixedCapacity(long? available) : IStorageCapacityProvider { public long? GetAvailableBytes(string _) => available; }
     private sealed class FixedClock(DateTimeOffset now) : IClock { public DateTimeOffset UtcNow => now; }
     private sealed class AlwaysValidValidator : IAudioBackupValidator { public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0; }
+    private sealed class CompleteFixtureAudioValidator : IAudioBackupValidator { public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length >= 20; }
+    private sealed class AlwaysValidVideoValidator : IVideoMediaValidator { public bool IsValidNonEmptyVideo(string path) => File.Exists(path) && new FileInfo(path).Length >= 24; }
     private sealed class SelectiveValidator(string rejectedPath) : IAudioBackupValidator { public bool IsValidNonEmptyAudio(string path) => !path.StartsWith(rejectedPath, StringComparison.OrdinalIgnoreCase) && File.Exists(path) && new FileInfo(path).Length > 0; }
     private sealed class TestRoot : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "recorder-session-storage-tests", Guid.NewGuid().ToString("N"));
         public TestRoot() => Directory.CreateDirectory(Path);
         public void Dispose() { if (Directory.Exists(Path)) Directory.Delete(Path, true); }
+    }
+    private static SessionStorageService VideoTestService(string rootPath) =>
+        new(rootPath, videoValidator: new AlwaysValidVideoValidator(), audioValidator: new AlwaysValidValidator());
+    private static void WriteMp4File(string path)
+    {
+        // Deliberately tiny but structurally complete enough for the managed
+        // publication/recovery guard: ftyp + mdat + a moov payload declaring
+        // an AVC video track. Native tests remain responsible for decode proof.
+        using var stream = File.Create(path);
+        WriteBox("ftyp", [0, 0, 0, 0, 0, 0, 0, 0]);
+        WriteBox("mdat", [0]);
+        WriteBox("moov", System.Text.Encoding.ASCII.GetBytes("videavc1"));
+
+        void WriteBox(string type, byte[] payload)
+        {
+            var size = checked(payload.Length + 8);
+            stream.WriteByte((byte)(size >> 24));
+            stream.WriteByte((byte)(size >> 16));
+            stream.WriteByte((byte)(size >> 8));
+            stream.WriteByte((byte)size);
+            stream.Write(System.Text.Encoding.ASCII.GetBytes(type));
+            stream.Write(payload);
+        }
     }
     private static void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new InvalidOperationException($"Expected {typeof(T).Name}."); }
 }

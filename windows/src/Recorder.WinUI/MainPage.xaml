@@ -107,6 +107,25 @@
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                             TextWrapping="Wrap" />
                     </StackPanel>
+                    <StackPanel Spacing="6">
+                        <CheckBox
+                            Content="Capture selected Teams shared-content window (MP4)"
+                            IsChecked="{Binding IsSharedContentCaptureEnabled, Mode=TwoWay}"
+                            IsEnabled="{Binding IsDeviceSelectionEnabled}" />
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <TextBlock Text="Teams window" VerticalAlignment="Center" />
+                            <Button Command="{Binding RefreshTeamsWindowsCommand}" Content="Refresh windows" />
+                        </StackPanel>
+                        <ComboBox
+                            DisplayMemberPath="DisplayName"
+                            IsEnabled="{Binding IsDeviceSelectionEnabled}"
+                            ItemsSource="{Binding TeamsCaptureWindows}"
+                            SelectedItem="{Binding SelectedVideoCaptureWindow, Mode=TwoWay}" />
+                        <TextBlock
+                            Text="Only the selected top-level Teams window is captured. Desktop and monitor capture are never used."
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
                     <StackPanel
                         Spacing="6"
                         Visibility="{Binding SelectedApplicationPanelVisibility}">

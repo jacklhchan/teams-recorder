@@ -51,7 +51,9 @@ typedef enum RecorderNativeCaptureMode {
     /* System render loopback, optionally mixed with one exact capture endpoint. */
     RECORDER_NATIVE_CAPTURE_MIXED = 3,
     /* Mixed recording rooted at an explicitly selected process tree. */
-    RECORDER_NATIVE_CAPTURE_SELECTED_APP_MIXED = 4
+    RECORDER_NATIVE_CAPTURE_SELECTED_APP_MIXED = 4,
+    /* Exact HWND WGC video plus mixed AAC audio, published as MP4. */
+    RECORDER_NATIVE_CAPTURE_SELECTED_WINDOW_AV = 5
 } RecorderNativeCaptureMode;
 
 /* Root audio source for recorder_native_start_selected_audio. */
@@ -130,6 +132,39 @@ typedef struct RecorderNativeSelectedAudioStartOptions {
     uint32_t reserved;
     uint64_t expected_process_creation_time_100ns;
 } RecorderNativeSelectedAudioStartOptions;
+
+/*
+ * Exact-window A/V recording. Both output paths are required and copied
+ * before this call returns: audio_output_path_utf8 is the playable M4A
+ * recovery artifact; video_output_path_utf8 is the final MP4 publication
+ * target (the native writer uses a sibling .partial file until finalization).
+ *
+ * target_window_handle, target_window_process_id, and
+ * target_window_process_creation_time_100ns are an indivisible selected
+ * Teams window identity. Native code verifies this exact identity and uses
+ * GraphicsCaptureItem::CreateForWindow only; it never falls back to desktop,
+ * monitor, title matching, or another HWND.
+ */
+typedef struct RecorderNativeSelectedWindowAvStartOptions {
+    uint32_t struct_size;
+    RecorderNativeSelectedAudioSource audio_source;
+    const char* audio_output_path_utf8;
+    const char* video_output_path_utf8;
+    const char* render_endpoint_id_utf8;
+    const char* microphone_endpoint_id_utf8;
+    uint64_t target_window_handle;
+    uint32_t target_window_process_id;
+    uint32_t audio_target_process_id;
+    uint32_t included_process_tree;
+    uint32_t video_width;
+    uint32_t video_height;
+    uint32_t video_frame_rate;
+    uint32_t video_bitrate_bps;
+    uint32_t aac_bitrate_bps;
+    uint32_t reserved;
+    uint64_t audio_process_creation_time_100ns;
+    uint64_t target_window_process_creation_time_100ns;
+} RecorderNativeSelectedWindowAvStartOptions;
 
 typedef struct RecorderNativeStats {
     /* Set to sizeof(RecorderNativeStats) before calling get_stats. */
@@ -215,6 +250,24 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_mixed(
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_selected_audio(
     RecorderNativeBridge* bridge,
     const RecorderNativeSelectedAudioStartOptions* options);
+
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_selected_window_av(
+    RecorderNativeBridge* bridge,
+    const RecorderNativeSelectedWindowAvStartOptions* options);
+
+/*
+ * Fail-closed native decode validation for a finalized H.264/AAC MP4. The
+ * function opens both streams and obtains at least one decoded video and
+ * audio sample. It does not retain frame or audio bytes. This intentionally
+ * has no bridge-handle argument because startup recovery runs after a former
+ * capture handle may already have been released.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_validate_h264_aac_mp4(
+    const char* path_utf8);
+
+/* Fail-closed native decode validation for a finalized AAC/M4A fallback. */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_validate_aac_m4a(
+    const char* path_utf8);
 
 /*
  * Sets the microphone contribution to a mixed M4A capture to an absolute

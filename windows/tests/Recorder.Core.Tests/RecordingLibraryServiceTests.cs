@@ -8,10 +8,11 @@ internal static class RecordingLibraryServiceTests
     public static void StartupRecoveryRefreshesLibraryAndMetadataEditsRoundTrip()
     {
         using var root = new TestRoot();
-        var storage = new SessionStorageService(root.Path);
+        var audio = new AlwaysValidAudio();
+        var storage = new SessionStorageService(root.Path, audioValidator: audio);
         var plan = storage.CreateSessionPlan(RecordingSessionKind.Manual);
         WriteM4a(Path.Combine(plan.FolderPath, RecordingSessionLayout.PartialAudioFileName));
-        var library = new RecordingLibraryService(storage);
+        var library = new RecordingLibraryService(storage, new SessionRecoveryService(storage, audio));
 
         var startup = library.RecoverAtStartupAsync().GetAwaiter().GetResult();
         if (!startup.RecoveryResults.Single(item => item.FolderPath == plan.FolderPath).Recovered ||
@@ -32,7 +33,7 @@ internal static class RecordingLibraryServiceTests
     public static void RecycleRequiresConfirmationAndFailedStartCleanupPreservesEvidence()
     {
         using var root = new TestRoot();
-        var storage = new SessionStorageService(root.Path);
+        var storage = new SessionStorageService(root.Path, audioValidator: new AlwaysValidAudio());
         var library = new RecordingLibraryService(storage);
         var plan = storage.CreateSessionPlan(RecordingSessionKind.Manual);
 
@@ -100,5 +101,10 @@ internal static class RecordingLibraryServiceTests
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "recorder-library-tests", Guid.NewGuid().ToString("N"));
         public TestRoot() => Directory.CreateDirectory(Path);
         public void Dispose() { if (Directory.Exists(Path)) Directory.Delete(Path, true); }
+    }
+
+    private sealed class AlwaysValidAudio : IAudioBackupValidator
+    {
+        public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
     }
 }

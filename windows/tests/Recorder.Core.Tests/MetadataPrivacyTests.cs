@@ -79,6 +79,40 @@ internal static class MetadataPrivacyTests
                 null)));
     }
 
+    public static void VideoMetadataDoesNotPersistRuntimeWindowIdentity()
+    {
+        var source = JsonNode.Parse("""
+            {
+              "title":"Shared content",
+              "mediaKind":"video",
+              "screenIntervals":[{"startSeconds":0,"endSeconds":30}],
+              "capturedTeamsWindow":{"processID":711,"windowID":42,"title":"Confidential call"},
+              "videoCapture":{"windowHandle":"0x2A","processId":711,"windowTitle":"Confidential call"},
+              "processId":711,
+              "windowHandle":"0x2A"
+            }
+            """) as JsonObject;
+
+        var video = RecordingInfoJson.CreateVideo(
+            source,
+            titleOverride: null,
+            RecordingRecoveryState.None,
+            RecordingSessionKind.Meeting);
+        var serialized = video.Document.ToJsonString();
+
+        if (video.MediaKind != "video" || video.Source != "teamsAutomatic" ||
+            video.Document["capturedTeamsWindow"] is not null ||
+            video.Document["videoCapture"] is not null ||
+            video.Document["processId"] is not null ||
+            video.Document["windowHandle"] is not null ||
+            video.Document["screenIntervals"] is not JsonArray intervals || intervals.Count != 0 ||
+            serialized.Contains("Confidential call", StringComparison.Ordinal) ||
+            serialized.Contains("0x2A", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Windows video metadata retained transient target-window identity.");
+        }
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull
     {
         if (!EqualityComparer<T>.Default.Equals(expected, actual))

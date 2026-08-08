@@ -8,6 +8,7 @@
 static_assert(std::is_standard_layout<RecorderNativeStartOptions>::value, "start options must remain C ABI safe");
 static_assert(std::is_standard_layout<RecorderNativeMixedStartOptions>::value, "mixed start options must remain C ABI safe");
 static_assert(std::is_standard_layout<RecorderNativeSelectedAudioStartOptions>::value, "selected-audio start options must remain C ABI safe");
+static_assert(std::is_standard_layout<RecorderNativeSelectedWindowAvStartOptions>::value, "selected-window A/V options must remain C ABI safe");
 static_assert(std::is_standard_layout<RecorderNativeStats>::value, "stats must remain C ABI safe");
 static_assert(sizeof(RecorderNativeStartOptions) == 32U, "x64 start options layout changed");
 static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8U, "output path offset changed");
@@ -25,6 +26,7 @@ static_assert(RECORDER_NATIVE_CAPTURE_MICROPHONE == 1, "capture mode ABI value c
 static_assert(RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK == 2, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_MIXED == 3, "mixed capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_SELECTED_APP_MIXED == 4, "selected-audio capture mode ABI value changed");
+static_assert(RECORDER_NATIVE_CAPTURE_SELECTED_WINDOW_AV == 5, "selected-window A/V capture mode ABI value changed");
 static_assert(sizeof(RecorderNativeMixedStartOptions) == 40U, "x64 mixed options layout changed");
 static_assert(offsetof(RecorderNativeMixedStartOptions, output_path_utf8) == 8U, "mixed output path offset changed");
 static_assert(offsetof(RecorderNativeMixedStartOptions, microphone_endpoint_id_utf8) == 24U, "mixed microphone offset changed");
@@ -34,6 +36,10 @@ static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, render_endpoint_
 static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, microphone_endpoint_id_utf8) == 24U, "selected-audio microphone offset changed");
 static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, target_process_id) == 32U, "selected-audio target PID offset changed");
 static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, expected_process_creation_time_100ns) == 48U, "selected-audio creation time offset changed");
+static_assert(sizeof(RecorderNativeSelectedWindowAvStartOptions) == 104U, "x64 selected-window A/V options layout changed");
+static_assert(offsetof(RecorderNativeSelectedWindowAvStartOptions, audio_output_path_utf8) == 8U, "A/V audio output offset changed");
+static_assert(offsetof(RecorderNativeSelectedWindowAvStartOptions, target_window_handle) == 40U, "A/V HWND offset changed");
+static_assert(offsetof(RecorderNativeSelectedWindowAvStartOptions, target_window_process_creation_time_100ns) == 96U, "A/V target identity offset changed");
 static_assert(RECORDER_NATIVE_SELECTED_AUDIO_SYSTEM_LOOPBACK == 0, "selected-audio system source ABI value changed");
 static_assert(RECORDER_NATIVE_SELECTED_AUDIO_PROCESS_TREE_LOOPBACK == 1, "selected-audio process-tree source ABI value changed");
 static_assert(RECORDER_NATIVE_STATE_STARTING == 4, "state ABI value changed");
@@ -76,10 +82,13 @@ int main() {
     uint32_t endpoint_count = 0;
     recorder_native_endpoint_list_destroy(nullptr);
 
-    if (!Expect(std::strcmp(recorder_native_version(), "0.7.0") == 0) ||
+    if (!Expect(std::strcmp(recorder_native_version(), "0.8.0") == 0) ||
         !Expect(recorder_native_start(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_with_options(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_selected_audio(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_start_selected_window_av(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_validate_h264_aac_mp4(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_validate_aac_m4a(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_stop(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_get_stats(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_get_state(nullptr) == RECORDER_NATIVE_STATE_FAULTED) ||
@@ -109,6 +118,8 @@ int main() {
     const bool passed =
         Expect(recorder_native_get_state(bridge) == RECORDER_NATIVE_STATE_READY) &&
         Expect(recorder_native_start(bridge) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_validate_h264_aac_mp4("not-an-mp4.m4a") == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_validate_aac_m4a("not-an-m4a.mp4") == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_start_with_options(bridge, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect((selected.struct_size = 0U, recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect((selected = ValidSelectedAudioOptions(), selected.audio_source = static_cast<RecorderNativeSelectedAudioSource>(99),

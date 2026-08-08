@@ -1,5 +1,6 @@
 using Recorder.Core;
 using TeamsRecorder.Windows.Application.Diagnostics;
+using TeamsRecorder.Windows.Application.Recovery;
 using TeamsRecorder.Windows.Application.Storage;
 
 namespace TeamsRecorder.Windows.Application;
@@ -20,10 +21,16 @@ public sealed class RecordingLifecycleService : IDisposable
     private Task<RecordingSessionPublicationResult>? publication;
     private readonly CaptureSourceSelectionPolicy captureSourcePolicy;
     private readonly IRecordingDiagnostics diagnostics;
+    private readonly IVideoCaptureTargetCatalog videoTargets;
+    // Release remains fail-closed until the acceptance evidence is complete.
+    // Test harnesses may opt in explicitly, but production construction never
+    // turns a partial implementation into an announced capture capability.
+    private readonly bool verifiedVideoCapturePipeline;
     private CancellationTokenSource? pendingStartCancellation;
     private long generation;
     private RecordingSessionKind? activeSessionKind;
     private WindowsCaptureMetadata? activeWindowsCapture;
+    private bool activeWindowVideo;
     private bool disposed;
 
     public RecordingLifecycleService(
@@ -31,14 +38,19 @@ public sealed class RecordingLifecycleService : IDisposable
         string storageRoot,
         IProcessCatalog? processCatalog = null,
         IRecordingDelay? recordingDelay = null,
-        IRecordingDiagnostics? diagnostics = null)
+        IRecordingDiagnostics? diagnostics = null,
+        IVideoCaptureTargetCatalog? videoTargets = null,
+        bool verifiedVideoCapturePipeline = false,
+        IAudioBackupValidator? audioValidator = null)
     {
         this.nativeBridge = nativeBridge ?? throw new ArgumentNullException(nameof(nativeBridge));
         coordinator = new RecordingCoordinator(nativeBridge, recordingDelay);
         coordinator.SnapshotChanged += OnSnapshotChanged;
-        storage = new SessionStorageService(storageRoot);
+        storage = new SessionStorageService(storageRoot, audioValidator: audioValidator);
         captureSourcePolicy = new CaptureSourceSelectionPolicy(processCatalog);
         this.diagnostics = diagnostics ?? LocalDiagnosticLog.CreateDefault();
+        this.videoTargets = videoTargets ?? new WindowsVideoCaptureTargetCatalog();
+        this.verifiedVideoCapturePipeline = verifiedVideoCapturePipeline;
     }
 
     public event EventHandler<RecordingCoordinatorSnapshot>? SnapshotChanged;
@@ -140,6 +152,7 @@ public sealed class RecordingLifecycleService : IDisposable
                 activeSession = plan;
                 activeSessionKind = request.Kind;
                 activeWindowsCapture = RecordingStartMetadataPolicy.CreateWindowsCaptureMetadata(request);
+                activeWindowVideo = request.VideoTarget is not null;
                 capture = activeWindowsCapture;
                 currentStorage = storage;
                 generation = checked(generation + 1);
@@ -159,9 +172,7 @@ public sealed class RecordingLifecycleService : IDisposable
                 var nativeRequest = captureSourcePolicy.CreateSelectedAudioRequest(
                     request,
                     plan.BackupAudioPath);
-                started = request.Kind == RecordingSessionKind.Test
-                    ? await coordinator.StartSelectedAudioTestAsync(nativeRequest, request.TestDuration!.Value).ConfigureAwait(false)
-                    : await coordinator.StartSelectedAudioAsync(nativeRequest).ConfigureAwait(false);
+                started = await StartForVideoIfRequestedAsync(request, plan, nativeRequest).ConfigureAwait(false);
             }
             else
             {
@@ -169,9 +180,26 @@ public sealed class RecordingLifecycleService : IDisposable
                     plan.BackupAudioPath,
                     request.RenderEndpointId,
                     request.MicrophoneEndpointId);
-                started = request.Kind == RecordingSessionKind.Test
-                    ? await coordinator.StartMixedTestAsync(nativeRequest, request.TestDuration!.Value).ConfigureAwait(false)
-                    : await coordinator.StartMixedAsync(nativeRequest).ConfigureAwait(false);
+                if (request.VideoTarget is not null)
+                {
+                    var selected = VideoCaptureTargetSelection.Resolve(request.VideoTarget, videoTargets.ListTargets())
+                        ?? throw new InvalidOperationException("The selected Teams window changed before recording started.");
+                    EnsureVideoCapability(plan);
+                    var videoRequest = new NativeSelectedWindowAvRequest(
+                        NativeSelectedAudioSource.SystemLoopback,
+                        plan.BackupAudioPath,
+                        plan.PartialVideoPath,
+                        selected,
+                        request.RenderEndpointId,
+                        request.MicrophoneEndpointId);
+                    started = await StartSelectedWindowAvAsync(videoRequest, request).ConfigureAwait(false);
+                }
+                else
+                {
+                    started = request.Kind == RecordingSessionKind.Test
+                        ? await coordinator.StartMixedTestAsync(nativeRequest, request.TestDuration!.Value).ConfigureAwait(false)
+                        : await coordinator.StartMixedAsync(nativeRequest).ConfigureAwait(false);
+                }
             }
 
             if (operationCancellation.IsCancellationRequested)
@@ -222,6 +250,7 @@ public sealed class RecordingLifecycleService : IDisposable
                 activeSession = plan;
                 activeSessionKind = kind;
                 activeWindowsCapture = WindowsCaptureMetadata.ForSystemLoopback(renderEndpointId);
+                activeWindowVideo = false;
                 generation = checked(generation + 1);
             }
 
@@ -293,6 +322,7 @@ public sealed class RecordingLifecycleService : IDisposable
             activeSession = null;
             activeSessionKind = null;
             activeWindowsCapture = null;
+            activeWindowVideo = false;
         }
         coordinator.CompleteFaultRecovery();
         var diagnostic = string.IsNullOrWhiteSpace(stopped.Error)
@@ -320,6 +350,7 @@ public sealed class RecordingLifecycleService : IDisposable
                 activeSession = null;
                 activeSessionKind = null;
                 activeWindowsCapture = null;
+                activeWindowVideo = false;
             }
             // CleanupEmptyOwnedSession itself refuses any media, partial media,
             // diagnostics, or recovery evidence; it can only remove an empty folder.
@@ -333,12 +364,17 @@ public sealed class RecordingLifecycleService : IDisposable
         {
             SessionStorageService current;
             WindowsCaptureMetadata? capture;
+            bool video;
             lock (stateGate)
             {
                 current = storage;
                 capture = activeWindowsCapture;
+                video = activeWindowVideo;
             }
-            await current.PublishCompletedMediaAsync(plan, title: null, windowsCapture: capture).ConfigureAwait(false);
+            if (video)
+                await current.PublishCompletedVideoAsync(plan, title: null, windowsCapture: capture).ConfigureAwait(false);
+            else
+                await current.PublishCompletedMediaAsync(plan, title: null, windowsCapture: capture).ConfigureAwait(false);
             return new RecordingSessionPublicationResult(plan, true, null);
         }
         catch (Exception exception) { return new RecordingSessionPublicationResult(plan, false, exception); }
@@ -351,11 +387,52 @@ public sealed class RecordingLifecycleService : IDisposable
                     activeSession = null;
                     activeSessionKind = null;
                     activeWindowsCapture = null;
+                    activeWindowVideo = false;
                 }
                 publication = null;
             }
         }
     }
+
+    private void EnsureVideoCapability(RecordingSessionPlan plan)
+    {
+        var capability = VideoCaptureFeatureGate.Evaluate(
+            Environment.OSVersion.Version.Build, plan.Capacity.Decision, verifiedVideoCapturePipeline);
+        if (!capability.CanStart) throw new InvalidOperationException(capability.Message);
+    }
+
+    private Task<RecordingCoordinatorSnapshot> StartForVideoIfRequestedAsync(
+        RecordingStartRequest request,
+        RecordingSessionPlan plan,
+        NativeSelectedAudioRequest audioRequest)
+    {
+        if (request.VideoTarget is null)
+            return request.Kind == RecordingSessionKind.Test
+                ? coordinator.StartSelectedAudioTestAsync(audioRequest, request.TestDuration!.Value)
+                : coordinator.StartSelectedAudioAsync(audioRequest);
+        var selected = VideoCaptureTargetSelection.Resolve(request.VideoTarget, videoTargets.ListTargets())
+            ?? throw new InvalidOperationException("The selected Teams window changed before recording started.");
+        EnsureVideoCapability(plan);
+        var videoRequest = new NativeSelectedWindowAvRequest(
+            audioRequest.AudioSource,
+            plan.BackupAudioPath,
+            plan.PartialVideoPath,
+            selected,
+            audioRequest.RenderEndpointId,
+            audioRequest.MicrophoneEndpointId,
+            audioRequest.TargetProcessId,
+            audioRequest.IncludedProcessTree,
+            audioRequest.ExpectedProcessCreationTime100Nanoseconds,
+            AacBitRate: audioRequest.AacBitRate);
+        return StartSelectedWindowAvAsync(videoRequest, request);
+    }
+
+    private Task<RecordingCoordinatorSnapshot> StartSelectedWindowAvAsync(
+        NativeSelectedWindowAvRequest request,
+        RecordingStartRequest originalRequest) =>
+        originalRequest.Kind == RecordingSessionKind.Test
+            ? coordinator.StartSelectedWindowAvTestAsync(request, originalRequest.TestDuration!.Value)
+            : coordinator.StartSelectedWindowAvAsync(request);
 
     private void OnSnapshotChanged(object? sender, RecordingCoordinatorSnapshot snapshot)
     {

@@ -41,7 +41,8 @@ public sealed record RecordingStartRequest(
     string? MicrophoneEndpointId = null,
     SelectedProcessTarget? ProcessTarget = null,
     bool IncludeProcessTree = false,
-    TimeSpan? TestDuration = null)
+    TimeSpan? TestDuration = null,
+    VideoCaptureTarget? VideoTarget = null)
 {
     public void Validate()
     {
@@ -54,6 +55,8 @@ public sealed record RecordingStartRequest(
             if (TestDuration is not { } duration || duration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(TestDuration));
         }
         else if (TestDuration is not null) throw new ArgumentException("Only test sessions accept a duration.", nameof(TestDuration));
+        if (VideoTarget is not null && !VideoTarget.IsUsable)
+            throw new ArgumentException("Video capture requires one admitted live Teams window.", nameof(VideoTarget));
 
         switch (AudioSource)
         {

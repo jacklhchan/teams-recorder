@@ -1,11 +1,20 @@
 #include "wgc_capture_probe.h"
 
 #include <dwmapi.h>
+#include <d3d11.h>
 #include <roapi.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
 #include <windows.graphics.capture.interop.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/base.h>
+#include <wrl/client.h>
 
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
 #include <sstream>
 
 namespace recorder::video {
@@ -126,6 +135,31 @@ private:
     bool initialized_by_probe_ = false;
 };
 
+winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice CreateDirect3DDevice() {
+    using Microsoft::WRL::ComPtr;
+    ComPtr<ID3D11Device> d3d_device;
+    D3D_FEATURE_LEVEL feature_level{};
+    const HRESULT created = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        nullptr, 0, D3D11_SDK_VERSION, &d3d_device, &feature_level, nullptr);
+    winrt::check_hresult(created);
+    ComPtr<IDXGIDevice> dxgi_device;
+    winrt::check_hresult(d3d_device.As(&dxgi_device));
+    ComPtr<IInspectable> inspectable;
+    winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(
+        dxgi_device.Get(), inspectable.GetAddressOf()));
+    return {inspectable.Detach(), winrt::take_ownership_from_abi};
+}
+
+struct FrameObservation final {
+    std::mutex gate;
+    std::condition_variable arrived;
+    std::uint64_t frames = 0;
+    std::uint32_t first_width = 0;
+    std::uint32_t first_height = 0;
+    HRESULT callback_failure = S_OK;
+};
+
 }  // namespace
 
 const char* WgcProbeStatusName(WgcProbeStatus status) noexcept {
@@ -140,6 +174,9 @@ const char* WgcProbeStatusName(WgcProbeStatus status) noexcept {
     case WgcProbeStatus::kApartmentInitializationFailed: return "apartment-initialization-failed";
     case WgcProbeStatus::kPlatformUnavailable: return "platform-unavailable";
     case WgcProbeStatus::kCreateItemFailed: return "create-item-failed";
+    case WgcProbeStatus::kDeviceInitializationFailed: return "device-initialization-failed";
+    case WgcProbeStatus::kFrameCaptureFailed: return "frame-capture-failed";
+    case WgcProbeStatus::kFrameTimeout: return "frame-timeout";
     }
     return "unknown";
 }
@@ -153,6 +190,143 @@ const char* WgcProbeApartmentName(WgcProbeApartment apartment) noexcept {
     case WgcProbeApartment::kNeutral: return "neutral";
     }
     return "unknown";
+}
+
+WgcProbeResult ProbeWindowGraphicsCaptureFrames(HWND window,
+                                                std::uint64_t required_frames,
+                                                DWORD timeout_milliseconds) {
+    if (required_frames == 0 || timeout_milliseconds == 0) {
+        return Failure(WgcProbeStatus::kFrameCaptureFailed, E_INVALIDARG,
+                       "Frame probing requires a non-zero frame count and timeout.");
+    }
+
+    WgcProbeResult result = ProbeWindowGraphicsCapture(window);
+    if (result.status != WgcProbeStatus::kSupported) return result;
+
+    try {
+        ProbeApartment apartment;
+        const HRESULT apartment_result = apartment.Initialize();
+        result.apartment = apartment.apartment();
+        result.apartment_initialized_by_probe = apartment.initialized_by_probe();
+        if (FAILED(apartment_result)) {
+            result.status = WgcProbeStatus::kApartmentInitializationFailed;
+            result.hresult = apartment_result;
+            result.diagnostic = "Could not initialize the frame-probe COM apartment: " + HresultText(apartment_result);
+            return result;
+        }
+
+        const auto interop = winrt::get_activation_factory<
+            winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
+            IGraphicsCaptureItemInterop>();
+        winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
+        winrt::check_hresult(interop->CreateForWindow(
+            window,
+            winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
+            winrt::put_abi(item)));
+        if (!item) {
+            return Failure(WgcProbeStatus::kCreateItemFailed, E_FAIL,
+                           "Frame probe received a null GraphicsCaptureItem.");
+        }
+        const auto item_size = item.Size();
+        if (item_size.Width <= 0 || item_size.Height <= 0) {
+            return Failure(WgcProbeStatus::kFrameCaptureFailed, E_INVALIDARG,
+                           "Frame probe refused an item with an empty content size.");
+        }
+
+        winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice device{nullptr};
+        try {
+            device = CreateDirect3DDevice();
+        } catch (const winrt::hresult_error& error) {
+            result.status = WgcProbeStatus::kDeviceInitializationFailed;
+            result.hresult = error.code();
+            result.diagnostic = "Could not create a D3D11 device for frame probing: " + HresultText(error.code());
+            return result;
+        }
+
+        auto frame_pool = winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
+            device,
+            winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            2,
+            item_size);
+        auto session = frame_pool.CreateCaptureSession(item);
+        session.IsCursorCaptureEnabled(false);
+        const auto observation = std::make_shared<FrameObservation>();
+        auto subscription = frame_pool.FrameArrived(winrt::auto_revoke,
+            [observation](const auto& sender, const auto&) {
+                try {
+                    const auto frame = sender.TryGetNextFrame();
+                    if (!frame) return;
+                    const auto size = frame.ContentSize();
+                    std::lock_guard<std::mutex> lock(observation->gate);
+                    if (observation->frames == 0) {
+                        observation->first_width = static_cast<std::uint32_t>(size.Width);
+                        observation->first_height = static_cast<std::uint32_t>(size.Height);
+                    }
+                    ++observation->frames;
+                    observation->arrived.notify_all();
+                } catch (const winrt::hresult_error& error) {
+                    std::lock_guard<std::mutex> lock(observation->gate);
+                    observation->callback_failure = error.code();
+                    observation->arrived.notify_all();
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(observation->gate);
+                    observation->callback_failure = E_FAIL;
+                    observation->arrived.notify_all();
+                }
+            });
+        session.StartCapture();
+        {
+            std::unique_lock<std::mutex> lock(observation->gate);
+            (void)observation->arrived.wait_for(lock, std::chrono::milliseconds(timeout_milliseconds),
+                [&] { return observation->frames >= required_frames || FAILED(observation->callback_failure); });
+            result.frames_observed = observation->frames;
+            result.first_frame_width = observation->first_width;
+            result.first_frame_height = observation->first_height;
+            if (FAILED(observation->callback_failure)) {
+                result.status = WgcProbeStatus::kFrameCaptureFailed;
+                result.hresult = observation->callback_failure;
+            }
+        }
+        // Stop accepting callbacks before tearing down the WinRT objects.  The
+        // callback owns no retained frame surface, so this cannot leak pixels
+        // into a later session.
+        subscription.revoke();
+        session.Close();
+        frame_pool.Close();
+
+        if (result.status == WgcProbeStatus::kFrameCaptureFailed) {
+            result.diagnostic = "Exact-HWND frame callback failed: " + HresultText(result.hresult);
+            return result;
+        }
+
+        if (result.frames_observed < required_frames) {
+            result.status = WgcProbeStatus::kFrameTimeout;
+            result.hresult = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            result.diagnostic = "Exact-HWND frame probe timed out after observing " +
+                std::to_string(result.frames_observed) + " frame(s); no media was captured.";
+            return result;
+        }
+        result.status = WgcProbeStatus::kSupported;
+        result.hresult = S_OK;
+        result.diagnostic = "Exact-HWND frame probe observed " + std::to_string(result.frames_observed) +
+            " frame(s); no pixels were retained and no media was captured.";
+        return result;
+    } catch (const winrt::hresult_error& error) {
+        result.status = WgcProbeStatus::kFrameCaptureFailed;
+        result.hresult = error.code();
+        result.diagnostic = "Exact-HWND frame probe failed: " + HresultText(error.code());
+        return result;
+    } catch (const std::exception& error) {
+        result.status = WgcProbeStatus::kFrameCaptureFailed;
+        result.hresult = E_FAIL;
+        result.diagnostic = "Exact-HWND frame probe failed: " + std::string(error.what());
+        return result;
+    } catch (...) {
+        result.status = WgcProbeStatus::kFrameCaptureFailed;
+        result.hresult = E_FAIL;
+        result.diagnostic = "Exact-HWND frame probe failed with an unknown exception.";
+        return result;
+    }
 }
 
 WgcProbeResult ProbeWindowGraphicsCapture(HWND window) {

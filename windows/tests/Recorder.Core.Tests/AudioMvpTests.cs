@@ -1,5 +1,6 @@
 using Recorder.Core;
 using TeamsRecorder.Windows.Application;
+using TeamsRecorder.Windows.Application.Recovery;
 
 internal static class AudioMvpTests
 {
@@ -166,14 +167,62 @@ internal static class AudioMvpTests
         lifecycle.StopAsync().GetAwaiter().GetResult();
     }
 
+    public static void SelectedWindowLifecycleFallsBackToAudio()
+    {
+        using var root = new TemporaryRoot();
+        var bridge = new MixedBridge { WriteOutputOnStart = true };
+        var target = new VideoCaptureTarget(42, (nint)0x1234, 100, "ms-teams.exe", "Meeting");
+        using var lifecycle = new RecordingLifecycleService(
+            bridge,
+            root.Path,
+            videoTargets: new FixedVideoTargetCatalog(target),
+            verifiedVideoCapturePipeline: true,
+            audioValidator: new AlwaysValidAudio());
+
+        var started = lifecycle.StartAsync(new RecordingStartRequest(
+            RecordingSessionKind.Manual,
+            RecordingAudioSource.SystemLoopback,
+            VideoTarget: target)).GetAwaiter().GetResult();
+        Equal(RecordingCoordinatorState.Recording, started.Snapshot.State);
+        if (bridge.LastVideoRequest is null || bridge.LastVideoRequest.VideoOutputPath != started.Session.PartialVideoPath)
+            throw new InvalidOperationException("Exact-window lifecycle did not request the owned MP4 work path.");
+
+        lifecycle.StopAsync().GetAwaiter().GetResult();
+        var publication = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
+        if (!publication.Published || !File.Exists(started.Session.FinalAudioPath) ||
+            File.Exists(started.Session.FinalVideoPath))
+            throw new InvalidOperationException("Video loss did not preserve the playable M4A fallback.");
+        var metadata = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
+        if (metadata.MediaKind != "audio" || metadata.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved)
+            throw new InvalidOperationException("Audio fallback was not published with the video-loss recovery state.");
+    }
+
+    public static void SelectedWindowLifecycleIsReleaseGatedByDefault()
+    {
+        using var root = new TemporaryRoot();
+        var bridge = new MixedBridge { WriteOutputOnStart = true };
+        var target = new VideoCaptureTarget(42, (nint)0x1234, 100, "ms-teams.exe", "Meeting");
+        using var lifecycle = new RecordingLifecycleService(
+            bridge, root.Path, videoTargets: new FixedVideoTargetCatalog(target));
+
+        Throws<InvalidOperationException>(() => lifecycle.StartAsync(new RecordingStartRequest(
+            RecordingSessionKind.Manual,
+            RecordingAudioSource.SystemLoopback,
+            VideoTarget: target)).GetAwaiter().GetResult());
+        if (bridge.LastVideoRequest is not null || bridge.MixedStartCalls != 0)
+            throw new InvalidOperationException("Release gate allowed a native window-capture start.");
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private static void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new InvalidOperationException($"Expected {typeof(T).Name}."); }
+    private sealed class AlwaysValidAudio : IAudioBackupValidator { public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0; }
 
-    private sealed class MixedBridge : INativeRecorderBridge, INativeSelectedAudioRecorderBridge
+    private sealed class MixedBridge : INativeRecorderBridge, INativeSelectedAudioRecorderBridge, INativeSelectedWindowAvRecorderBridge
     {
         public NativeOperationResult MixedStartResult { get; set; } = NativeOperationResult.Success();
         public NativeMixedRecordingRequest? LastMixedRequest { get; private set; }
         public NativeSelectedAudioRequest? LastSelectedRequest { get; private set; }
+        public NativeSelectedWindowAvRequest? LastVideoRequest { get; private set; }
         public int MixedStartCalls { get; private set; }
         public int SelectedStartCalls { get; private set; }
         public int RegularStartCalls { get; private set; }
@@ -195,6 +244,14 @@ internal static class AudioMvpTests
             return MixedStartResult;
         }
         public NativeOperationResult StartSelectedAudio(NativeSelectedAudioRequest request) { request.Validate(); LastSelectedRequest = request; SelectedStartCalls++; state = NativeRecorderState.Recording; return NativeOperationResult.Success(); }
+        public NativeOperationResult StartSelectedWindowAv(NativeSelectedWindowAvRequest request)
+        {
+            request.Validate();
+            LastVideoRequest = request;
+            if (WriteOutputOnStart) File.WriteAllBytes(request.AudioRecoveryPath, [1, 2, 3, 4]);
+            state = NativeRecorderState.Recording;
+            return NativeOperationResult.Success();
+        }
         public NativeOperationResult Stop() { StopCalls++; state = NativeRecorderState.Stopped; return NativeOperationResult.Success(); }
         public NativeRecorderSnapshot GetSnapshot() => SourceFaulted
             ? new(
@@ -209,6 +266,11 @@ internal static class AudioMvpTests
                 null);
         public NativeEndpointEnumerationResult EnumerateEndpoints() => new(NativeOperationResult.Success(), Array.Empty<NativeCaptureEndpoint>());
         public void Dispose() { }
+    }
+
+    private sealed class FixedVideoTargetCatalog(VideoCaptureTarget target) : IVideoCaptureTargetCatalog
+    {
+        public IReadOnlyList<VideoCaptureTarget> ListTargets() => [target];
     }
 
     private sealed class TemporaryRoot : IDisposable

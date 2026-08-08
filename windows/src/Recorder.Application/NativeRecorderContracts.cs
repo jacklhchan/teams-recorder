@@ -1,3 +1,5 @@
+using Recorder.Core;
+
 namespace TeamsRecorder.Windows.Application;
 
 public enum RecordingCaptureMode
@@ -7,6 +9,7 @@ public enum RecordingCaptureMode
     ProcessLoopback = 2,
     Mixed = 3,
     SelectedAppMixed = 4,
+    SelectedWindowAv = 5,
 }
 
 /// <summary>
@@ -265,6 +268,55 @@ public sealed record NativeSelectedAudioRequest(
     }
 }
 
+/// <summary>
+/// Exact-HWND WGC plus mixed audio.  The M4A path is retained until the MP4
+/// has been decoder-validated and atomically published, so a video or mux
+/// failure never turns an otherwise playable audio recording into data loss.
+/// </summary>
+public sealed record NativeSelectedWindowAvRequest(
+    NativeSelectedAudioSource AudioSource,
+    string AudioRecoveryPath,
+    string VideoOutputPath,
+    VideoCaptureTarget WindowTarget,
+    string? RenderEndpointId = null,
+    string? MicrophoneEndpointId = null,
+    uint AudioTargetProcessId = 0,
+    bool IncludedProcessTree = false,
+    ulong AudioProcessCreationTime100Nanoseconds = 0,
+    uint VideoWidth = 1280,
+    uint VideoHeight = 720,
+    uint VideoFrameRate = 30,
+    uint VideoBitRate = 2_500_000,
+    uint AacBitRate = 128_000) : INativeRecordingRequest
+{
+    public RecordingCaptureMode Mode => RecordingCaptureMode.SelectedWindowAv;
+    public string OutputPath => VideoOutputPath;
+
+    public void Validate()
+    {
+        if (!Enum.IsDefined(AudioSource) || WindowTarget is null || !WindowTarget.IsUsable)
+            throw new ArgumentException("A live exact window target is required.", nameof(WindowTarget));
+        ValidatePath(AudioRecoveryPath, ".m4a", nameof(AudioRecoveryPath));
+        ValidatePath(VideoOutputPath, ".mp4", nameof(VideoOutputPath));
+        NativeSelectedAudioRequest audio = new(
+            AudioSource, AudioRecoveryPath, RenderEndpointId, MicrophoneEndpointId,
+            AudioTargetProcessId, IncludedProcessTree,
+            AudioProcessCreationTime100Nanoseconds, AacBitRate);
+        audio.Validate();
+        if (VideoWidth is < 2 or > 1920 || VideoHeight is < 2 or > 1080 ||
+            VideoWidth % 2 != 0 || VideoHeight % 2 != 0 ||
+            VideoFrameRate is < 1 or > 60 || VideoBitRate is < 250_000 or > 12_000_000)
+            throw new ArgumentOutOfRangeException(nameof(VideoWidth), "Video settings are outside the safe MP4 profile.");
+    }
+
+    private static void ValidatePath(string value, string extension, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.IndexOf('\0') >= 0 ||
+            !string.Equals(Path.GetExtension(value), extension, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException($"A {extension} path is required.", parameterName);
+    }
+}
+
 public sealed record NativeCaptureStats(
     RecordingCaptureMode Mode,
     uint SourceSampleRate,
@@ -395,6 +447,11 @@ public interface INativeRecorderMicrophoneMuteControl
 public interface INativeSelectedAudioRecorderBridge
 {
     NativeOperationResult StartSelectedAudio(NativeSelectedAudioRequest request);
+}
+
+public interface INativeSelectedWindowAvRecorderBridge
+{
+    NativeOperationResult StartSelectedWindowAv(NativeSelectedWindowAvRequest request);
 }
 
 /// <summary>Optional native capability used only for a non-blocking Teams endpoint preflight.</summary>

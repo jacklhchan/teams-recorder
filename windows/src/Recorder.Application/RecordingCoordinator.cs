@@ -104,6 +104,18 @@ public sealed class RecordingCoordinator
                     "The native recorder does not expose selected-process audio capture."));
     }
 
+    public Task<RecordingCoordinatorSnapshot> StartSelectedWindowAvAsync(NativeSelectedWindowAvRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return StartCoreAsync(
+            request,
+            () => nativeBridge is INativeSelectedWindowAvRecorderBridge windowAv
+                ? windowAv.StartSelectedWindowAv(request)
+                : NativeOperationResult.Failure(
+                    NativeRecorderResult.NotImplemented,
+                    "The native recorder does not expose exact-window video capture."));
+    }
+
     private Task<RecordingCoordinatorSnapshot> StartCoreAsync(
         INativeRecordingRequest request,
         Func<NativeOperationResult> startOperation)
@@ -165,6 +177,14 @@ public sealed class RecordingCoordinator
     {
         ArgumentNullException.ThrowIfNull(request);
         return await StartTestCoreAsync(() => StartSelectedAudioAsync(request), duration).ConfigureAwait(false);
+    }
+
+    public async Task<RecordingCoordinatorSnapshot> StartSelectedWindowAvTestAsync(
+        NativeSelectedWindowAvRequest request,
+        TimeSpan duration)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return await StartTestCoreAsync(() => StartSelectedWindowAvAsync(request), duration).ConfigureAwait(false);
     }
 
     private async Task<RecordingCoordinatorSnapshot> StartTestCoreAsync(

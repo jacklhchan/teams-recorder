@@ -12,9 +12,9 @@ public sealed class NativeRecorderInteropException : Exception
     }
 }
 
-public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge, INativeTeamsRenderEndpointProbe
+public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge, INativeSelectedWindowAvRecorderBridge, INativeTeamsRenderEndpointProbe
 {
-    private const string RequiredAbiVersion = "0.7.0";
+    private const string RequiredAbiVersion = "0.8.0";
     private readonly object gate = new();
     private readonly NativeBridgeHandle handle;
     private bool disposed;
@@ -147,6 +147,52 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
                 Marshal.FreeCoTaskMem(outputPath);
                 Marshal.FreeCoTaskMem(renderEndpointId);
                 Marshal.FreeCoTaskMem(microphoneEndpointId);
+            }
+        }
+    }
+
+    public NativeOperationResult StartSelectedWindowAv(NativeSelectedWindowAvRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        request.Validate();
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            var audioPath = Marshal.StringToCoTaskMemUTF8(request.AudioRecoveryPath);
+            var videoPath = Marshal.StringToCoTaskMemUTF8(request.VideoOutputPath);
+            var render = string.IsNullOrEmpty(request.RenderEndpointId) ? IntPtr.Zero : Marshal.StringToCoTaskMemUTF8(request.RenderEndpointId);
+            var microphone = string.IsNullOrEmpty(request.MicrophoneEndpointId) ? IntPtr.Zero : Marshal.StringToCoTaskMemUTF8(request.MicrophoneEndpointId);
+            try
+            {
+                var options = new NativeSelectedWindowAvStartOptions
+                {
+                    StructSize = checked((uint)Marshal.SizeOf<NativeSelectedWindowAvStartOptions>()),
+                    AudioSource = request.AudioSource,
+                    AudioOutputPathUtf8 = audioPath,
+                    VideoOutputPathUtf8 = videoPath,
+                    RenderEndpointIdUtf8 = render,
+                    MicrophoneEndpointIdUtf8 = microphone,
+                    TargetWindowHandle = unchecked((ulong)request.WindowTarget.WindowHandle.ToInt64()),
+                    TargetWindowProcessId = checked((uint)request.WindowTarget.ProcessId),
+                    AudioTargetProcessId = request.AudioTargetProcessId,
+                    IncludedProcessTree = request.IncludedProcessTree ? 1U : 0U,
+                    VideoWidth = request.VideoWidth,
+                    VideoHeight = request.VideoHeight,
+                    VideoFrameRate = request.VideoFrameRate,
+                    VideoBitRateBps = request.VideoBitRate,
+                    AacBitRateBps = request.AacBitRate,
+                    Reserved = 0,
+                    AudioProcessCreationTime100Nanoseconds = request.AudioProcessCreationTime100Nanoseconds,
+                    TargetWindowProcessCreationTime100Nanoseconds = checked((ulong)request.WindowTarget.ProcessCreationTimeFileTimeUtc),
+                };
+                return ToOperationResult(NativeMethods.StartSelectedWindowAv(handle, ref options));
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(audioPath);
+                Marshal.FreeCoTaskMem(videoPath);
+                Marshal.FreeCoTaskMem(render);
+                Marshal.FreeCoTaskMem(microphone);
             }
         }
     }
@@ -317,6 +363,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         if (Marshal.SizeOf<NativeStartOptions>() != 32 ||
             Marshal.SizeOf<NativeMixedStartOptions>() != 40 ||
             Marshal.SizeOf<NativeSelectedAudioStartOptions>() != 56 ||
+            Marshal.SizeOf<NativeSelectedWindowAvStartOptions>() != 104 ||
             Marshal.SizeOf<NativeStats>() != 208)
         {
             throw new NativeRecorderInteropException(
@@ -330,7 +377,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         if (!Version.TryParse(version, out var parsedVersion) ||
             parsedVersion is null ||
             parsedVersion.Major != 0 ||
-            parsedVersion.CompareTo(new Version(0, 7)) < 0)
+            parsedVersion.CompareTo(new Version(0, 8)) < 0)
         {
             throw new NativeRecorderInteropException(
                 $"Recorder.NativeBridge {RequiredAbiVersion} or newer is required.");
@@ -525,6 +572,29 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 8)]
+    private struct NativeSelectedWindowAvStartOptions
+    {
+        public uint StructSize;
+        public NativeSelectedAudioSource AudioSource;
+        public IntPtr AudioOutputPathUtf8;
+        public IntPtr VideoOutputPathUtf8;
+        public IntPtr RenderEndpointIdUtf8;
+        public IntPtr MicrophoneEndpointIdUtf8;
+        public ulong TargetWindowHandle;
+        public uint TargetWindowProcessId;
+        public uint AudioTargetProcessId;
+        public uint IncludedProcessTree;
+        public uint VideoWidth;
+        public uint VideoHeight;
+        public uint VideoFrameRate;
+        public uint VideoBitRateBps;
+        public uint AacBitRateBps;
+        public uint Reserved;
+        public ulong AudioProcessCreationTime100Nanoseconds;
+        public ulong TargetWindowProcessCreationTime100Nanoseconds;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
     private struct NativeStats
     {
         public uint StructSize;
@@ -646,6 +716,12 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         internal static partial NativeRecorderResult StartSelectedAudio(
             NativeBridgeHandle bridge,
             ref NativeSelectedAudioStartOptions options);
+
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_start_selected_window_av")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial NativeRecorderResult StartSelectedWindowAv(
+            NativeBridgeHandle bridge,
+            ref NativeSelectedWindowAvStartOptions options);
 
         [LibraryImport(LibraryName, EntryPoint = "recorder_native_set_microphone_muted")]
         [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

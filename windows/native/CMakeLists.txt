@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(RecorderNativeBridge VERSION 0.7.0 LANGUAGES C CXX)
+project(RecorderNativeBridge VERSION 0.8.0 LANGUAGES C CXX)
 
 option(RECORDER_NATIVE_BUILD_TESTS "Build native bridge contract tests" ON)
 
@@ -60,6 +60,7 @@ if(WIN32)
 
     add_library(Recorder.Timeline STATIC
         timeline/canonical_timeline.cpp
+        timeline/video_pts_mapper.cpp
     )
     target_compile_features(Recorder.Timeline PUBLIC cxx_std_17)
     target_include_directories(Recorder.Timeline PUBLIC timeline)
@@ -90,6 +91,8 @@ target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadw
         src/capture_session.cpp
         src/mixed_capture_session.cpp
         src/m4a_writer.cpp
+        src/mp4_decode_validator.cpp
+        src/mp4_mux_writer.cpp
     )
     target_include_directories(Recorder.NativeBridge PRIVATE src)
     target_link_libraries(Recorder.NativeBridge
@@ -99,10 +102,12 @@ target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadw
             Recorder.Resample
             Recorder.Timeline
             Recorder.WasapiCapture
+            Recorder.WgcWindowCaptureSession
             Recorder.Wav
             mfplat
             mfreadwrite
             mfuuid
+            ole32
     )
 
     add_executable(Recorder.AudioProbe tools/audio_probe_main.cpp)
@@ -122,11 +127,20 @@ target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadw
 
     add_library(Recorder.WgcCaptureProbe STATIC
         video/wgc_capture_probe.cpp
+        video/bgra_to_nv12.cpp
     )
     target_compile_features(Recorder.WgcCaptureProbe PUBLIC cxx_std_17)
     target_include_directories(Recorder.WgcCaptureProbe PUBLIC video)
-    target_link_libraries(Recorder.WgcCaptureProbe PUBLIC dwmapi windowsapp)
+    target_link_libraries(Recorder.WgcCaptureProbe PUBLIC d3d11 dxgi dwmapi windowsapp)
     recorder_enable_strict_warnings(Recorder.WgcCaptureProbe)
+
+    add_library(Recorder.WgcWindowCaptureSession STATIC
+        video/wgc_window_capture_session.cpp
+    )
+    target_compile_features(Recorder.WgcWindowCaptureSession PUBLIC cxx_std_17)
+    target_include_directories(Recorder.WgcWindowCaptureSession PUBLIC video)
+    target_link_libraries(Recorder.WgcWindowCaptureSession PUBLIC Recorder.WgcCaptureProbe)
+    recorder_enable_strict_warnings(Recorder.WgcWindowCaptureSession)
 
     add_executable(Recorder.WgcCaptureProbe.Tool tools/wgc_capture_probe_main.cpp)
     target_compile_features(Recorder.WgcCaptureProbe.Tool PRIVATE cxx_std_17)
@@ -188,6 +202,36 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         COMMAND Recorder.M4aWriter.Tests abort-after-write --frames 1)
     add_test(NAME Recorder.M4aWriter.AbortAfter960Frames
         COMMAND Recorder.M4aWriter.Tests abort-after-write --frames 960)
+
+    add_executable(Recorder.Mp4MuxWriter.Tests
+        tests/mp4_mux_writer_tests.cpp
+        src/mp4_mux_writer.cpp
+    )
+    target_compile_features(Recorder.Mp4MuxWriter.Tests PRIVATE cxx_std_17)
+    target_include_directories(Recorder.Mp4MuxWriter.Tests PRIVATE src)
+    target_link_libraries(Recorder.Mp4MuxWriter.Tests PRIVATE Recorder.NativeBridge mfplat mfreadwrite mfuuid)
+    recorder_enable_strict_warnings(Recorder.Mp4MuxWriter.Tests)
+    add_test(NAME Recorder.Mp4MuxWriter.Container COMMAND Recorder.Mp4MuxWriter.Tests)
+
+    # AT-03/AT-05 deterministic media evidence. The CTest default is short so
+    # the regular verifier remains bounded; release acceptance runs the same
+    # executable with --duration-seconds 300 (and three 600-second runs).
+    add_executable(Recorder.AvMarkerAcceptance.Tests
+        tests/av_marker_acceptance_tests.cpp
+        src/mp4_mux_writer.cpp
+    )
+    target_compile_features(Recorder.AvMarkerAcceptance.Tests PRIVATE cxx_std_17)
+    target_include_directories(Recorder.AvMarkerAcceptance.Tests PRIVATE src)
+    target_link_libraries(Recorder.AvMarkerAcceptance.Tests PRIVATE mfplat mfreadwrite mfuuid ole32)
+    recorder_enable_strict_warnings(Recorder.AvMarkerAcceptance.Tests)
+    add_test(NAME Recorder.AvMarkerAcceptance.Short COMMAND Recorder.AvMarkerAcceptance.Tests)
+    set_tests_properties(Recorder.AvMarkerAcceptance.Short PROPERTIES LABELS "av;media-foundation" RUN_SERIAL TRUE TIMEOUT 180)
+
+    add_executable(Recorder.BgraToNv12.Tests tests/bgra_to_nv12_tests.cpp)
+    target_compile_features(Recorder.BgraToNv12.Tests PRIVATE cxx_std_17)
+    target_link_libraries(Recorder.BgraToNv12.Tests PRIVATE Recorder.WgcCaptureProbe)
+    recorder_enable_strict_warnings(Recorder.BgraToNv12.Tests)
+    add_test(NAME Recorder.BgraToNv12.Tests COMMAND Recorder.BgraToNv12.Tests)
     add_test(NAME Recorder.M4aWriter.AbortAfter1024Frames
         COMMAND Recorder.M4aWriter.Tests abort-after-write --frames 1024)
     add_test(NAME Recorder.M4aWriter.SplitOnePlus1023
@@ -274,6 +318,16 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         target_link_libraries(Recorder.Timeline.Tests PRIVATE Recorder.Timeline)
         recorder_enable_strict_warnings(Recorder.Timeline.Tests)
         add_test(NAME Recorder.Timeline.Tests COMMAND Recorder.Timeline.Tests)
+
+        add_executable(Recorder.WgcWindowCaptureSession.Tests
+            video/wgc_window_capture_session_tests.cpp
+        )
+        target_compile_features(Recorder.WgcWindowCaptureSession.Tests PRIVATE cxx_std_17)
+        target_link_libraries(Recorder.WgcWindowCaptureSession.Tests
+            PRIVATE Recorder.WgcWindowCaptureSession)
+        recorder_enable_strict_warnings(Recorder.WgcWindowCaptureSession.Tests)
+        add_test(NAME Recorder.WgcWindowCaptureSession.Tests
+            COMMAND Recorder.WgcWindowCaptureSession.Tests)
 
         add_executable(Recorder.SelectedAudioSessionFacade.Tests
             tests/selected_audio_session_facade_tests.cpp

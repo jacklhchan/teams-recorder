@@ -53,11 +53,24 @@ private:
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "Usage: Recorder.WgcCaptureProbe.exe <top-level-hwnd-in-decimal|--self-window|--self-window-sta>\n";
+    if (argc != 2 && argc != 4) {
+        std::cerr << "Usage: Recorder.WgcCaptureProbe.exe <top-level-hwnd-in-decimal|--self-window|--self-window-sta> [--frames N]\n";
         return 64;
     }
     const std::string_view input(argv[1]);
+    std::uint64_t required_frames = 0;
+    if (argc == 4) {
+        if (std::string_view(argv[2]) != "--frames") {
+            std::cerr << "Expected --frames N.\n";
+            return 64;
+        }
+        const std::string_view count(argv[3]);
+        const auto parsed = std::from_chars(count.data(), count.data() + count.size(), required_frames, 10);
+        if (parsed.ec != std::errc{} || parsed.ptr != count.data() + count.size() || required_frames == 0) {
+            std::cerr << "Frame count must be a positive integer.\n";
+            return 64;
+        }
+    }
     HWND window = nullptr;
     const bool self_window = input == "--self-window" || input == "--self-window-sta";
     std::optional<ScopedRoApartment> sta_apartment;
@@ -84,7 +97,9 @@ int main(int argc, char** argv) {
         }
         window = reinterpret_cast<HWND>(raw_handle);
     }
-    const auto result = recorder::video::ProbeWindowGraphicsCapture(window);
+    const auto result = required_frames == 0
+        ? recorder::video::ProbeWindowGraphicsCapture(window)
+        : recorder::video::ProbeWindowGraphicsCaptureFrames(window, required_frames, 5'000);
     std::cout << "status=" << recorder::video::WgcProbeStatusName(result.status)
               << " hresult=0x" << std::hex << static_cast<unsigned long>(result.hresult)
               << std::dec << " pid=" << result.process_id
@@ -92,6 +107,8 @@ int main(int argc, char** argv) {
               << " currentIntegrity=" << result.current_integrity_rid
               << " apartment=" << recorder::video::WgcProbeApartmentName(result.apartment)
               << " apartmentInitializedByProbe=" << (result.apartment_initialized_by_probe ? "true" : "false")
+              << " frames=" << result.frames_observed
+              << " firstFrame=" << result.first_frame_width << "x" << result.first_frame_height
               << " diagnostic=" << result.diagnostic << "\n";
     if (self_window) {
         DestroyWindow(window);

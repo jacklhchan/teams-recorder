@@ -5,12 +5,21 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.VisualBasic.FileIO;
 using Recorder.Core;
+using TeamsRecorder.Windows.Application.Recovery;
 
 namespace TeamsRecorder.Windows.Application.Storage;
 
 public interface IStorageCapacityProvider { long? GetAvailableBytes(string rootPath); }
 public interface IClock { DateTimeOffset UtcNow { get; } }
 public interface ISessionPathCollisionProvider { bool DirectoryExists(string path); }
+
+/// <summary>
+/// A conservative publication/recovery guard for a finalized MP4.  It is not
+/// a replacement for native decode verification; it only prevents an empty,
+/// audio-only, or obviously incomplete work file from being renamed into the
+/// library's final video name.
+/// </summary>
+public interface IVideoMediaValidator { bool IsValidNonEmptyVideo(string path); }
 
 public sealed class SystemStorageCapacityProvider : IStorageCapacityProvider
 {
@@ -25,7 +34,154 @@ public sealed class SystemStorageCapacityProvider : IStorageCapacityProvider
 public sealed class SystemClock : IClock { public DateTimeOffset UtcNow => DateTimeOffset.UtcNow; }
 public sealed class FileSystemCollisionProvider : ISessionPathCollisionProvider { public bool DirectoryExists(string path) => Directory.Exists(path); }
 
-public sealed record RecordingSessionPlan(RecordingSessionKind Kind, string FolderPath, string FinalAudioPath, string BackupAudioPath, string MetadataPath, StorageCapacityStatus Capacity);
+public sealed class Mp4VideoMediaValidator : IVideoMediaValidator
+{
+    private const int MaximumMoovBytes = 32 * 1024 * 1024;
+
+    public bool IsValidNonEmptyVideo(string path)
+    {
+        try
+        {
+            if (!File.Exists(path) || new FileInfo(path).Length < 24)
+            {
+                return false;
+            }
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var hasFtyp = false;
+            var hasMdat = false;
+            var hasVideoHandler = false;
+            var hasVideoCodec = false;
+            while (stream.Position < stream.Length)
+            {
+                if (!TryReadBoxHeader(stream, out var type, out var size, out var headerBytes) ||
+                    size < headerBytes || size > stream.Length - stream.Position + headerBytes)
+                {
+                    return false;
+                }
+
+                var payloadBytes = size - headerBytes;
+                switch (type)
+                {
+                    case "ftyp":
+                        hasFtyp = true;
+                        stream.Seek(payloadBytes, SeekOrigin.Current);
+                        break;
+                    case "mdat":
+                        hasMdat |= payloadBytes > 0;
+                        stream.Seek(payloadBytes, SeekOrigin.Current);
+                        break;
+                    case "moov" when payloadBytes <= MaximumMoovBytes:
+                    {
+                        var payload = new byte[checked((int)payloadBytes)];
+                        stream.ReadExactly(payload);
+                        hasVideoHandler |= ContainsAscii(payload, "vide");
+                        hasVideoCodec |= ContainsAscii(payload, "avc1") || ContainsAscii(payload, "avc3") ||
+                            ContainsAscii(payload, "hvc1") || ContainsAscii(payload, "hev1") ||
+                            ContainsAscii(payload, "vp09") || ContainsAscii(payload, "av01");
+                        break;
+                    }
+                    case "moov":
+                        // A huge movie atom is not a reason to publish an
+                        // unverified recording during startup recovery.
+                        return false;
+                    default:
+                        stream.Seek(payloadBytes, SeekOrigin.Current);
+                        break;
+                }
+            }
+
+            // The bounded box scan rejects obvious corruption before native
+            // activation. Publication still requires native H.264 + AAC
+            // decoder output below; atom names alone are never proof that a
+            // recording is playable.
+            return hasFtyp && hasMdat && hasVideoHandler && hasVideoCodec &&
+                NativeMediaDecoder.TryDecodeH264AacMp4(path);
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (ArgumentException) { return false; }
+        catch (OverflowException) { return false; }
+    }
+
+    private static bool TryReadBoxHeader(Stream stream, out string type, out long size, out int headerBytes)
+    {
+        type = string.Empty;
+        size = 0;
+        headerBytes = 0;
+        Span<byte> header = stackalloc byte[8];
+        if (stream.Read(header) != header.Length) return false;
+        var smallSize = ((long)header[0] << 24) | ((long)header[1] << 16) | ((long)header[2] << 8) | header[3];
+        type = System.Text.Encoding.ASCII.GetString(header[4..]);
+        headerBytes = 8;
+        if (smallSize == 0) return false;
+        if (smallSize != 1)
+        {
+            size = smallSize;
+            return true;
+        }
+
+        Span<byte> extended = stackalloc byte[8];
+        if (stream.Read(extended) != extended.Length) return false;
+        headerBytes = 16;
+        if ((extended[0] & 0x80) != 0) return false;
+        size = ((long)extended[0] << 56) | ((long)extended[1] << 48) |
+               ((long)extended[2] << 40) | ((long)extended[3] << 32) |
+               ((long)extended[4] << 24) | ((long)extended[5] << 16) |
+               ((long)extended[6] << 8) | extended[7];
+        return true;
+    }
+
+    private static bool ContainsAscii(ReadOnlySpan<byte> bytes, string text) =>
+        bytes.IndexOf(System.Text.Encoding.ASCII.GetBytes(text)) >= 0;
+}
+
+internal static partial class NativeMediaDecoder
+{
+    private const string LibraryName = "Recorder.NativeBridge";
+
+    public static bool TryDecodeH264AacMp4(string path)
+    {
+        try { return ValidateH264AacMp4(path) == NativeMp4ValidationResult.Ok; }
+        catch (DllNotFoundException) { return false; }
+        catch (EntryPointNotFoundException) { return false; }
+        catch (BadImageFormatException) { return false; }
+    }
+
+    public static bool TryDecodeAacM4a(string path)
+    {
+        try { return ValidateAacM4a(path) == NativeMp4ValidationResult.Ok; }
+        catch (DllNotFoundException) { return false; }
+        catch (EntryPointNotFoundException) { return false; }
+        catch (BadImageFormatException) { return false; }
+    }
+
+    [LibraryImport(LibraryName, EntryPoint = "recorder_native_validate_h264_aac_mp4", StringMarshalling = StringMarshalling.Utf8)]
+    private static partial NativeMp4ValidationResult ValidateH264AacMp4(string path);
+
+    [LibraryImport(LibraryName, EntryPoint = "recorder_native_validate_aac_m4a", StringMarshalling = StringMarshalling.Utf8)]
+    private static partial NativeMp4ValidationResult ValidateAacM4a(string path);
+
+    private enum NativeMp4ValidationResult : uint { Ok = 0 }
+}
+
+public sealed record RecordingSessionPlan(RecordingSessionKind Kind, string FolderPath, string FinalAudioPath, string BackupAudioPath, string MetadataPath, StorageCapacityStatus Capacity)
+{
+    public string PartialAudioPath => Path.Combine(FolderPath, RecordingSessionLayout.PartialAudioFileName);
+    public string FinalVideoPath => Path.Combine(FolderPath, RecordingSessionLayout.FinalVideoFileName);
+    public string PartialVideoPath => Path.Combine(FolderPath, RecordingSessionLayout.PartialVideoFileName);
+}
+
+/// <summary>
+/// A video publication can deliberately degrade to audio when the MP4 cannot
+/// be safely published.  The caller can present that state without guessing
+/// from file existence, while the separately finalized M4A remains playable.
+/// </summary>
+public sealed record RecordingVideoPublicationResult(
+    bool VideoPublished,
+    bool AudioPreserved,
+    RecordingRecoveryState RecoveryState,
+    string? Reason);
 /// <summary>
 /// A discoverable recording. <see cref="IsManaged"/> is false for pre-session-layout
 /// M4A files found directly in the selected root; they are deliberately playback-only
@@ -38,7 +194,13 @@ public sealed record RecordingSessionLibraryItem(
     long AudioBytes,
     RecordingInfo Metadata,
     bool HasRecoverableBackup,
-    bool IsManaged = true);
+    bool IsManaged = true)
+{
+    // Keep the original positional members source-compatible for existing UI
+    // callers, while making the media-neutral meaning explicit for MP4 items.
+    public string MediaPath => AudioPath;
+    public long MediaBytes => AudioBytes;
+}
 
 /// <summary>Owns only the app's session-library filesystem layout; capture code can use the returned paths directly.</summary>
 public sealed class SessionStorageService
@@ -49,14 +211,25 @@ public sealed class SessionStorageService
     private readonly RecordingStoragePolicy policy;
     private readonly IStorageCapacityProvider capacityProvider;
     private readonly IClock clock;
+    private readonly IVideoMediaValidator videoValidator;
+    private readonly IAudioBackupValidator audioValidator;
 
-    public SessionStorageService(string rootPath, RecordingStoragePolicy? policy = null, IStorageCapacityProvider? capacityProvider = null, IClock? clock = null, ISessionPathCollisionProvider? collisions = null)
+    public SessionStorageService(
+        string rootPath,
+        RecordingStoragePolicy? policy = null,
+        IStorageCapacityProvider? capacityProvider = null,
+        IClock? clock = null,
+        ISessionPathCollisionProvider? collisions = null,
+        IVideoMediaValidator? videoValidator = null,
+        IAudioBackupValidator? audioValidator = null)
     {
         if (string.IsNullOrWhiteSpace(rootPath)) throw new ArgumentException("A storage root is required.", nameof(rootPath));
         this.rootPath = Path.GetFullPath(rootPath);
         this.policy = policy ?? new RecordingStoragePolicy();
         this.capacityProvider = capacityProvider ?? new SystemStorageCapacityProvider();
         this.clock = clock ?? new SystemClock();
+        this.videoValidator = videoValidator ?? new Mp4VideoMediaValidator();
+        this.audioValidator = audioValidator ?? new M4aAudioBackupValidator();
         // Retain the optional collision provider for source compatibility. Directory creation below is
         // the authoritative, cross-process collision check.
         _ = collisions;
@@ -131,7 +304,7 @@ public sealed class SessionStorageService
     {
         EnsurePlan(plan);
         if (!File.Exists(plan.BackupAudioPath)) throw new FileNotFoundException("The recording work file does not exist.", plan.BackupAudioPath);
-        if (new FileInfo(plan.BackupAudioPath).Length <= 0) throw new IOException("The recording work file is empty.");
+        if (!audioValidator.IsValidNonEmptyAudio(plan.BackupAudioPath)) throw new IOException("The recording work file is not a decodable AAC/M4A recording.");
         if (File.Exists(plan.FinalAudioPath)) throw new IOException("A final recording already exists for this session.");
         // Publish the metadata first. If it cannot be atomically written, the
         // backup remains in place for startup recovery instead of creating a
@@ -145,6 +318,250 @@ public sealed class SessionStorageService
         await WriteMetadataAsync(plan.MetadataPath, info, cancellationToken).ConfigureAwait(false);
         File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
     }
+
+    /// <summary>
+    /// Publishes a completed MP4 as the primary media only after a separate
+    /// M4A fallback is final.  The API deliberately accepts no HWND, PID,
+    /// window title, process creation time, or screen image; those values are
+    /// transient capture inputs and cannot enter durable metadata here.
+    /// </summary>
+    public async Task<RecordingVideoPublicationResult> PublishCompletedVideoAsync(
+        RecordingSessionPlan plan,
+        string? title = null,
+        WindowsCaptureMetadata? windowsCapture = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsurePlan(plan);
+        var existing = ReadExistingOrNewMetadata(plan);
+
+        // Finalize the independent M4A first.  If this step fails, neither the
+        // MP4 nor its work file is touched, so startup recovery still has the
+        // original backup evidence.
+        await EnsureAudioFallbackAsync(
+            plan,
+            existing,
+            title,
+            windowsCapture,
+            RecordingRecoveryState.None,
+            cancellationToken).ConfigureAwait(false);
+
+        if (IsSafeCompletedVideo(plan.FinalVideoPath))
+        {
+            try
+            {
+                await WriteVideoMetadataAsync(
+                    plan,
+                    existing,
+                    title,
+                    windowsCapture,
+                    RecordingRecoveryState.None,
+                    cancellationToken).ConfigureAwait(false);
+                return new RecordingVideoPublicationResult(true, true, RecordingRecoveryState.None, null);
+            }
+            catch (IOException error)
+            {
+                return new RecordingVideoPublicationResult(false, true, RecordingRecoveryState.RecoveredAfterInterruption,
+                    $"MP4 was finalized but video metadata could not be published yet: {error.Message}");
+            }
+            catch (UnauthorizedAccessException error)
+            {
+                return new RecordingVideoPublicationResult(false, true, RecordingRecoveryState.RecoveredAfterInterruption,
+                    $"MP4 was finalized but video metadata could not be published yet: {error.Message}");
+            }
+        }
+
+        // Never overwrite a final-looking but invalid/reparse MP4.  It remains
+        // evidence, while the already-final M4A becomes the only library item.
+        if (File.Exists(plan.FinalVideoPath) || !IsSafeCompletedVideo(plan.PartialVideoPath))
+        {
+            return await PublishVideoFailureAudioFallbackCoreAsync(
+                plan,
+                existing,
+                title,
+                windowsCapture,
+                "The MP4 work file was absent, invalid, or could not be safely published.",
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            File.Move(plan.PartialVideoPath, plan.FinalVideoPath, false);
+        }
+        catch (IOException error)
+        {
+            return await PublishVideoFailureAudioFallbackCoreAsync(
+                plan,
+                existing,
+                title,
+                windowsCapture,
+                $"The MP4 work file could not be promoted without overwriting media: {error.Message}",
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (UnauthorizedAccessException error)
+        {
+            return await PublishVideoFailureAudioFallbackCoreAsync(
+                plan,
+                existing,
+                title,
+                windowsCapture,
+                $"The MP4 work file could not be promoted without overwriting media: {error.Message}",
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            await WriteVideoMetadataAsync(
+                plan,
+                existing,
+                title,
+                windowsCapture,
+                RecordingRecoveryState.None,
+                cancellationToken).ConfigureAwait(false);
+            return new RecordingVideoPublicationResult(true, true, RecordingRecoveryState.None, null);
+        }
+        catch (IOException error)
+        {
+            // Both final media files remain intact.  Recovery will repair the
+            // metadata before exposing the MP4 as a library primary item.
+            return new RecordingVideoPublicationResult(false, true, RecordingRecoveryState.RecoveredAfterInterruption,
+                $"Final media was retained, but video metadata could not be published yet: {error.Message}");
+        }
+        catch (UnauthorizedAccessException error)
+        {
+            return new RecordingVideoPublicationResult(false, true, RecordingRecoveryState.RecoveredAfterInterruption,
+                $"Final media was retained, but video metadata could not be published yet: {error.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Completes the safe audio path after a capture, GPU, encoder, mux, or
+    /// video-publication failure.  Any partial MP4 is intentionally retained
+    /// as recovery evidence and can never become library media through this
+    /// operation.
+    /// </summary>
+    public async Task<RecordingVideoPublicationResult> PublishVideoFailureAudioFallbackAsync(
+        RecordingSessionPlan plan,
+        string? title = null,
+        WindowsCaptureMetadata? windowsCapture = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsurePlan(plan);
+        return await PublishVideoFailureAudioFallbackCoreAsync(
+            plan,
+            ReadExistingOrNewMetadata(plan),
+            title,
+            windowsCapture,
+            "Video was unavailable; the separately finalized M4A was preserved.",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<RecordingVideoPublicationResult> PublishVideoFailureAudioFallbackCoreAsync(
+        RecordingSessionPlan plan,
+        RecordingInfo existing,
+        string? title,
+        WindowsCaptureMetadata? windowsCapture,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        await EnsureAudioFallbackAsync(
+            plan,
+            existing,
+            title,
+            windowsCapture,
+            RecordingRecoveryState.VideoLostAudioPreserved,
+            cancellationToken).ConfigureAwait(false);
+        return new RecordingVideoPublicationResult(
+            VideoPublished: false,
+            AudioPreserved: true,
+            RecoveryState: RecordingRecoveryState.VideoLostAudioPreserved,
+            Reason: reason);
+    }
+
+    private async Task EnsureAudioFallbackAsync(
+        RecordingSessionPlan plan,
+        RecordingInfo existing,
+        string? title,
+        WindowsCaptureMetadata? windowsCapture,
+        RecordingRecoveryState recoveryState,
+        CancellationToken cancellationToken)
+    {
+        if (File.Exists(plan.FinalAudioPath))
+        {
+            if (!IsSafeCompletedAudio(plan.FinalAudioPath))
+            {
+                throw new IOException("The existing final M4A is not a safe non-empty regular file.");
+            }
+
+            await WriteAudioMetadataAsync(
+                plan,
+                existing,
+                title,
+                windowsCapture,
+                recoveryState,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!IsSafeCompletedAudio(plan.BackupAudioPath))
+        {
+            throw new FileNotFoundException("A non-empty M4A backup is required before video can be published.", plan.BackupAudioPath);
+        }
+
+        // Metadata is made durable before the rename.  If its write fails, the
+        // backup remains exactly where native capture left it and startup can
+        // retry; no final media file is created with no recoverable metadata.
+        await WriteAudioMetadataAsync(
+            plan,
+            existing,
+            title,
+            windowsCapture,
+            recoveryState,
+            cancellationToken).ConfigureAwait(false);
+        File.Move(plan.BackupAudioPath, plan.FinalAudioPath, false);
+    }
+
+    private Task WriteAudioMetadataAsync(
+        RecordingSessionPlan plan,
+        RecordingInfo existing,
+        string? title,
+        WindowsCaptureMetadata? windowsCapture,
+        RecordingRecoveryState recoveryState,
+        CancellationToken cancellationToken)
+    {
+        var audio = RecordingInfoJson.CreateAudioOnly(
+            existing.Document,
+            title,
+            recoveryState,
+            plan.Kind);
+        return WriteMetadataAsync(
+            plan.MetadataPath,
+            RecordingInfoJson.WithWindowsCapture(audio, windowsCapture ?? existing.WindowsCapture),
+            cancellationToken);
+    }
+
+    private Task WriteVideoMetadataAsync(
+        RecordingSessionPlan plan,
+        RecordingInfo existing,
+        string? title,
+        WindowsCaptureMetadata? windowsCapture,
+        RecordingRecoveryState recoveryState,
+        CancellationToken cancellationToken)
+    {
+        var video = RecordingInfoJson.CreateVideo(
+            existing.Document,
+            title,
+            recoveryState,
+            plan.Kind);
+        return WriteMetadataAsync(
+            plan.MetadataPath,
+            RecordingInfoJson.WithWindowsCapture(video, windowsCapture ?? existing.WindowsCapture),
+            cancellationToken);
+    }
+
+    private RecordingInfo ReadExistingOrNewMetadata(RecordingSessionPlan plan) =>
+        IsSafeFile(plan.MetadataPath)
+            ? ReadMetadata(plan.MetadataPath)
+            : RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, plan.Kind);
 
     /// <summary>
     /// Removes only an empty folder allocated by this storage service after a
@@ -206,13 +623,12 @@ public sealed class SessionStorageService
         CancellationToken cancellationToken = default)
     {
         EnsureOwnedFolder(folderPath);
-        var finalAudio = Path.Combine(folderPath, RecordingSessionLayout.FinalAudioFileName);
-        if (!IsSafeFile(finalAudio))
+        var metadataPath = Path.Combine(folderPath, RecordingSessionLayout.MetadataFileName);
+        if (!TryGetPublishedMediaPath(folderPath, ReadMetadata(metadataPath), out _))
         {
             throw new IOException("The selected session does not contain a safe completed recording.");
         }
 
-        var metadataPath = Path.Combine(folderPath, RecordingSessionLayout.MetadataFileName);
         var writeGate = MetadataWriteGates.GetOrAdd(metadataPath, static _ => new SemaphoreSlim(1, 1));
         await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -241,7 +657,9 @@ public sealed class SessionStorageService
                 document["isFavorite"] = favorite;
             }
 
-            var normalized = RecordingInfoJson.Normalize(document, null, null);
+            var normalized = current.MediaKind == "video"
+                ? RecordingInfoJson.CreateVideo(document, null, current.RecoveryState, GetOwnedKind(folderPath))
+                : RecordingInfoJson.Normalize(document, null, null);
             await WriteMetadataAsync(metadataPath, normalized, cancellationToken).ConfigureAwait(false);
             return normalized;
         }
@@ -260,8 +678,8 @@ public sealed class SessionStorageService
     public void RecycleSession(string folderPath)
     {
         EnsureOwnedFolder(folderPath);
-        var finalAudio = Path.Combine(folderPath, RecordingSessionLayout.FinalAudioFileName);
-        if (!IsSafeFile(finalAudio))
+        var metadataPath = Path.Combine(folderPath, RecordingSessionLayout.MetadataFileName);
+        if (!TryGetPublishedMediaPath(folderPath, ReadMetadata(metadataPath), out _))
         {
             throw new IOException("The selected session does not contain a safe completed recording.");
         }
@@ -282,9 +700,36 @@ public sealed class SessionStorageService
             foreach (var folder in Directory.EnumerateDirectories(rootPath))
             {
                 if (!TryOwnedFolder(folder, out var kind) || IsReparsePoint(folder)) continue;
-                var final = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
-                if (!IsSafeFile(final)) continue;
                 var metadata = ReadMetadata(Path.Combine(folder, RecordingSessionLayout.MetadataFileName));
+                if (metadata.MediaKind == "video")
+                {
+                    // Do not surface legacy/imported target identity in the
+                    // Windows library even before a user makes an edit.
+                    metadata = RecordingInfoJson.CreateVideo(
+                        metadata.Document,
+                        metadata.Title,
+                        metadata.RecoveryState,
+                        kind);
+                    // A stale/invalid MP4 must not make its associated M4A
+                    // look like a playable video recording.  Recovery will
+                    // persist this same downgrade, but the library fails
+                    // closed even if it is queried before recovery runs.
+                    var finalAudio = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
+                    var finalVideo = Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName);
+                    if ((!IsSafeCompletedVideo(finalVideo) || !IsSafeCompletedAudio(finalAudio)) &&
+                        IsSafeCompletedAudio(finalAudio))
+                    {
+                        metadata = RecordingInfoJson.CreateAudioOnly(
+                            metadata.Document,
+                            metadata.Title,
+                            RecordingRecoveryState.VideoLostAudioPreserved,
+                            kind);
+                    }
+                }
+                // A video record is discoverable only when its publisher has
+                // written both explicit video metadata and the final MP4. A
+                // partial MP4 is always recovery evidence, never library media.
+                if (!TryGetPublishedMediaPath(folder, metadata, out var final)) continue;
                 var backup = Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName);
                 result.Add(new(kind, folder, final, new FileInfo(final).Length, metadata, IsSafeFile(backup) && new FileInfo(backup).Length > 0));
             }
@@ -379,6 +824,42 @@ public sealed class SessionStorageService
 
     internal bool IsSafeFile(string path) => IsDescendant(path) && File.Exists(path) && !IsReparsePoint(path);
 
+    /// <summary>Shared by publication and startup recovery; a final MP4 must pass the bounded structural guard.</summary>
+    internal bool IsSafeCompletedVideo(string path) => IsSafeNonEmptyFile(path) && videoValidator.IsValidNonEmptyVideo(path);
+
+    /// <summary>A final M4A must have a decodable AAC sample, not merely bytes or BMFF atom names.</summary>
+    internal bool IsSafeCompletedAudio(string path)
+    {
+        return IsSafeNonEmptyFile(path) && audioValidator.IsValidNonEmptyAudio(path);
+    }
+
+    internal bool IsSafeNonEmptyFile(string path)
+    {
+        try { return IsSafeFile(path) && new FileInfo(path).Length > 0; }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    private bool TryGetPublishedMediaPath(string folder, RecordingInfo metadata, out string mediaPath)
+    {
+        var finalVideo = Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName);
+        var finalAudio = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
+        if (metadata.MediaKind == "video" && IsSafeCompletedVideo(finalVideo) && IsSafeCompletedAudio(finalAudio))
+        {
+            mediaPath = finalVideo;
+            return true;
+        }
+
+        if (IsSafeCompletedAudio(finalAudio))
+        {
+            mediaPath = finalAudio;
+            return true;
+        }
+
+        mediaPath = string.Empty;
+        return false;
+    }
+
     private static string? NormalizeTitle(string? title)
     {
         var value = title?.Trim();
@@ -404,6 +885,16 @@ public sealed class SessionStorageService
     }
 
     private RecordingSessionPlan Plan(RecordingSessionKind kind, string folder, StorageCapacityStatus capacity) => new(kind, folder, Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName), Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName), Path.Combine(folder, RecordingSessionLayout.MetadataFileName), capacity);
+
+    private RecordingSessionKind GetOwnedKind(string folder)
+    {
+        if (!TryOwnedFolder(folder, out var kind))
+        {
+            throw new InvalidOperationException("The session folder is not a managed direct child of the storage root.");
+        }
+        return kind;
+    }
+
     private bool TryOwnedFolder(string folder, out RecordingSessionKind kind)
     {
         kind = default;
@@ -416,9 +907,13 @@ public sealed class SessionStorageService
         var expectedFinal = Path.Combine(plan.FolderPath, RecordingSessionLayout.FinalAudioFileName);
         var expectedBackup = Path.Combine(plan.FolderPath, RecordingSessionLayout.BackupAudioFileName);
         var expectedMetadata = Path.Combine(plan.FolderPath, RecordingSessionLayout.MetadataFileName);
+        var expectedFinalVideo = Path.Combine(plan.FolderPath, RecordingSessionLayout.FinalVideoFileName);
+        var expectedPartialVideo = Path.Combine(plan.FolderPath, RecordingSessionLayout.PartialVideoFileName);
         if (!PathEquals(plan.FinalAudioPath, expectedFinal) ||
             !PathEquals(plan.BackupAudioPath, expectedBackup) ||
-            !PathEquals(plan.MetadataPath, expectedMetadata))
+            !PathEquals(plan.MetadataPath, expectedMetadata) ||
+            !PathEquals(plan.FinalVideoPath, expectedFinalVideo) ||
+            !PathEquals(plan.PartialVideoPath, expectedPartialVideo))
         {
             throw new InvalidOperationException("The recording session plan contains an unexpected path.");
         }

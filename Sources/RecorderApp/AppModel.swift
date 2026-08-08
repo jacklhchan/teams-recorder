@@ -1837,6 +1837,7 @@ final class AppModel: ObservableObject {
         guard canPresentWorkspaceResult(for: fence) else { return }
         switch outcome {
         case .success:
+            playbackFeature.stopIfActive(sessionID: session.id)
             statusMessage = "Moved \(session.displayName) to Trash"
         case .failure(let error): statusMessage = error.message
         }

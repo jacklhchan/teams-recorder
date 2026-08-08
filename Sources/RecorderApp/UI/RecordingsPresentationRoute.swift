@@ -61,3 +61,40 @@ struct RecordingsCanonicalActionAdmission {
         return true
     }
 }
+
+enum RecordingsSessionLocationAction {
+    case openFolder
+    case revealRecording
+}
+
+@MainActor
+struct RecordingsSessionLocationActions {
+    private let admission: RecordingsCanonicalActionAdmission
+    private let openFolder: (RecordingSession) -> Void
+    private let revealRecording: (RecordingSession) -> Void
+
+    init(
+        currentSessions: @escaping () -> [RecordingSession],
+        openFolder: @escaping (RecordingSession) -> Void,
+        revealRecording: @escaping (RecordingSession) -> Void
+    ) {
+        admission = .init(currentSessions: currentSessions)
+        self.openFolder = openFolder
+        self.revealRecording = revealRecording
+    }
+
+    @discardableResult
+    func perform(
+        _ action: RecordingsSessionLocationAction,
+        sessionID: RecordingSession.ID
+    ) -> Bool {
+        admission.perform(sessionID: sessionID) { session in
+            switch action {
+            case .openFolder:
+                openFolder(session)
+            case .revealRecording:
+                revealRecording(session)
+            }
+        }
+    }
+}

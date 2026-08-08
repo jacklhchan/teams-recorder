@@ -940,6 +940,53 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.metadataTitle))
     }
 
+    func testRecordingsCapturedArtifactActionsFailClosedAfterFilesDisappear() throws {
+        let fixture = try RecordingsMeetingIntelligenceRenderFixture()
+        defer { fixture.remove() }
+        let transcriptURL = TranscriptDocumentStore.editableURL(
+            in: fixture.session.folderURL
+        )
+        let logURL = fixture.session.folderURL.appendingPathComponent(
+            TranscriptDocumentStore.logFileName
+        )
+        try Data("ASR log".utf8).write(to: logURL)
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        let moreID = "recorder.row.more.\(rowID)"
+        let transcriptAction = try XCTUnwrap(host.captureNativeMenuAction(
+            forButton: moreID,
+            itemIdentifier: "recorder.row.transcript.\(rowID).menu"
+        ))
+        let logAction = try XCTUnwrap(host.captureNativeMenuAction(
+            forButton: moreID,
+            itemIdentifier: "recorder.row.log.\(rowID)"
+        ))
+        XCTAssertTrue(transcriptAction.item.isEnabled)
+        XCTAssertTrue(logAction.item.isEnabled)
+
+        try FileManager.default.removeItem(at: transcriptURL)
+        try FileManager.default.removeItem(at: logURL)
+        let statusBeforeInvocation = fixture.model.statusMessage
+
+        XCTAssertTrue(host.invokeCapturedNativeMenuAction(transcriptAction))
+        host.render()
+        XCTAssertFalse(host.containsAccessibilityIdentifier(
+            "recorder.transcript.detail.root"
+        ))
+        XCTAssertTrue(host.invokeCapturedNativeMenuAction(logAction))
+        XCTAssertEqual(
+            fixture.model.statusMessage,
+            statusBeforeInvocation,
+            "A captured log token must not reach its callback after the log disappears."
+        )
+    }
+
     func testRecordingsCapturedTranscribeActionCannotBecomeCancelAfterMenuUpdate() throws {
         let fixture = try RecordingsMeetingIntelligenceRenderFixture()
         defer { fixture.remove() }

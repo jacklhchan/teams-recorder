@@ -75,6 +75,7 @@ struct RecordingsLibraryView: View {
             transcriptionStatesBySessionID: transcription.transcriptionStatesBySessionID,
             play: model.play,
             open: model.open,
+            revealRecording: model.revealRecording,
             transcribe: model.transcribe,
             cancelTranscription: model.cancelTranscription,
             openTranscript: model.openTranscript,
@@ -172,6 +173,7 @@ private struct SessionListView: View {
     let transcriptionStatesBySessionID: [RecordingSession.ID: TranscriptionState]
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
+    let revealRecording: (RecordingSession) -> Void
     let transcribe: (RecordingSession) -> Void
     let cancelTranscription: () -> Void
     let openTranscript: (RecordingSession) -> Void
@@ -208,6 +210,36 @@ private struct SessionListView: View {
 
     private var admission: RecordingsCanonicalActionAdmission {
         .init(currentSessions: canonicalSessions)
+    }
+
+    private var locationActions: RecordingsSessionLocationActions {
+        .init(
+            currentSessions: canonicalSessions,
+            openFolder: open,
+            revealRecording: revealRecording
+        )
+    }
+
+    private enum AvailableArtifact {
+        case transcript
+        case transcriptLog
+    }
+
+    private func performAvailableArtifactAction(
+        _ artifact: AvailableArtifact,
+        sessionID: RecordingSession.ID,
+        action: (RecordingSession) -> Void
+    ) {
+        _ = admission.perform(sessionID: sessionID) { canonical in
+            let resolvedURL: URL? = switch artifact {
+            case .transcript:
+                TranscriptDocumentStore.resolvedURL(in: canonical.folderURL)
+            case .transcriptLog:
+                TranscriptDocumentStore.logURL(in: canonical.folderURL)
+            }
+            guard resolvedURL != nil else { return }
+            action(canonical)
+        }
     }
 
     @ViewBuilder
@@ -490,7 +522,10 @@ private struct SessionListView: View {
                             session: session,
                             compact: false
                         ) {
-                            _ = admission.perform(sessionID: session.id) {
+                            performAvailableArtifactAction(
+                                .transcript,
+                                sessionID: session.id
+                            ) {
                                 route = .transcript($0.id)
                             }
                         }
@@ -510,7 +545,10 @@ private struct SessionListView: View {
                         session: session,
                         compact: false
                     ) {
-                        _ = admission.perform(sessionID: session.id, action: open)
+                        _ = locationActions.perform(
+                            .revealRecording,
+                            sessionID: session.id
+                        )
                     }
                 }
             }
@@ -545,7 +583,7 @@ private struct SessionListView: View {
         let rowID = session.id.lastPathComponent
         var items: [RecordingSessionMenuButton.Item] = [
             .init(title: "Open Folder", identifier: "recorder.row.open.\(rowID).menu") {
-                _ = admission.perform(sessionID: session.id, action: open)
+                _ = locationActions.perform(.openFolder, sessionID: session.id)
             },
             .init(title: "Edit Details", identifier: "recorder.row.edit.\(rowID)") {
                 _ = admission.perform(sessionID: session.id) { metadataSession = $0 }
@@ -588,7 +626,10 @@ private struct SessionListView: View {
                 identifier: "recorder.row.transcript.\(rowID).menu",
                 enabled: hasTranscript(for: session)
             ) {
-                _ = admission.perform(sessionID: session.id) {
+                performAvailableArtifactAction(
+                    .transcript,
+                    sessionID: session.id
+                ) {
                     route = .transcript($0.id)
                 }
             },
@@ -597,7 +638,11 @@ private struct SessionListView: View {
                 identifier: "recorder.row.log.\(rowID)",
                 enabled: hasTranscriptLog(for: session)
             ) {
-                _ = admission.perform(sessionID: session.id, action: openTranscriptLog)
+                performAvailableArtifactAction(
+                    .transcriptLog,
+                    sessionID: session.id,
+                    action: openTranscriptLog
+                )
             },
             .separator,
             .init(

@@ -45,6 +45,43 @@ final class RecordingsPresentationRouteTests: XCTestCase {
         XCTAssertEqual(writes, 0)
     }
 
+    func testLocationActionsRouteOpenFolderAndRevealToDistinctCanonicalClosures() {
+        let folder = URL(fileURLWithPath: "/tmp/recordings-route-\(UUID().uuidString)")
+        let captured = RecordingSession(
+            id: folder,
+            folderURL: folder,
+            recordingURL: folder.appendingPathComponent("stale-recording.m4a"),
+            createdAt: .distantPast,
+            duration: 1,
+            fileSize: 1,
+            metadata: .init(title: "Captured")
+        )
+        let canonical = RecordingSession(
+            id: folder,
+            folderURL: folder,
+            recordingURL: folder.appendingPathComponent("recording.m4a"),
+            createdAt: .now,
+            duration: 60,
+            fileSize: 1_024,
+            metadata: .init(title: "Canonical")
+        )
+        var openedFolders: [URL] = []
+        var revealedRecordings: [URL] = []
+        let actions = RecordingsSessionLocationActions(
+            currentSessions: { [canonical] },
+            openFolder: { openedFolders.append($0.folderURL) },
+            revealRecording: { revealedRecordings.append($0.recordingURL) }
+        )
+
+        XCTAssertTrue(actions.perform(.revealRecording, sessionID: captured.id))
+        XCTAssertEqual(revealedRecordings, [canonical.recordingURL])
+        XCTAssertTrue(openedFolders.isEmpty)
+
+        XCTAssertTrue(actions.perform(.openFolder, sessionID: captured.id))
+        XCTAssertEqual(openedFolders, [canonical.folderURL])
+        XCTAssertEqual(revealedRecordings, [canonical.recordingURL])
+    }
+
     func testSaveRejectsMissingCanonicalSessionWithoutInvokingWrite() async {
         let original = makeSession(title: "Original")
         var currentSessions = [original]

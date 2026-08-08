@@ -343,6 +343,72 @@ final class AppModelPlaybackTests: XCTestCase {
         XCTAssertTrue(model.statusMessage.contains("Playback failed"))
     }
 
+    func testSuccessfulTrashStopsActivePlaybackAndClearsPresenterSessionID() async {
+        let coordinator = FakePlaybackCoordinator()
+        let model = makeModel(
+            playbackCoordinator: coordinator,
+            recordingSessionTrashHandler: { _ in true }
+        )
+        let session = makeSession(in: model.outputFolder, extension: "m4a")
+        model.seedLibrarySessionsForTesting([session])
+        model.libraryFeature.onSessionRemoved = { _ in }
+        model.play(session: session)
+        await Task.yield()
+        XCTAssertEqual(model.playingSessionID, session.id)
+        let stopCountBeforeTrash = coordinator.stopCount
+
+        await model.moveSessionToTrash(session)
+
+        XCTAssertNil(
+            model.playingSessionID,
+            "The existing presenter observes this active ID to dismiss itself."
+        )
+        XCTAssertFalse(model.isPlaybackActive)
+        XCTAssertEqual(coordinator.stopCount, stopCountBeforeTrash + 1)
+    }
+
+    func testFailedOrUnrelatedTrashDoesNotStopCurrentPlayback() async {
+        let coordinator = FakePlaybackCoordinator()
+        let model = makeModel(
+            playbackCoordinator: coordinator,
+            recordingSessionTrashHandler: { url in
+                url.lastPathComponent != "fails"
+            }
+        )
+        let failing = makeSession(
+            in: model.outputFolder,
+            named: "fails",
+            extension: "m4a"
+        )
+        let unrelated = makeSession(
+            in: model.outputFolder,
+            named: "unrelated",
+            extension: "m4a"
+        )
+        let removed = makeSession(
+            in: model.outputFolder,
+            named: "removed",
+            extension: "m4a"
+        )
+        model.seedLibrarySessionsForTesting([failing, unrelated, removed])
+        model.play(session: failing)
+        await Task.yield()
+        let stopCountBeforeFailure = coordinator.stopCount
+
+        await model.moveSessionToTrash(failing)
+
+        XCTAssertEqual(model.playingSessionID, failing.id)
+        XCTAssertEqual(coordinator.stopCount, stopCountBeforeFailure)
+
+        model.play(session: unrelated)
+        await Task.yield()
+        let stopCountBeforeUnrelatedTrash = coordinator.stopCount
+        await model.moveSessionToTrash(removed)
+
+        XCTAssertEqual(model.playingSessionID, unrelated.id)
+        XCTAssertEqual(coordinator.stopCount, stopCountBeforeUnrelatedTrash)
+    }
+
     func testTestRecordingAutoplayUsesCoordinatorWithSavedResultSession() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -451,13 +517,17 @@ final class AppModelPlaybackTests: XCTestCase {
 
     private func makeModel(
         playbackCoordinator: FakePlaybackCoordinator,
-        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
+        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
+        recordingSessionTrashHandler: @escaping @Sendable (URL) throws -> Bool = {
+            _ in true
+        }
     ) -> AppModel {
         AppModel(
             defaults: makeDefaults(),
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
+            recordingSessionTrashHandler: recordingSessionTrashHandler,
             playbackCoordinator: playbackCoordinator,
             teamsAutoMeetingCoordinator: teamsAutoMeetingCoordinator
         )
@@ -484,6 +554,23 @@ final class AppModelPlaybackTests: XCTestCase {
             duration: 12,
             fileSize: 0,
             metadata: .init(screenIntervals: screenIntervals)
+        )
+    }
+
+    private func makeSession(
+        in workspace: URL,
+        named name: String = UUID().uuidString,
+        extension fileExtension: String
+    ) -> RecordingSession {
+        let folder = workspace.appendingPathComponent(name, isDirectory: true)
+        return RecordingSession(
+            id: folder,
+            folderURL: folder,
+            recordingURL: folder.appendingPathComponent("recording.\(fileExtension)"),
+            createdAt: .now,
+            duration: 12,
+            fileSize: 0,
+            metadata: .init()
         )
     }
 

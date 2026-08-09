@@ -66,7 +66,9 @@ try {
     Invoke-Checked $dotnet "build" ".\src\Recorder.WinUI\Recorder.WinUI.csproj" "--configuration" "Release" "--property:Platform=x64" "--property:RuntimeIdentifier=win-x64" "--no-restore" "--tl:off"
     Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.Core.Tests\Recorder.Core.Tests.csproj" "--configuration" "Release" "--no-build"
     Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.Control.Tests\Recorder.Control.Tests.csproj" "--configuration" "Release" "--no-build"
-    Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.WinUI.Layout.Tests\Recorder.WinUI.Layout.Tests.csproj" "--configuration" "Release" "--no-restore" "--tl:off"
+    # This standalone layout-contract project is intentionally not part of the
+    # shipping solution, so a clean CI checkout has no assets file for it yet.
+    Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.WinUI.Layout.Tests\Recorder.WinUI.Layout.Tests.csproj" "--configuration" "Release" "--tl:off"
     $publishDirectory = Join-Path $windowsRoot "out\publish\win-x64"
     Invoke-Checked $dotnet "publish" ".\src\Recorder.WinUI\Recorder.WinUI.csproj" "--configuration" "Release" "--property:Platform=x64" "--property:RuntimeIdentifier=win-x64" "--property:WindowsPackageType=None" "--no-restore" "--output" $publishDirectory "--tl:off"
     foreach ($publishedFile in @("Recorder.WinUI.exe", "Recorder.NativeBridge.dll", "Recorder.AsrWorker.exe")) {

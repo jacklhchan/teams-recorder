@@ -15,10 +15,15 @@ try {
     Write-Host "PASS: WDK preflight succeeded on this host."
 }
 catch {
-    if ($_.Exception.Message -notmatch "Windows Driver Kit \(WDK\) is required") {
+    $preflightFailure = $_.Exception.Message
+    $expectedUnavailableHost =
+        $preflightFailure -match "Windows Driver Kit \(WDK\) is required" -or
+        $preflightFailure -match "installed WDK is incomplete" -or
+        $preflightFailure -match "Visual Studio MSBuild is required"
+    if (-not $expectedUnavailableHost) {
         throw
     }
-    Write-Host "PASS: SDK-only host emits the explicit missing-WDK preflight error."
+    Write-Host "PASS: host without the complete WDK toolchain fails closed with an explicit preflight error."
 }
 
 & $dotnet run --project $testProject --configuration Release --tl:off

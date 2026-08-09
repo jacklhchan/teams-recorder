@@ -5,7 +5,10 @@ $ErrorActionPreference = "Stop"
 
 function Find-FirstFile {
     param(
-        [Parameter(Mandatory)][string[]]$Candidates,
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [string[]]$Candidates = @(),
         [Parameter(Mandatory)][string]$Name
     )
 

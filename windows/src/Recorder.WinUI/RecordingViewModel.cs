@@ -9,6 +9,8 @@ using Microsoft.UI.Xaml.Media;
 using Recorder.Core;
 using TeamsRecorder.Windows.Application;
 using TeamsRecorder.Windows.Application.AI;
+using TeamsRecorder.Windows.Application.Control;
+using TeamsRecorder.Windows.Application.Diagnostics;
 using TeamsRecorder.Windows.Application.Recovery;
 using TeamsRecorder.Windows.Application.Library;
 using TeamsRecorder.Windows.Application.Settings;
@@ -24,7 +26,7 @@ namespace TeamsRecorder.Windows.WinUI;
 /// local playback at the WinUI edge. The coordinator remains the single owner
 /// of native start/stop serialization.
 /// </summary>
-public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverlayStateSource
+public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverlayStateSource, IRecorderControlViewModelLifecycle
 {
     private const int WaveformBarCount = 48;
     private static readonly Brush HealthyHealthBrush = new SolidColorBrush(global::Microsoft.UI.Colors.ForestGreen);
@@ -44,7 +46,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private string? libraryServiceRoot;
     private readonly IRecorderAppSettingsStore appSettingsStore = new JsonRecorderAppSettingsStore();
     private readonly SemaphoreSlim appSettingsWriteGate = new(1, 1);
+    // UI actions, automatic-recording callbacks, and local control-pipe
+    // requests all acquire this same gate before changing recorder lifecycle.
+    // RecordingLifecycleService remains the durable/native serialization owner.
+    private readonly SemaphoreSlim recordingLifecycleActionGate = new(1, 1);
     private RecorderAppSettings? pendingAppSettings;
+    private string? pendingSelectedApplicationExecutable;
     private bool restoreTeamsMuteSyncAfterInitialization;
     private bool restoreTeamsAutomaticRecordingAfterInitialization;
     // AI provider settings are deliberately application-layer services. The view model
@@ -64,9 +71,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private VideoCaptureWindowChoice? selectedVideoCaptureWindow;
     private bool isSharedContentCaptureEnabled;
     private LibraryRecording? selectedLibraryItem;
+    private readonly List<LibraryRecording> allLibraryItems = [];
+    private RecordingLibrarySessionIdentity? pendingRecycleIdentity;
+    private string? pendingRecycleDisplayName;
+    private long librarySelectionGeneration;
     private string? loadedPlaybackPath;
     private string outputFolder;
-    private string nextOutputPath = "開始錄製後會建立 M4A 工作階段。";
+    private string nextOutputPath = "開始錄製後會建立 crash-safe MP4 工作階段。";
     private string lastResultText = "尚未完成新的錄製工作階段。";
     private string statusText = "正在準備錄音元件…";
     private string? errorText;
@@ -80,18 +91,35 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private bool isRecorderAvailable;
     private bool isShuttingDown;
     private bool isTelemetryRefreshInProgress;
+    private bool isLowStorageStopInProgress;
+    private DateTimeOffset nextStorageCapacityCheckUtc;
     private bool isFaultFinalizationInProgress;
     private bool isUpdatingPlaybackPosition;
     private double playbackProgress;
-    private string playbackText = "請從資料庫選取有效的 M4A 檔案。";
+    private double playbackPositionSeconds;
+    private double playbackDurationSeconds;
+    private double playbackVolume = 1d;
+    private double selectedPlaybackRate = 1d;
+    private string playbackText = "請從錄音庫選取有效的 MP4 或舊版 M4A 檔案。";
+    private string librarySearchText = string.Empty;
+    private bool libraryFavoritesOnly;
     private string libraryTitle = string.Empty;
     private string libraryTagsText = string.Empty;
     private bool isLibraryFavorite;
     private bool isRecycleConfirmationVisible;
     private readonly InputMuteCoordinator teamsInputMute = new();
+    // The retired WebSocket/pairing types intentionally are not constructed by
+    // this view model.  Local window monitoring + strict UIA drive the existing
+    // automatic-recording reducer instead.
+    private TeamsLocalIntegrationCoordinator? teamsLocalIntegration;
+    private TeamsLocalIntegrationSnapshot teamsLocalSnapshot = TeamsLocalIntegrationSnapshot.Initial;
+    // Retained only so old event-cleanup methods remain harmless for upgrades;
+    // these are never assigned or started in the WinUI runtime.
     private TeamsThirdPartyApiClient? teamsApiClient;
     private TeamsMuteSyncCoordinator? teamsMuteSync;
     private TeamsAutomaticRecordingController? teamsAutomaticRecorder;
+    private RecorderControlLifecycleOwnerAdapter? recorderControlOwner;
+    private RecorderControlServerRuntime? recorderControlRuntime;
     private TeamsMuteSyncSnapshot teamsMuteSnapshot = TeamsMuteSyncSnapshot.Initial;
     private TeamsAutoMeetingSnapshot teamsAutomaticSnapshot = TeamsAutoMeetingSnapshot.Initial;
     private bool isTeamsMuteSyncEnabled;
@@ -151,6 +179,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         PlayCommand = new AsyncRelayCommand(PlayAsync, () => CanPlay);
         PauseCommand = new AsyncRelayCommand(PauseAsync, () => CanPause);
         StopPlaybackCommand = new AsyncRelayCommand(StopPlaybackAsync, () => mediaPlayer is not null);
+        SkipBackward15Command = new AsyncRelayCommand(() => SkipPlaybackAsync(-15), () => CanSeek);
+        SkipForward15Command = new AsyncRelayCommand(() => SkipPlaybackAsync(15), () => CanSeek);
         SaveLibraryMetadataCommand = new AsyncRelayCommand(SaveLibraryMetadataAsync, () => CanManageLibrary);
         OpenLibraryFolderCommand = new AsyncRelayCommand(OpenLibraryFolderAsync, () => CanManageLibrary);
         RequestRecycleLibraryCommand = new AsyncRelayCommand(RequestRecycleLibraryAsync, () => CanManageLibrary);
@@ -192,6 +222,15 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public ObservableCollection<LibraryRecording> LibraryItems { get; } = [];
 
+    public IReadOnlyList<PlaybackRateChoice> PlaybackRateChoices { get; } =
+    [
+        new(0.5, "0.5×"),
+        new(1, "1×"),
+        new(1.25, "1.25×"),
+        new(1.5, "1.5×"),
+        new(2, "2×"),
+    ];
+
     /// <summary>Model IDs discovered by the explicitly requested provider connection test.</summary>
     public ObservableCollection<string> OpenAiDiscoveredModels { get; } = [];
 
@@ -226,6 +265,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public AsyncRelayCommand PauseCommand { get; }
 
     public AsyncRelayCommand StopPlaybackCommand { get; }
+
+    public AsyncRelayCommand SkipBackward15Command { get; }
+
+    public AsyncRelayCommand SkipForward15Command { get; }
 
     public AsyncRelayCommand SaveLibraryMetadataCommand { get; }
 
@@ -267,7 +310,11 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public string GlobalMuteHotKeyStatus => globalMuteHotKeyStatus;
 
-    /// <summary>Teams integration is an explicit, persisted non-secret opt-in; pairing credentials remain in DPAPI storage.</summary>
+    /// <summary>
+    /// Teams integration is an explicit, persisted non-secret local opt-in.
+    /// It monitors admitted local Teams windows; retired pairing credentials are
+    /// removed during app startup and are never read by this view model.
+    /// </summary>
     public bool IsTeamsMuteSyncEnabled
     {
         get => isTeamsMuteSyncEnabled;
@@ -276,6 +323,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             if (SetProperty(ref isTeamsMuteSyncEnabled, value))
             {
                 OnPropertyChanged(nameof(TeamsMuteEnableButtonText));
+                OnPropertyChanged(nameof(TeamsLocalStatusText));
+                OnPropertyChanged(nameof(TeamsLocalRoutingText));
+                OnPropertyChanged(nameof(TeamsLocalAutomaticRecordingStatusText));
                 UpdateCommandStates();
             }
         }
@@ -283,11 +333,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public bool CanManageTeamsMuteSync => !isShuttingDown && !isTeamsMuteSyncOperationInProgress;
 
-    /// <summary>A paired connection does not need another pairing request.</summary>
-    public bool CanRequestTeamsPairing =>
-        CanManageTeamsMuteSync &&
-        IsTeamsMuteSyncEnabled &&
-        !teamsMuteSnapshot.IsPairingKnown;
+    /// <summary>Pairing belongs to the retired WebSocket integration and is unavailable.</summary>
+    public bool CanRequestTeamsPairing => false;
 
     /// <summary>
     /// Automatic recording is deliberately a separate opt-in.  A Teams connection alone is
@@ -297,18 +344,16 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     private bool HasTrustedTeamsMeetingState =>
         IsTeamsMuteSyncEnabled &&
-        teamsMuteSnapshot.IsPairingKnown &&
-        teamsMuteSnapshot.Status is TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting &&
-        teamsMuteSnapshot.LastMeetingState is not null;
+        teamsLocalSnapshot.IsRunning &&
+        teamsLocalSnapshot.Meeting.IsMeetingPresent;
 
     /// <summary>
-    /// Automation may be enabled for a paired connection before it reports a meeting.
+    /// Automation may be enabled while the local monitor waits for a meeting.
     /// Starting capture still requires <see cref="HasTrustedTeamsMeetingState"/>.
     /// </summary>
     private bool HasPairedTeamsConnection =>
         IsTeamsMuteSyncEnabled &&
-        teamsMuteSnapshot.IsPairingAuthenticated &&
-        teamsMuteSnapshot.Status is TeamsMuteSyncStatus.WaitingForMeeting or TeamsMuteSyncStatus.Ready or TeamsMuteSyncStatus.InMeeting;
+        teamsLocalSnapshot.IsRunning;
 
     public bool CanEnableTeamsAutomaticRecording =>
         !isShuttingDown &&
@@ -358,7 +403,60 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             _ => snapshot.IsTestRecording ? RecordingOverlayRecordingKind.Test : RecordingOverlayRecordingKind.Manual,
         };
 
-    public string TeamsMuteEnableButtonText => IsTeamsMuteSyncEnabled ? "停用 Teams 靜音同步" : "啟用 Teams 靜音同步";
+    public string TeamsMuteEnableButtonText => IsTeamsMuteSyncEnabled ? "停用 Teams 本機監看" : "啟用 Teams 本機監看";
+
+    /// <summary>
+    /// A deliberately bounded local-monitor projection.  It never contains a
+    /// window caption, identity, account, token, or UIA automation identifier.
+    /// </summary>
+    public string TeamsLocalStatusText => !IsTeamsMuteSyncEnabled
+        ? "未啟用：不會監看 Teams 視窗，也不會變更錄音麥克風。"
+        : !teamsLocalSnapshot.IsRunning
+            ? "本機 Teams 監看尚未就緒。"
+            : teamsLocalSnapshot.Meeting.State switch
+            {
+                TeamsLocalMeetingDetectionState.Waiting => "正在監看本機 Teams 會議視窗。",
+                TeamsLocalMeetingDetectionState.Confirming => "正在確認 Teams 會議狀態。",
+                TeamsLocalMeetingDetectionState.Detected => "已確認本機 Teams 會議。",
+                TeamsLocalMeetingDetectionState.Ending => "正在確認 Teams 會議是否結束。",
+                TeamsLocalMeetingDetectionState.Ambiguous => "偵測到不明確的 Teams 視窗；不會自動錄音。",
+                TeamsLocalMeetingDetectionState.Unavailable => "暫時無法驗證 Teams 會議視窗；不會自動錄音。",
+                _ => "本機 Teams 監看狀態未知。",
+            };
+
+    /// <summary>
+    /// The production UIA binding is intentionally disabled until it has been
+    /// verified for a specific Teams build.  The monitor continues to run, but
+    /// this fail-closed state can never alter the recorder microphone.
+    /// </summary>
+    public string TeamsLocalRoutingText => teamsLocalSnapshot.MuteFailure switch
+    {
+        TeamsUiAutomationFailure.None =>
+            "Teams 靜音控制尚未啟用；本機錄音麥克風保持由使用者控制。",
+        TeamsUiAutomationFailure.BindingNotConfigured =>
+            "Teams UI 自動化綁定尚未驗證，因此不會讀取或變更 Teams／錄音麥克風靜音狀態。",
+        TeamsUiAutomationFailure.WindowIdentityInvalid =>
+            "未取得可驗證的 Teams 會議視窗；不會變更錄音麥克風。",
+        _ => "Teams 靜音狀態未獲驗證；不會變更錄音麥克風。",
+    };
+
+    public string TeamsLocalAutomaticRecordingStatusText => !IsTeamsAutomaticRecordingEnabled
+        ? HasPairedTeamsConnection
+            ? "未啟用自動錄音：本機 Teams 監看已就緒。啟用後只會在確認的會議狀態下開始。"
+            : "自動錄音尚未可用：請先啟用本機 Teams 監看。"
+        : teamsAutomaticSnapshot.State switch
+        {
+            TeamsAutoMeetingState.WaitingForMeeting => "自動錄音已啟用：正在等待確認的本機 Teams 會議。",
+            TeamsAutoMeetingState.StartCountdown(var seconds) => $"自動錄音已啟用：確認會議後 {seconds} 秒開始。",
+            TeamsAutoMeetingState.Starting => "正在建立錄音工作階段。",
+            TeamsAutoMeetingState.AutomaticRecording => "自動錄音進行中。",
+            TeamsAutoMeetingState.StopCountdown(var seconds) => $"Teams 會議結束確認中：{seconds} 秒後停止自動錄音。",
+            TeamsAutoMeetingState.Stopping => "正在停止自動錄音。",
+            TeamsAutoMeetingState.SuppressedUntilMeetingEnd => "本次 Teams 會議已由使用者停止；會議結束前不會重新開始。",
+            TeamsAutoMeetingState.StartBlocked _ => "自動錄音目前無法開始。",
+            TeamsAutoMeetingState.StartFailed _ => "自動錄音無法開始。",
+            _ => "自動錄音狀態未知。",
+        };
 
     public string TeamsMuteStatusText => teamsMuteSnapshot.Status switch
     {
@@ -383,8 +481,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         : !teamsMuteSnapshot.IsMicrophoneRoutingEngaged
             ? "Teams 只提供了會議快照。尚未驗證後續靜音事件，因此 Recorder 不會依「未靜音」快照自動開啟本機錄音麥克風。"
         : teamsInputMute.IsInputMuted
-            ? "Teams 推送了靜音狀態：已靜音本次 M4A 錄音內選取的麥克風來源；不會改變 Teams 本身。"
-            : "Teams 推送了後續未靜音狀態：本次 M4A 錄音內選取的麥克風來源可用；不會改變 Teams 本身。";
+            ? "Teams 推送了靜音狀態：已靜音本次錄影內選取的麥克風來源；不會改變 Teams 本身。"
+            : "Teams 推送了後續未靜音狀態：本次錄影內選取的麥克風來源可用；不會改變 Teams 本身。";
 
     public string TeamsAutomaticRecordingStatusText => !IsTeamsAutomaticRecordingEnabled
         ? HasPairedTeamsConnection
@@ -394,7 +492,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         {
             TeamsAutoMeetingState.WaitingForMeeting => "自動錄音已啟用：正在等待 Teams 回報進入會議。",
             TeamsAutoMeetingState.StartCountdown(var seconds) => $"自動錄音已啟用：確認會議狀態後 {seconds} 秒開始。",
-            TeamsAutoMeetingState.Starting => "自動錄音正在開始 M4A 工作階段。",
+            TeamsAutoMeetingState.Starting => "自動錄音正在開始 crash-safe MP4 工作階段。",
             TeamsAutoMeetingState.AutomaticRecording => "自動錄音進行中；離開會議後會先等待停止緩衝時間。",
             TeamsAutoMeetingState.StopCountdown(var seconds) => $"Teams 回報已離開會議；{seconds} 秒後停止自動錄音。",
             TeamsAutoMeetingState.Stopping => "正在停止並儲存自動錄音。",
@@ -468,6 +566,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             {
                 OnPropertyChanged(nameof(SelectedCaptureSourceDescription));
                 UpdateCommandStates();
+                PersistAppSettingsInBackground();
             }
         }
     }
@@ -509,9 +608,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public string SelectedCaptureSourceDescription => SelectedCaptureSource?.Kind switch
     {
         CaptureSourceKind.SelectedApplication when SelectedProcess is null =>
-            "Preview／實驗性模式：請選擇一個可用的 Teams 應用程式或背景程序；程序不可用時會拒絕錄音，不會改錄系統音訊。",
+            "請選擇一個可用的應用程式或背景程序；程序不可用時會拒絕錄音，不會改錄系統音訊。",
         CaptureSourceKind.SelectedApplication =>
-            $"Preview／實驗性模式：只會錄製 {SelectedProcess!.DisplayName}（PID {SelectedProcess.ProcessId}）；不保證包含所有參與者音訊，也不會回退至系統音訊。",
+            $"只會錄製 {SelectedProcess!.DisplayName} 及其子處理程序；程序身分失效時會停止此來源，絕不回退至系統音訊。",
         _ => "建議來源：錄製系統 loopback 與所選輸出裝置，可靠包含 Teams 參與者音訊。",
     };
 
@@ -528,15 +627,50 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         {
             if (SetProperty(ref selectedLibraryItem, value))
             {
+                librarySelectionGeneration++;
                 PlaybackText = value is null
-                    ? "請從資料庫選取有效的 M4A 檔案。"
+                    ? "請從錄音庫選取有效的 MP4 或舊版 M4A 檔案。"
                     : $"已選取：{value.DisplayName}";
                 LibraryTitle = value?.Title ?? string.Empty;
                 LibraryTagsText = value is null ? string.Empty : string.Join(", ", value.Tags);
                 IsLibraryFavorite = value?.IsFavorite ?? false;
+                pendingRecycleIdentity = null;
+                pendingRecycleDisplayName = null;
                 IsRecycleConfirmationVisible = false;
+                ResetPlaybackForSelectionChange(value);
                 OnPropertyChanged(nameof(SelectedLibraryDetails));
+                OnPropertyChanged(nameof(IsVideoPlaybackStageVisible));
+                OnPropertyChanged(nameof(IsAudioPlaybackStageVisible));
+                OnPropertyChanged(nameof(PlaybackStageAccessibleName));
+                OnPropertyChanged(nameof(PlaybackMediaKindText));
+                OnPropertyChanged(nameof(PlaybackRecoveryText));
+                OnPropertyChanged(nameof(PlaybackAiChipText));
                 UpdateCommandStates();
+            }
+        }
+    }
+
+    /// <summary>Local search covers title, tags, source, and the bounded canonical transcript.</summary>
+    public string LibrarySearchText
+    {
+        get => librarySearchText;
+        set
+        {
+            if (SetProperty(ref librarySearchText, value ?? string.Empty))
+            {
+                ApplyLibraryQuery();
+            }
+        }
+    }
+
+    public bool LibraryFavoritesOnly
+    {
+        get => libraryFavoritesOnly;
+        set
+        {
+            if (SetProperty(ref libraryFavoritesOnly, value))
+            {
+                ApplyLibraryQuery();
             }
         }
     }
@@ -574,12 +708,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     }
 
     public string RecycleConfirmationText => IsRecycleConfirmationVisible && SelectedLibraryItem is { } item
-        ? $"確認將「{item.DisplayName}」移至資源回收桶？此操作不會立即永久刪除檔案。"
+        ? $"確認將「{pendingRecycleDisplayName ?? item.DisplayName}」移至資源回收桶？此操作不會立即永久刪除檔案。"
         : string.Empty;
 
     public string SelectedLibraryDetails => SelectedLibraryItem is { } item
-        ? $"{item.KindText} · {item.AudioBytes / 1024d / 1024d:0.0} MiB" +
-          (item.HasRecoverableBackup ? " · 偵測到可復原備份" : string.Empty)
+        ? $"{item.MediaKindText} · {item.KindText} · {item.MediaBytes / 1024d / 1024d:0.0} MiB" +
+          (item.HasRecoverableBackup ? " · 偵測到可復原備份" : string.Empty) +
+          (item.RecoveryChipText is { } recovery ? $" · {recovery}" : string.Empty)
         : "選取一個工作階段後即可編輯名稱、標籤與最愛狀態。";
 
     public string OutputFolder
@@ -602,6 +737,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
             SetProperty(ref outputFolder, requestedFolder);
             ResetSessionStorage();
+            allLibraryItems.Clear();
             LibraryItems.Clear();
             SelectedLibraryItem = null;
             RefreshStorageReadiness();
@@ -846,7 +982,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public string ResultText => lastResultText;
 
-    public string LibrarySummaryText => $"{LibraryItems.Count} 個可播放工作階段 · {LibraryItems.Count(item => item.IsFavorite)} 個最愛";
+    public string LibrarySummaryText => LibraryItems.Count == allLibraryItems.Count
+        ? $"{LibraryItems.Count} 個可播放工作階段 · {LibraryItems.Count(item => item.IsFavorite)} 個最愛"
+        : $"顯示 {LibraryItems.Count} / {allLibraryItems.Count} 個工作階段 · {LibraryItems.Count(item => item.IsFavorite)} 個最愛";
 
     public string PlaybackText
     {
@@ -862,7 +1000,94 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             var clamped = Math.Clamp(value, 0d, 1d);
             if (SetProperty(ref playbackProgress, clamped) && !isUpdatingPlaybackPosition)
             {
-                SeekPlayback(clamped);
+                SeekPlaybackByProgress(clamped);
+            }
+        }
+    }
+
+    /// <summary>The shared player is intentionally exposed only to the playback stage.</summary>
+    public MediaPlayer? PlaybackMediaPlayer => mediaPlayer;
+
+    public Visibility IsVideoPlaybackStageVisible => SelectedLibraryItem is { IsVideo: true }
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
+    public Visibility IsAudioPlaybackStageVisible => SelectedLibraryItem is { IsVideo: true }
+        ? Visibility.Collapsed
+        : Visibility.Visible;
+
+    public string PlaybackStageAccessibleName => SelectedLibraryItem is { IsVideo: true }
+        ? "影片錄音播放畫面"
+        : "純音訊錄音播放畫面";
+
+    public string PlaybackMediaKindText => SelectedLibraryItem?.MediaKindText ?? "選取錄音後顯示媒體類型";
+
+    public string PlaybackRecoveryText => SelectedLibraryItem?.RecoveryChipText ?? string.Empty;
+
+    public string PlaybackAiChipText => SelectedLibraryItem?.AiChipText ?? string.Empty;
+
+    public double PlaybackPositionSeconds
+    {
+        get => playbackPositionSeconds;
+        set
+        {
+            var clamped = Math.Clamp(value, 0d, Math.Max(0d, PlaybackDurationSeconds));
+            if (SetProperty(ref playbackPositionSeconds, clamped) && !isUpdatingPlaybackPosition)
+            {
+                SeekPlaybackToSeconds(clamped);
+            }
+        }
+    }
+
+    public double PlaybackDurationSeconds
+    {
+        get => playbackDurationSeconds;
+        private set
+        {
+            if (SetProperty(ref playbackDurationSeconds, Math.Max(0d, value)))
+            {
+                OnPropertyChanged(nameof(PlaybackElapsedText));
+                OnPropertyChanged(nameof(PlaybackRemainingText));
+                OnPropertyChanged(nameof(PlaybackDurationText));
+                OnPropertyChanged(nameof(PlaybackTimeReadout));
+            }
+        }
+    }
+
+    public string PlaybackElapsedText => FormatPlaybackTime(PlaybackPositionSeconds, PlaybackDurationSeconds >= 3600d);
+
+    public string PlaybackRemainingText => "-" + FormatPlaybackTime(
+        Math.Max(0d, PlaybackDurationSeconds - PlaybackPositionSeconds),
+        PlaybackDurationSeconds >= 3600d);
+
+    public string PlaybackDurationText => FormatPlaybackTime(PlaybackDurationSeconds, PlaybackDurationSeconds >= 3600d);
+
+    public string PlaybackTimeReadout => $"{PlaybackElapsedText} / {PlaybackDurationText}";
+
+    public double PlaybackVolume
+    {
+        get => playbackVolume;
+        set
+        {
+            var clamped = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref playbackVolume, clamped) && mediaPlayer is not null)
+            {
+                mediaPlayer.Volume = clamped;
+            }
+        }
+    }
+
+    public double SelectedPlaybackRate
+    {
+        get => selectedPlaybackRate;
+        set
+        {
+            var supported = PlaybackRateChoices.Any(choice => Math.Abs(choice.Rate - value) < 0.001d)
+                ? value
+                : 1d;
+            if (SetProperty(ref selectedPlaybackRate, supported) && mediaPlayer is not null)
+            {
+                mediaPlayer.PlaybackSession.PlaybackRate = supported;
             }
         }
     }
@@ -876,9 +1101,19 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public void InitializePlayer()
     {
         mediaPlayer = new MediaPlayer();
+        mediaPlayer.Volume = PlaybackVolume;
+        mediaPlayer.PlaybackSession.PlaybackRate = SelectedPlaybackRate;
+        OnPropertyChanged(nameof(PlaybackMediaPlayer));
         mediaPlayer.MediaOpened += (_, _) => dispatcherQueue.TryEnqueue(() =>
         {
+            if (loadedPlaybackPath is null)
+            {
+                return;
+            }
+
             PlaybackText = "可播放。";
+            PlaybackDurationSeconds = Math.Max(0d, mediaPlayer.PlaybackSession.NaturalDuration.TotalSeconds);
+            SetPlaybackPositionSeconds(mediaPlayer.PlaybackSession.Position.TotalSeconds);
             playbackTimer.Start();
             UpdateCommandStates();
         });
@@ -886,6 +1121,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         {
             playbackTimer.Stop();
             PlaybackText = $"無法播放：{args.ErrorMessage}";
+            ClearPlaybackTimeline();
             UpdateCommandStates();
         });
         mediaPlayer.PlaybackSession.PlaybackStateChanged += (_, _) =>
@@ -1013,14 +1249,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     });
 
-    /// <summary>Starts a user-confirmed ASR job for one completed, managed M4A session.</summary>
+    /// <summary>Starts a user-confirmed ASR job for one completed, managed recording.</summary>
     public Task StartOpenAiTranscriptionAsync() => RunOperationAsync(async () =>
     {
         var coordinator = transcriptionCoordinator
             ?? throw new InvalidOperationException("AI 逐字稿服務尚未準備完成。");
-        var plan = GetSelectedManagedSessionPlan();
+        var plan = await GetSelectedManagedSessionPlanAsync();
         var job = await coordinator.StartAsync(plan, explicitlyOptedIn: true);
-        OpenAiProviderIntegrationStatus = "正在上傳並產生逐字稿；此工作只處理已完成的 M4A。";
+        OpenAiProviderIntegrationStatus = "正在準備完整、可解碼的音訊分段並產生逐字稿。";
         try
         {
             await job.Completion;
@@ -1041,7 +1277,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
         var coordinator = meetingSummaryCoordinator
             ?? throw new InvalidOperationException("AI 摘要服務尚未準備完成。");
-        var plan = GetSelectedManagedSessionPlan();
+        var plan = await GetSelectedManagedSessionPlanAsync();
         var snapshot = await providers.SnapshotAsync();
         OpenAiProviderIntegrationStatus = "正在傳送已完成逐字稿以產生摘要。音訊不會再次上傳。";
         try
@@ -1056,22 +1292,29 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     });
 
-    private RecordingSessionPlan GetSelectedManagedSessionPlan()
+    private async Task<RecordingSessionPlan> GetSelectedManagedSessionPlanAsync()
     {
-        var item = SelectedLibraryItem is { IsManaged: true, IsPlayable: true } selected
-            ? selected
-            : throw new InvalidOperationException("請先選取一個已完成且受管理的 M4A 錄音。" );
+        var target = CaptureLibraryActionTarget(requireManaged: true);
+        var item = await ResolveCanonicalLibraryActionAsync(target);
         var folder = Path.GetFullPath(item.SessionPath);
-        if (!RecordingSessionLayout.TryGetKind(Path.GetFileName(folder), out var kind) || kind != item.Kind ||
-            !PathEquals(item.MediaPath, Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName)))
-            throw new IOException("選取的項目不是可供 AI 處理的受管理錄音工作階段。");
-        return new RecordingSessionPlan(
+        var provisionalPlan = new RecordingSessionPlan(
             item.Kind,
             folder,
-            Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName),
+            Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName),
             Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName),
             Path.Combine(folder, RecordingSessionLayout.MetadataFileName),
             new StorageCapacityStatus(null, RecordingStorageDecision.Normal));
+        ResolvedRecordingSessionMedia media;
+        try
+        {
+            media = RecordingSessionAsrMediaResolver.Resolve(provisionalPlan);
+        }
+        catch (IOException)
+        {
+            throw new IOException("選取的項目不是可供 AI 處理的受管理錄音工作階段。");
+        }
+
+        return provisionalPlan with { FinalAudioPath = media.Path };
     }
 
     private async Task RestoreAppSettingsAsync()
@@ -1079,6 +1322,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         try
         {
             pendingAppSettings = await appSettingsStore.LoadAsync();
+            pendingSelectedApplicationExecutable = pendingAppSettings?.SelectedApplicationExecutable;
             restoreTeamsMuteSyncAfterInitialization = pendingAppSettings?.TeamsMuteSyncEnabled == true;
             restoreTeamsAutomaticRecordingAfterInitialization = restoreTeamsMuteSyncAfterInitialization &&
                 pendingAppSettings?.TeamsAutomaticRecordingEnabled == true;
@@ -1095,6 +1339,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             // Its detailed content (including the user's local folder) is intentionally
             // not surfaced in the UI or diagnostic status.
             pendingAppSettings = null;
+            pendingSelectedApplicationExecutable = null;
             restoreTeamsMuteSyncAfterInitialization = false;
             restoreTeamsAutomaticRecordingAfterInitialization = false;
             StatusText = "無法還原先前的應用程式設定；將使用安全預設值。";
@@ -1128,11 +1373,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 : CaptureSourceKind.SystemAudio));
         if (saved.CaptureSource == RecorderPersistedCaptureSource.SelectedApplication)
         {
-            // A PID or executable path is intentionally not saved. Restarting into this
-            // mode requires the user to choose a currently live Teams process and never
-            // falls back to system loopback.
+            // Only a sanitized executable basename may be restored. PID, process start
+            // time, path, command line and window title are deliberately never saved.
             SelectedProcess = null;
-            ProcessCatalogStatusText = "已還原「指定應用程式」模式；請重新整理並選取目前的 Teams 程序後才可開始錄音。";
+            ProcessCatalogStatusText = pendingSelectedApplicationExecutable is null
+                ? "已還原「指定應用程式」模式；請選取目前正在執行的應用程式。"
+                : $"正在尋找已儲存的應用程式 {pendingSelectedApplicationExecutable}。";
         }
         StatusText = "已還原本機錄音設定。";
     }
@@ -1167,6 +1413,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         CaptureSource = SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
             ? RecorderPersistedCaptureSource.SelectedApplication
             : RecorderPersistedCaptureSource.SystemLoopback,
+        SelectedApplicationExecutable = SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication
+            ? SelectedProcess?.ProcessName
+            : null,
         TeamsMuteSyncEnabled = IsTeamsMuteSyncEnabled,
         TeamsAutomaticRecordingEnabled = IsTeamsAutomaticRecordingEnabled,
     };
@@ -1199,6 +1448,79 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     }
 
+    /// <summary>
+    /// The former Teams WebSocket pairing credential is no longer consumed by
+    /// Windows.  Remove it best-effort at startup so a stale secret cannot be
+    /// silently retained merely because the app is now using local monitoring.
+    /// Failure is intentionally non-fatal and never displayed with a path or
+    /// DPAPI diagnostic.
+    /// </summary>
+    private static async Task ClearRetiredTeamsPairingCredentialAsync()
+    {
+        try
+        {
+            await new WindowsDpapiTeamsPairingTokenStore().ClearAsync();
+        }
+        catch (Exception)
+        {
+            // Local recording and the new no-credential Teams integration are
+            // still safe if an old store cannot be cleaned in this process.
+        }
+    }
+
+    private void StartRecorderControlRuntime()
+    {
+        if (isShuttingDown || recorderControlRuntime is not null)
+        {
+            return;
+        }
+
+        try
+        {
+            recorderControlOwner = new RecorderControlLifecycleOwnerAdapter(dispatcherQueue, this);
+            recorderControlRuntime = new RecorderControlServerRuntime(recorderControlOwner);
+            recorderControlRuntime.Start();
+        }
+        catch (Exception)
+        {
+            // The named pipe is an optional local-control surface.  Keep the
+            // recorder usable rather than leaking a transport exception or
+            // failing application startup.
+            recorderControlRuntime?.Dispose();
+            recorderControlRuntime = null;
+            recorderControlOwner?.Dispose();
+            recorderControlOwner = null;
+            ErrorText = "本機錄音控制服務無法啟動；錄音功能仍可在此視窗使用。";
+        }
+    }
+
+    private async Task StopRecorderControlRuntimeAsync()
+    {
+        var runtime = recorderControlRuntime;
+        recorderControlRuntime = null;
+        recorderControlOwner = null;
+
+        if (runtime is not null)
+        {
+            try
+            {
+                await runtime.StopAsync();
+            }
+            catch (Exception)
+            {
+                // Shutdown still has to reach durable recorder finalization.
+            }
+            finally
+            {
+                runtime.Dispose();
+            }
+        }
+
+        // Do not dispose the adapter gate here: StopAsync closes the listener
+        // but an already-dispatched UI callback may still be unwinding.  The
+        // adapter becomes unreachable after that callback completes.
+    }
+
     public async Task InitializeAsync()
     {
         if (isInitialized || isInitializing)
@@ -1211,19 +1533,26 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         try
         {
             await RestoreAppSettingsAsync();
+            await ClearRetiredTeamsPairingCredentialAsync();
             await InitializeOpenAiProviderAsync();
             recordingLifecycle = new RecordingLifecycleService(new NativeRecorderBridge(), OutputFolder);
             recordingLifecycle.SnapshotChanged += OnSnapshotChanged;
             InitializeGlobalMuteHotKey();
             SetRecorderAvailable(true);
             await RefreshEndpointsCoreAsync(announce: false);
+            if (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication)
+            {
+                await RefreshProcessCatalogCoreAsync();
+            }
             RefreshStorageReadiness();
             await RecoverAndRefreshLibraryAsync();
             await RestoreTeamsIntegrationAsync();
             ApplySnapshot(recordingLifecycle.Snapshot);
+            StartRecorderControlRuntime();
         }
         catch (Exception exception)
         {
+            await StopRecorderControlRuntimeAsync();
             if (recordingLifecycle is not null)
             {
                 recordingLifecycle.SnapshotChanged -= OnSnapshotChanged;
@@ -1256,6 +1585,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         playbackTimer.Stop();
         UpdateCommandStates();
 
+        // Close the local control endpoint before finalization.  A pipe request
+        // can no longer race a stop/start with the recovery checkpoint below.
+        await StopRecorderControlRuntimeAsync();
+
         try
         {
             await PersistAppSettingsAsync();
@@ -1267,16 +1600,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             ErrorText = "無法儲存應用程式設定；下次啟動可能需要重新選擇裝置。";
         }
 
-        await DisposeTeamsMuteSyncAsync();
-        DisposeGlobalMuteHotKey();
-        teamsInputMute.Changed -= OnInputMuteChanged;
-
         var activeLifecycle = recordingLifecycle;
+        // Media publication is the first shutdown dependency. A failure while
+        // tearing down Teams, hotkeys, playback, or AI services must never skip
+        // the recorder's final durable checkpoint/finalization attempt.
         if (activeLifecycle is not null)
         {
             try
             {
-                var finalization = await activeLifecycle.FinalizeForRecoveryAsync();
+                // A request accepted just before the pipe was closed may still
+                // be unwinding on the UI dispatcher.  Join the same VM gate
+                // before finalization so it cannot overlap a start/stop.
+                var finalization = await RunRecordingLifecycleActionAsync(
+                    _ => activeLifecycle.FinalizeForRecoveryAsync(),
+                    CancellationToken.None);
                 if (!finalization.Published && finalization.Error is not null)
                 {
                     // The application service has released the active plan but
@@ -1296,8 +1633,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         recordingLifecycle = null;
         activeLifecycle?.Dispose();
+        await DisposeTeamsMuteSyncAsync();
+        DisposeGlobalMuteHotKey();
+        teamsInputMute.Changed -= OnInputMuteChanged;
         mediaPlayer?.Dispose();
         mediaPlayer = null;
+        OnPropertyChanged(nameof(PlaybackMediaPlayer));
         transcriptionCoordinator?.Dispose();
         transcriptionCoordinator = null;
         meetingSummaryClient?.Dispose();
@@ -1336,34 +1677,36 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         UpdateCommandStates();
         try
         {
-            teamsApiClient = new TeamsThirdPartyApiClient(
-                TeamsThirdPartyApiIdentity.Recorder(typeof(RecordingViewModel).Assembly.GetName().Version?.ToString() ?? "0.0.0"),
-                new WindowsDpapiTeamsPairingTokenStore());
-            teamsMuteSync = new TeamsMuteSyncCoordinator(teamsApiClient, new InputMuteCoordinatorSink(teamsInputMute));
-            teamsMuteSync.SnapshotChanged += OnTeamsMuteSnapshotChanged;
-            teamsMuteSync.MeetingPresenceChanged += OnTeamsMeetingPresenceChanged;
             teamsAutomaticRecorder = new TeamsAutomaticRecordingController(
                 StartTeamsAutomaticRecordingAsync,
                 StopTeamsAutomaticRecordingAsync);
             teamsAutomaticRecorder.SnapshotChanged += OnTeamsAutomaticRecordingSnapshotChanged;
             teamsAutomaticRecorder.OperationFailed += OnTeamsAutomaticRecordingOperationFailed;
-            await teamsMuteSync.SetEnabledAsync(true);
-            teamsMuteSnapshot = teamsMuteSync.Snapshot;
+            var monitor = new TeamsLocalMeetingMonitor(
+                new WindowsTeamsLocalWindowInventory(),
+                new WindowsTeamsWindowChangeSource());
+            teamsLocalIntegration = new TeamsLocalIntegrationCoordinator(
+                monitor,
+                // The exact UIA binding deliberately starts disabled.  This
+                // fails closed for mute routing while the meeting monitor keeps
+                // polling and handling WinEvent invalidation.
+                new WindowsTeamsMuteAutomation(TeamsMuteAutomationBinding.Disabled),
+                new InputMuteCoordinatorSink(teamsInputMute),
+                new TeamsAutomaticRecordingPresenceSink(teamsAutomaticRecorder));
+            teamsLocalIntegration.SnapshotChanged += OnTeamsLocalIntegrationSnapshotChanged;
+            await teamsLocalIntegration.StartAsync();
+            teamsLocalSnapshot = teamsLocalIntegration.Snapshot;
             IsTeamsMuteSyncEnabled = true;
             if (restoreAutomaticRecording && teamsAutomaticRecorder is { } automatic)
             {
                 await automatic.SetEnabledAsync(true);
                 teamsAutomaticSnapshot = automatic.Snapshot;
-                var meeting = teamsMuteSnapshot.LastMeetingState;
-                if (meeting is { } trustedMeeting && HasTrustedTeamsMeetingState)
-                {
-                    await automatic.SetMeetingPresenceAsync(trustedMeeting.IsInMeeting);
-                }
                 OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
                 OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+                OnPropertyChanged(nameof(TeamsLocalAutomaticRecordingStatusText));
             }
-            OnPropertyChanged(nameof(TeamsMuteStatusText));
-            OnPropertyChanged(nameof(TeamsMuteRoutingText));
+            OnPropertyChanged(nameof(TeamsLocalStatusText));
+            OnPropertyChanged(nameof(TeamsLocalRoutingText));
             PersistAppSettingsInBackground();
         }
         catch (Exception exception)
@@ -1438,14 +1781,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         try
         {
             await automatic.SetEnabledAsync(true);
-            var meeting = teamsMuteSnapshot.LastMeetingState;
-            if (meeting is { } trustedMeeting && HasTrustedTeamsMeetingState)
-            {
-                await automatic.SetMeetingPresenceAsync(trustedMeeting.IsInMeeting);
-            }
             teamsAutomaticSnapshot = automatic.Snapshot;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            OnPropertyChanged(nameof(TeamsLocalAutomaticRecordingStatusText));
             PersistAppSettingsInBackground();
         }
         catch (Exception exception)
@@ -1477,6 +1816,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             teamsAutomaticSnapshot = automatic.Snapshot;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            OnPropertyChanged(nameof(TeamsLocalAutomaticRecordingStatusText));
             PersistAppSettingsInBackground();
         }
         catch (Exception exception)
@@ -1523,6 +1863,15 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     private async Task DisposeTeamsMuteSyncAsync()
     {
+        var local = teamsLocalIntegration;
+        teamsLocalIntegration = null;
+        teamsLocalSnapshot = TeamsLocalIntegrationSnapshot.Initial;
+        if (local is not null)
+        {
+            local.SnapshotChanged -= OnTeamsLocalIntegrationSnapshotChanged;
+            await local.DisposeAsync();
+        }
+
         await DisposeTeamsAutomaticRecordingAsync();
 
         var sync = teamsMuteSync;
@@ -1534,6 +1883,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         teamsInputMute.SetInputMuted(false);
         OnPropertyChanged(nameof(TeamsMuteStatusText));
         OnPropertyChanged(nameof(TeamsMuteRoutingText));
+        OnPropertyChanged(nameof(TeamsLocalStatusText));
+        OnPropertyChanged(nameof(TeamsLocalRoutingText));
+        OnPropertyChanged(nameof(TeamsLocalAutomaticRecordingStatusText));
 
         if (sync is not null)
         {
@@ -1565,6 +1917,34 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         automatic.SnapshotChanged -= OnTeamsAutomaticRecordingSnapshotChanged;
         automatic.OperationFailed -= OnTeamsAutomaticRecordingOperationFailed;
         await automatic.DisposeAsync();
+    }
+
+    private void OnTeamsLocalIntegrationSnapshotChanged(
+        object? sender,
+        TeamsLocalIntegrationSnapshot changed)
+    {
+        void Apply()
+        {
+            if (isShuttingDown || !ReferenceEquals(sender, teamsLocalIntegration))
+            {
+                return;
+            }
+
+            teamsLocalSnapshot = changed;
+            OnPropertyChanged(nameof(TeamsLocalStatusText));
+            OnPropertyChanged(nameof(TeamsLocalRoutingText));
+            OnPropertyChanged(nameof(TeamsLocalAutomaticRecordingStatusText));
+            UpdateCommandStates();
+        }
+
+        if (dispatcherQueue.HasThreadAccess)
+        {
+            Apply();
+        }
+        else
+        {
+            _ = dispatcherQueue.TryEnqueue(Apply);
+        }
     }
 
     private void OnTeamsMuteSnapshotChanged(object? sender, TeamsMuteSyncSnapshot changed)
@@ -1685,6 +2065,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             teamsAutomaticSnapshot = changed;
             OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
             OnPropertyChanged(nameof(TeamsAutomaticRecordingStatusText));
+            OnPropertyChanged(nameof(TeamsLocalAutomaticRecordingStatusText));
             NotifyRecordingOverlayStateChanged();
             UpdateCommandStates();
         }
@@ -1840,35 +2221,50 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public bool CanConfirmRecycle =>
         IsRecycleConfirmationVisible &&
-        SelectedLibraryItem is not null &&
+        pendingRecycleIdentity is not null &&
         !isShuttingDown;
 
-    private Task StartAsync() => RunOperationAsync(async () =>
-    {
-        var result = await StartRecordingAsync(RecordingSessionKind.Manual);
-        if (result.State == RecordingCoordinatorState.Recording)
+    private Task StartAsync() => RunOperationAsync(() =>
+        RunRecordingLifecycleActionAsync(async cancellationToken =>
         {
-            await NotifyManualRecordingStartedAsync();
-        }
-    });
+            var result = await StartRecordingAsync(RecordingSessionKind.Manual, cancellationToken: cancellationToken);
+            if (result.State == RecordingCoordinatorState.Recording)
+            {
+                await NotifyManualRecordingStartedAsync();
+            }
+            return true;
+        }, CancellationToken.None));
 
-    private Task StartTestAsync() => RunOperationAsync(async () =>
-    {
-        var result = await StartRecordingAsync(RecordingSessionKind.Test, TimeSpan.FromSeconds(10));
-        if (result.State == RecordingCoordinatorState.Recording)
+    private Task StartTestAsync() => RunOperationAsync(() =>
+        RunRecordingLifecycleActionAsync(async cancellationToken =>
         {
-            await NotifyManualRecordingStartedAsync();
-        }
-    });
+            var result = await StartRecordingAsync(
+                RecordingSessionKind.Test,
+                TimeSpan.FromSeconds(10),
+                cancellationToken);
+            if (result.State == RecordingCoordinatorState.Recording)
+            {
+                await NotifyManualRecordingStartedAsync();
+            }
+            return true;
+        }, CancellationToken.None));
 
-    private Task StopAsync() => RunOperationAsync(async () =>
+    private Task StopAsync() => RunOperationAsync(() =>
+        RunRecordingLifecycleActionAsync(async cancellationToken =>
+        {
+            await StopRecordingCoreAsync(suppressAutomaticRestart: true, cancellationToken);
+            return true;
+        }, CancellationToken.None));
+
+    private async Task StopRecordingCoreAsync(bool suppressAutomaticRestart, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var automatic = teamsAutomaticRecorder;
-        if (automatic?.Snapshot.RecordingOwner == RecordingOwner.TeamsAutomatic)
+        if (suppressAutomaticRestart && automatic?.Snapshot.RecordingOwner == RecordingOwner.TeamsAutomatic)
         {
-            // An explicit Stop is a user decision.  Suppress re-starts for this meeting before
-            // stopping the capture, then retain the finished session normally.
-            await automatic.SuppressUntilMeetingEndsAsync();
+            // An explicit UI or pipe Stop is a user decision.  Suppress any
+            // restart for the current meeting before ending this capture.
+            await automatic.SuppressUntilMeetingEndsAsync(cancellationToken);
         }
 
         var result = await GetRecordingLifecycle().StopAsync();
@@ -1876,7 +2272,23 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         await EnsureSessionPublishedAsync();
         await RefreshLibraryCoreAsync();
         await NotifyManualRecordingStoppedAsync();
-    });
+    }
+
+    private async Task<T> RunRecordingLifecycleActionAsync<T>(
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken)
+    {
+        await recordingLifecycleActionGate.WaitAsync(cancellationToken);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return await action(cancellationToken);
+        }
+        finally
+        {
+            recordingLifecycleActionGate.Release();
+        }
+    }
 
     private async Task NotifyManualRecordingStartedAsync()
     {
@@ -1925,14 +2337,19 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private Task<TeamsAutomaticStartResult> StartTeamsAutomaticRecordingAsync(CancellationToken cancellationToken) =>
         InvokeOnUiAsync(() => StartTeamsAutomaticRecordingOnUiAsync(cancellationToken));
 
-    private async Task<TeamsAutomaticStartResult> StartTeamsAutomaticRecordingOnUiAsync(CancellationToken cancellationToken)
+    private Task<TeamsAutomaticStartResult> StartTeamsAutomaticRecordingOnUiAsync(CancellationToken cancellationToken) =>
+        RunRecordingLifecycleActionAsync(
+            _ => StartTeamsAutomaticRecordingOnUiCoreAsync(cancellationToken),
+            cancellationToken);
+
+    private async Task<TeamsAutomaticStartResult> StartTeamsAutomaticRecordingOnUiCoreAsync(CancellationToken cancellationToken)
     {
         if (cancellationToken.IsCancellationRequested || isShuttingDown)
         {
             return TeamsAutomaticStartResult.BlockedBy("應用程式正在停止。" );
         }
 
-        if (!HasTrustedTeamsMeetingState || teamsMuteSnapshot.LastMeetingState is not { IsInMeeting: true })
+        if (!HasTrustedTeamsMeetingState)
         {
             return TeamsAutomaticStartResult.BlockedBy("Teams 尚未提供可信的進行中會議狀態。" );
         }
@@ -1945,7 +2362,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         IsBusy = true;
         try
         {
-            var result = await StartRecordingAsync(RecordingSessionKind.Meeting);
+            var result = await StartRecordingAsync(RecordingSessionKind.Meeting, cancellationToken: cancellationToken);
             if (result.State != RecordingCoordinatorState.Recording)
             {
                 return TeamsAutomaticStartResult.Failed(result.Error ?? "原生錄音元件沒有進入錄音狀態。" );
@@ -1978,7 +2395,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     private async Task StopTeamsAutomaticRecordingAsync(CancellationToken cancellationToken)
     {
-        await InvokeOnUiAsync(async () =>
+        await InvokeOnUiAsync(() => RunRecordingLifecycleActionAsync(async lifecycleCancellationToken =>
         {
             if (isShuttingDown || cancellationToken.IsCancellationRequested || recordingLifecycle is null ||
                 snapshot.State is not (RecordingCoordinatorState.Starting or RecordingCoordinatorState.Recording or RecordingCoordinatorState.Stopping))
@@ -2004,7 +2421,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             {
                 IsBusy = false;
             }
-        });
+        }, cancellationToken));
     }
 
     private Task RefreshEndpointsAsync() => RunOperationAsync(
@@ -2026,12 +2443,204 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 VideoCaptureTargetSelection.Resolve(previous, [choice.Target]) is not null);
     }
 
+    internal RecorderCrashContext CaptureCrashContext() => new(
+        snapshot.State.ToString(),
+        recordingStartedAt is null ? null : Math.Max(0, (long)elapsed.TotalSeconds),
+        storageCapacity?.AvailableBytes,
+        snapshot.HasRecoverableFault,
+        snapshot.Request?.Mode.ToString() ?? "none");
+
+    public Task<RecorderControlStatus> GetRecorderControlStatusAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var state = snapshot.State switch
+        {
+            RecordingCoordinatorState.Ready or RecordingCoordinatorState.Stopped => RecorderControlRecordingState.Idle,
+            RecordingCoordinatorState.Starting => RecorderControlRecordingState.Starting,
+            RecordingCoordinatorState.Recording => RecorderControlRecordingState.Recording,
+            RecordingCoordinatorState.Stopping => RecorderControlRecordingState.Stopping,
+            _ => RecorderControlRecordingState.Faulted,
+        };
+        var operation = isShuttingDown || isFaultFinalizationInProgress
+            ? RecorderControlLifecycleOperation.Finalize
+            : snapshot.State == RecordingCoordinatorState.Starting
+                ? RecorderControlLifecycleOperation.Start
+                : snapshot.State == RecordingCoordinatorState.Stopping
+                    ? RecorderControlLifecycleOperation.Stop
+                    : isInitializing
+                        ? RecorderControlLifecycleOperation.Refresh
+                        : RecorderControlLifecycleOperation.None;
+        var version = typeof(RecordingViewModel).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+        return Task.FromResult(new RecorderControlStatus(
+            AppRunning: isInitialized && !isShuttingDown,
+            AppVersion: version,
+            RecordingState: state,
+            LifecycleOperation: operation,
+            ElapsedSeconds: state == RecorderControlRecordingState.Recording
+                ? Math.Clamp((long)elapsed.TotalSeconds, 0, 31_536_000)
+                : null,
+            MicrophoneMuted: teamsInputMute.IsMuted,
+            AutoModeEnabled: IsTeamsAutomaticRecordingEnabled));
+    }
+
+    public async Task<RecorderControlActionResult> StartRecorderControlAsync(CancellationToken cancellationToken)
+    {
+        if (isShuttingDown || !isInitialized || recordingLifecycle is null || !isRecorderAvailable)
+        {
+            return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+        }
+
+        if (snapshot.State == RecordingCoordinatorState.Recording)
+        {
+            return RecorderControlActionResult.NoOp();
+        }
+
+        if (IsBusy || snapshot.State is RecordingCoordinatorState.Starting or RecordingCoordinatorState.Stopping)
+        {
+            return RecorderControlActionResult.Rejected(RecorderControlErrorCode.Busy);
+        }
+
+        return await RunRecordingLifecycleActionAsync(async token =>
+        {
+            if (isShuttingDown || !CanStart)
+            {
+                return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+            }
+
+            IsBusy = true;
+            try
+            {
+                var result = await StartRecordingAsync(RecordingSessionKind.Manual, cancellationToken: token);
+                if (result.State != RecordingCoordinatorState.Recording)
+                {
+                    return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+                }
+
+                await NotifyManualRecordingStartedAsync();
+                return RecorderControlActionResult.Accepted();
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+            }
+            finally
+            {
+                IsBusy = false;
+            }
+        }, cancellationToken);
+    }
+
+    public async Task<RecorderControlActionResult> StopRecorderControlAsync(CancellationToken cancellationToken)
+    {
+        if (isShuttingDown || recordingLifecycle is null)
+        {
+            return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+        }
+
+        if (snapshot.State is RecordingCoordinatorState.Ready or RecordingCoordinatorState.Stopped or RecordingCoordinatorState.Failed)
+        {
+            return RecorderControlActionResult.NoOp();
+        }
+
+        if (IsBusy)
+        {
+            return RecorderControlActionResult.Rejected(RecorderControlErrorCode.Busy);
+        }
+
+        return await RunRecordingLifecycleActionAsync(async token =>
+        {
+            if (isShuttingDown || recordingLifecycle is null)
+            {
+                return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+            }
+
+            IsBusy = true;
+            try
+            {
+                await StopRecordingCoreAsync(suppressAutomaticRestart: true, token);
+                return RecorderControlActionResult.Accepted();
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+            }
+            finally
+            {
+                IsBusy = false;
+            }
+        }, cancellationToken);
+    }
+
+    public async Task<RecorderControlActionResult> SetRecorderControlAutomaticModeAsync(
+        bool enabled,
+        CancellationToken cancellationToken)
+    {
+        var automatic = teamsAutomaticRecorder;
+        if (isShuttingDown || !IsTeamsMuteSyncEnabled || automatic is null)
+        {
+            return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+        }
+
+        if (automatic.Snapshot.IsEnabled == enabled)
+        {
+            return RecorderControlActionResult.NoOp();
+        }
+
+        try
+        {
+            await automatic.SetEnabledAsync(enabled, cancellationToken);
+            teamsAutomaticSnapshot = automatic.Snapshot;
+            OnPropertyChanged(nameof(IsTeamsAutomaticRecordingEnabled));
+            OnPropertyChanged(nameof(TeamsLocalAutomaticRecordingStatusText));
+            PersistAppSettingsInBackground();
+            return RecorderControlActionResult.Accepted();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (ObjectDisposedException)
+        {
+            return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+        }
+        catch (Exception)
+        {
+            return RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady);
+        }
+    }
+
+    public Task<RecorderControlActionResult> SetRecorderControlMicrophoneMutedAsync(
+        bool muted,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (isShuttingDown)
+        {
+            return Task.FromResult(RecorderControlActionResult.Rejected(RecorderControlErrorCode.NotReady));
+        }
+
+        if (teamsInputMute.IsLocalMuted == muted)
+        {
+            return Task.FromResult(RecorderControlActionResult.NoOp());
+        }
+
+        teamsInputMute.SetLocalMuted(muted);
+        return Task.FromResult(RecorderControlActionResult.Accepted());
+    }
+
     private async Task RefreshProcessCatalogCoreAsync()
     {
         // Process enumeration can be slow or deny access to individual processes.
         // The Application catalog filters those cases and exposes no paths or command lines.
-        var entries = TeamsProcessCatalogPolicy.FilterForTeams(
-            await Task.Run(processCatalog.GetProcesses));
+        var entries = await Task.Run(processCatalog.GetProcesses);
         var previous = SelectedProcess;
 
         ProcessCatalog.Clear();
@@ -2049,30 +2658,79 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         SelectedProcess = ProcessCatalog.FirstOrDefault(candidate =>
             candidate.HasSameIdentity(previous));
-        ProcessCatalogStatusText = ProcessCatalog.Count == 0
-            ? "找不到可用的 Teams 程序；請先開啟 Microsoft Teams，然後重新整理。"
-            : $"已列出 {ProcessCatalog.Count} 個可用的 Teams 程序。";
+
+        var restoredStatus = false;
+        if (SelectedProcess is null && pendingSelectedApplicationExecutable is { } executable)
+        {
+            var matches = ProcessCatalog
+                .Where(candidate => SameExecutable(candidate.ProcessName, executable))
+                .Take(2)
+                .ToArray();
+            if (matches.Length == 1)
+            {
+                SelectedProcess = matches[0];
+                ProcessCatalogStatusText = $"已重新連接 {matches[0].DisplayName}。";
+                restoredStatus = true;
+            }
+            else if (matches.Length > 1)
+            {
+                ProcessCatalogStatusText = $"找到多個 {executable} 程序；為避免選錯來源，請手動選取。";
+                restoredStatus = true;
+            }
+        }
+
+        pendingSelectedApplicationExecutable = null;
+        if (!restoredStatus)
+        {
+            ProcessCatalogStatusText = SelectedProcess is not null
+                ? $"已保留 {SelectedProcess.DisplayName} 的目前程序選擇。"
+                : ProcessCatalog.Count == 0
+                    ? "找不到可用的應用程式程序；請先啟動目標應用程式，然後重新整理。"
+                    : $"已列出 {ProcessCatalog.Count} 個可用程序；請選取要錄製的應用程式。";
+        }
     }
+
+    private static bool SameExecutable(string left, string right) =>
+        WindowsExecutableBasename.TryCreateExecutableBasename(left, out var normalizedLeft) &&
+        WindowsExecutableBasename.TryCreateExecutableBasename(right, out var normalizedRight) &&
+        string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
 
     private Task RefreshLibraryAsync() => RunOperationAsync(RefreshLibraryCoreAsync);
 
-    private Task PlayAsync() => RunOperationAsync(() =>
+    private Task PlayAsync() => RunOperationAsync(async () =>
     {
-        if (SelectedLibraryItem is not { IsPlayable: true } item || mediaPlayer is null)
+        if (mediaPlayer is null)
         {
-            PlaybackText = "請選取存在的 M4A 檔案。";
-            return Task.CompletedTask;
+            PlaybackText = "播放元件尚未準備完成。";
+            return;
+        }
+
+        var target = CaptureLibraryActionTarget(requireManaged: false);
+        var item = await ResolveCanonicalLibraryActionAsync(target);
+        // Selection is allowed to change while the filesystem is re-checked;
+        // never attach a just-resolved old row to the newly selected stage.
+        if (!IsCurrentLibraryActionTarget(target))
+        {
+            return;
+        }
+
+        if (!item.IsPlayable)
+        {
+            PlaybackText = "請選取存在的 MP4 或舊版 M4A 檔案。";
+            return;
         }
 
         if (!PathEquals(loadedPlaybackPath, item.MediaPath))
         {
             mediaPlayer.Source = MediaSource.CreateFromUri(new Uri(item.MediaPath, UriKind.Absolute));
             loadedPlaybackPath = item.MediaPath;
+            ClearPlaybackTimeline();
         }
 
+        mediaPlayer.Volume = PlaybackVolume;
+        mediaPlayer.PlaybackSession.PlaybackRate = SelectedPlaybackRate;
         mediaPlayer.Play();
         PlaybackText = $"正在播放：{item.DisplayName}";
-        return Task.CompletedTask;
     });
 
     private Task PauseAsync() => RunOperationAsync(() =>
@@ -2091,33 +2749,43 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
 
         SetPlaybackProgress(0d);
+        SetPlaybackPositionSeconds(0d);
         PlaybackText = "已停止。";
+        return Task.CompletedTask;
+    });
+
+    private Task SkipPlaybackAsync(double offsetSeconds) => RunOperationAsync(() =>
+    {
+        if (!CanSeek || mediaPlayer is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        SeekPlaybackToSeconds(mediaPlayer.PlaybackSession.Position.TotalSeconds + offsetSeconds);
         return Task.CompletedTask;
     });
 
     private Task SaveLibraryMetadataAsync() => RunOperationAsync(async () =>
     {
-        var item = SelectedLibraryItem
-            ?? throw new InvalidOperationException("請先選取要編輯的工作階段。");
+        var target = CaptureLibraryActionTarget(requireManaged: true);
         var tags = LibraryTagsText.Split(
             [',', ';', '\r', '\n'],
             StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         var library = GetLibraryService();
-        await Task.Run(() => library.UpdateMetadataAsync(
-            item.SessionPath,
+        await ResolveCanonicalLibraryActionAsync(target);
+        await Task.Run(async () => await library.UpdateMetadataAsync(
+            target.Identity,
             LibraryTitle,
             tags,
             IsLibraryFavorite));
         await RefreshLibraryCoreAsync();
-        SelectedLibraryItem = LibraryItems.FirstOrDefault(candidate =>
-            PathEquals(candidate.SessionPath, item.SessionPath));
         PlaybackText = "已儲存工作階段資料。";
     });
 
-    private Task OpenLibraryFolderAsync() => RunOperationAsync(() =>
+    private Task OpenLibraryFolderAsync() => RunOperationAsync(async () =>
     {
-        var item = SelectedLibraryItem
-            ?? throw new InvalidOperationException("請先選取要開啟的工作階段。");
+        var target = CaptureLibraryActionTarget(requireManaged: true);
+        var item = await ResolveCanonicalLibraryActionAsync(target);
         if (!Directory.Exists(item.SessionPath))
         {
             throw new DirectoryNotFoundException("選取的工作階段資料夾已不存在。");
@@ -2128,7 +2796,6 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             FileName = item.SessionPath,
             UseShellExecute = true,
         });
-        return Task.CompletedTask;
     });
 
     private Task SaveDiagnosticsAsync() => RunOperationAsync(async () =>
@@ -2154,52 +2821,60 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         return Task.CompletedTask;
     });
 
-    private Task RequestRecycleLibraryAsync() => RunOperationAsync(() =>
+    private Task RequestRecycleLibraryAsync() => RunOperationAsync(async () =>
     {
-        if (SelectedLibraryItem is null)
+        var target = CaptureLibraryActionTarget(requireManaged: true);
+        var item = await ResolveCanonicalLibraryActionAsync(target);
+        if (!IsCurrentLibraryActionTarget(target))
         {
-            throw new InvalidOperationException("請先選取要移除的工作階段。");
+            return;
         }
 
+        pendingRecycleIdentity = target.Identity;
+        pendingRecycleDisplayName = item.DisplayName;
         IsRecycleConfirmationVisible = true;
-        return Task.CompletedTask;
     });
 
     private Task CancelRecycleLibraryAsync() => RunOperationAsync(() =>
     {
+        pendingRecycleIdentity = null;
+        pendingRecycleDisplayName = null;
         IsRecycleConfirmationVisible = false;
         return Task.CompletedTask;
     });
 
     private Task ConfirmRecycleLibraryAsync() => RunOperationAsync(async () =>
     {
-        var item = SelectedLibraryItem
-            ?? throw new InvalidOperationException("請先選取要移除的工作階段。");
-        if (!IsRecycleConfirmationVisible)
+        var expected = pendingRecycleIdentity;
+        if (!IsRecycleConfirmationVisible || expected is null)
         {
             throw new InvalidOperationException("請先確認移至資源回收桶。");
         }
 
-        if (PathEquals(loadedPlaybackPath, item.MediaPath))
+        // Verify and recycle the exact row that the confirmation referred to,
+        // rather than whichever row happens to be selected now.
+        var library = GetLibraryService();
+        var canonical = await Task.Run(() => library.ResolveCanonicalSession(expected))
+            ?? throw new IOException("該工作階段已被移除或取代；未執行刪除。請重新整理錄音庫。");
+        if (PathEquals(loadedPlaybackPath, canonical.MediaPath))
         {
-            mediaPlayer?.Pause();
-            if (mediaPlayer is not null)
-            {
-                mediaPlayer.PlaybackSession.Position = TimeSpan.Zero;
-            }
-            SetPlaybackProgress(0d);
-            loadedPlaybackPath = null;
+            ClearLoadedPlayback();
         }
 
-        await Task.Run(() => GetLibraryService().RecycleSession(item.SessionPath, userConfirmed: true));
+        await Task.Run(() => library.RecycleSession(expected, userConfirmed: true));
+        pendingRecycleIdentity = null;
+        pendingRecycleDisplayName = null;
         IsRecycleConfirmationVisible = false;
-        SelectedLibraryItem = null;
         await RefreshLibraryCoreAsync();
         PlaybackText = "已將工作階段移至資源回收桶。";
     });
 
-    private async Task<RecordingCoordinatorSnapshot> StartRecordingAsync(RecordingSessionKind kind, TimeSpan? testDuration = null)
+    private async Task<RecordingCoordinatorSnapshot> StartRecordingAsync(
+        RecordingSessionKind kind,
+        TimeSpan? testDuration = null,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!SelectedDevicesReady)
         {
             throw new InvalidOperationException("請重新選取可用的輸出裝置與麥克風後再開始錄製。");
@@ -2230,7 +2905,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                     process.ProcessName),
                 IncludeProcessTree: true,
                 TestDuration: testDuration,
-                VideoTarget: SelectedVideoTargetOrNull()));
+                VideoTarget: SelectedVideoTargetOrNull()), cancellationToken);
         }
         else
         {
@@ -2240,11 +2915,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 RenderEndpointId: SelectedRenderEndpoint?.EndpointId,
                 MicrophoneEndpointId: SelectedMicrophoneEndpoint?.EndpointId,
                 TestDuration: testDuration,
-                VideoTarget: SelectedVideoTargetOrNull()));
+                VideoTarget: SelectedVideoTargetOrNull()), cancellationToken);
         }
         var plan = started.Session;
-        NextOutputPath = IsSharedContentCaptureEnabled ? plan.FinalVideoPath : plan.FinalAudioPath;
-        lastResultText = $"正在建立工作階段：{plan.FinalAudioPath}";
+        // New Windows sessions are always MP4.  Legacy root-level M4A files
+        // remain a playback-only compatibility path in the library.
+        NextOutputPath = plan.FinalVideoPath;
+        lastResultText = $"正在建立工作階段：{plan.FinalVideoPath}";
         OnPropertyChanged(nameof(ResultText));
         UpdateCommandStates();
 
@@ -2370,39 +3047,117 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     {
         try
         {
-            var sessions = await Task.Run(() => GetLibraryService().ListSessions());
-            var selectedPath = SelectedLibraryItem?.MediaPath;
-            LibraryItems.Clear();
-            foreach (var session in sessions)
-            {
-                var displayName = string.IsNullOrWhiteSpace(session.Metadata.Title)
-                    ? session.IsManaged
-                        ? Path.GetFileName(session.FolderPath)
-                        : Path.GetFileNameWithoutExtension(session.AudioPath)
-                    : session.Metadata.Title;
-                LibraryItems.Add(new LibraryRecording(
-                    displayName,
-                    session.AudioPath,
-                    session.FolderPath,
-                    IsPlayable: File.Exists(session.AudioPath),
-                    session.Metadata.Title,
-                    session.Metadata.Tags,
-                    session.Metadata.IsFavorite,
-                    session.Kind,
-                    session.AudioBytes,
-                    session.HasRecoverableBackup,
-                    session.IsManaged));
-            }
-
-            SelectedLibraryItem = LibraryItems.FirstOrDefault(item =>
-                PathEquals(item.MediaPath, selectedPath));
-            OnPropertyChanged(nameof(LibrarySummaryText));
+            var library = GetLibraryService();
+            var projections = await Task.Run(() => library.ListSessions()
+                .Select(TryCreateLibraryRecording)
+                .Where(static item => item is not null)
+                .Cast<LibraryRecording>()
+                .ToArray());
+            var selectedIdentity = SelectedLibraryItem?.Identity;
+            allLibraryItems.Clear();
+            allLibraryItems.AddRange(projections);
+            ApplyLibraryQuery(selectedIdentity);
         }
         catch (Exception exception)
         {
             ErrorText = $"無法讀取本機工作階段資料庫：{exception.Message}";
         }
     }
+
+    private void ApplyLibraryQuery(RecordingLibrarySessionIdentity? preferredSelection = null)
+    {
+        var selectedIdentity = preferredSelection ?? SelectedLibraryItem?.Identity;
+        var query = LibrarySearchText;
+        var visible = allLibraryItems
+            .Where(item => !LibraryFavoritesOnly || item.IsFavorite)
+            .Where(item => item.SearchDocument.Matches(query))
+            .Select(item => item with { TranscriptSnippet = item.SearchDocument.TranscriptSnippet(query) })
+            .ToArray();
+
+        LibraryItems.Clear();
+        foreach (var item in visible)
+        {
+            LibraryItems.Add(item);
+        }
+
+        SelectedLibraryItem = selectedIdentity is null
+            ? null
+            : visible.FirstOrDefault(item => item.Identity == selectedIdentity);
+        OnPropertyChanged(nameof(LibrarySummaryText));
+    }
+
+    private static LibraryRecording? TryCreateLibraryRecording(RecordingSessionLibraryItem session)
+    {
+        try
+        {
+            var displayName = string.IsNullOrWhiteSpace(session.Metadata.Title)
+                ? session.IsManaged
+                    ? Path.GetFileName(session.FolderPath)
+                    : Path.GetFileNameWithoutExtension(session.MediaPath)
+                : session.Metadata.Title;
+            var identity = RecordingLibrarySessionIdentity.Create(session);
+            return new LibraryRecording(
+                displayName,
+                session.MediaPath,
+                session.FolderPath,
+                IsPlayable: File.Exists(session.MediaPath),
+                session.Metadata.Title,
+                session.Metadata.Tags,
+                session.Metadata.IsFavorite,
+                session.Kind,
+                session.MediaBytes,
+                session.HasRecoverableBackup,
+                session.IsManaged,
+                session.Metadata.MediaKind,
+                session.Metadata.RecoveryState,
+                session.Metadata.Source,
+                identity,
+                RecordingLibrarySearchDocument.Create(session, displayName),
+                RecordingLibraryArtifactStatus.Read(session.FolderPath, session.IsManaged));
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (ArgumentException) { return null; }
+    }
+
+    private sealed record LibraryActionTarget(
+        RecordingLibrarySessionIdentity Identity,
+        long SelectionGeneration,
+        string DisplayName);
+
+    private LibraryActionTarget CaptureLibraryActionTarget(bool requireManaged)
+    {
+        var item = SelectedLibraryItem
+            ?? throw new InvalidOperationException("請先從錄音庫選取工作階段。");
+        if (!item.IsPlayable)
+        {
+            throw new IOException("選取的媒體檔案已不存在。請重新整理錄音庫。");
+        }
+
+        if (requireManaged && !item.IsManaged)
+        {
+            throw new InvalidOperationException("舊版 M4A 可播放，但無法由此版本編輯資料或移至資源回收桶。");
+        }
+
+        return new(item.Identity, librarySelectionGeneration, item.DisplayName);
+    }
+
+    private async Task<LibraryRecording> ResolveCanonicalLibraryActionAsync(LibraryActionTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        var library = GetLibraryService();
+        return await Task.Run(() =>
+        {
+            var canonical = library.ResolveCanonicalSession(target.Identity)
+                ?? throw new IOException("選取的工作階段已被移除或取代；未對其他錄音執行操作。請重新整理後再試一次。");
+            return TryCreateLibraryRecording(canonical)
+                ?? throw new IOException("選取的工作階段在重新驗證時已不再可用。請重新整理錄音庫。");
+        });
+    }
+
+    private bool IsCurrentLibraryActionTarget(LibraryActionTarget target) =>
+        librarySelectionGeneration == target.SelectionGeneration &&
+        SelectedLibraryItem?.Identity == target.Identity;
 
     private async Task EnsureSessionPublishedAsync()
     {
@@ -2414,9 +3169,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         if (result.Published)
         {
-            NextOutputPath = result.Session.FinalAudioPath;
-            lastResultText = $"Published: {result.Session.FinalAudioPath}";
-            StatusText = "Recording saved.";
+            NextOutputPath = result.Session.FinalVideoPath;
+            lastResultText = $"已發佈：{result.Session.FinalVideoPath}";
+            StatusText = "錄音已儲存。";
             await RefreshLibraryCoreAsync();
         }
         else
@@ -2526,6 +3281,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     {
         if (isShuttingDown ||
             isTelemetryRefreshInProgress ||
+            isLowStorageStopInProgress ||
             snapshot.State != RecordingCoordinatorState.Recording ||
             recordingLifecycle is null)
         {
@@ -2536,6 +3292,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         try
         {
             RefreshElapsed();
+            var now = DateTimeOffset.UtcNow;
+            if (now >= nextStorageCapacityCheckUtc)
+            {
+                nextStorageCapacityCheckUtc = now.AddSeconds(2);
+                storageCapacity = recordingLifecycle.GetCapacityStatus();
+                OnPropertyChanged(nameof(StorageReadinessText));
+                if (storageCapacity.Decision == RecordingStorageDecision.Stop)
+                {
+                    isLowStorageStopInProgress = true;
+                    ErrorText = "儲存空間已低於安全下限；正在停止並保存最近的耐久 checkpoint。";
+                    await StopAsync();
+                    return;
+                }
+            }
             ApplySnapshot(await recordingLifecycle.RefreshAsync());
         }
         catch (Exception exception)
@@ -2544,6 +3314,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
         finally
         {
+            isLowStorageStopInProgress = false;
             isTelemetryRefreshInProgress = false;
         }
     }
@@ -2726,10 +3497,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
 
         var session = mediaPlayer.PlaybackSession;
-        var progress = session.NaturalDuration.TotalSeconds > 0
-            ? Math.Clamp(session.Position.TotalSeconds / session.NaturalDuration.TotalSeconds, 0d, 1d)
-            : 0d;
+        var duration = Math.Max(0d, session.NaturalDuration.TotalSeconds);
+        PlaybackDurationSeconds = duration;
+        var position = Math.Clamp(session.Position.TotalSeconds, 0d, duration);
+        var progress = duration > 0d ? position / duration : 0d;
         SetPlaybackProgress(progress);
+        SetPlaybackPositionSeconds(position);
     }
 
     private void SetPlaybackProgress(double value)
@@ -2745,15 +3518,79 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     }
 
-    private void SeekPlayback(double progress)
+    private void SetPlaybackPositionSeconds(double value)
+    {
+        isUpdatingPlaybackPosition = true;
+        try
+        {
+            PlaybackPositionSeconds = Math.Clamp(value, 0d, Math.Max(0d, PlaybackDurationSeconds));
+        }
+        finally
+        {
+            isUpdatingPlaybackPosition = false;
+        }
+
+        OnPropertyChanged(nameof(PlaybackElapsedText));
+        OnPropertyChanged(nameof(PlaybackRemainingText));
+        OnPropertyChanged(nameof(PlaybackTimeReadout));
+    }
+
+    private void SeekPlaybackByProgress(double progress)
+    {
+        SeekPlaybackToSeconds(Math.Max(0d, PlaybackDurationSeconds) * Math.Clamp(progress, 0d, 1d));
+    }
+
+    private void SeekPlaybackToSeconds(double seconds)
     {
         if (!CanSeek || mediaPlayer is null)
         {
             return;
         }
 
-        mediaPlayer.PlaybackSession.Position = TimeSpan.FromTicks(
-            (long)(mediaPlayer.PlaybackSession.NaturalDuration.Ticks * progress));
+        var duration = Math.Max(0d, mediaPlayer.PlaybackSession.NaturalDuration.TotalSeconds);
+        var clamped = Math.Clamp(seconds, 0d, duration);
+        mediaPlayer.PlaybackSession.Position = TimeSpan.FromSeconds(clamped);
+        SetPlaybackPositionSeconds(clamped);
+        SetPlaybackProgress(duration > 0d ? clamped / duration : 0d);
+    }
+
+    private void ResetPlaybackForSelectionChange(LibraryRecording? selected)
+    {
+        if (selected is not null && PathEquals(loadedPlaybackPath, selected.MediaPath))
+        {
+            return;
+        }
+
+        ClearLoadedPlayback();
+    }
+
+    private void ClearLoadedPlayback()
+    {
+        playbackTimer.Stop();
+        if (mediaPlayer is not null)
+        {
+            mediaPlayer.Pause();
+            mediaPlayer.PlaybackSession.Position = TimeSpan.Zero;
+            mediaPlayer.Source = null;
+        }
+
+        loadedPlaybackPath = null;
+        ClearPlaybackTimeline();
+    }
+
+    private void ClearPlaybackTimeline()
+    {
+        PlaybackDurationSeconds = 0d;
+        SetPlaybackPositionSeconds(0d);
+        SetPlaybackProgress(0d);
+    }
+
+    private static string FormatPlaybackTime(double seconds, bool includesHours)
+    {
+        var totalSeconds = Math.Max(0, (int)Math.Round(double.IsFinite(seconds) ? seconds : 0d));
+        return includesHours
+            ? $"{totalSeconds / 3600:00}:{totalSeconds / 60 % 60:00}:{totalSeconds % 60:00}"
+            : $"{totalSeconds / 60:00}:{totalSeconds % 60:00}";
     }
 
     private async Task RunOperationAsync(Func<Task> operation)
@@ -2819,6 +3656,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         PlayCommand.RaiseCanExecuteChanged();
         PauseCommand.RaiseCanExecuteChanged();
         StopPlaybackCommand.RaiseCanExecuteChanged();
+        SkipBackward15Command.RaiseCanExecuteChanged();
+        SkipForward15Command.RaiseCanExecuteChanged();
         SaveLibraryMetadataCommand.RaiseCanExecuteChanged();
         OpenLibraryFolderCommand.RaiseCanExecuteChanged();
         RequestRecycleLibraryCommand.RaiseCanExecuteChanged();
@@ -2861,7 +3700,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         RecordingCoordinatorState.Recording => "錄音中",
         RecordingCoordinatorState.Stopping => "正在停止並儲存…",
         RecordingCoordinatorState.Stopped when snapshot.HasRecoverableFault => "錄音異常已完成清理；保留可復原證據，可開始新的錄音。",
-        RecordingCoordinatorState.Stopped => "正在發佈 M4A 工作階段…",
+        RecordingCoordinatorState.Stopped => "正在發佈 MP4 工作階段…",
         RecordingCoordinatorState.Failed => "無法開始錄音",
         RecordingCoordinatorState.Faulted => "錄音異常，已保留可復原的工作檔（若存在）。",
         _ => "未知狀態",
@@ -2954,10 +3793,26 @@ public sealed record LibraryRecording(
     IReadOnlyList<string> Tags,
     bool IsFavorite,
     RecordingSessionKind Kind,
-    long AudioBytes,
+    long MediaBytes,
     bool HasRecoverableBackup,
-    bool IsManaged)
+    bool IsManaged,
+    string MediaKind,
+    RecordingRecoveryState RecoveryState,
+    string Source,
+    RecordingLibrarySessionIdentity Identity,
+    RecordingLibrarySearchDocument SearchDocument,
+    RecordingLibraryArtifactStatus ArtifactStatus,
+    string? TranscriptSnippet = null)
 {
+    // Kept as a compatibility alias for any diagnostic or UI binding compiled
+    // before the library became media-kind neutral.
+    public long AudioBytes => MediaBytes;
+
+    public bool IsVideo => string.Equals(MediaKind, "video", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(Path.GetExtension(MediaPath), ".mp4", StringComparison.OrdinalIgnoreCase);
+
+    public string MediaKindText => IsVideo ? "影片" : "純音訊";
+
     public string KindText => Kind switch
     {
         RecordingSessionKind.Meeting => "會議",
@@ -2968,4 +3823,23 @@ public sealed record LibraryRecording(
     public string AvailabilityText => IsManaged ? "受管理工作階段" : "舊版 M4A · 僅可播放";
 
     public string TagsText => Tags.Count == 0 ? "未加標籤" : string.Join("、", Tags);
+
+    public string? RecoveryChipText => RecoveryState switch
+    {
+        RecordingRecoveryState.VideoLostAudioPreserved => "影片遺失，已保留音訊",
+        RecordingRecoveryState.RecoveredAfterInterruption => "已從中斷復原",
+        RecordingRecoveryState.FailedEvidenceRetained => "保留復原證據",
+        _ => null,
+    };
+
+    public string? AiChipText => ArtifactStatus.AiChipText;
+
+    public string SourceText => Source switch
+    {
+        "teamsAutomatic" => "Teams 自動",
+        "imported" => "匯入",
+        _ => "手動",
+    };
 }
+
+public sealed record PlaybackRateChoice(double Rate, string DisplayName);

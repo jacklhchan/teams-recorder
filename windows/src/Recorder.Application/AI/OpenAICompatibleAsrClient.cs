@@ -168,12 +168,24 @@ public sealed class OpenAICompatibleAsrClient
         ReadOnlyMemory<byte> audio,
         string fileName,
         CancellationToken cancellationToken = default)
+        => TranscribeAsync(snapshot, audio, fileName, snapshot?.Profile.Prompt ?? string.Empty, cancellationToken);
+
+    /// <summary>
+    /// Chunk-aware adapter. Endpoint, credential, model, and language stay frozen in the immutable
+    /// snapshot while the coordinator supplies only the bounded rolling context for this chunk.
+    /// </summary>
+    public Task<OpenAICompatibleAsrResult> TranscribeAsync(
+        OpenAICompatibleProviderSnapshot snapshot,
+        ReadOnlyMemory<byte> audio,
+        string fileName,
+        string prompt,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         var profile = OpenAICompatibleProviderProfile.ValidateStored(snapshot.Profile);
         return TranscribeAsync(new OpenAICompatibleAsrRequest(
             new Uri(profile.BaseUrl, UriKind.Absolute), profile.AsrModel, profile.Language,
-            profile.Prompt, snapshot.ApiKey, audio, fileName), cancellationToken);
+            prompt ?? string.Empty, snapshot.ApiKey, audio, fileName), cancellationToken);
     }
 
     private async Task<OpenAICompatibleAsrResult> SendAsync(OpenAICompatibleAsrRequest request, OpenAICompatibleAsrResponseFormat format, CancellationToken cancellationToken)

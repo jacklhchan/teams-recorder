@@ -1,5 +1,7 @@
 #include "m4a_writer.h"
 
+#include "fragmented_mp4_sink.h"
+
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -40,13 +42,13 @@ public:
     ~Impl() {
         // The sink is apartment-affine.  Its final Release must run before
         // balancing the CoInitializeEx performed by this writer.
-        sink.Reset();
+        sink.reset();
         if (owns_com_apartment) {
             CoUninitialize();
         }
     }
 
-    ComPtr<IMFSinkWriter> sink;
+    std::unique_ptr<recorder::media::FragmentedMp4Sink> sink;
     bool owns_com_apartment = false;
     std::vector<float> pending_samples;
     std::uint64_t pending_start_100ns = 0;
@@ -56,6 +58,8 @@ public:
     bool begun_writing = false;
     bool finalize_attempted = false;
     bool sink_finalized = false;
+    bool accepted_samples = false;
+    bool accepted_input = false;
 
 private:
     static constexpr std::uint64_t kBlockDurationNumerator =
@@ -67,7 +71,15 @@ private:
 namespace {
 Error Fail(Error error, std::string* detail, const char* text) { if (detail) *detail = text; return error; }
 }
-Writer::Writer(std::filesystem::path path, std::uint32_t bitrate) : final_path_(std::move(path)), partial_path_(final_path_.wstring() + L".partial"), bitrate_bps_(bitrate), impl_(std::make_unique<Impl>()) {}
+Writer::Writer(std::filesystem::path path, std::uint32_t bitrate,
+               bool publish_on_finalize)
+    : final_path_(std::move(path)),
+      partial_path_(publish_on_finalize
+          ? std::filesystem::path(final_path_.wstring() + L".partial")
+          : final_path_),
+      bitrate_bps_(bitrate),
+      publish_on_finalize_(publish_on_finalize),
+      impl_(std::make_unique<Impl>()) {}
 Writer::~Writer() {
     if (!finalized_) Abort();
     // `impl_` tears down the sink and then balances this writer's COM
@@ -79,13 +91,34 @@ std::unique_ptr<Writer> Writer::Create(const std::filesystem::path& path, std::u
     if (path.empty() || bitrate < 64000 || bitrate > 320000) { Fail(Error::InvalidArgument, detail, "Invalid M4A output path or AAC bitrate."); return nullptr; }
     std::error_code ec;
     if (std::filesystem::exists(path, ec) || std::filesystem::exists(path.wstring() + L".partial", ec) || ec) { Fail(Error::AlreadyExists, detail, "Final or partial M4A output already exists."); *error = Error::AlreadyExists; return nullptr; }
-    auto writer = std::unique_ptr<Writer>(new Writer(path, bitrate)); *error = writer->Open(detail); return *error == Error::Ok ? std::move(writer) : nullptr;
+    auto writer = std::unique_ptr<Writer>(new Writer(path, bitrate, true)); *error = writer->Open(detail); return *error == Error::Ok ? std::move(writer) : nullptr;
+}
+std::unique_ptr<Writer> Writer::CreateWorkFile(
+    const std::filesystem::path& path, std::uint32_t bitrate,
+    Error* error, std::string* detail) {
+    if (error == nullptr) return nullptr;
+    *error = Error::InvalidArgument;
+    if (path.empty() || bitrate < 64000 || bitrate > 320000) {
+        Fail(Error::InvalidArgument, detail,
+             "Invalid audio safety work path or AAC bitrate.");
+        return nullptr;
+    }
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec) || ec) {
+        Fail(Error::AlreadyExists, detail,
+             "The audio safety work file already exists.");
+        *error = Error::AlreadyExists;
+        return nullptr;
+    }
+    auto writer = std::unique_ptr<Writer>(new Writer(path, bitrate, false));
+    *error = writer->Open(detail);
+    return *error == Error::Ok ? std::move(writer) : nullptr;
 }
 Error Writer::Open(std::string* detail) {
     HRESULT hr = impl_->InitializeApartment(); if (FAILED(hr)) return Fail(Error::IoError, detail, "COM initialization failed.");
-    ComPtr<IMFAttributes> attributes; hr = MFCreateAttributes(&attributes, 1); if (SUCCEEDED(hr)) hr = attributes->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4); if (SUCCEEDED(hr)) hr = MFCreateSinkWriterFromURL(partial_path_.c_str(), nullptr, attributes.Get(), &impl_->sink); if (FAILED(hr)) return Fail(Error::IoError, detail, "Creating M4A sink writer failed.");
-    ComPtr<IMFMediaType> output; hr = MFCreateMediaType(&output); if (SUCCEEDED(hr)) hr = output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio); if (SUCCEEDED(hr)) hr = output->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bitrate_bps_ / 8U); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29U); DWORD stream = 0; if (SUCCEEDED(hr)) hr = impl_->sink->AddStream(output.Get(), &stream); if (SUCCEEDED(hr) && stream != 0) hr = E_FAIL;
-    ComPtr<IMFMediaType> input; if (SUCCEEDED(hr)) hr = MFCreateMediaType(&input); if (SUCCEEDED(hr)) hr = input->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio); if (SUCCEEDED(hr)) hr = input->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000); if (SUCCEEDED(hr)) hr = impl_->sink->SetInputMediaType(0, input.Get(), nullptr); if (SUCCEEDED(hr)) hr = impl_->sink->BeginWriting(); if (SUCCEEDED(hr)) impl_->begun_writing = true;
+    ComPtr<IMFMediaType> output; hr = MFCreateMediaType(&output); if (SUCCEEDED(hr)) hr = output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio); if (SUCCEEDED(hr)) hr = output->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bitrate_bps_ / 8U); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 1); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AVG_BITRATE, bitrate_bps_); if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29U);
+    if (SUCCEEDED(hr)) { impl_->sink = recorder::media::FragmentedMp4Sink::Create(partial_path_, nullptr, output.Get(), detail); if (!impl_->sink) hr = E_FAIL; }
+    ComPtr<IMFMediaType> input; if (SUCCEEDED(hr)) hr = MFCreateMediaType(&input); if (SUCCEEDED(hr)) hr = input->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio); if (SUCCEEDED(hr)) hr = input->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4); if (SUCCEEDED(hr)) hr = input->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000); if (SUCCEEDED(hr)) hr = impl_->sink->SetInputMediaType(0, input.Get()); if (SUCCEEDED(hr)) hr = impl_->sink->BeginWriting(); if (SUCCEEDED(hr)) impl_->begun_writing = true;
     return FAILED(hr) ? Fail(Error::IoError, detail, "Configuring AAC M4A encoding failed.") : Error::Ok;
 }
 Error Writer::WriteCanonicalBlock(const float* samples, std::uint64_t time,
@@ -98,7 +131,7 @@ Error Writer::WriteCanonicalBlock(const float* samples, std::uint64_t time,
     if (SUCCEEDED(hr) && (data == nullptr || max < bytes64)) hr = E_FAIL;
     if (SUCCEEDED(hr)) { auto* pcm = reinterpret_cast<std::int16_t*>(data); for (std::uint64_t i = 0; i < static_cast<std::uint64_t>(frames) * 2U; ++i) { const float clamped = (std::max)(-1.0F, (std::min)(1.0F, samples[i])); pcm[i] = static_cast<std::int16_t>(clamped * 32767.0F); } }
     if (locked) { const HRESULT unlock_hr = buffer->Unlock(); if (SUCCEEDED(hr) && FAILED(unlock_hr)) hr = unlock_hr; }
-    if (SUCCEEDED(hr)) hr = buffer->SetCurrentLength(static_cast<DWORD>(bytes64)); ComPtr<IMFSample> sample; if (SUCCEEDED(hr)) hr = MFCreateSample(&sample); if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer.Get()); if (SUCCEEDED(hr)) hr = sample->SetSampleTime(static_cast<LONGLONG>(time)); if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(static_cast<LONGLONG>(duration)); if (SUCCEEDED(hr)) hr = impl_->sink->WriteSample(0, sample.Get()); return FAILED(hr) ? Fail(Error::IoError, detail, "Writing AAC sample failed.") : Error::Ok;
+    if (SUCCEEDED(hr)) hr = buffer->SetCurrentLength(static_cast<DWORD>(bytes64)); ComPtr<IMFSample> sample; if (SUCCEEDED(hr)) hr = MFCreateSample(&sample); if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer.Get()); if (SUCCEEDED(hr)) hr = sample->SetSampleTime(static_cast<LONGLONG>(time)); if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(static_cast<LONGLONG>(duration)); if (SUCCEEDED(hr)) hr = impl_->sink->WriteSample(0, sample.Get()); if (FAILED(hr)) return Fail(Error::IoError, detail, "Writing AAC sample failed."); impl_->accepted_samples = true; return Error::Ok;
 }
 Error Writer::WriteFrames(const float* samples, std::uint32_t frames, std::uint64_t time, std::string* detail) {
     constexpr std::size_t kSamplesPerWrite = 1024U * 2U;
@@ -112,6 +145,7 @@ Error Writer::WriteFrames(const float* samples, std::uint32_t frames, std::uint6
     impl_->pending_samples.insert(
         impl_->pending_samples.end(), samples,
         samples + static_cast<std::size_t>(frames) * 2U);
+    impl_->accepted_input = true;
     while (impl_->pending_samples.size() >= kSamplesPerWrite) {
         const std::uint64_t duration = impl_->NextBlockDuration();
         const Error result = WriteCanonicalBlock(
@@ -122,6 +156,23 @@ Error Writer::WriteFrames(const float* samples, std::uint32_t frames, std::uint6
             impl_->pending_samples.begin() + static_cast<std::ptrdiff_t>(kSamplesPerWrite));
         impl_->AdvanceBlockTimestamp(duration);
     }
+    return Error::Ok;
+}
+Error Writer::CreateDurableCheckpoint(
+    std::uint64_t media_time_100ns,
+    DurableCheckpoint* checkpoint,
+    std::string* detail) {
+    if (checkpoint == nullptr || finalized_ || aborted_ || !impl_ || !impl_->sink ||
+        !impl_->accepted_samples) {
+        return Fail(Error::InvalidState, detail, "M4A writer has no media to checkpoint.");
+    }
+    recorder::media::DurableCheckpoint native_checkpoint;
+    const HRESULT hr = impl_->sink->CreateDurableCheckpoint(
+        std::vector<DWORD>{0}, &native_checkpoint, detail);
+    if (FAILED(hr)) return Error::IoError;
+    checkpoint->sequence = native_checkpoint.sequence;
+    checkpoint->file_size_bytes = native_checkpoint.file_size_bytes;
+    checkpoint->media_time_100ns = media_time_100ns;
     return Error::Ok;
 }
 Error Writer::DrainToMinimumAacBlocks(std::string* detail) {
@@ -164,16 +215,18 @@ Error Writer::Finalize(std::string* detail) {
     }
     impl_->finalize_attempted = true;
     if (DrainToMinimumAacBlocks(detail) != Error::Ok) return Error::IoError;
-    const HRESULT hr = impl_->sink->Finalize();
+    const HRESULT hr = impl_->sink->Finalize(detail);
     if (FAILED(hr)) return Fail(Error::IoError, detail, "Finalizing M4A output failed.");
     impl_->sink_finalized = true;
     // Close the file handle before the atomic publish.  The sink's final
     // release still occurs on this mixer thread, before its COM apartment is
     // balanced in Impl's destructor.
-    impl_->sink.Reset();
-    std::error_code ec;
-    std::filesystem::rename(partial_path_, final_path_, ec);
-    if (ec) return Fail(Error::IoError, detail, "Publishing finalized M4A output failed.");
+    impl_->sink.reset();
+    if (publish_on_finalize_) {
+        std::error_code ec;
+        std::filesystem::rename(partial_path_, final_path_, ec);
+        if (ec) return Fail(Error::IoError, detail, "Publishing finalized M4A output failed.");
+    }
     finalized_ = true;
     return Error::Ok;
 }
@@ -190,7 +243,7 @@ Error Writer::FinalizeForRecovery(std::string* detail) {
     // inspection/recovery rather than deleting the only evidence.
     preserve_partial_ = true;
     if (impl_) {
-        impl_->sink.Reset();
+        impl_->sink.reset();
     }
     return result;
 }
@@ -204,14 +257,16 @@ void Writer::Abort() noexcept {
         // This method is noexcept, so a best-effort drain must never escape.
         try {
             if (DrainToMinimumAacBlocks(nullptr) == Error::Ok) {
-                (void)impl_->sink->Finalize();
+                (void)impl_->sink->Finalize(nullptr);
             }
         } catch (...) {
         }
     }
-    if (impl_) impl_->sink.Reset();
+    if (impl_) impl_->sink.reset();
     std::error_code ec;
-    if (!preserve_partial) std::filesystem::remove(partial_path_, ec);
+    if (!preserve_partial && !(impl_ && impl_->accepted_input)) {
+        std::filesystem::remove(partial_path_, ec);
+    }
     aborted_ = true;
 }
 }

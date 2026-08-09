@@ -8,6 +8,7 @@
 #include "selected_audio_session_facade.h"
 #include "wasapi_capture.h"
 #include "canonical_timeline.h"
+#include "dynamic_video_route.h"
 #include "session_duration_clock.h"
 #include "video_pts_mapper.h"
 #include "wgc_window_capture_session.h"
@@ -34,9 +35,12 @@ namespace {
 
 constexpr std::uint32_t kFramesPerBlock = 960;  // 20 ms at 48 kHz.
 constexpr std::uint64_t kBlock100ns = 200'000;
+constexpr std::uint64_t kFirstDurableCheckpoint100ns = 20'000'000;  // 2 s.
+constexpr std::uint64_t kDurableCheckpointInterval100ns = 80'000'000;  // 8 s.
 constexpr std::size_t kMaxQueuedFrames = 48'000U * 4U;
 constexpr auto kSourceSkewWait = std::chrono::milliseconds(60);
 constexpr std::uint64_t kLiveMixerLatencyFrames = 4'800;  // 100 ms.
+constexpr auto kVideoWakeInterval = std::chrono::milliseconds(20);
 
 std::uint64_t CurrentQpc100ns() noexcept {
     LARGE_INTEGER counter{};
@@ -219,9 +223,14 @@ public:
             writer_ready_ = false;
             video_failed_ = false;
             video_error_.clear();
+            video_target_error_.clear();
             audio_end_100ns_.store(0, std::memory_order_release);
             mp4_writer_.reset();
             video_capture_.reset();
+            video_route_ = {};
+            video_sample_written_.store(false, std::memory_order_release);
+            video_target_was_enabled_.store(false, std::memory_order_release);
+            black_video_frame_.clear();
             // Mute is a per-session routing choice.  A previous recording
             // must never leave the next session's selected microphone muted.
             microphone_muted_ = false;
@@ -281,37 +290,32 @@ public:
             return Stop();
         }
 
-        if (!config_.video_output_path.empty()) {
-            recorder::video::WgcWindowCaptureConfig video_config;
-            video_config.target.window = reinterpret_cast<HWND>(config_.target_window_handle);
-            video_config.target.process_id = config_.target_window_process_id;
-            video_config.target.process_creation_time_100ns =
-                config_.target_window_process_creation_time_100ns;
-            video_config.canvas_width = config_.video_width;
-            video_config.canvas_height = config_.video_height;
-            video_config.max_queued_frames = 3;
-            auto capture = std::make_unique<recorder::video::WgcWindowCaptureSession>();
-            const auto result = capture->Start(video_config);
-            if (!result.succeeded()) {
-                // Exact-window video is additive to the independently
-                // playable M4A safety recording. WGC/GPU admission failure
-                // must not discard that audio or substitute another visual
-                // source; publication will explicitly mark the audio fallback.
-                MarkVideoFailure("The selected Teams window could not start exact-window capture.");
-            } else {
-                video_capture_ = std::move(capture);
-                video_ = std::thread([this] { VideoThread(); });
-            }
-        }
-
         {
             std::lock_guard<std::mutex> lock(mutex_);
             started_ = true;
+        }
+
+        if (!config_.video_output_path.empty()) {
+            InitializeBlackVideoFrame();
+            video_ = std::thread([this] { VideoThread(); });
+            if (config_.target_window_handle != 0 ||
+                config_.target_window_process_id != 0 ||
+                config_.target_window_process_creation_time_100ns != 0) {
+                // Initial WGC is deliberately additive. If the target ceased
+                // to be valid between UI admission and native activation,
+                // preserve the active audio recording and begin with black
+                // video rather than choosing any replacement window.
+                (void)SetVideoTarget(
+                    config_.target_window_handle,
+                    config_.target_window_process_id,
+                    config_.target_window_process_creation_time_100ns);
+            }
         }
         return RECORDER_NATIVE_OK;
     }
 
     RecorderNativeResult Stop() {
+        std::shared_ptr<recorder::video::WgcWindowCaptureSession> capture;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!started_ && !mixer_.joinable()) {
@@ -321,14 +325,15 @@ public:
             }
             duration_clock_.Stop();
             stop_requested_ = true;
+            video_route_.Disable();
+            capture = std::move(video_capture_);
             cv_.notify_all();
+            video_cv_.notify_all();
         }
 
         StopSource(render_);
         StopSource(microphone_);
-        if (video_capture_) {
-            video_capture_->Stop();
-        }
+        if (capture) capture->Stop();
         if (video_.joinable()) {
             video_.join();
         }
@@ -339,6 +344,103 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         started_ = false;
         return failure_;
+    }
+
+    RecorderNativeResult SetVideoTarget(
+        std::uintptr_t window_handle,
+        std::uint32_t process_id,
+        std::uint64_t process_creation_time_100ns) {
+        const recorder::video::ExactWindowIdentity target{
+            window_handle, process_id, process_creation_time_100ns};
+        if (!target.IsUsable()) {
+            return SetVideoTargetError(
+                RECORDER_NATIVE_INVALID_ARGUMENT,
+                "Exact-window video requires a complete HWND, PID, and process creation time.");
+        }
+
+        std::lock_guard<std::mutex> transition_lock(video_transition_mutex_);
+        std::shared_ptr<recorder::video::WgcWindowCaptureSession> old_capture;
+        std::uint64_t target_generation = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!started_ || stop_requested_ || config_.video_output_path.empty() ||
+                video_failed_) {
+                return SetVideoTargetErrorLocked(
+                    RECORDER_NATIVE_INVALID_STATE,
+                    "Exact-window video is unavailable outside an active A/V recording.");
+            }
+            target_generation = video_route_.BeginReplace();
+            old_capture = std::move(video_capture_);
+            video_target_error_.clear();
+            video_cv_.notify_all();
+        }
+
+        // Stop and join the former WGC owner before starting a new target. The
+        // route has already fenced its queue, so a concurrent video tick uses
+        // black rather than any old window pixels during this interval.
+        if (old_capture) old_capture->Stop();
+
+        recorder::video::WgcWindowCaptureConfig config;
+        config.target.window = reinterpret_cast<HWND>(window_handle);
+        config.target.process_id = process_id;
+        config.target.process_creation_time_100ns = process_creation_time_100ns;
+        config.canvas_width = config_.video_width;
+        config.canvas_height = config_.video_height;
+        config.max_queued_frames = 3;
+        auto capture = std::make_shared<recorder::video::WgcWindowCaptureSession>();
+        const auto start = capture->Start(config);
+
+        bool stale = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stale = !started_ || stop_requested_ ||
+                target_generation != video_route_.generation();
+            if (!stale && start.succeeded()) {
+                if (!video_route_.CommitReplace(target_generation, target)) {
+                    stale = true;
+                } else {
+                    video_capture_ = capture;
+                    video_target_was_enabled_.store(true, std::memory_order_release);
+                    video_target_error_.clear();
+                }
+            }
+            if (!stale && !start.succeeded()) {
+                (void)video_route_.RejectReplace(target_generation);
+                video_target_error_ = "The selected capture window could not start exact-window capture.";
+            }
+            video_cv_.notify_all();
+        }
+        if (stale) {
+            capture->Stop();
+            return SetVideoTargetError(
+                RECORDER_NATIVE_INVALID_STATE,
+                "The recording stopped or another target request superseded this exact-window update.");
+        }
+        if (!start.succeeded()) {
+            return SetVideoTargetError(
+                RECORDER_NATIVE_CAPTURE_ERROR,
+                "The selected capture window could not start exact-window capture.");
+        }
+        return RECORDER_NATIVE_OK;
+    }
+
+    RecorderNativeResult DisableVideoTarget() {
+        std::lock_guard<std::mutex> transition_lock(video_transition_mutex_);
+        std::shared_ptr<recorder::video::WgcWindowCaptureSession> capture;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!started_ || stop_requested_ || config_.video_output_path.empty()) {
+                return SetVideoTargetErrorLocked(
+                    RECORDER_NATIVE_INVALID_STATE,
+                    "Exact-window video is unavailable outside an active A/V recording.");
+            }
+            video_route_.Disable();
+            capture = std::move(video_capture_);
+            video_target_error_.clear();
+            video_cv_.notify_all();
+        }
+        if (capture) capture->Stop();
+        return RECORDER_NATIVE_OK;
     }
 
     RecorderNativeResult SetMicrophoneMuted(bool muted) {
@@ -397,7 +499,9 @@ public:
 
     std::string last_error() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return error_;
+        if (!error_.empty()) return error_;
+        if (!video_error_.empty()) return video_error_;
+        return video_target_error_;
     }
 
 private:
@@ -707,98 +811,160 @@ private:
         if (!video_failed_) {
             video_failed_ = true;
             video_error_ = std::move(detail);
+            video_cv_.notify_all();
         }
+    }
+
+    RecorderNativeResult SetVideoTargetError(RecorderNativeResult result,
+                                             const char* detail) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return SetVideoTargetErrorLocked(result, detail);
+    }
+
+    RecorderNativeResult SetVideoTargetErrorLocked(RecorderNativeResult result,
+                                                   const char* detail) {
+        video_target_error_ = detail;
+        return result;
+    }
+
+    void InitializeBlackVideoFrame() {
+        const std::size_t luma_bytes =
+            static_cast<std::size_t>(config_.video_width) * config_.video_height;
+        const std::size_t total_bytes = luma_bytes + luma_bytes / 2U;
+        black_video_frame_.assign(total_bytes, static_cast<std::uint8_t>(128U));
+        std::fill_n(black_video_frame_.begin(), luma_bytes,
+                    static_cast<std::uint8_t>(16U));
+    }
+
+    void MarkVideoTargetLost(
+        const std::shared_ptr<recorder::video::WgcWindowCaptureSession>& capture,
+        std::uint64_t generation) {
+        std::shared_ptr<recorder::video::WgcWindowCaptureSession> detached;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (video_capture_ != capture ||
+                !video_route_.MarkTargetLost(generation)) {
+                return;
+            }
+            detached = std::move(video_capture_);
+            video_target_error_ = "The selected capture window closed or changed; video is now privacy-black.";
+            video_cv_.notify_all();
+        }
+        if (detached) detached->Stop();
     }
 
     void VideoThread() noexcept {
         try {
-            const auto origin = [&] {
-                std::lock_guard<std::mutex> lock(mutex_);
-                return timeline_.origin_qpc_100ns();
-            }();
-            if (origin == 0) {
-                MarkVideoFailure("The shared A/V clock did not initialize.");
-                return;
-            }
-            recorder::timeline::VideoPtsMapper mapper(origin);
             const std::uint64_t frame_duration = config_.video_frame_rate == 0
                 ? 333'333U : 10'000'000U / config_.video_frame_rate;
+            std::uint64_t next_timestamp = 0;
             for (;;) {
-                recorder::video::WgcNv12Frame frame;
-                recorder::video::WgcWindowCaptureSession* capture = nullptr;
+                std::shared_ptr<recorder::video::WgcWindowCaptureSession> capture;
+                recorder::video::ExactWindowIdentity target;
+                std::uint64_t target_generation = 0;
+                bool stopping = false;
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    capture = video_capture_.get();
-                }
-                if (capture == nullptr || !capture->WaitPopFrame(&frame, 200U)) {
-                    bool stopping = false;
-                    {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        stopping = stop_requested_;
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    const auto can_emit = [&] {
+                        const auto audio_end = audio_end_100ns_.load(std::memory_order_acquire);
+                        return next_timestamp + frame_duration <= audio_end;
+                    };
+                    if (!can_emit() && !stop_requested_) {
+                        video_cv_.wait_for(lock, kVideoWakeInterval, [this, &can_emit] {
+                            return stop_requested_ || can_emit();
+                        });
                     }
-                    if (stopping || capture == nullptr) break;
+                    stopping = stop_requested_;
+                    const auto audio_end = audio_end_100ns_.load(std::memory_order_acquire);
+                    if (next_timestamp + frame_duration > audio_end) {
+                        if (stopping) break;
+                        continue;
+                    }
+                    capture = video_capture_;
+                    target_generation = video_route_.generation();
+                    // The only identity accepted by this thread is the one
+                    // committed by SetVideoTarget after WGC revalidation.
+                    // A zero target is intentionally the privacy-black path.
+                    if (capture) target = video_route_.identity();
+                }
+
+                bool use_target_frame = false;
+                recorder::video::WgcNv12Frame frame;
+                if (capture) {
                     if (!capture->IsRunning()) {
-                        const auto result = capture->LastResult();
-                        if (!result.succeeded()) {
-                            MarkVideoFailure("Exact-window capture ended before recording stopped.");
-                        }
-                        break;
+                        MarkVideoTargetLost(capture, target_generation);
+                    } else if (capture->TryPopFrame(&frame)) {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        // Recheck after the pop. A target change may have
+                        // completed while WGC was copying this frame.
+                        use_target_frame = video_capture_ == capture &&
+                            video_route_.AllowsFrame(target_generation, target);
                     }
-                    continue;
                 }
-                const auto mapped = mapper.Map(
-                    frame.system_relative_time_100ns,
-                    audio_end_100ns_.load(std::memory_order_acquire));
-                if (!mapped.has_value()) continue;
+
+                const std::uint8_t* bytes = use_target_frame
+                    ? frame.bytes.data() : black_video_frame_.data();
+                const std::uint32_t stride = use_target_frame
+                    ? frame.stride : config_.video_width;
                 std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
                 if (!mp4_writer_ || video_failed_) break;
                 std::string detail;
                 if (mp4_writer_->WriteVideoNv12(
-                        frame.bytes.data(), frame.stride, *mapped, frame_duration,
+                        bytes, stride, next_timestamp, frame_duration,
                         &detail) != recorder::mp4::Error::Ok) {
-                    MarkVideoFailure("Writing a selected-window video frame failed.");
+                    MarkVideoFailure("Writing the privacy-safe MP4 video frame failed.");
                     break;
                 }
+                video_sample_written_.store(true, std::memory_order_release);
+                next_timestamp += frame_duration;
             }
         } catch (...) {
-            MarkVideoFailure("The selected-window video worker failed.");
+            MarkVideoFailure("The privacy-safe video worker failed.");
         }
     }
 
-    void MixerThread() {
-        std::string detail;
-        recorder::m4a::Error writer_error;
-        auto writer = recorder::m4a::Writer::Create(
-            config_.output_path,
-            config_.aac_bitrate_bps,
-            &writer_error,
-            &detail);
-        if (!writer) {
+    void MixerThread() noexcept {
+        try {
+            MixerThreadCore();
+        } catch (...) {
             std::lock_guard<std::mutex> lock(mutex_);
-            FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
+            FailLocked(RECORDER_NATIVE_INTERNAL_ERROR,
+                       "The mixed recorder worker failed unexpectedly.");
             writer_ready_ = true;
             ready_cv_.notify_all();
-            return;
         }
+    }
+
+    void MixerThreadCore() {
+        std::string detail;
+        recorder::m4a::Error writer_error;
+        auto writer = config_.audio_output_is_work_file
+            ? recorder::m4a::Writer::CreateWorkFile(
+                config_.output_path, config_.aac_bitrate_bps,
+                &writer_error, &detail)
+            : recorder::m4a::Writer::Create(
+                config_.output_path, config_.aac_bitrate_bps,
+                &writer_error, &detail);
+        bool audio_safety_healthy = writer != nullptr;
+        bool wrote_audio_safety = false;
 
         if (!config_.video_output_path.empty()) {
             recorder::mp4::Config video_config;
+            // The managed session store already owns publication from
+            // recording.partial.mp4 to recording.mp4. Write that exact work
+            // file instead of inventing recording.partial.mp4.partial.
             video_config.final_path = config_.video_output_path;
+            video_config.work_path = config_.video_output_path;
             video_config.width = config_.video_width;
             video_config.height = config_.video_height;
             video_config.frame_rate = config_.video_frame_rate;
             video_config.video_bitrate_bps = config_.video_bitrate_bps;
             video_config.audio_bitrate_bps = config_.aac_bitrate_bps;
             recorder::mp4::Error video_error;
-            auto mp4 = recorder::mp4::Writer::Create(video_config, &video_error, &detail);
+            auto mp4 = recorder::mp4::Writer::Create(
+                video_config, &video_error, &detail);
             if (!mp4) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                // Keep the M4A writer alive; an encoder/mux initialization
-                // fault is a video loss, not a reason to interrupt audio.
-                video_failed_.store(true, std::memory_order_release);
-                video_error_ = "Could not create the selected-window MP4 writer.";
-                writer_ready_ = true;
-                ready_cv_.notify_all();
+                MarkVideoFailure("Could not create the selected-window fragmented MP4 writer.");
             } else {
                 std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
                 mp4_writer_ = std::move(mp4);
@@ -806,72 +972,74 @@ private:
         }
 
         {
+            std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
+            if (!audio_safety_healthy && !mp4_writer_) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
+                writer_ready_ = true;
+                ready_cv_.notify_all();
+                return;
+            }
+        }
+        {
             std::lock_guard<std::mutex> lock(mutex_);
             writer_ready_ = true;
             ready_cv_.notify_all();
         }
 
         std::uint64_t output_time_100ns = 0;
+        std::uint64_t next_checkpoint_100ns = kFirstDurableCheckpoint100ns;
         bool wrote_block = false;
+        std::vector<float> block(kFramesPerBlock * 2U, 0.0F);
         for (;;) {
-            std::vector<float> block(kFramesPerBlock * 2U, 0.0F);
+            std::fill(block.begin(), block.end(), 0.0F);
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 cv_.wait_for(lock, kSourceSkewWait, [this] {
                     return stop_requested_ || failure_ != RECORDER_NATIVE_OK ||
                         next_output_frame_ + kFramesPerBlock <= OutputFrameLimitLocked();
                 });
-
-                // WASAPI owns the worker thread, so a device invalidation can
-                // occur without another packet arriving to wake the mixer.
-                // Poll at the same bounded interval used for silence handling.
                 DetectUnexpectedDisconnectLocked(render_);
                 DetectUnexpectedDisconnectLocked(microphone_);
-
                 const bool should_emit =
                     next_output_frame_ + kFramesPerBlock <= OutputFrameLimitLocked();
                 if (!should_emit) {
-                    if (stop_requested_ || failure_ != RECORDER_NATIVE_OK) {
-                        break;
-                    }
+                    if (stop_requested_ || failure_ != RECORDER_NATIVE_OK) break;
                     continue;
                 }
-
-                recorder::timeline::MixFrames(&render_.queue, &render_.queued_frames,
-                                               next_output_frame_, block.data(), kFramesPerBlock);
-                recorder::timeline::MixFrames(&microphone_.queue, &microphone_.queued_frames,
-                                               next_output_frame_, block.data(), kFramesPerBlock);
+                recorder::timeline::MixFrames(
+                    &render_.queue, &render_.queued_frames,
+                    next_output_frame_, block.data(), kFramesPerBlock);
+                recorder::timeline::MixFrames(
+                    &microphone_.queue, &microphone_.queued_frames,
+                    next_output_frame_, block.data(), kFramesPerBlock);
             }
 
-            for (float& sample : block) {
-                sample = std::tanh(sample);
-            }
-            if (writer->WriteFrames(
-                    block.data(),
-                    kFramesPerBlock,
-                    output_time_100ns,
-                    &detail) != recorder::m4a::Error::Ok) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
-                // The writer may already have accepted earlier access units;
-                // run the recovery close path rather than discarding them.
-                wrote_block = true;
-                break;
+            for (float& sample : block) sample = std::tanh(sample);
+            if (audio_safety_healthy &&
+                writer->WriteFrames(block.data(), kFramesPerBlock,
+                                    output_time_100ns, &detail) !=
+                    recorder::m4a::Error::Ok) {
+                audio_safety_healthy = false;
+            } else if (audio_safety_healthy) {
+                wrote_audio_safety = true;
             }
 
             {
                 std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
-                if (mp4_writer_ && !video_failed_ &&
-                    mp4_writer_->WriteAudioFrames(
-                        block.data(), kFramesPerBlock, output_time_100ns,
-                        &detail) != recorder::mp4::Error::Ok) {
-                    MarkVideoFailure("Writing selected-window MP4 audio failed.");
+                if (mp4_writer_ && !video_failed_) {
+                    if (mp4_writer_->WriteAudioFrames(
+                            block.data(), kFramesPerBlock, output_time_100ns,
+                            &detail) != recorder::mp4::Error::Ok) {
+                        MarkVideoFailure("Writing selected-window MP4 audio failed.");
+                    }
                 }
             }
 
             wrote_block = true;
             output_time_100ns += kBlock100ns;
             audio_end_100ns_.store(output_time_100ns, std::memory_order_release);
+            video_cv_.notify_one();
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 stats_.output_frames += kFramesPerBlock;
@@ -879,6 +1047,50 @@ private:
                 for (const float sample : block) {
                     stats_.peak = (std::max)(stats_.peak, std::abs(sample));
                 }
+            }
+
+            if (output_time_100ns >= next_checkpoint_100ns) {
+                if (audio_safety_healthy) {
+                    recorder::m4a::DurableCheckpoint checkpoint;
+                    if (writer->CreateDurableCheckpoint(
+                            output_time_100ns, &checkpoint, &detail) ==
+                        recorder::m4a::Error::Ok) {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        stats_.audio_durable_checkpoint_sequence = checkpoint.sequence;
+                        stats_.audio_durable_checkpoint_bytes = checkpoint.file_size_bytes;
+                        stats_.audio_durable_checkpoint_100ns = checkpoint.media_time_100ns;
+                    } else {
+                        audio_safety_healthy = false;
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
+                    if (mp4_writer_ && !video_failed_ &&
+                        video_target_was_enabled_.load(std::memory_order_acquire)) {
+                        recorder::mp4::DurableCheckpoint checkpoint;
+                        if (mp4_writer_->CreateDurableCheckpoint(
+                                output_time_100ns, &checkpoint, &detail) ==
+                            recorder::mp4::Error::Ok) {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            stats_.video_durable_checkpoint_sequence = checkpoint.sequence;
+                            stats_.video_durable_checkpoint_bytes = checkpoint.file_size_bytes;
+                            stats_.video_durable_checkpoint_100ns = checkpoint.media_time_100ns;
+                        } else {
+                            MarkVideoFailure("Durably checkpointing selected-window MP4 failed.");
+                        }
+                    }
+                }
+                do {
+                    next_checkpoint_100ns += kDurableCheckpointInterval100ns;
+                } while (next_checkpoint_100ns <= output_time_100ns);
+            }
+
+            if (!audio_safety_healthy &&
+                (config_.video_output_path.empty() || video_failed_)) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                FailLocked(RECORDER_NATIVE_IO_ERROR,
+                           "Both fragmented recording writers became unavailable.");
+                break;
             }
         }
 
@@ -888,67 +1100,94 @@ private:
             failed = failure_ != RECORDER_NATIVE_OK;
         }
         if (failed) {
-            if (wrote_block &&
-                writer->FinalizeForRecovery(&detail) != recorder::m4a::Error::Ok) {
-                // Keep the first capture/source fault as the externally
-                // reported cause; the writer retains its named .partial
-                // artifact for startup inspection if this close also fails.
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (error_.empty()) {
-                    error_ = detail;
-                }
-            } else if (!wrote_block) {
-                // No accumulated media exists, so the normal destructive
-                // cleanup is safe and allows owned-folder cleanup upstream.
-                writer->Abort();
+            if (writer) {
+                if (wrote_audio_safety) (void)writer->FinalizeForRecovery(&detail);
+                else writer->Abort();
+            }
+            std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
+            if (mp4_writer_) {
+                mp4_writer_->Abort();
+                mp4_writer_.reset();
             }
             return;
         }
 
-        // An AAC sink cannot finalize an empty stream. A short silent frame
-        // produces a valid, playable test/session artifact when Windows has
-        // not delivered any loopback packet (for example on a silent device).
         if (!wrote_block) {
             const std::vector<float> silence(kFramesPerBlock * 2U, 0.0F);
-            if (writer->WriteFrames(
-                    silence.data(),
-                    kFramesPerBlock,
-                    0,
-                    &detail) != recorder::m4a::Error::Ok) {
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
+            if (audio_safety_healthy &&
+                writer->WriteFrames(silence.data(), kFramesPerBlock, 0, &detail) ==
+                    recorder::m4a::Error::Ok) {
+                wrote_audio_safety = true;
+            } else {
+                audio_safety_healthy = false;
+            }
+            {
+                std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
+                if (mp4_writer_ && !video_failed_ &&
+                    mp4_writer_->WriteAudioFrames(
+                        silence.data(), kFramesPerBlock, 0, &detail) !=
+                        recorder::mp4::Error::Ok) {
+                    MarkVideoFailure("Writing the final privacy-safe MP4 audio failed.");
                 }
-                writer->FinalizeForRecovery(&detail);
-                return;
             }
             std::lock_guard<std::mutex> lock(mutex_);
             stats_.output_frames += kFramesPerBlock;
         }
 
-        if (writer->Finalize(&detail) != recorder::m4a::Error::Ok) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                FailLocked(RECORDER_NATIVE_IO_ERROR, detail);
+        bool audio_finalized = false;
+        if (writer) {
+            if (audio_safety_healthy && wrote_audio_safety &&
+                writer->Finalize(&detail) == recorder::m4a::Error::Ok) {
+                audio_finalized = true;
+            } else if (wrote_audio_safety) {
+                (void)writer->FinalizeForRecovery(&detail);
+            } else {
+                writer->Abort();
             }
-            writer->FinalizeForRecovery(&detail);
         }
 
-        // Video is additive: the M4A backup is the recovery authority until
-        // MP4 finalization succeeds. A video fault never destroys or truncates
-        // the independently playable audio session.
-        std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
-        if (mp4_writer_) {
-            if (video_failed_ || mp4_writer_->Finalize(&detail) != recorder::mp4::Error::Ok) {
-                mp4_writer_->Abort();
-                MarkVideoFailure("Finalizing selected-window MP4 failed; audio recovery was retained.");
+        bool video_finalized = false;
+        {
+            std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
+            if (mp4_writer_) {
+                if (!video_target_was_enabled_.load(std::memory_order_acquire)) {
+                    mp4_writer_->Discard();
+                } else if (!video_failed_ &&
+                    !video_sample_written_.load(std::memory_order_acquire)) {
+                    if (mp4_writer_->WriteVideoNv12(
+                            black_video_frame_.data(), config_.video_width,
+                            0, 10'000'000U / config_.video_frame_rate,
+                            &detail) != recorder::mp4::Error::Ok) {
+                        MarkVideoFailure("Writing the final privacy-safe MP4 black frame failed.");
+                    } else {
+                        video_sample_written_.store(true, std::memory_order_release);
+                    }
+                }
+                if (video_target_was_enabled_.load(std::memory_order_acquire)) {
+                    if (!video_failed_ &&
+                        video_sample_written_.load(std::memory_order_acquire) &&
+                        mp4_writer_->Finalize(&detail) == recorder::mp4::Error::Ok) {
+                        video_finalized = true;
+                    } else {
+                        mp4_writer_->Abort();
+                        MarkVideoFailure(
+                            "Finalizing selected-window MP4 failed; audio recovery was retained.");
+                    }
+                }
+                mp4_writer_.reset();
             }
-            mp4_writer_.reset();
+        }
+
+        if (!audio_finalized && !video_finalized) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            FailLocked(RECORDER_NATIVE_IO_ERROR,
+                       "Neither fragmented recording writer could finalize.");
         }
     }
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
+    std::condition_variable video_cv_;
     std::condition_variable ready_cv_;
     MixedCaptureSessionConfig config_;
     Source render_;
@@ -959,12 +1198,18 @@ private:
     std::uint64_t next_output_frame_ = 0;
     std::thread mixer_;
     std::thread video_;
-    std::unique_ptr<recorder::video::WgcWindowCaptureSession> video_capture_;
+    std::shared_ptr<recorder::video::WgcWindowCaptureSession> video_capture_;
+    recorder::video::DynamicVideoRoute video_route_;
+    std::mutex video_transition_mutex_;
+    std::vector<std::uint8_t> black_video_frame_;
     std::unique_ptr<recorder::mp4::Writer> mp4_writer_;
     std::mutex mp4_mutex_;
     std::atomic<std::uint64_t> audio_end_100ns_{0};
     std::atomic<bool> video_failed_{false};
+    std::atomic<bool> video_sample_written_{false};
+    std::atomic<bool> video_target_was_enabled_{false};
     std::string video_error_;
+    std::string video_target_error_;
     RecorderNativeStats stats_{};
     RecorderNativeResult failure_ = RECORDER_NATIVE_OK;
     std::string error_;
@@ -989,6 +1234,18 @@ RecorderNativeResult MixedCaptureSession::Stop() {
 
 RecorderNativeResult MixedCaptureSession::SetMicrophoneMuted(bool muted) {
     return impl_->SetMicrophoneMuted(muted);
+}
+
+RecorderNativeResult MixedCaptureSession::SetVideoTarget(
+    std::uintptr_t window_handle,
+    std::uint32_t process_id,
+    std::uint64_t process_creation_time_100ns) {
+    return impl_->SetVideoTarget(
+        window_handle, process_id, process_creation_time_100ns);
+}
+
+RecorderNativeResult MixedCaptureSession::DisableVideoTarget() {
+    return impl_->DisableVideoTarget();
 }
 
 RecorderNativeResult MixedCaptureSession::health_result() const {

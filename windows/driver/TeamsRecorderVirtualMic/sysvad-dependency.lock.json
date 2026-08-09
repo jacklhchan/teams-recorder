@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/microsoft/Windows-driver-samples.git",
+  "commit": "26a27df80772dbcfd69e6449b671d5c29eb5aedc",
+  "path": "audio/sysvad",
+  "wilSubmoduleCommit": "3c00e7f1d8cf9930bbb8e5be3ef0df65c84e8928",
+  "license": "MS-PL",
+  "purpose": "Test-signed Windows virtual microphone preview only; this lock does not make SysVAD a production dependency."
+}

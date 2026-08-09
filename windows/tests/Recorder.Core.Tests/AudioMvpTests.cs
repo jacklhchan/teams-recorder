@@ -134,8 +134,8 @@ internal static class AudioMvpTests
         Equal(true, faulted.HasRecoverableFault);
 
         var recovery = lifecycle.FinalizeForRecoveryAsync().GetAwaiter().GetResult();
-        if (recovery.Published || !File.Exists(first.Session.BackupAudioPath) ||
-            File.Exists(first.Session.FinalAudioPath))
+        if (recovery.Published || !File.Exists(first.Session.AudioSafetyPartialPath) ||
+            File.Exists(first.Session.FinalVideoPath))
         {
             throw new InvalidOperationException(
                 "A recoverable capture fault was incorrectly published as a clean recording.");
@@ -189,9 +189,9 @@ internal static class AudioMvpTests
 
         lifecycle.StopAsync().GetAwaiter().GetResult();
         var publication = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
-        if (!publication.Published || !File.Exists(started.Session.FinalAudioPath) ||
-            File.Exists(started.Session.FinalVideoPath))
-            throw new InvalidOperationException("Video loss did not preserve the playable M4A fallback.");
+        if (!publication.Published || !File.Exists(started.Session.FinalVideoPath) ||
+            File.Exists(started.Session.FinalAudioPath))
+            throw new InvalidOperationException("Video loss did not preserve the playable audio-only MP4 fallback.");
         var metadata = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
         if (metadata.MediaKind != "audio" || metadata.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved)
             throw new InvalidOperationException("Audio fallback was not published with the video-loss recovery state.");

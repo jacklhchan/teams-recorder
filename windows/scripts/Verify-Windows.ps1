@@ -65,9 +65,11 @@ try {
     Invoke-Checked $dotnet "build" ".\TeamsRecorder.Windows.sln" "--configuration" "Release" "--tl:off"
     Invoke-Checked $dotnet "build" ".\src\Recorder.WinUI\Recorder.WinUI.csproj" "--configuration" "Release" "--property:Platform=x64" "--property:RuntimeIdentifier=win-x64" "--no-restore" "--tl:off"
     Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.Core.Tests\Recorder.Core.Tests.csproj" "--configuration" "Release" "--no-build"
+    Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.Control.Tests\Recorder.Control.Tests.csproj" "--configuration" "Release" "--no-build"
+    Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.WinUI.Layout.Tests\Recorder.WinUI.Layout.Tests.csproj" "--configuration" "Release" "--no-restore" "--tl:off"
     $publishDirectory = Join-Path $windowsRoot "out\publish\win-x64"
     Invoke-Checked $dotnet "publish" ".\src\Recorder.WinUI\Recorder.WinUI.csproj" "--configuration" "Release" "--property:Platform=x64" "--property:RuntimeIdentifier=win-x64" "--property:WindowsPackageType=None" "--no-restore" "--output" $publishDirectory "--tl:off"
-    foreach ($publishedFile in @("Recorder.WinUI.exe", "Recorder.NativeBridge.dll")) {
+    foreach ($publishedFile in @("Recorder.WinUI.exe", "Recorder.NativeBridge.dll", "Recorder.AsrWorker.exe")) {
         if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory $publishedFile) -PathType Leaf)) {
             throw "Unpackaged publish did not produce $publishedFile."
         }
@@ -77,5 +79,6 @@ try {
 }
 
 & (Join-Path $PSScriptRoot "Test-Contracts.ps1")
+& (Join-Path $PSScriptRoot "Test-VirtualMicPreview.ps1")
 
 Write-Host "Windows migration verification passed."

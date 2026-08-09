@@ -15,6 +15,7 @@ internal static class RecorderAppSettingsTests
             RecordMicrophone = true,
             MicrophoneEndpointId = "mic-id",
             CaptureSource = RecorderPersistedCaptureSource.SelectedApplication,
+            SelectedApplicationExecutable = "custom-recorder-target",
             TeamsMuteSyncEnabled = true,
             TeamsAutomaticRecordingEnabled = true,
         }).GetAwaiter().GetResult();
@@ -25,11 +26,13 @@ internal static class RecorderAppSettingsTests
             loaded.OutputFolder != Path.GetFullPath(expectedFolder) ||
             loaded.RenderEndpointId != "render-id" || loaded.MicrophoneEndpointId != "mic-id" ||
             loaded.CaptureSource != RecorderPersistedCaptureSource.SelectedApplication ||
+            loaded.SelectedApplicationExecutable != "custom-recorder-target.exe" ||
             !loaded.TeamsMuteSyncEnabled || !loaded.TeamsAutomaticRecordingEnabled)
             throw new InvalidOperationException("Public app settings did not round trip.");
 
         var json = File.ReadAllText(path);
-        if (json.Contains("apiKey", StringComparison.OrdinalIgnoreCase) || json.Contains("token", StringComparison.OrdinalIgnoreCase))
+        if (json.Contains("apiKey", StringComparison.OrdinalIgnoreCase) || json.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+            json.Contains("processId", StringComparison.OrdinalIgnoreCase) || json.Contains("windowTitle", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("App settings must not contain credentials.");
     }
 
@@ -62,8 +65,13 @@ internal static class RecorderAppSettingsTests
         if (legacy.TeamsMuteSyncEnabled || legacy.TeamsAutomaticRecordingEnabled)
             throw new InvalidOperationException("Legacy settings must default Teams opt-ins to disabled.");
 
-        Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { SchemaVersion = 2 }));
+        Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { SchemaVersion = 3 }));
         Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { RenderEndpointId = "unsafe\u0001id" }));
+        Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings
+        {
+            CaptureSource = RecorderPersistedCaptureSource.SelectedApplication,
+            SelectedApplicationExecutable = @"C:\\Program Files\\target.exe",
+        }));
     }
 
     private static void Throws<T>(Action action) where T : Exception

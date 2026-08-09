@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(RecorderNativeBridge VERSION 0.8.0 LANGUAGES C CXX)
+project(RecorderNativeBridge VERSION 0.9.0 LANGUAGES C CXX)
 
 option(RECORDER_NATIVE_BUILD_TESTS "Build native bridge contract tests" ON)
 
@@ -34,6 +34,14 @@ recorder_enable_strict_warnings(Recorder.Wav)
 
 if(WIN32)
     add_compile_definitions(NOMINMAX)
+
+    add_library(Recorder.FragmentedMp4Sink STATIC
+        src/fragmented_mp4_sink.cpp
+    )
+    target_compile_features(Recorder.FragmentedMp4Sink PUBLIC cxx_std_17)
+    target_include_directories(Recorder.FragmentedMp4Sink PUBLIC src)
+    target_link_libraries(Recorder.FragmentedMp4Sink PUBLIC mf mfplat mfreadwrite mfuuid ole32)
+    recorder_enable_strict_warnings(Recorder.FragmentedMp4Sink)
 
     add_library(Recorder.Format STATIC
         format/mix_format_decoder.cpp
@@ -98,6 +106,7 @@ target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadw
     target_link_libraries(Recorder.NativeBridge
         PRIVATE
             Recorder.Format
+            Recorder.FragmentedMp4Sink
             Recorder.ProcessLoopback
             Recorder.Resample
             Recorder.Timeline
@@ -183,7 +192,7 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     )
     target_compile_features(Recorder.M4aWriter.Tests PRIVATE cxx_std_17)
     target_include_directories(Recorder.M4aWriter.Tests PRIVATE src)
-    target_link_libraries(Recorder.M4aWriter.Tests PRIVATE mfplat mfreadwrite mfuuid)
+    target_link_libraries(Recorder.M4aWriter.Tests PRIVATE Recorder.FragmentedMp4Sink mfplat mfreadwrite mfuuid)
     recorder_enable_strict_warnings(Recorder.M4aWriter.Tests)
     add_test(NAME Recorder.M4aWriter.Container COMMAND Recorder.M4aWriter.Tests container --frames 960)
     # AAC encoders commonly consume 1024 sample access units. These tests make
@@ -197,6 +206,10 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     # this CTest test from the command line so every repetition is a fresh EXE.
     add_test(NAME Recorder.M4aWriter.Stress COMMAND Recorder.M4aWriter.Tests stress --iterations 16 --frames 960)
     add_test(NAME Recorder.M4aWriter.Duration COMMAND Recorder.M4aWriter.Tests duration)
+    add_test(NAME Recorder.M4aWriter.ExactSafetyWorkFile
+        COMMAND Recorder.M4aWriter.Tests work-file)
+    add_test(NAME Recorder.M4aWriter.ProcessKillRecovery
+        COMMAND Recorder.M4aWriter.Tests process-kill)
     add_test(NAME Recorder.M4aWriter.Abort COMMAND Recorder.M4aWriter.Tests abort)
     add_test(NAME Recorder.M4aWriter.AbortAfterOneFrame
         COMMAND Recorder.M4aWriter.Tests abort-after-write --frames 1)
@@ -209,9 +222,30 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     )
     target_compile_features(Recorder.Mp4MuxWriter.Tests PRIVATE cxx_std_17)
     target_include_directories(Recorder.Mp4MuxWriter.Tests PRIVATE src)
-    target_link_libraries(Recorder.Mp4MuxWriter.Tests PRIVATE Recorder.NativeBridge mfplat mfreadwrite mfuuid)
+    target_link_libraries(Recorder.Mp4MuxWriter.Tests PRIVATE Recorder.NativeBridge Recorder.FragmentedMp4Sink mfplat mfreadwrite mfuuid)
     recorder_enable_strict_warnings(Recorder.Mp4MuxWriter.Tests)
     add_test(NAME Recorder.Mp4MuxWriter.Container COMMAND Recorder.Mp4MuxWriter.Tests)
+
+    # Regression for the recovery publication gate: a valid early fMP4
+    # fragment cannot make a later-corrupt recording pass. Both the A/V and
+    # audio-only safety paths must decode their required streams to EOS.
+    add_executable(Recorder.Mp4DecodeValidator.Tests
+        tests/mp4_decode_validator_tests.cpp
+        src/m4a_writer.cpp
+        src/mp4_decode_validator.cpp
+        src/mp4_mux_writer.cpp
+    )
+    target_compile_features(Recorder.Mp4DecodeValidator.Tests PRIVATE cxx_std_17)
+    target_include_directories(Recorder.Mp4DecodeValidator.Tests PRIVATE src)
+    target_link_libraries(Recorder.Mp4DecodeValidator.Tests
+        PRIVATE Recorder.FragmentedMp4Sink mf mfplat mfreadwrite mfuuid ole32)
+    recorder_enable_strict_warnings(Recorder.Mp4DecodeValidator.Tests)
+    add_test(NAME Recorder.Mp4DecodeValidator.EosRegression
+        COMMAND Recorder.Mp4DecodeValidator.Tests)
+    set_tests_properties(Recorder.Mp4DecodeValidator.EosRegression PROPERTIES
+        LABELS "mp4;media-foundation;recovery"
+        RUN_SERIAL TRUE
+        TIMEOUT 180)
 
     # AT-03/AT-05 deterministic media evidence. The CTest default is short so
     # the regular verifier remains bounded; release acceptance runs the same
@@ -222,7 +256,7 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     )
     target_compile_features(Recorder.AvMarkerAcceptance.Tests PRIVATE cxx_std_17)
     target_include_directories(Recorder.AvMarkerAcceptance.Tests PRIVATE src)
-    target_link_libraries(Recorder.AvMarkerAcceptance.Tests PRIVATE mfplat mfreadwrite mfuuid ole32)
+    target_link_libraries(Recorder.AvMarkerAcceptance.Tests PRIVATE Recorder.FragmentedMp4Sink mfplat mfreadwrite mfuuid ole32)
     recorder_enable_strict_warnings(Recorder.AvMarkerAcceptance.Tests)
     add_test(NAME Recorder.AvMarkerAcceptance.Short COMMAND Recorder.AvMarkerAcceptance.Tests)
     set_tests_properties(Recorder.AvMarkerAcceptance.Short PROPERTIES LABELS "av;media-foundation" RUN_SERIAL TRUE TIMEOUT 180)
@@ -254,6 +288,8 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         Recorder.M4aWriter.AudibleSignalRoundTrip
         Recorder.M4aWriter.Stress
         Recorder.M4aWriter.Duration
+        Recorder.M4aWriter.ExactSafetyWorkFile
+        Recorder.M4aWriter.ProcessKillRecovery
         Recorder.M4aWriter.Abort
         Recorder.M4aWriter.AbortAfterOneFrame
         Recorder.M4aWriter.AbortAfter960Frames
@@ -328,6 +364,18 @@ if(RECORDER_NATIVE_BUILD_TESTS)
         recorder_enable_strict_warnings(Recorder.WgcWindowCaptureSession.Tests)
         add_test(NAME Recorder.WgcWindowCaptureSession.Tests
             COMMAND Recorder.WgcWindowCaptureSession.Tests)
+
+        # Deterministic acceptance coverage for the dynamic exact-window
+        # routing state.  This deliberately has no WGC/desktop dependency so
+        # target replacement and privacy fencing stay testable in CI.
+        add_executable(Recorder.DynamicVideoCaptureAcceptance.Tests
+            tests/dynamic_video_capture_acceptance_tests.cpp
+        )
+        target_compile_features(Recorder.DynamicVideoCaptureAcceptance.Tests PRIVATE cxx_std_17)
+        target_include_directories(Recorder.DynamicVideoCaptureAcceptance.Tests PRIVATE video)
+        recorder_enable_strict_warnings(Recorder.DynamicVideoCaptureAcceptance.Tests)
+        add_test(NAME Recorder.DynamicVideoCaptureAcceptance.Tests
+            COMMAND Recorder.DynamicVideoCaptureAcceptance.Tests)
 
         add_executable(Recorder.SelectedAudioSessionFacade.Tests
             tests/selected_audio_session_facade_tests.cpp

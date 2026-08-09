@@ -5,7 +5,58 @@ namespace Recorder.Core;
 
 public enum RecordingSessionKind { Meeting, Test, Manual }
 
-public enum RecordingRecoveryState { None, VideoLostAudioPreserved, RecoveredAfterInterruption }
+public enum RecordingRecoveryState
+{
+    None,
+    VideoLostAudioPreserved,
+    RecoveredAfterInterruption,
+    FailedEvidenceRetained,
+}
+
+/// <summary>
+/// A byte boundary that has already crossed every native sink marker and
+/// durable file flush. Recovery must never infer durability beyond it.
+/// </summary>
+public sealed record RecordingRecoveryCheckpoint(
+    long DurableByteOffset,
+    long PresentationTime100Nanoseconds);
+
+/// <summary>
+/// The small, versioned hand-off between the native fragmented writers and
+/// managed startup recovery. Each stream advances independently so a failed
+/// video writer cannot erase proof that the audio safety stream was durable.
+/// </summary>
+public sealed record RecordingRecoveryJournal(
+    int SchemaVersion,
+    long Sequence,
+    RecordingRecoveryCheckpoint? AudioVideo,
+    RecordingRecoveryCheckpoint? AudioSafety,
+    DateTimeOffset UpdatedUtc)
+{
+    public const int CurrentSchemaVersion = 1;
+
+    public static RecordingRecoveryJournal Create(
+        long sequence,
+        RecordingRecoveryCheckpoint? audioVideo,
+        RecordingRecoveryCheckpoint? audioSafety,
+        DateTimeOffset updatedUtc) =>
+        new(CurrentSchemaVersion, sequence, audioVideo, audioSafety, updatedUtc);
+
+    public bool IsValid()
+    {
+        if (SchemaVersion != CurrentSchemaVersion || Sequence < 0 ||
+            UpdatedUtc == default || UpdatedUtc.Offset != TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        return IsValid(AudioVideo) && IsValid(AudioSafety);
+    }
+
+    private static bool IsValid(RecordingRecoveryCheckpoint? checkpoint) =>
+        checkpoint is null ||
+        (checkpoint.DurableByteOffset >= 0 && checkpoint.PresentationTime100Nanoseconds >= 0);
+}
 
 /// <summary>
 /// The deliberately small, portable description of a Windows audio capture.
@@ -34,6 +85,14 @@ public static class RecordingSessionLayout
     public const string PartialAudioFileName = "recording.audio-backup.m4a.partial";
     public const string FinalVideoFileName = "recording.mp4";
     public const string PartialVideoFileName = "recording.partial.mp4";
+    public const string AudioSafetyPartialFileName = "recording.audio-safety.partial.mp4";
+    public const string RecoveryJournalFileName = "recording-recovery.json";
+    public const string ActiveLockFileName = "recording.active.lock";
+
+    // v1.0 briefly passed an already-partial name through the native writer,
+    // which appended a second suffix. It remains discoverable evidence, but
+    // new plans never produce it.
+    public const string LegacyDoublePartialVideoFileName = "recording.partial.mp4.partial";
     public const string MetadataFileName = "recording-info.json";
 
     public static string Prefix(RecordingSessionKind kind) => kind switch
@@ -204,6 +263,7 @@ public static class RecordingInfoJson
     {
         "videoLostAudioPreserved" => RecordingRecoveryState.VideoLostAudioPreserved,
         "recoveredAfterInterruption" => RecordingRecoveryState.RecoveredAfterInterruption,
+        "failedEvidenceRetained" => RecordingRecoveryState.FailedEvidenceRetained,
         _ => RecordingRecoveryState.None,
     };
     private static int? SchemaVersion(JsonNode? node) =>
@@ -212,6 +272,7 @@ public static class RecordingInfoJson
     {
         RecordingRecoveryState.VideoLostAudioPreserved => "videoLostAudioPreserved",
         RecordingRecoveryState.RecoveredAfterInterruption => "recoveredAfterInterruption",
+        RecordingRecoveryState.FailedEvidenceRetained => "failedEvidenceRetained",
         _ => "none",
     };
 

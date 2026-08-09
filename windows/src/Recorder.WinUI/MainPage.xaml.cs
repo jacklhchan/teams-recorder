@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using TeamsRecorder.Windows.Application.Diagnostics;
 
 namespace TeamsRecorder.Windows.WinUI;
 
@@ -12,12 +13,15 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         InitializeComponent();
+        WorkspaceNavigation.SelectedItem = RecordNavigationItem;
+        ShowWorkspace("Record");
         viewModel = new RecordingViewModel();
         recordingOverlayPresenter = new RecordingOverlayPresenter();
         viewModel.RecordingOverlayStateChanged += OnRecordingOverlayStateChanged;
         recordingOverlayPresenter.CancelRequested += OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested += OnRecordingOverlayStopRequested;
         viewModel.InitializePlayer();
+        PlaybackVideoStage.SetMediaPlayer(viewModel.PlaybackMediaPlayer!);
         DataContext = viewModel;
         Loaded += OnLoaded;
     }
@@ -44,11 +48,35 @@ public sealed partial class MainPage : Page
         await viewModel.InitializeAsync();
     }
 
-    private void OnGoToRecordingSetupClick(object sender, RoutedEventArgs args) =>
-        RecordingSetupSection.StartBringIntoView();
+    private void OnNavigationSelectionChanged(
+        NavigationView sender,
+        NavigationViewSelectionChangedEventArgs args)
+    {
+        if (args.SelectedItemContainer?.Tag is string workspace)
+        {
+            ShowWorkspace(workspace);
+        }
+    }
 
-    private void OnGoToLibraryClick(object sender, RoutedEventArgs args) =>
-        LibrarySection.StartBringIntoView();
+    private void OnLibrarySearchTextChanged(object sender, TextChangedEventArgs args)
+    {
+        // TextBox bindings can otherwise wait for focus to move before they
+        // commit.  The library's bounded local index is safe to filter on each
+        // keystroke and never sends transcript content anywhere.
+        if (sender is TextBox searchBox && DataContext is RecordingViewModel model)
+        {
+            model.LibrarySearchText = searchBox.Text;
+        }
+    }
+
+    internal RecorderCrashContext CaptureCrashContext() => viewModel.CaptureCrashContext();
+
+    private void ShowWorkspace(string workspace)
+    {
+        RecordWorkspace.Visibility = workspace == "Record" ? Visibility.Visible : Visibility.Collapsed;
+        RecordingsWorkspace.Visibility = workspace == "Recordings" ? Visibility.Visible : Visibility.Collapsed;
+        SettingsWorkspace.Visibility = workspace == "Settings" ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     private async void OnSaveOpenAiProviderSettingsClick(object sender, RoutedEventArgs args)
     {

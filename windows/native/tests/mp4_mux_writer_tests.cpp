@@ -1,4 +1,5 @@
 #include "mp4_mux_writer.h"
+#include "fragmented_mp4_sink.h"
 #include "recorder_native_bridge.h"
 
 #include <mfapi.h>
@@ -16,6 +17,22 @@
 namespace {
 using Microsoft::WRL::ComPtr;
 void Expect(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
+
+HRESULT FailBeforeCheckpointFileFlush(recorder::media::CheckpointStage stage) {
+    return stage == recorder::media::CheckpointStage::BeforeFileFlush
+        ? E_ACCESSDENIED : S_OK;
+}
+
+class ScopedCheckpointFault final {
+public:
+    ScopedCheckpointFault() {
+        recorder::media::SetCheckpointFaultHookForTesting(
+            &FailBeforeCheckpointFileFlush);
+    }
+    ~ScopedCheckpointFault() {
+        recorder::media::SetCheckpointFaultHookForTesting(nullptr);
+    }
+};
 
 void WritesReopenableH264AacMp4() {
     const auto root = std::filesystem::temp_directory_path() / "teams-recorder-mp4-mux-test";
@@ -40,6 +57,28 @@ void WritesReopenableH264AacMp4() {
         Expect(writer->WriteVideoNv12(video.data(), 160, static_cast<std::uint64_t>(index) * 333'333U, 333'333U, &detail) == recorder::mp4::Error::Ok,
                "could not write MP4 video");
     }
+    recorder::mp4::DurableCheckpoint checkpoint;
+    Expect(writer->CreateDurableCheckpoint(30'000'000U, &checkpoint, &detail) ==
+               recorder::mp4::Error::Ok,
+           "could not create a marker/byte-stream/file durable MP4 checkpoint");
+    Expect(checkpoint.sequence == 1U && checkpoint.file_size_bytes > 0U &&
+               checkpoint.media_time_100ns == 30'000'000U,
+           "MP4 durable checkpoint evidence was incomplete");
+    {
+        ScopedCheckpointFault fault;
+        recorder::mp4::DurableCheckpoint rejected;
+        Expect(writer->CreateDurableCheckpoint(
+                   31'000'000U, &rejected, &detail) ==
+                   recorder::mp4::Error::IoError &&
+                   rejected.sequence == 0U,
+               "MP4 checkpoint advanced despite an injected file-flush fault");
+    }
+    recorder::mp4::DurableCheckpoint checkpoint_after_fault;
+    Expect(writer->CreateDurableCheckpoint(
+               32'000'000U, &checkpoint_after_fault, &detail) ==
+               recorder::mp4::Error::Ok &&
+               checkpoint_after_fault.sequence == 2U,
+           "MP4 checkpoint did not recover cleanly after the injected fault");
     Expect(writer->Finalize(&detail) == recorder::mp4::Error::Ok, "could not finalize MP4");
     writer.reset();
     Expect(std::filesystem::exists(output) && std::filesystem::file_size(output) > 0, "MP4 output was not published");
@@ -84,13 +123,53 @@ void WritesReopenableH264AacMp4() {
            "MP4 audio stream did not decode a sample");
     std::filesystem::remove_all(root, error);
 }
+
+void AbortPreservesAcceptedAvWorkFile() {
+    const auto root = std::filesystem::temp_directory_path() /
+        "teams-recorder-mp4-abort-retention-test";
+    std::error_code filesystem_error;
+    std::filesystem::remove_all(root, filesystem_error);
+    std::filesystem::create_directories(root, filesystem_error);
+    Expect(!filesystem_error, "could not create MP4 abort test directory");
+    const auto work_path = root / "recording.partial.mp4";
+    recorder::mp4::Config config{
+        work_path, 160, 90, 1'000'000, 128'000, 30};
+    config.work_path = work_path;
+    recorder::mp4::Error create_error{};
+    std::string detail;
+    auto writer = recorder::mp4::Writer::Create(
+        config, &create_error, &detail);
+    Expect(writer != nullptr && create_error == recorder::mp4::Error::Ok,
+           "could not create MP4 abort-retention writer");
+    std::array<float, 2U> audio{0.1F, -0.1F};
+    std::vector<std::uint8_t> video(
+        160U * 90U * 3U / 2U, static_cast<std::uint8_t>(16U));
+    std::fill(video.begin() + 160U * 90U, video.end(),
+              static_cast<std::uint8_t>(128U));
+    Expect(writer->WriteAudioFrames(audio.data(), 1U, 0U, &detail) ==
+               recorder::mp4::Error::Ok &&
+               writer->WriteVideoNv12(
+                   video.data(), 160U, 0U, 333'333U, &detail) ==
+               recorder::mp4::Error::Ok,
+           "MP4 abort-retention writer did not accept its media");
+    writer->Abort();
+    writer.reset();
+    Expect(std::filesystem::exists(work_path) &&
+               std::filesystem::file_size(work_path) > 0U,
+           "MP4 Abort discarded its accepted work file");
+    const auto path_utf8 = work_path.u8string();
+    Expect(recorder_native_validate_h264_aac_mp4(path_utf8.c_str()) ==
+               RECORDER_NATIVE_OK,
+           "MP4 Abort did not leave a decodable A/V work file");
+    std::filesystem::remove_all(root, filesystem_error);
+}
 }
 
 int main() {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(com) && com != RPC_E_CHANGED_MODE) return 1;
     const HRESULT mf = MFStartup(MF_VERSION);
-    try { if (FAILED(mf)) throw std::runtime_error("MFStartup failed"); WritesReopenableH264AacMp4(); }
+    try { if (FAILED(mf)) throw std::runtime_error("MFStartup failed"); WritesReopenableH264AacMp4(); AbortPreservesAcceptedAvWorkFile(); }
     catch (const std::exception& exception) { std::cerr << "FAIL " << exception.what() << '\n'; if (SUCCEEDED(mf)) MFShutdown(); if (SUCCEEDED(com)) CoUninitialize(); return 1; }
     if (SUCCEEDED(mf)) MFShutdown();
     if (SUCCEEDED(com)) CoUninitialize();

@@ -25,6 +25,18 @@ public sealed class RecordingLibraryService
     public IReadOnlyList<RecordingSessionLibraryItem> ListSessions() => storage.ListSessions();
 
     /// <summary>
+    /// Re-enumerates the library and returns a session only when its current
+    /// immutable fingerprint still matches the row that initiated an action.
+    /// A path alone is intentionally insufficient: a recycled or replaced
+    /// folder must never receive an action intended for an older row.
+    /// </summary>
+    public RecordingSessionLibraryItem? ResolveCanonicalSession(RecordingLibrarySessionIdentity expected)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        return storage.ListSessions().SingleOrDefault(expected.Matches);
+    }
+
+    /// <summary>
     /// Performs the conservative startup-recovery pass, then reads the library
     /// again so callers receive exactly the media that is now publishable.
     /// </summary>
@@ -43,6 +55,18 @@ public sealed class RecordingLibraryService
         CancellationToken cancellationToken = default) =>
         storage.UpdateMetadataAsync(folderPath, title, tags, isFavorite, cancellationToken);
 
+    /// <summary>Updates metadata only after a fresh, matching canonical row is found.</summary>
+    public Task<RecordingInfo> UpdateMetadataAsync(
+        RecordingLibrarySessionIdentity expected,
+        string? title,
+        IEnumerable<string>? tags,
+        bool? isFavorite,
+        CancellationToken cancellationToken = default)
+    {
+        var current = RequireCanonicalManagedSession(expected);
+        return storage.UpdateMetadataAsync(current.FolderPath, title, tags, isFavorite, cancellationToken);
+    }
+
     /// <summary>
     /// Sends a completed managed session to the Windows Recycle Bin only after
     /// the UI has recorded an affirmative, per-session user confirmation.
@@ -57,11 +81,35 @@ public sealed class RecordingLibraryService
         storage.RecycleSession(folderPath);
     }
 
+    /// <summary>Recycles only the exact canonical session that was confirmed by the user.</summary>
+    public void RecycleSession(RecordingLibrarySessionIdentity expected, bool userConfirmed)
+    {
+        if (!userConfirmed)
+        {
+            throw new InvalidOperationException("Deleting a recording requires explicit user confirmation.");
+        }
+
+        var current = RequireCanonicalManagedSession(expected);
+        storage.RecycleSession(current.FolderPath);
+    }
+
     /// <summary>
     /// Removes a failed-start allocation only when it remains empty. Media,
     /// partial media, recovery evidence and diagnostics are always retained.
     /// </summary>
     public bool CleanupFailedStart(RecordingSessionPlan plan) => storage.CleanupEmptyOwnedSession(plan);
+
+    private RecordingSessionLibraryItem RequireCanonicalManagedSession(RecordingLibrarySessionIdentity expected)
+    {
+        var current = ResolveCanonicalSession(expected)
+            ?? throw new IOException("The selected recording changed or is no longer available. Refresh the library and choose it again.");
+        if (!current.IsManaged)
+        {
+            throw new InvalidOperationException("Legacy recordings are playback-only and cannot be changed or recycled by this app.");
+        }
+
+        return current;
+    }
 }
 
 public sealed record RecordingLibraryStartupResult(

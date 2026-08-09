@@ -89,10 +89,12 @@ typedef struct RecorderNativeStartOptions {
     uint32_t reserved;
 } RecorderNativeStartOptions;
 
-/* Additive M4A mixed-capture ABI.  All strings are UTF-8 and copied on start. */
+/* Additive mixed-capture ABI. All strings are UTF-8 and copied on start. */
 typedef struct RecorderNativeMixedStartOptions {
     uint32_t struct_size;
-    /* Required final .m4a path.  The encoder writes <path>.partial first. */
+    /* Preferred exact managed-owned recording.audio-safety.partial.mp4 work
+       path. Finalize closes it in place. Legacy final .m4a paths remain
+       accepted and retain the sibling .partial + rename behaviour. */
     const char* output_path_utf8;
     /* NULL/empty selects the default render endpoint for system loopback. */
     const char* render_endpoint_id_utf8;
@@ -105,7 +107,9 @@ typedef struct RecorderNativeMixedStartOptions {
 
 /*
  * Additive selected-audio mixed-capture ABI. All UTF-8 strings are copied on
- * start. output_path_utf8 must be a final .m4a path. NULL/empty
+ * start. output_path_utf8 should be the exact managed-owned
+ * recording.audio-safety.partial.mp4 work path (legacy final .m4a paths are
+ * accepted for ABI compatibility). NULL/empty
  * microphone_endpoint_id_utf8 means that no microphone is recorded; it never
  * selects a default microphone.
  *
@@ -135,15 +139,18 @@ typedef struct RecorderNativeSelectedAudioStartOptions {
 
 /*
  * Exact-window A/V recording. Both output paths are required and copied
- * before this call returns: audio_output_path_utf8 is the playable M4A
- * recovery artifact; video_output_path_utf8 is the final MP4 publication
- * target (the native writer uses a sibling .partial file until finalization).
+ * before this call returns: audio_output_path_utf8 should be the exact
+ * recording.audio-safety.partial.mp4 safety work file; video_output_path_utf8
+ * is the exact recording.partial.mp4 A/V work file. Both are durably closed in
+ * place; the managed session store owns publication to recording.mp4. Legacy
+ * final .m4a safety paths remain accepted for ABI compatibility.
  *
  * target_window_handle, target_window_process_id, and
  * target_window_process_creation_time_100ns are an indivisible selected
- * Teams window identity. Native code verifies this exact identity and uses
- * GraphicsCaptureItem::CreateForWindow only; it never falls back to desktop,
- * monitor, title matching, or another HWND.
+ * Teams window identity. They can all be zero at start to create an
+ * audio-first MP4 with privacy-black video frames. Native code verifies a
+ * non-zero identity and uses GraphicsCaptureItem::CreateForWindow only; it
+ * never falls back to desktop, monitor, title matching, or another HWND.
  */
 typedef struct RecorderNativeSelectedWindowAvStartOptions {
     uint32_t struct_size;
@@ -165,6 +172,23 @@ typedef struct RecorderNativeSelectedWindowAvStartOptions {
     uint64_t audio_process_creation_time_100ns;
     uint64_t target_window_process_creation_time_100ns;
 } RecorderNativeSelectedWindowAvStartOptions;
+
+/*
+ * An exact window identity used to replace or enable video while a
+ * selected-window A/V session is recording. The bridge copies this value
+ * before returning. All three identity fields are required; a zero or partial
+ * identity is rejected. The native session serializes transitions and fences
+ * callbacks by an internal monotonically increasing generation, so a late
+ * frame from a replaced/closed window is never muxed after the transition.
+ */
+typedef struct RecorderNativeVideoTargetOptions {
+    uint32_t struct_size;
+    uint32_t reserved;
+    uint64_t target_window_handle;
+    uint32_t target_window_process_id;
+    uint32_t reserved2;
+    uint64_t target_window_process_creation_time_100ns;
+} RecorderNativeVideoTargetOptions;
 
 typedef struct RecorderNativeStats {
     /* Set to sizeof(RecorderNativeStats) before calling get_stats. */
@@ -205,11 +229,21 @@ typedef struct RecorderNativeStats {
     float primary_level_rms;
     float microphone_level_peak;
     float microphone_level_rms;
+    /* Additive v4 crash-recovery checkpoints. A non-zero sequence means the
+       named prefix was acknowledged by the sink marker, IMFByteStream::Flush,
+       and FlushFileBuffers. Audio and A/V advance independently. */
+    uint64_t audio_durable_checkpoint_sequence;
+    uint64_t audio_durable_checkpoint_bytes;
+    uint64_t audio_durable_checkpoint_100ns;
+    uint64_t video_durable_checkpoint_sequence;
+    uint64_t video_durable_checkpoint_bytes;
+    uint64_t video_durable_checkpoint_100ns;
 } RecorderNativeStats;
 
 #define RECORDER_NATIVE_STATS_V1_SIZE 96u
 #define RECORDER_NATIVE_STATS_V2_SIZE 192u
 #define RECORDER_NATIVE_STATS_V3_SIZE 208u
+#define RECORDER_NATIVE_STATS_V4_SIZE 256u
 
 RECORDER_NATIVE_API RecorderNativeBridge* recorder_native_create(void);
 
@@ -256,6 +290,23 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_selected_window_a
     const RecorderNativeSelectedWindowAvStartOptions* options);
 
 /*
+ * Enables or replaces the exact HWND WGC target of an already-recording A/V
+ * session. A failed WGC admission leaves audio and the MP4 timeline running
+ * with black frames; it never substitutes a desktop, monitor, or other
+ * window. Valid only for RECORDER_NATIVE_CAPTURE_SELECTED_WINDOW_AV.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_set_video_target(
+    RecorderNativeBridge* bridge,
+    const RecorderNativeVideoTargetOptions* options);
+
+/*
+ * Disables the current exact HWND target of an already-recording A/V session.
+ * Audio continues and the MP4 retains its fixed canvas with black frames.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_disable_video_target(
+    RecorderNativeBridge* bridge);
+
+/*
  * Fail-closed native decode validation for a finalized H.264/AAC MP4. The
  * function opens both streams and obtains at least one decoded video and
  * audio sample. It does not retain frame or audio bytes. This intentionally
@@ -265,7 +316,10 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_start_selected_window_a
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_validate_h264_aac_mp4(
     const char* path_utf8);
 
-/* Fail-closed native decode validation for a finalized AAC/M4A fallback. */
+/*
+ * Fail-closed native decode validation for a finalized AAC-only ISO-BMFF
+ * fallback. Accepts legacy .m4a and v0.9 audio-safety .mp4 paths.
+ */
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_validate_aac_m4a(
     const char* path_utf8);
 

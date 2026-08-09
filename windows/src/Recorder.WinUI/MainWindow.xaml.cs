@@ -1,5 +1,7 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Windows.Graphics;
+using TeamsRecorder.Windows.Application.Diagnostics;
 
 namespace TeamsRecorder.Windows.WinUI;
 
@@ -19,6 +21,12 @@ public sealed partial class MainWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
+        AppWindow.Resize(new SizeInt32(1000, 760));
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.PreferredMinimumWidth = 860;
+            presenter.PreferredMinimumHeight = 680;
+        }
 
         RootFrame.Navigate(typeof(MainPage));
         AppWindow.Closing += OnAppWindowClosing;
@@ -68,4 +76,9 @@ public sealed partial class MainWindow : Window
         shutdownInProgress = true;
         Close();
     }
+
+    internal RecorderCrashContext CaptureCrashContext() =>
+        RootFrame.Content is MainPage page
+            ? page.CaptureCrashContext()
+            : new("initializing", null, null, false, "none");
 }

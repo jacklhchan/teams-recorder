@@ -9,13 +9,13 @@ internal static class CaptureSourceChoiceTests
         Contains("loopback", CaptureSourceChoice.Default.Description);
     }
 
-    public static void MarksProcessLoopbackAsPreviewAndNeverSilentlyFallsBack()
+    public static void SupportsAnyApplicationAndNeverSilentlyFallsBack()
     {
         var process = CaptureSourceChoice.SelectedApplication;
 
-        Contains("Preview", process.DisplayName);
-        Contains("實驗性", process.Description);
-        Contains("不會回退至系統音訊", process.Description);
+        Equal("指定應用程式", process.DisplayName);
+        Contains("所選應用程式", process.Description);
+        Contains("絕不回退至系統音訊", process.Description);
         Equal(process, CaptureSourceChoice.ResolveSelection(requested: null, current: process));
     }
 

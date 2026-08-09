@@ -31,8 +31,8 @@ public sealed record CaptureSourceChoice(
 
     public static CaptureSourceChoice SelectedApplication { get; } = new(
         CaptureSourceKind.SelectedApplication,
-        "指定應用程式（Preview／實驗性）",
-        "Preview／實驗性：只錄製所選 Teams 程序及其子處理程序的音訊，可能無法包含所有參與者音訊；若程序不可用，錄音會失敗且不會回退至系統音訊。");
+        "指定應用程式",
+        "只錄製所選應用程式及其子處理程序的音訊；若程序離開或身分不再一致，錄音會失敗且絕不回退至系統音訊。");
 
     /// <summary>
     /// A cleared picker value must preserve the user's current choice. In
@@ -82,11 +82,11 @@ public sealed record ProcessSelectionChoice(
         StartedAtUtc == other.StartedAtUtc;
 }
 
-/// <summary>Presentation-only wrapper for an admitted exact Teams HWND.</summary>
+/// <summary>Presentation-only wrapper for an admitted exact application HWND.</summary>
 public sealed record VideoCaptureWindowChoice(VideoCaptureTarget Target)
 {
     public string DisplayName => string.IsNullOrWhiteSpace(Target.WindowTitle)
         ? Target.ProcessName
         : Target.WindowTitle;
-    public string Description => $"{Target.ProcessName} — selected Teams window";
+    public string Description => $"{Target.ProcessName} — 已選取的共享內容視窗";
 }

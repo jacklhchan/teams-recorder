@@ -41,13 +41,27 @@ public sealed class M4aAudioBackupValidator : IAudioBackupValidator
         catch (UnauthorizedAccessException) { return false; }
     }
 }
-public sealed record SessionRecoveryResult(string FolderPath, bool Recovered, string? Reason);
+public sealed record SessionRecoveryResult(
+    string FolderPath,
+    bool Recovered,
+    string? Reason,
+    RecordingRecoveryState RecoveryState = RecordingRecoveryState.None);
 
 public sealed class SessionRecoveryService
 {
     private readonly SessionStorageService storage;
     private readonly IAudioBackupValidator validator;
-    public SessionRecoveryService(SessionStorageService storage, IAudioBackupValidator? validator = null) { this.storage = storage; this.validator = validator ?? new M4aAudioBackupValidator(); }
+    private readonly IRecoveryMediaValidator recoveryMediaValidator;
+
+    public SessionRecoveryService(
+        SessionStorageService storage,
+        IAudioBackupValidator? validator = null,
+        IRecoveryMediaValidator? recoveryMediaValidator = null)
+    {
+        this.storage = storage;
+        this.validator = validator ?? new M4aAudioBackupValidator();
+        this.recoveryMediaValidator = recoveryMediaValidator ?? new StorageRecoveryMediaValidator(storage);
+    }
 
     public async Task<IReadOnlyList<SessionRecoveryResult>> RecoverAsync(CancellationToken cancellationToken = default)
     {
@@ -65,11 +79,30 @@ public sealed class SessionRecoveryService
         RecordingSessionKind kind,
         CancellationToken cancellationToken)
     {
+        if (!storage.TryAcquireSessionLock(folder, out var sessionLock))
+        {
+            return new SessionRecoveryResult(folder, false, "The recording session is active or its exclusive lock is unavailable.");
+        }
+
+        using (sessionLock)
+        {
+            return await RecoverUnlockedFolderAsync(folder, kind, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<SessionRecoveryResult> RecoverUnlockedFolderAsync(
+        string folder,
+        RecordingSessionKind kind,
+        CancellationToken cancellationToken)
+    {
         var finalAudio = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
         var backupAudio = Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName);
         var partialAudio = Path.Combine(folder, RecordingSessionLayout.PartialAudioFileName);
         var finalVideo = Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName);
         var partialVideo = Path.Combine(folder, RecordingSessionLayout.PartialVideoFileName);
+        var legacyDoublePartialVideo = Path.Combine(folder, RecordingSessionLayout.LegacyDoublePartialVideoFileName);
+        var audioSafety = Path.Combine(folder, RecordingSessionLayout.AudioSafetyPartialFileName);
+        var journal = storage.ReadRecoveryJournal(Path.Combine(folder, RecordingSessionLayout.RecoveryJournalFileName));
         var metadataPath = Path.Combine(folder, RecordingSessionLayout.MetadataFileName);
         var metadataExists = storage.IsSafeFile(metadataPath);
         var current = metadataExists
@@ -77,8 +110,141 @@ public sealed class SessionRecoveryService
             : RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, kind);
         var hasFinalAudio = storage.IsSafeCompletedAudio(finalAudio);
         var hasFinalVideo = storage.IsSafeCompletedVideo(finalVideo);
-        var hasPartialVideo = storage.IsSafeCompletedVideo(partialVideo);
-        var hasVideoEvidence = current.MediaKind == "video" || File.Exists(finalVideo) || File.Exists(partialVideo);
+        var completedLegacyVideo = storage.IsSafeCompletedVideo(partialVideo)
+            ? partialVideo
+            : storage.IsSafeCompletedVideo(legacyDoublePartialVideo)
+                ? legacyDoublePartialVideo
+                : null;
+        var hasPartialVideo = completedLegacyVideo is not null;
+        var hasFragmentedVideoEvidence = File.Exists(partialVideo) || File.Exists(legacyDoublePartialVideo) ||
+            journal?.AudioVideo is not null;
+        var hasVideoEvidence = current.MediaKind == "video" || File.Exists(finalVideo) || hasFragmentedVideoEvidence;
+
+        // A second process must be able to finish a publication interrupted
+        // after the no-overwrite rename but before metadata commit.
+        if (!hasFinalVideo && current.MediaKind == "audio" && storage.IsSafeNonEmptyFile(finalVideo) &&
+            recoveryMediaValidator.ValidateToEnd(finalVideo, RecoveryMediaKind.AudioOnlyMp4).IsValid)
+        {
+            var state = hasFragmentedVideoEvidence
+                ? RecordingRecoveryState.VideoLostAudioPreserved
+                : RecordingRecoveryState.RecoveredAfterInterruption;
+            if (metadataExists && current.RecoveryState == state)
+            {
+                return new SessionRecoveryResult(folder, false, "Recovered audio MP4 already exists.", state);
+            }
+            try
+            {
+                await WriteRecoveryMetadataAsync(folder, kind, current, isVideo: false, state, cancellationToken)
+                    .ConfigureAwait(false);
+                return new SessionRecoveryResult(folder, true, null, state);
+            }
+            catch (IOException) { return FailedEvidence(folder, "Recovered audio MP4 metadata could not be written yet."); }
+            catch (UnauthorizedAccessException) { return FailedEvidence(folder, "Recovered audio MP4 metadata could not be written yet."); }
+        }
+
+        // A normal completed fMP4 may not have a legacy M4A beside it. The
+        // durable fMP4/journal contract supersedes that old publication rule.
+        if (hasFinalVideo && hasFragmentedVideoEvidence && !hasFinalAudio)
+        {
+            if (metadataExists && current.MediaKind == "video" &&
+                current.RecoveryState is RecordingRecoveryState.None or RecordingRecoveryState.RecoveredAfterInterruption)
+            {
+                var sanitized = RecordingInfoJson.CreateVideo(
+                    current.Document,
+                    current.Title,
+                    current.RecoveryState,
+                    kind);
+                if (string.Equals(
+                    sanitized.Document.ToJsonString(),
+                    current.Document.ToJsonString(),
+                    StringComparison.Ordinal))
+                {
+                    return new SessionRecoveryResult(
+                        folder,
+                        false,
+                        "Final fragmented MP4 already exists.",
+                        current.RecoveryState);
+                }
+                try
+                {
+                    await storage.WriteMetadataAsync(metadataPath, sanitized, cancellationToken).ConfigureAwait(false);
+                    return new SessionRecoveryResult(
+                        folder,
+                        false,
+                        "Final fragmented MP4 metadata was sanitized.",
+                        current.RecoveryState);
+                }
+                catch (IOException) { return FailedEvidence(folder, "Final fragmented MP4 metadata could not be sanitized yet."); }
+                catch (UnauthorizedAccessException) { return FailedEvidence(folder, "Final fragmented MP4 metadata could not be sanitized yet."); }
+            }
+            try
+            {
+                var state = current.MediaKind == "video" && current.RecoveryState == RecordingRecoveryState.None
+                    ? RecordingRecoveryState.None
+                    : RecordingRecoveryState.RecoveredAfterInterruption;
+                await WriteRecoveryMetadataAsync(folder, kind, current, isVideo: true, state, cancellationToken)
+                    .ConfigureAwait(false);
+                return new SessionRecoveryResult(folder, state != RecordingRecoveryState.None, null, state);
+            }
+            catch (IOException) { return FailedEvidence(folder, "Final fragmented MP4 metadata could not be written yet."); }
+            catch (UnauthorizedAccessException) { return FailedEvidence(folder, "Final fragmented MP4 metadata could not be written yet."); }
+        }
+
+        if (!File.Exists(finalVideo))
+        {
+            var videoAttempt = await TryPromoteFragmentedPrefixAsync(
+                folder,
+                [
+                    new FragmentedSource(partialVideo, journal?.AudioVideo?.DurableByteOffset),
+                    new FragmentedSource(legacyDoublePartialVideo, null),
+                ],
+                finalVideo,
+                RecoveryMediaKind.AudioVideoMp4,
+                "recording.recovery-video.candidate.mp4",
+                cancellationToken).ConfigureAwait(false);
+            if (videoAttempt.Promoted)
+            {
+                try
+                {
+                    await WriteRecoveryMetadataAsync(
+                        folder,
+                        kind,
+                        current,
+                        isVideo: true,
+                        RecordingRecoveryState.RecoveredAfterInterruption,
+                        cancellationToken).ConfigureAwait(false);
+                    return new SessionRecoveryResult(
+                        folder,
+                        true,
+                        null,
+                        RecordingRecoveryState.RecoveredAfterInterruption);
+                }
+                catch (IOException) { return FailedEvidence(folder, "Recovered video metadata could not be written yet."); }
+                catch (UnauthorizedAccessException) { return FailedEvidence(folder, "Recovered video metadata could not be written yet."); }
+            }
+
+            var audioAttempt = await TryPromoteFragmentedPrefixAsync(
+                folder,
+                [new FragmentedSource(audioSafety, journal?.AudioSafety?.DurableByteOffset)],
+                finalVideo,
+                RecoveryMediaKind.AudioOnlyMp4,
+                "recording.recovery-audio.candidate.mp4",
+                cancellationToken).ConfigureAwait(false);
+            if (audioAttempt.Promoted)
+            {
+                var state = hasVideoEvidence
+                    ? RecordingRecoveryState.VideoLostAudioPreserved
+                    : RecordingRecoveryState.RecoveredAfterInterruption;
+                try
+                {
+                    await WriteRecoveryMetadataAsync(folder, kind, current, isVideo: false, state, cancellationToken)
+                        .ConfigureAwait(false);
+                    return new SessionRecoveryResult(folder, true, null, state);
+                }
+                catch (IOException) { return FailedEvidence(folder, "Recovered audio metadata could not be written yet."); }
+                catch (UnauthorizedAccessException) { return FailedEvidence(folder, "Recovered audio metadata could not be written yet."); }
+            }
+        }
 
         if (hasFinalVideo)
         {
@@ -153,7 +319,9 @@ public sealed class SessionRecoveryService
                     cancellationToken).ConfigureAwait(false);
                 if (!audio.Succeeded)
                 {
-                    return new SessionRecoveryResult(folder, false,
+                    await TryWriteFailedEvidenceMetadataAsync(folder, kind, current, cancellationToken).ConfigureAwait(false);
+                    return FailedEvidence(
+                        folder,
                         "Validated partial MP4 was retained but no valid M4A fallback could be published: " + audio.Reason);
                 }
                 hasFinalAudio = true;
@@ -161,17 +329,25 @@ public sealed class SessionRecoveryService
 
             try
             {
-                File.Move(partialVideo, finalVideo, false);
+                File.Move(completedLegacyVideo!, finalVideo, false);
             }
             catch (IOException)
             {
                 await TryWriteAudioFallbackMetadataAsync(folder, kind, current, cancellationToken).ConfigureAwait(false);
-                return new SessionRecoveryResult(folder, false, "Validated partial MP4 could not be promoted without overwriting media.");
+                return new SessionRecoveryResult(
+                    folder,
+                    false,
+                    "Validated partial MP4 could not be promoted without overwriting media.",
+                    RecordingRecoveryState.VideoLostAudioPreserved);
             }
             catch (UnauthorizedAccessException)
             {
                 await TryWriteAudioFallbackMetadataAsync(folder, kind, current, cancellationToken).ConfigureAwait(false);
-                return new SessionRecoveryResult(folder, false, "Validated partial MP4 could not be promoted without overwriting media.");
+                return new SessionRecoveryResult(
+                    folder,
+                    false,
+                    "Validated partial MP4 could not be promoted without overwriting media.",
+                    RecordingRecoveryState.VideoLostAudioPreserved);
             }
 
             try
@@ -189,7 +365,7 @@ public sealed class SessionRecoveryService
             catch (UnauthorizedAccessException) { return new SessionRecoveryResult(folder, false, "Finalized MP4 was retained but recovery metadata could not be written yet."); }
         }
 
-        return await RecoverAudioOnlyAsync(
+        var legacyResult = await RecoverAudioOnlyAsync(
             folder,
             kind,
             current,
@@ -199,6 +375,19 @@ public sealed class SessionRecoveryService
             partialAudio,
             hasVideoEvidence,
             cancellationToken).ConfigureAwait(false);
+        if (legacyResult.Recovered || storage.IsSafeCompletedAudio(finalAudio) ||
+            storage.IsSafeCompletedVideo(finalVideo))
+        {
+            return legacyResult;
+        }
+
+        var hasRetainedEvidence = File.Exists(finalVideo) || File.Exists(partialVideo) ||
+            File.Exists(legacyDoublePartialVideo) || File.Exists(audioSafety) ||
+            File.Exists(backupAudio) || File.Exists(partialAudio) || journal is not null;
+        if (!hasRetainedEvidence) return legacyResult;
+
+        await TryWriteFailedEvidenceMetadataAsync(folder, kind, current, cancellationToken).ConfigureAwait(false);
+        return FailedEvidence(folder, legacyResult.Reason ?? "No recoverable media passed full validation.");
     }
 
     private async Task<SessionRecoveryResult> RecoverAudioOnlyAsync(
@@ -226,7 +415,7 @@ public sealed class SessionRecoveryService
             try
             {
                 await WriteRecoveryMetadataAsync(folder, kind, current, isVideo: false, recoveryState, cancellationToken).ConfigureAwait(false);
-                return new SessionRecoveryResult(folder, false, "Final media already exists; metadata was repaired.");
+                return new SessionRecoveryResult(folder, false, "Final media already exists; metadata was repaired.", recoveryState);
             }
             catch (IOException) { return new SessionRecoveryResult(folder, false, "Final media exists but recovery metadata could not be written yet."); }
             catch (UnauthorizedAccessException) { return new SessionRecoveryResult(folder, false, "Final media exists but recovery metadata could not be written yet."); }
@@ -241,7 +430,7 @@ public sealed class SessionRecoveryService
             recoveryState,
             cancellationToken).ConfigureAwait(false);
         return audio.Succeeded
-            ? new SessionRecoveryResult(folder, true, null)
+            ? new SessionRecoveryResult(folder, true, null, recoveryState)
             : new SessionRecoveryResult(folder, false, audio.Reason);
     }
 
@@ -302,6 +491,142 @@ public sealed class SessionRecoveryService
         catch (UnauthorizedAccessException) { }
     }
 
+    private async Task<FragmentedPromotionAttempt> TryPromoteFragmentedPrefixAsync(
+        string folder,
+        IReadOnlyList<FragmentedSource> sources,
+        string finalPath,
+        RecoveryMediaKind mediaKind,
+        string candidateFileName,
+        CancellationToken cancellationToken)
+    {
+        var hadEvidence = false;
+        string? lastReason = null;
+        foreach (var source in sources)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!storage.IsSafeFile(source.Path)) continue;
+            hadEvidence = true;
+
+            var scan = FragmentedMp4PrefixScanner.Scan(source.Path, source.DurableByteLimit);
+            if (!scan.HasRecoverablePrefix)
+            {
+                lastReason = scan.Reason;
+                continue;
+            }
+
+            var candidate = Path.Combine(folder, candidateFileName);
+            try
+            {
+                if (File.Exists(candidate))
+                {
+                    if (!storage.IsSafeFile(candidate))
+                    {
+                        lastReason = "The recovery staging path is not a safe regular file.";
+                        continue;
+                    }
+
+                    var existingValidation = recoveryMediaValidator.ValidateToEnd(candidate, mediaKind);
+                    if (!existingValidation.IsValid)
+                    {
+                        // This is a derived copy, never the only evidence. The
+                        // source remains byte-for-byte intact for the retry.
+                        File.Delete(candidate);
+                    }
+                }
+
+                if (!File.Exists(candidate))
+                {
+                    await CopyPrefixWithWriteThroughAsync(
+                        source.Path,
+                        candidate,
+                        scan.CompletePrefixLength,
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                var validation = recoveryMediaValidator.ValidateToEnd(candidate, mediaKind);
+                if (!validation.IsValid)
+                {
+                    lastReason = validation.Reason;
+                    continue;
+                }
+
+                File.Move(candidate, finalPath, overwrite: false);
+                return new FragmentedPromotionAttempt(true, true, null);
+            }
+            catch (IOException error)
+            {
+                lastReason = error.Message;
+            }
+            catch (UnauthorizedAccessException error)
+            {
+                lastReason = error.Message;
+            }
+        }
+
+        return new FragmentedPromotionAttempt(false, hadEvidence, lastReason);
+    }
+
+    private static async Task CopyPrefixWithWriteThroughAsync(
+        string sourcePath,
+        string candidatePath,
+        long byteCount,
+        CancellationToken cancellationToken)
+    {
+        if (byteCount <= 0) throw new IOException("A recovery prefix must be non-empty.");
+        await using var source = new FileStream(
+            sourcePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (byteCount > source.Length) throw new IOException("The selected recovery prefix exceeds its evidence file.");
+
+        await using var destination = new FileStream(
+            candidatePath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        var buffer = new byte[1024 * 1024];
+        var remaining = byteCount;
+        while (remaining > 0)
+        {
+            var read = await source.ReadAsync(
+                buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)),
+                cancellationToken).ConfigureAwait(false);
+            if (read == 0) throw new EndOfStreamException("The recovery evidence ended before its complete fragment boundary.");
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            remaining -= read;
+        }
+        await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+        destination.Flush(flushToDisk: true);
+    }
+
+    private async Task TryWriteFailedEvidenceMetadataAsync(
+        string folder,
+        RecordingSessionKind kind,
+        RecordingInfo current,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await WriteRecoveryMetadataAsync(
+                folder,
+                kind,
+                current,
+                isVideo: current.MediaKind == "video",
+                RecordingRecoveryState.FailedEvidenceRetained,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static SessionRecoveryResult FailedEvidence(string folder, string reason) =>
+        new(folder, false, reason, RecordingRecoveryState.FailedEvidenceRetained);
+
     private Task WriteRecoveryMetadataAsync(
         string folder,
         RecordingSessionKind kind,
@@ -318,4 +643,6 @@ public sealed class SessionRecoveryService
     }
 
     private sealed record AudioPromotionResult(bool Succeeded, string? Reason);
+    private sealed record FragmentedSource(string Path, long? DurableByteLimit);
+    private sealed record FragmentedPromotionAttempt(bool Promoted, bool HadEvidence, string? Reason);
 }

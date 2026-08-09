@@ -4,7 +4,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- A test-signed kernel driver must never be reachable from a Release build. -->
+    <EnableTestSignedVirtualMicPreview Condition="'$(EnableTestSignedVirtualMicPreview)' == ''">false</EnableTestSignedVirtualMicPreview>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' and '$(EnableTestSignedVirtualMicPreview)' == 'true'">
+    <DefineConstants>$(DefineConstants);TEAMSRECORDER_TESTSIGNED_VIRTUAL_MIC</DefineConstants>
+  </PropertyGroup>
+  <Target Name="RejectTestSignedVirtualMicPreviewInRelease" BeforeTargets="CoreCompile" Condition="'$(Configuration)' == 'Release' and '$(EnableTestSignedVirtualMicPreview)' == 'true'">
+    <Error Text="EnableTestSignedVirtualMicPreview is permitted only in Debug builds; Release builds always disable the test-signed virtual microphone." />
+  </Target>
   <ItemGroup>
     <ProjectReference Include="../Recorder.Core/Recorder.Core.csproj" />
   </ItemGroup>

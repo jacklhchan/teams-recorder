@@ -7,6 +7,43 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Assert-SelfContainedAsrWorkerMsixPayload {
+    param(
+        [Parameter(Mandatory)]
+        [string]$PackagePath
+    )
+
+    # MSIX is a ZIP container. Inspect its actual payload rather than trusting
+    # the loose build directory, where a project-reference apphost can mask a
+    # same-named self-contained helper.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $PackagePath).Path)
+    try {
+        $worker = @($archive.Entries | Where-Object { $_.FullName -ieq "Recorder.AsrWorker.exe" })
+        if ($worker.Count -ne 1) {
+            throw "MSIX must contain exactly one Recorder.AsrWorker.exe; found $($worker.Count)."
+        }
+        # A framework-dependent apphost is roughly 160 KiB. This lower bound,
+        # combined with no worker runtime sidecars, proves the package carries
+        # the self-contained single-file helper produced by WinUI's target.
+        if ($worker[0].Length -lt 50MB) {
+            throw "MSIX Recorder.AsrWorker.exe is not self-contained: $($worker[0].Length) bytes."
+        }
+        $forbidden = @(
+            "Recorder.AsrWorker.deps.json",
+            "Recorder.AsrWorker.runtimeconfig.json",
+            "Recorder.AsrWorker.dll"
+        )
+        $sidecars = @($archive.Entries | Where-Object { $forbidden -icontains $_.FullName })
+        if ($sidecars.Count -ne 0) {
+            throw "MSIX contains framework-dependent ASR worker sidecars: $($sidecars.FullName -join ', ')."
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 $windowsRoot = Join-Path $repoRoot "windows"
 $project = Join-Path $windowsRoot "src\Recorder.WinUI\Recorder.WinUI.csproj"
@@ -84,6 +121,7 @@ try {
     }
     $package = Get-ChildItem -LiteralPath $packageRoot -Filter "Recorder.WinUI_*.msix" -File -Recurse | Where-Object { $_.DirectoryName -notmatch "[\\/]Dependencies([\\/]|$)" } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($null -eq $package) { throw "MSIX packaging completed but the main package was not found under $packageRoot." }
+    Assert-SelfContainedAsrWorkerMsixPayload -PackagePath $package.FullName
     if ($AppInstallerUri) {
         $appInstallerPath = Join-Path $package.DirectoryName "Recorder.WinUI.appinstaller"
         $packageUri = [uri]::new($AppInstallerUri, [uri]::EscapeDataString($package.Name))

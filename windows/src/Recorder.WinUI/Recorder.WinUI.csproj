@@ -23,6 +23,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Recorder.Application\Recorder.Application.csproj" />
+    <!-- Built as a self-contained single executable below.  The project
+         reference makes standalone restore/build include its assets without
+         loading the helper assembly into the WinUI process. -->
+    <ProjectReference Include="..\Recorder.AsrWorker\Recorder.AsrWorker.csproj" ReferenceOutputAssembly="false" />
 
     <Content Include="Assets\SplashScreen.scale-200.png" />
     <Content Include="Assets\LockScreenLogo.scale-200.png" />
@@ -40,6 +44,10 @@
 
   <PropertyGroup>
     <NativeBridgePath>$(MSBuildThisFileDirectory)..\..\out\native\$(Configuration)\Recorder.NativeBridge.dll</NativeBridgePath>
+    <AsrWorkerProjectPath>$(MSBuildThisFileDirectory)..\Recorder.AsrWorker\Recorder.AsrWorker.csproj</AsrWorkerProjectPath>
+    <!-- Must be absolute because this value is passed into the worker project
+         through MSBuild, whose project directory is different from WinUI's. -->
+    <AsrWorkerPublishDirectory>$(MSBuildProjectDirectory)\obj\asr-worker\$(Configuration)\</AsrWorkerPublishDirectory>
   </PropertyGroup>
 
   <ItemGroup>
@@ -74,5 +82,58 @@
   <Target Name="RequireNativeBridge" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
     <Error Condition="!Exists('$(NativeBridgePath)')"
            Text="Recorder.NativeBridge.dll is missing for $(Configuration). Build windows/native with the matching x64 preset before building Recorder.WinUI." />
+  </Target>
+
+  <!-- Media Foundation's synchronous source-reader calls are intentionally
+       hosted out-of-process. Package a self-contained, single-file helper
+       next to the WinUI executable so deployed builds never fall back to an
+       in-process decoder or depend on a machine-wide .NET runtime. -->
+  <Target Name="PublishAsrWorker"
+          BeforeTargets="CopyFilesToOutputDirectory;CopyFilesToPublishDirectory"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <MSBuild Projects="$(AsrWorkerProjectPath)"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true;IncludeNativeLibrariesForSelfExtract=true;PublishTrimmed=false;PublishReadyToRun=false;PublishDir=$(AsrWorkerPublishDirectory);RestoreIgnoreFailedSources=true" />
+    <Error Condition="!Exists('$(AsrWorkerPublishDirectory)Recorder.AsrWorker.exe')"
+           Text="Recorder.AsrWorker.exe was not produced for the WinUI deployment." />
+  </Target>
+
+  <Target Name="CopyAsrWorkerToOutput"
+          AfterTargets="CopyFilesToOutputDirectory"
+          DependsOnTargets="PublishAsrWorker"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <Copy SourceFiles="$(AsrWorkerPublishDirectory)Recorder.AsrWorker.exe"
+          DestinationFiles="$(OutDir)Recorder.AsrWorker.exe"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyAsrWorkerToPublish"
+          AfterTargets="CopyFilesToPublishDirectory"
+          DependsOnTargets="PublishAsrWorker"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <Copy SourceFiles="$(AsrWorkerPublishDirectory)Recorder.AsrWorker.exe"
+          DestinationFiles="$(PublishDir)Recorder.AsrWorker.exe"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- MSIX gathers PackagingOutputs before the ordinary output copy target.
+       A project-reference apphost can therefore win the same-name payload
+       de-duplication and leave its deps/runtimeconfig sidecars behind. Replace
+       those payload entries after MSIX computes them, before it writes the
+       recipe, with the verified self-contained publish artifact. -->
+  <Target Name="UseSelfContainedAsrWorkerInMsixPayload"
+          AfterTargets="_ComputeAppxPackagePayload"
+          BeforeTargets="_GenerateAppxPackageRecipe"
+          DependsOnTargets="PublishAsrWorker"
+          Condition="'$(AppxPackage)' == 'true' and '$(WindowsPackageType)' == 'MSIX' and '$(DesignTimeBuild)' != 'true'">
+    <ItemGroup>
+      <AppxPackagePayload Remove="@(AppxPackagePayload)"
+                          Condition="'%(TargetPath)' == 'Recorder.AsrWorker.exe' or '%(TargetPath)' == 'Recorder.AsrWorker.deps.json' or '%(TargetPath)' == 'Recorder.AsrWorker.runtimeconfig.json'" />
+      <AppxPackagePayload Include="$(AsrWorkerPublishDirectory)Recorder.AsrWorker.exe">
+        <TargetPath>Recorder.AsrWorker.exe</TargetPath>
+      </AppxPackagePayload>
+    </ItemGroup>
+    <Error Condition="!Exists('$(AsrWorkerPublishDirectory)Recorder.AsrWorker.exe')"
+           Text="The MSIX package cannot include the missing self-contained Recorder.AsrWorker.exe." />
   </Target>
 </Project>

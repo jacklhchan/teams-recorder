@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <data name="WorkspaceNavigation.PaneTitle" xml:space="preserve"><value>Teams Recorder</value></data>
+  <data name="NavigationRecord.Content" xml:space="preserve"><value>Record</value></data>
+  <data name="NavigationRecordings.Content" xml:space="preserve"><value>Recordings</value></data>
+  <data name="NavigationSettings.Content" xml:space="preserve"><value>Settings</value></data>
+  <data name="RecordTitle.Text" xml:space="preserve"><value>Record</value></data>
+  <data name="RefreshDevicesButton.Label" xml:space="preserve"><value>Refresh devices</value></data>
+  <data name="ToggleMuteButton.Label" xml:space="preserve"><value>Toggle microphone mute</value></data>
+  <data name="TestRecordingButton.Label" xml:space="preserve"><value>10-second test</value></data>
+  <data name="StartRecordingButton.Content" xml:space="preserve"><value>Start recording</value></data>
+  <data name="StopRecordingButton.Content" xml:space="preserve"><value>Stop and save</value></data>
+  <data name="CaptureSettingsTitle.Text" xml:space="preserve"><value>Capture settings</value></data>
+  <data name="RecordingsTitle.Text" xml:space="preserve"><value>Recordings</value></data>
+  <data name="RefreshLibraryButton.Label" xml:space="preserve"><value>Refresh recordings</value></data>
+  <data name="LibrarySearchBox.PlaceholderText" xml:space="preserve"><value>Search titles, tags, and transcripts</value></data>
+  <data name="LibraryFavoritesOnlyToggle.Header" xml:space="preserve"><value>Favorites only</value></data>
+  <data name="PlaybackSectionTitle.Text" xml:space="preserve"><value>Playback</value></data>
+  <data name="PlaybackAudioStageText.Text" xml:space="preserve"><value>Audio-only recording</value></data>
+  <data name="PlaybackVolumeLabel.Text" xml:space="preserve"><value>Volume</value></data>
+  <data name="PlaybackRateLabel.Text" xml:space="preserve"><value>Speed</value></data>
+  <data name="SettingsTitle.Text" xml:space="preserve"><value>Settings</value></data>
+  <data name="SettingsSubtitle.Text" xml:space="preserve"><value>Teams, AI, and diagnostics</value></data>
+  <data name="TeamsSettingsTitle.Text" xml:space="preserve"><value>Teams integration</value></data>
+  <data name="TranscriptionSettingsTitle.Text" xml:space="preserve"><value>Transcription and AI</value></data>
+  <data name="DiagnosticsSettingsTitle.Text" xml:space="preserve"><value>Diagnostics</value></data>
+</root>

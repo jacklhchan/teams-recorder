@@ -18,7 +18,12 @@ public sealed class RecordingLifecycleService : IDisposable
     private readonly object stateGate = new();
     private SessionStorageService storage;
     private RecordingSessionPlan? activeSession;
+    private RecordingSessionActiveLock? activeSessionLock;
     private Task<RecordingSessionPublicationResult>? publication;
+    private Task recoveryJournalWrite = Task.CompletedTask;
+    private ulong lastAudioCheckpointSequence;
+    private ulong lastVideoCheckpointSequence;
+    private long recoveryJournalSequence;
     private readonly CaptureSourceSelectionPolicy captureSourcePolicy;
     private readonly IRecordingDiagnostics diagnostics;
     private readonly IVideoCaptureTargetCatalog videoTargets;
@@ -149,12 +154,14 @@ public sealed class RecordingLifecycleService : IDisposable
                 if (activeSession is not null || publication is { IsCompleted: false } || pendingStartCancellation is not null)
                     throw new InvalidOperationException("A recording session is already active or being published.");
                 plan = storage.CreateSessionPlan(request.Kind);
+                activeSessionLock = storage.AcquireActiveLock(plan);
                 activeSession = plan;
                 activeSessionKind = request.Kind;
                 activeWindowsCapture = RecordingStartMetadataPolicy.CreateWindowsCaptureMetadata(request);
-                activeWindowVideo = request.VideoTarget is not null;
+                activeWindowVideo = false;
                 capture = activeWindowsCapture;
                 currentStorage = storage;
+                ResetRecoveryJournalState();
                 generation = checked(generation + 1);
                 operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 pendingStartCancellation = operationCancellation;
@@ -171,31 +178,43 @@ public sealed class RecordingLifecycleService : IDisposable
                 captureSourcePolicy.EnsureSelectedProcessIsCurrent(request);
                 var nativeRequest = captureSourcePolicy.CreateSelectedAudioRequest(
                     request,
-                    plan.BackupAudioPath);
-                started = await StartForVideoIfRequestedAsync(request, plan, nativeRequest).ConfigureAwait(false);
+                    plan.AudioSafetyPartialPath);
+                var videoStart = await StartForVideoIfRequestedAsync(request, plan, nativeRequest).ConfigureAwait(false);
+                started = videoStart.Snapshot;
+                if (nativeBridge is INativeSelectedWindowAvRecorderBridge)
+                {
+                    lock (stateGate)
+                    {
+                        activeWindowVideo = started.State == RecordingCoordinatorState.Recording &&
+                            videoStart.ExactTargetWasPassed;
+                    }
+                }
             }
             else
             {
-                var nativeRequest = new NativeMixedRecordingRequest(
-                    plan.BackupAudioPath,
-                    request.RenderEndpointId,
-                    request.MicrophoneEndpointId);
-                if (request.VideoTarget is not null)
+                if (nativeBridge is INativeSelectedWindowAvRecorderBridge)
                 {
-                    var selected = VideoCaptureTargetSelection.Resolve(request.VideoTarget, videoTargets.ListTargets())
-                        ?? throw new InvalidOperationException("The selected Teams window changed before recording started.");
-                    EnsureVideoCapability(plan);
+                    var selected = ResolveInitialVideoTarget(request.VideoTarget, plan);
                     var videoRequest = new NativeSelectedWindowAvRequest(
                         NativeSelectedAudioSource.SystemLoopback,
-                        plan.BackupAudioPath,
+                        plan.AudioSafetyPartialPath,
                         plan.PartialVideoPath,
                         selected,
                         request.RenderEndpointId,
                         request.MicrophoneEndpointId);
                     started = await StartSelectedWindowAvAsync(videoRequest, request).ConfigureAwait(false);
+                    lock (stateGate)
+                    {
+                        activeWindowVideo = started.State == RecordingCoordinatorState.Recording &&
+                            selected is not null;
+                    }
                 }
                 else
                 {
+                    var nativeRequest = new NativeMixedRecordingRequest(
+                        plan.AudioSafetyPartialPath,
+                        request.RenderEndpointId,
+                        request.MicrophoneEndpointId);
                     started = request.Kind == RecordingSessionKind.Test
                         ? await coordinator.StartMixedTestAsync(nativeRequest, request.TestDuration!.Value).ConfigureAwait(false)
                         : await coordinator.StartMixedAsync(nativeRequest).ConfigureAwait(false);
@@ -247,17 +266,19 @@ public sealed class RecordingLifecycleService : IDisposable
                 if (activeSession is not null || publication is { IsCompleted: false })
                     throw new InvalidOperationException("A recording session is already active or being published.");
                 plan = storage.CreateSessionPlan(kind);
+                activeSessionLock = storage.AcquireActiveLock(plan);
                 activeSession = plan;
                 activeSessionKind = kind;
                 activeWindowsCapture = WindowsCaptureMetadata.ForSystemLoopback(renderEndpointId);
                 activeWindowVideo = false;
+                ResetRecoveryJournalState();
                 generation = checked(generation + 1);
             }
 
             try
             {
                 await storage.WriteProvisionalMetadataAsync(plan, activeWindowsCapture).ConfigureAwait(false);
-                var request = new NativeMixedRecordingRequest(plan.BackupAudioPath, renderEndpointId, microphoneEndpointId);
+                var request = new NativeMixedRecordingRequest(plan.AudioSafetyPartialPath, renderEndpointId, microphoneEndpointId);
                 var snapshot = testDuration is { } duration
                     ? await coordinator.StartMixedTestAsync(request, duration).ConfigureAwait(false)
                     : await coordinator.StartMixedAsync(request).ConfigureAwait(false);
@@ -323,6 +344,7 @@ public sealed class RecordingLifecycleService : IDisposable
             activeSessionKind = null;
             activeWindowsCapture = null;
             activeWindowVideo = false;
+            ReleaseActiveSessionLock();
         }
         coordinator.CompleteFaultRecovery();
         var diagnostic = string.IsNullOrWhiteSpace(stopped.Error)
@@ -341,6 +363,58 @@ public sealed class RecordingLifecycleService : IDisposable
             : NativeOperationResult.Failure(NativeRecorderResult.NotImplemented, "The native recorder does not support microphone mute control.");
     }
 
+    /// <summary>
+    /// Enables or replaces the current exact-HWND target without ending the
+    /// recording. The native layer revalidates HWND + PID + creation time and
+    /// fences stale callbacks; a target that vanished simply remains black
+    /// video while audio keeps recording.
+    /// </summary>
+    public async Task<NativeOperationResult> SetVideoTargetAsync(VideoCaptureTarget target)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(target);
+        await operationGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            RecordingSessionPlan? plan;
+            lock (stateGate) plan = activeSession;
+            if (plan is null)
+                return NativeOperationResult.Failure(NativeRecorderResult.InvalidState,
+                    "No recording is active.");
+
+            var selected = VideoCaptureTargetSelection.Resolve(target, videoTargets.ListTargets());
+            if (selected is null)
+                return NativeOperationResult.Failure(NativeRecorderResult.CaptureError,
+                    "The selected capture window changed before video could be enabled.");
+            EnsureVideoCapability(plan);
+            var result = await coordinator.SetVideoTargetAsync(selected).ConfigureAwait(false);
+            if (result.IsSuccess)
+            {
+                lock (stateGate) activeWindowVideo = true;
+            }
+            return result;
+        }
+        finally { operationGate.Release(); }
+    }
+
+    /// <summary>Stops exact-window pixels but preserves the running MP4/audio timeline as privacy-black video.</summary>
+    public async Task<NativeOperationResult> DisableVideoTargetAsync()
+    {
+        ThrowIfDisposed();
+        await operationGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            lock (stateGate)
+            {
+                if (activeSession is null)
+                    return NativeOperationResult.Failure(NativeRecorderResult.InvalidState,
+                        "No recording is active.");
+            }
+            return await coordinator.DisableVideoTargetAsync().ConfigureAwait(false);
+        }
+        finally { operationGate.Release(); }
+    }
+
     private void ClearFailedStart(RecordingSessionPlan plan)
     {
         lock (stateGate)
@@ -351,6 +425,7 @@ public sealed class RecordingLifecycleService : IDisposable
                 activeSessionKind = null;
                 activeWindowsCapture = null;
                 activeWindowVideo = false;
+                ReleaseActiveSessionLock();
             }
             // CleanupEmptyOwnedSession itself refuses any media, partial media,
             // diagnostics, or recovery evidence; it can only remove an empty folder.
@@ -388,6 +463,7 @@ public sealed class RecordingLifecycleService : IDisposable
                     activeSessionKind = null;
                     activeWindowsCapture = null;
                     activeWindowVideo = false;
+                    ReleaseActiveSessionLock();
                 }
                 publication = null;
             }
@@ -401,21 +477,22 @@ public sealed class RecordingLifecycleService : IDisposable
         if (!capability.CanStart) throw new InvalidOperationException(capability.Message);
     }
 
-    private Task<RecordingCoordinatorSnapshot> StartForVideoIfRequestedAsync(
+    private async Task<InitialVideoStartResult> StartForVideoIfRequestedAsync(
         RecordingStartRequest request,
         RecordingSessionPlan plan,
         NativeSelectedAudioRequest audioRequest)
     {
-        if (request.VideoTarget is null)
-            return request.Kind == RecordingSessionKind.Test
+        if (nativeBridge is not INativeSelectedWindowAvRecorderBridge)
+        {
+            var snapshot = await (request.Kind == RecordingSessionKind.Test
                 ? coordinator.StartSelectedAudioTestAsync(audioRequest, request.TestDuration!.Value)
-                : coordinator.StartSelectedAudioAsync(audioRequest);
-        var selected = VideoCaptureTargetSelection.Resolve(request.VideoTarget, videoTargets.ListTargets())
-            ?? throw new InvalidOperationException("The selected Teams window changed before recording started.");
-        EnsureVideoCapability(plan);
+                : coordinator.StartSelectedAudioAsync(audioRequest)).ConfigureAwait(false);
+            return new InitialVideoStartResult(snapshot, ExactTargetWasPassed: false);
+        }
+        var selected = ResolveInitialVideoTarget(request.VideoTarget, plan);
         var videoRequest = new NativeSelectedWindowAvRequest(
             audioRequest.AudioSource,
-            plan.BackupAudioPath,
+            plan.AudioSafetyPartialPath,
             plan.PartialVideoPath,
             selected,
             audioRequest.RenderEndpointId,
@@ -424,7 +501,24 @@ public sealed class RecordingLifecycleService : IDisposable
             audioRequest.IncludedProcessTree,
             audioRequest.ExpectedProcessCreationTime100Nanoseconds,
             AacBitRate: audioRequest.AacBitRate);
-        return StartSelectedWindowAvAsync(videoRequest, request);
+        var started = await StartSelectedWindowAvAsync(videoRequest, request).ConfigureAwait(false);
+        return new InitialVideoStartResult(started, ExactTargetWasPassed: selected is not null);
+    }
+
+    private sealed record InitialVideoStartResult(
+        RecordingCoordinatorSnapshot Snapshot,
+        bool ExactTargetWasPassed);
+
+    private VideoCaptureTarget? ResolveInitialVideoTarget(
+        VideoCaptureTarget? requested,
+        RecordingSessionPlan plan)
+    {
+        if (requested is null) return null;
+        EnsureVideoCapability(plan);
+        // A target may disappear between UI selection and native start. The
+        // native session starts audio plus black video in that case; it never
+        // substitutes a similarly titled window or a desktop capture.
+        return VideoCaptureTargetSelection.Resolve(requested, videoTargets.ListTargets());
     }
 
     private Task<RecordingCoordinatorSnapshot> StartSelectedWindowAvAsync(
@@ -437,7 +531,78 @@ public sealed class RecordingLifecycleService : IDisposable
     private void OnSnapshotChanged(object? sender, RecordingCoordinatorSnapshot snapshot)
     {
         diagnostics.RecordSnapshot(snapshot);
+        QueueRecoveryJournal(snapshot);
         SnapshotChanged?.Invoke(this, snapshot);
+    }
+
+    private void QueueRecoveryJournal(RecordingCoordinatorSnapshot snapshot)
+    {
+        var audio = snapshot.Stats.AudioDurableCheckpoint;
+        var video = snapshot.Stats.VideoDurableCheckpoint;
+        if (!audio.IsDurable && !video.IsDurable) return;
+
+        lock (stateGate)
+        {
+            if (activeSession is not { } plan || activeSessionLock is null) return;
+            if (audio.Sequence <= lastAudioCheckpointSequence &&
+                video.Sequence <= lastVideoCheckpointSequence) return;
+
+            lastAudioCheckpointSequence = Math.Max(lastAudioCheckpointSequence, audio.Sequence);
+            lastVideoCheckpointSequence = Math.Max(lastVideoCheckpointSequence, video.Sequence);
+            var sequence = checked(++recoveryJournalSequence);
+            var journal = RecordingRecoveryJournal.Create(
+                sequence,
+                ToRecoveryCheckpoint(video),
+                ToRecoveryCheckpoint(audio),
+                DateTimeOffset.UtcNow);
+            var currentStorage = storage;
+
+            // Serialize journal replacements. A failed write is diagnostic-only:
+            // the previous complete journal remains authoritative after a crash.
+            recoveryJournalWrite = recoveryJournalWrite.ContinueWith(
+                async _ =>
+                {
+                    try
+                    {
+                        await currentStorage.WriteRecoveryJournalAsync(plan, journal).ConfigureAwait(false);
+                    }
+                    catch (Exception error)
+                    {
+                        diagnostics.RecordFailure("recovery-journal", error);
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default).Unwrap();
+        }
+    }
+
+    private static RecordingRecoveryCheckpoint? ToRecoveryCheckpoint(NativeDurableCheckpoint checkpoint)
+    {
+        if (!checkpoint.IsDurable ||
+            checkpoint.DurableBytes > long.MaxValue ||
+            checkpoint.PresentationTime100Nanoseconds > long.MaxValue)
+        {
+            return null;
+        }
+
+        return new RecordingRecoveryCheckpoint(
+            checked((long)checkpoint.DurableBytes),
+            checked((long)checkpoint.PresentationTime100Nanoseconds));
+    }
+
+    private void ResetRecoveryJournalState()
+    {
+        lastAudioCheckpointSequence = 0;
+        lastVideoCheckpointSequence = 0;
+        recoveryJournalSequence = 0;
+        recoveryJournalWrite = Task.CompletedTask;
+    }
+
+    private void ReleaseActiveSessionLock()
+    {
+        activeSessionLock?.Dispose();
+        activeSessionLock = null;
     }
     private void ThrowIfDisposed() { if (disposed) throw new ObjectDisposedException(nameof(RecordingLifecycleService)); }
     public void Dispose()
@@ -447,6 +612,7 @@ public sealed class RecordingLifecycleService : IDisposable
         coordinator.SnapshotChanged -= OnSnapshotChanged;
         lock (stateGate) pendingStartCancellation?.Cancel();
         nativeBridge.Dispose();
+        lock (stateGate) ReleaseActiveSessionLock();
         operationGate.Dispose();
     }
 }

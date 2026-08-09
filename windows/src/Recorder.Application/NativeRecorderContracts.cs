@@ -133,7 +133,8 @@ public sealed record NativeRecordingRequest(
 
 /// <summary>
 /// Describes the audio-first Windows recording path: system render loopback,
-/// optionally mixed with one explicitly selected microphone, encoded as AAC M4A.
+/// optionally mixed with one explicitly selected microphone, encoded as AAC in
+/// fragmented MP4. Legacy callers may still supply M4A paths during migration.
 /// Empty endpoint IDs deliberately mean the Windows default render endpoint and
 /// no microphone respectively; the native bridge never substitutes another
 /// explicitly selected endpoint.
@@ -160,9 +161,9 @@ public sealed record NativeMixedRecordingRequest(
             throw new ArgumentException("The output path contains a null character.", nameof(OutputPath));
         }
 
-        if (!string.Equals(Path.GetExtension(OutputPath), ".m4a", StringComparison.OrdinalIgnoreCase))
+        if (!HasSupportedAacContainerExtension(OutputPath))
         {
-            throw new ArgumentException("Mixed recording output must use the .m4a extension.", nameof(OutputPath));
+            throw new ArgumentException("Mixed recording output must use the .mp4 or legacy .m4a extension.", nameof(OutputPath));
         }
 
         ValidateEndpointId(RenderEndpointId, nameof(RenderEndpointId));
@@ -188,10 +189,14 @@ public sealed record NativeMixedRecordingRequest(
             throw new ArgumentException("The endpoint ID contains a null character.", parameterName);
         }
     }
+
+    private static bool HasSupportedAacContainerExtension(string path) =>
+        string.Equals(Path.GetExtension(path), ".mp4", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(Path.GetExtension(path), ".m4a", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>
-/// M4A request for the selected-audio C ABI.  This is deliberately separate
+/// AAC fragmented-MP4 request for the selected-audio C ABI. This is deliberately separate
 /// from <see cref="NativeRecordingRequest"/> so legacy WAV/process entry
 /// points cannot accidentally be used for the selected-app product path.
 /// </summary>
@@ -221,9 +226,10 @@ public sealed record NativeSelectedAudioRequest(
             throw new ArgumentException("An output path is required.", nameof(OutputPath));
         }
 
-        if (!string.Equals(Path.GetExtension(OutputPath), ".m4a", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(Path.GetExtension(OutputPath), ".mp4", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(Path.GetExtension(OutputPath), ".m4a", StringComparison.OrdinalIgnoreCase))
         {
-            throw new ArgumentException("Selected-audio output must use the .m4a extension.", nameof(OutputPath));
+            throw new ArgumentException("Selected-audio output must use the .mp4 or legacy .m4a extension.", nameof(OutputPath));
         }
 
         ValidateEndpointId(RenderEndpointId, nameof(RenderEndpointId));
@@ -269,15 +275,17 @@ public sealed record NativeSelectedAudioRequest(
 }
 
 /// <summary>
-/// Exact-HWND WGC plus mixed audio.  The M4A path is retained until the MP4
-/// has been decoder-validated and atomically published, so a video or mux
-/// failure never turns an otherwise playable audio recording into data loss.
+/// Fixed-canvas H.264/AAC MP4 plus mixed audio. A session can begin without a
+/// window target; it emits privacy-black video until an exact HWND is enabled.
+/// The independent audio-safety MP4 is retained until the A/V MP4 has been
+/// decoder-validated and atomically published, so a video or mux failure never
+/// turns an otherwise playable audio recording into data loss.
 /// </summary>
 public sealed record NativeSelectedWindowAvRequest(
     NativeSelectedAudioSource AudioSource,
     string AudioRecoveryPath,
     string VideoOutputPath,
-    VideoCaptureTarget WindowTarget,
+    VideoCaptureTarget? WindowTarget = null,
     string? RenderEndpointId = null,
     string? MicrophoneEndpointId = null,
     uint AudioTargetProcessId = 0,
@@ -294,9 +302,9 @@ public sealed record NativeSelectedWindowAvRequest(
 
     public void Validate()
     {
-        if (!Enum.IsDefined(AudioSource) || WindowTarget is null || !WindowTarget.IsUsable)
-            throw new ArgumentException("A live exact window target is required.", nameof(WindowTarget));
-        ValidatePath(AudioRecoveryPath, ".m4a", nameof(AudioRecoveryPath));
+        if (!Enum.IsDefined(AudioSource) || (WindowTarget is not null && !WindowTarget.IsUsable))
+            throw new ArgumentException("A video target must be a live exact window identity when supplied.", nameof(WindowTarget));
+        ValidateAudioRecoveryPath(AudioRecoveryPath);
         ValidatePath(VideoOutputPath, ".mp4", nameof(VideoOutputPath));
         NativeSelectedAudioRequest audio = new(
             AudioSource, AudioRecoveryPath, RenderEndpointId, MicrophoneEndpointId,
@@ -314,6 +322,16 @@ public sealed record NativeSelectedWindowAvRequest(
         if (string.IsNullOrWhiteSpace(value) || value.IndexOf('\0') >= 0 ||
             !string.Equals(Path.GetExtension(value), extension, StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException($"A {extension} path is required.", parameterName);
+    }
+
+    private static void ValidateAudioRecoveryPath(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.IndexOf('\0') >= 0 ||
+            (!string.Equals(Path.GetExtension(value), ".mp4", StringComparison.OrdinalIgnoreCase) &&
+             !string.Equals(Path.GetExtension(value), ".m4a", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new ArgumentException("An .mp4 or legacy .m4a audio recovery path is required.", nameof(AudioRecoveryPath));
+        }
     }
 }
 
@@ -341,6 +359,16 @@ public sealed record NativeCaptureStats(
     /// <summary>Latest normalized optional-microphone envelope for live UI metering.</summary>
     public float MicrophoneLevelPeak { get; init; }
     public float MicrophoneLevelRms { get; init; }
+    /// <summary>
+    /// Latest independently durable audio-safety prefix. A zero sequence means
+    /// the native sink has not completed a marker plus file flush yet.
+    /// </summary>
+    public NativeDurableCheckpoint AudioDurableCheckpoint { get; init; } = NativeDurableCheckpoint.None;
+    /// <summary>
+    /// Latest independently durable A/V prefix. It must never be inferred from
+    /// bytes merely accepted by Media Foundation.
+    /// </summary>
+    public NativeDurableCheckpoint VideoDurableCheckpoint { get; init; } = NativeDurableCheckpoint.None;
 
     public static NativeCaptureStats Empty(RecordingCaptureMode mode) => new(
         mode,
@@ -359,6 +387,15 @@ public sealed record NativeCaptureStats(
         Peak: 0,
         RenderTimeline: NativeSourceTimelineStats.Empty,
         MicrophoneTimeline: NativeSourceTimelineStats.Empty);
+}
+
+public sealed record NativeDurableCheckpoint(
+    ulong Sequence,
+    ulong DurableBytes,
+    ulong PresentationTime100Nanoseconds)
+{
+    public static NativeDurableCheckpoint None { get; } = new(0, 0, 0);
+    public bool IsDurable => Sequence > 0 && DurableBytes > 0;
 }
 
 public sealed record NativeSourceTimelineStats(
@@ -452,6 +489,19 @@ public interface INativeSelectedAudioRecorderBridge
 public interface INativeSelectedWindowAvRecorderBridge
 {
     NativeOperationResult StartSelectedWindowAv(NativeSelectedWindowAvRequest request);
+}
+
+/// <summary>
+/// Additive dynamic exact-window control for a running fixed-canvas A/V
+/// recording. Implementations must fail closed: a rejected/lost target leaves
+/// the audio timeline running with privacy-black video and never chooses a
+/// desktop, monitor, title match, or another HWND.
+/// </summary>
+public interface INativeDynamicWindowVideoRecorderBridge
+{
+    NativeOperationResult SetVideoTarget(VideoCaptureTarget target);
+
+    NativeOperationResult DisableVideoTarget();
 }
 
 /// <summary>Optional native capability used only for a non-blocking Teams endpoint preflight.</summary>

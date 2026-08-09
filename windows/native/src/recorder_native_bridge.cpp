@@ -177,7 +177,7 @@ struct RecorderNativeEndpointList {
 
 namespace {
 
-constexpr char kVersion[] = "0.8.0";
+constexpr char kVersion[] = "0.9.0";
 constexpr char kInvalidHandleError[] = "RecorderNativeBridge handle is null.";
 
 RecorderNativeStats EmptyStats(RecorderNativeCaptureMode mode) {
@@ -207,6 +207,18 @@ bool IsValidSelectedAudioSource(RecorderNativeSelectedAudioSource source) {
 
 bool IsNullOrEmpty(const char* value) {
     return value == nullptr || value[0] == '\0';
+}
+
+bool HasNoWindowTarget(const RecorderNativeSelectedWindowAvStartOptions& options) {
+    return options.target_window_handle == 0 &&
+        options.target_window_process_id == 0 &&
+        options.target_window_process_creation_time_100ns == 0;
+}
+
+bool HasCompleteWindowTarget(const RecorderNativeSelectedWindowAvStartOptions& options) {
+    return options.target_window_handle != 0 &&
+        options.target_window_process_id != 0 &&
+        options.target_window_process_creation_time_100ns != 0;
 }
 
 RecorderNativeResult Reject(
@@ -293,6 +305,20 @@ bool WideToUtf8(const std::wstring& value, std::string* result) {
                nullptr) == required;
 }
 
+bool EndsWithInsensitive(const std::wstring& value, std::wstring_view suffix) {
+    return value.size() >= suffix.size() &&
+        _wcsicmp(value.c_str() + value.size() - suffix.size(),
+                  std::wstring(suffix).c_str()) == 0;
+}
+
+bool IsLegacyM4aPath(const std::wstring& path) {
+    return EndsWithInsensitive(path, L".m4a");
+}
+
+bool IsAudioSafetyWorkPath(const std::wstring& path) {
+    return EndsWithInsensitive(path, L".mp4");
+}
+
 #endif
 
 }  // namespace
@@ -351,7 +377,7 @@ extern "C" RecorderNativeResult recorder_native_start_mixed(
     }
     if (options->output_path_utf8 == nullptr || options->output_path_utf8[0] == '\0' ||
         options->reserved != 0 || options->aac_bitrate_bps < 64000 || options->aac_bitrate_bps > 320000) {
-        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "Mixed capture requires a .m4a path, zero reserved field, and AAC bitrate from 64000 to 320000.");
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "Mixed capture requires an audio safety path, zero reserved field, and AAC bitrate from 64000 to 320000.");
     }
 #if !defined(_WIN32)
     return Reject(bridge, RECORDER_NATIVE_NOT_IMPLEMENTED, "Native audio capture is implemented only on Windows.");
@@ -364,11 +390,13 @@ extern "C" RecorderNativeResult recorder_native_start_mixed(
         (options->microphone_endpoint_id_utf8 != nullptr && !Utf8ToWide(options->microphone_endpoint_id_utf8, &microphone))) {
         return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "A mixed-capture path or endpoint ID is not valid UTF-8.");
     }
-    if (output.size() < 4 || _wcsicmp(output.c_str() + output.size() - 4, L".m4a") != 0) {
-        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT, "Mixed capture output must use the .m4a extension.");
+    if (!IsLegacyM4aPath(output) && !IsAudioSafetyWorkPath(output)) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT,
+                      "Mixed capture requires an .mp4 safety work path (legacy .m4a is still accepted).");
     }
     recorder::bridge::MixedCaptureSessionConfig config;
     config.output_path = output;
+    config.audio_output_is_work_file = IsAudioSafetyWorkPath(output);
     config.render_endpoint_id = std::move(render);
     config.microphone_endpoint_id = std::move(microphone);
     config.aac_bitrate_bps = options->aac_bitrate_bps;
@@ -474,17 +502,18 @@ extern "C" RecorderNativeResult recorder_native_start_selected_audio(
             RECORDER_NATIVE_INVALID_ARGUMENT,
             "A selected-audio path or endpoint ID is not valid UTF-8.");
     }
-    if (output.size() < 4 ||
-        _wcsicmp(output.c_str() + output.size() - 4, L".m4a") != 0) {
+    if (!IsLegacyM4aPath(output) && !IsAudioSafetyWorkPath(output)) {
         return Reject(
             bridge,
             RECORDER_NATIVE_INVALID_ARGUMENT,
-            "Selected-audio capture output must use the .m4a extension.");
+            "Selected-audio capture requires an .mp4 safety work path (legacy .m4a is still accepted).");
     }
 
     recorder::bridge::MixedCaptureSessionConfig config;
     config.mode = RECORDER_NATIVE_CAPTURE_SELECTED_APP_MIXED;
     config.output_path = std::move(output);
+    config.audio_output_is_work_file =
+        IsAudioSafetyWorkPath(config.output_path.wstring());
     config.render_endpoint_id = std::move(render);
     config.microphone_endpoint_id = std::move(microphone);
     config.target_process_id = options->target_process_id;
@@ -540,8 +569,7 @@ extern "C" RecorderNativeResult recorder_native_start_selected_window_av(
         !IsValidSelectedAudioSource(options->audio_source) ||
         IsNullOrEmpty(options->audio_output_path_utf8) ||
         IsNullOrEmpty(options->video_output_path_utf8) || options->reserved != 0 ||
-        options->target_window_handle == 0 || options->target_window_process_id == 0 ||
-        options->target_window_process_creation_time_100ns == 0 ||
+        (!HasNoWindowTarget(*options) && !HasCompleteWindowTarget(*options)) ||
         options->video_width < 2 || options->video_width > 1920 ||
         options->video_height < 2 || options->video_height > 1080 ||
         (options->video_width % 2) != 0 || (options->video_height % 2) != 0 ||
@@ -580,15 +608,17 @@ extern "C" RecorderNativeResult recorder_native_start_selected_window_av(
         return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT,
                       "A selected-window A/V path or endpoint ID is not valid UTF-8.");
     }
-    if (audio_output.size() < 4 || video_output.size() < 4 ||
-        _wcsicmp(audio_output.c_str() + audio_output.size() - 4, L".m4a") != 0 ||
-        _wcsicmp(video_output.c_str() + video_output.size() - 4, L".mp4") != 0) {
+    if ((!IsLegacyM4aPath(audio_output) &&
+         !IsAudioSafetyWorkPath(audio_output)) ||
+        !EndsWithInsensitive(video_output, L".mp4")) {
         return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT,
-                      "Selected-window A/V requires an M4A recovery path and MP4 output path.");
+                      "Selected-window A/V requires an audio safety work path and MP4 output path.");
     }
     recorder::bridge::MixedCaptureSessionConfig config;
     config.mode = RECORDER_NATIVE_CAPTURE_SELECTED_WINDOW_AV;
     config.output_path = std::move(audio_output);
+    config.audio_output_is_work_file =
+        IsAudioSafetyWorkPath(config.output_path.wstring());
     config.video_output_path = std::move(video_output);
     config.render_endpoint_id = std::move(render);
     config.microphone_endpoint_id = std::move(microphone);
@@ -644,6 +674,70 @@ extern "C" RecorderNativeResult recorder_native_start_selected_window_av(
 #endif
 }
 
+extern "C" RecorderNativeResult recorder_native_set_video_target(
+    RecorderNativeBridge* bridge,
+    const RecorderNativeVideoTargetOptions* options) {
+    if (bridge == nullptr) return RECORDER_NATIVE_INVALID_ARGUMENT;
+    if (options == nullptr ||
+        options->struct_size < sizeof(RecorderNativeVideoTargetOptions) ||
+        options->reserved != 0 || options->reserved2 != 0 ||
+        options->target_window_handle == 0 || options->target_window_process_id == 0 ||
+        options->target_window_process_creation_time_100ns == 0) {
+        return Reject(bridge, RECORDER_NATIVE_INVALID_ARGUMENT,
+                      "Exact-window video target options are incomplete or malformed.");
+    }
+#if !defined(_WIN32)
+    return Reject(bridge, RECORDER_NATIVE_NOT_IMPLEMENTED,
+                  "Dynamic exact-window capture is implemented only on Windows.");
+#else
+    std::lock_guard<std::mutex> lock(bridge->mutex);
+    if (bridge->state != RECORDER_NATIVE_STATE_RECORDING ||
+        !bridge->mixed_session ||
+        bridge->mixed_session->stats().mode != RECORDER_NATIVE_CAPTURE_SELECTED_WINDOW_AV) {
+        SetErrorLocked(bridge,
+                       "Exact-window video can change only while an A/V recording is active.");
+        return RECORDER_NATIVE_INVALID_STATE;
+    }
+    const RecorderNativeResult result = bridge->mixed_session->SetVideoTarget(
+        static_cast<std::uintptr_t>(options->target_window_handle),
+        options->target_window_process_id,
+        options->target_window_process_creation_time_100ns);
+    bridge->last_stats = bridge->mixed_session->stats();
+    if (result == RECORDER_NATIVE_OK) {
+        bridge->last_error.clear();
+    } else {
+        SetErrorLocked(bridge, bridge->mixed_session->last_error());
+    }
+    return result;
+#endif
+}
+
+extern "C" RecorderNativeResult recorder_native_disable_video_target(
+    RecorderNativeBridge* bridge) {
+    if (bridge == nullptr) return RECORDER_NATIVE_INVALID_ARGUMENT;
+#if !defined(_WIN32)
+    return Reject(bridge, RECORDER_NATIVE_NOT_IMPLEMENTED,
+                  "Dynamic exact-window capture is implemented only on Windows.");
+#else
+    std::lock_guard<std::mutex> lock(bridge->mutex);
+    if (bridge->state != RECORDER_NATIVE_STATE_RECORDING ||
+        !bridge->mixed_session ||
+        bridge->mixed_session->stats().mode != RECORDER_NATIVE_CAPTURE_SELECTED_WINDOW_AV) {
+        SetErrorLocked(bridge,
+                       "Exact-window video can change only while an A/V recording is active.");
+        return RECORDER_NATIVE_INVALID_STATE;
+    }
+    const RecorderNativeResult result = bridge->mixed_session->DisableVideoTarget();
+    bridge->last_stats = bridge->mixed_session->stats();
+    if (result == RECORDER_NATIVE_OK) {
+        bridge->last_error.clear();
+    } else {
+        SetErrorLocked(bridge, bridge->mixed_session->last_error());
+    }
+    return result;
+#endif
+}
+
 extern "C" RecorderNativeResult recorder_native_validate_h264_aac_mp4(
     const char* path_utf8) {
     if (IsNullOrEmpty(path_utf8)) return RECORDER_NATIVE_INVALID_ARGUMENT;
@@ -670,8 +764,15 @@ extern "C" RecorderNativeResult recorder_native_validate_aac_m4a(
     return RECORDER_NATIVE_NOT_IMPLEMENTED;
 #else
     std::wstring path;
-    if (!Utf8ToWide(path_utf8, &path) || path.size() < 4 ||
-        _wcsicmp(path.c_str() + path.size() - 4, L".m4a") != 0) {
+    if (!Utf8ToWide(path_utf8, &path) || path.size() < 4) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+    const wchar_t* const extension = path.c_str() + path.size() - 4;
+    // v0.9 audio safety files are fragmented MP4s named recording.mp4. The
+    // historical ABI name is retained for compatibility, but both AAC-only
+    // ISO-BMFF extensions must reach the decode-to-EOS publication gate.
+    if (_wcsicmp(extension, L".m4a") != 0 &&
+        _wcsicmp(extension, L".mp4") != 0) {
         return RECORDER_NATIVE_INVALID_ARGUMENT;
     }
     recorder::mp4::validation::Report report{};

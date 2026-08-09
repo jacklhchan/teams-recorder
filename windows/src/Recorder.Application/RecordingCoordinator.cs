@@ -1,3 +1,5 @@
+using Recorder.Core;
+
 namespace TeamsRecorder.Windows.Application;
 
 public enum RecordingCoordinatorState
@@ -114,6 +116,48 @@ public sealed class RecordingCoordinator
                 : NativeOperationResult.Failure(
                     NativeRecorderResult.NotImplemented,
                     "The native recorder does not expose exact-window video capture."));
+    }
+
+    /// <summary>
+    /// Serializes a non-destructive exact-window replacement behind existing
+    /// capture operations. A rejected target is not a recording fault: the
+    /// native A/V session remains active with privacy-black video and keeps
+    /// its audio timeline running.
+    /// </summary>
+    public Task<NativeOperationResult> SetVideoTargetAsync(VideoCaptureTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (!target.IsUsable)
+            throw new ArgumentException("A complete exact-window target is required.", nameof(target));
+
+        lock (stateGate)
+        {
+            if (snapshot.State != RecordingCoordinatorState.Recording)
+                return Task.FromResult(NativeOperationResult.Failure(
+                    NativeRecorderResult.InvalidState,
+                    "A recording must be active before its video target can change."));
+            return Enqueue(() => nativeBridge is INativeDynamicWindowVideoRecorderBridge dynamicVideo
+                ? InvokeNative(() => dynamicVideo.SetVideoTarget(target), "set the video target")
+                : NativeOperationResult.Failure(
+                    NativeRecorderResult.NotImplemented,
+                    "The native recorder does not support changing video targets while recording."));
+        }
+    }
+
+    public Task<NativeOperationResult> DisableVideoTargetAsync()
+    {
+        lock (stateGate)
+        {
+            if (snapshot.State != RecordingCoordinatorState.Recording)
+                return Task.FromResult(NativeOperationResult.Failure(
+                    NativeRecorderResult.InvalidState,
+                    "A recording must be active before its video target can change."));
+            return Enqueue(() => nativeBridge is INativeDynamicWindowVideoRecorderBridge dynamicVideo
+                ? InvokeNative(dynamicVideo.DisableVideoTarget, "disable the video target")
+                : NativeOperationResult.Failure(
+                    NativeRecorderResult.NotImplemented,
+                    "The native recorder does not support changing video targets while recording."));
+        }
     }
 
     private Task<RecordingCoordinatorSnapshot> StartCoreAsync(

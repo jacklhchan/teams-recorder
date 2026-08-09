@@ -423,7 +423,18 @@ void ProcessFrame(const std::shared_ptr<SharedState>& state,
         std::lock_guard<std::mutex> lock(state->mutex);
         state->stats.latest_source_width = source_width;
         state->stats.latest_source_height = source_height;
-        if (recreate_pool) ++state->stats.frame_pool_recreations;
+        if (recreate_pool) {
+            ++state->stats.frame_pool_recreations;
+            // A resize is a privacy boundary, not an opportunity to repeat a
+            // stale frame. Drop the transition frame and every pre-resize
+            // queued frame. The A/V scheduler observes the empty queue and
+            // emits an explicit black canvas until a later stable frame
+            // arrives from this same exact HWND.
+            state->stats.frames_dropped_invalid += state->queue.size() + 1U;
+            state->queue.clear();
+            state->changed.notify_all();
+            return;
+        }
         if (state->stop_requested || state->state != WgcWindowCaptureState::kRunning) return;
         if (state->queue.size() >= state->config.max_queued_frames) {
             ++state->stats.frames_dropped_queue_full;

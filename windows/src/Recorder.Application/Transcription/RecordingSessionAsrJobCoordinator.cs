@@ -1,8 +1,82 @@
+using System.Globalization;
+using System.Runtime.CompilerServices;
+using System.Text;
 using Recorder.Core;
 using TeamsRecorder.Windows.Application.AI;
 using TeamsRecorder.Windows.Application.Storage;
 
 namespace TeamsRecorder.Windows.Application.Transcription;
+
+public sealed record RecordingSessionAsrChunkConstraints(TimeSpan MaximumDuration, int MaximumBytes)
+{
+    public static RecordingSessionAsrChunkConstraints ProviderDefault { get; } =
+        new(TimeSpan.FromSeconds(120), OpenAICompatibleAsrClient.MaximumAudioBytes);
+}
+
+/// <summary>A complete, independently decodable provider upload; never a byte slice of a media container.</summary>
+public sealed record RecordingSessionAsrChunk(int Sequence, TimeSpan Duration, byte[] Audio, string FileName);
+
+/// <summary>
+/// Production seam for Media Foundation audio extraction/chunk export. Implementations must yield
+/// complete containers in chronological order and delete their private staging files after enumeration.
+/// </summary>
+public interface IRecordingSessionAsrChunkSource
+{
+    IAsyncEnumerable<RecordingSessionAsrChunk> ReadChunksAsync(
+        RecordingSessionPlan plan,
+        RecordingSessionAsrChunkConstraints constraints,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Compatibility path for an already-small completed M4A. Duration cannot be probed in managed code;
+/// long recordings must use an injected Media Foundation chunk source rather than this adapter.
+/// </summary>
+public sealed class CompletedM4aAsrChunkSource : IRecordingSessionAsrChunkSource
+{
+    public async IAsyncEnumerable<RecordingSessionAsrChunk> ReadChunksAsync(
+        RecordingSessionPlan plan,
+        RecordingSessionAsrChunkConstraints constraints,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var audio = await File.ReadAllBytesAsync(plan.FinalAudioPath, cancellationToken).ConfigureAwait(false);
+        if (audio.Length == 0) throw new IOException("The completed recording.m4a is empty.");
+        if (audio.Length > constraints.MaximumBytes)
+            throw new OpenAICompatibleAsrException(OpenAICompatibleAsrFailure.AudioChunkTooLarge,
+                message: "The recording needs Media Foundation chunk export before transcription; no oversized whole-file upload was sent.");
+        // Zero means that this compatibility adapter did not assert a media duration. Strict long-
+        // recording exporters must provide a positive duration no greater than MaximumDuration.
+        yield return new RecordingSessionAsrChunk(0, TimeSpan.Zero, audio, RecordingSessionLayout.FinalAudioFileName);
+    }
+}
+
+public interface IRecordingSessionAsrChunkTranscriber : IRecordingSessionAsrTranscriber
+{
+    Task<OpenAICompatibleAsrResult> TranscribeChunkAsync(
+        OpenAICompatibleProviderSnapshot snapshot,
+        ReadOnlyMemory<byte> completeChunk,
+        string fileName,
+        string rollingPrompt,
+        CancellationToken cancellationToken);
+}
+
+public static class RecordingSessionAsrRollingPrompt
+{
+    public const int MaximumContextCharacters = 240;
+
+    public static string Build(string? basePrompt, string priorTranscript)
+    {
+        var prefix = basePrompt?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(priorTranscript)) return prefix;
+        var indices = StringInfo.ParseCombiningCharacters(priorTranscript);
+        var start = indices.Length <= MaximumContextCharacters ? 0 : indices[^MaximumContextCharacters];
+        var context = priorTranscript[start..].Trim();
+        if (context.Length == 0) return prefix;
+        return prefix.Length == 0
+            ? "Previous transcript context:\n" + context
+            : prefix + "\n\nPrevious transcript context:\n" + context;
+    }
+}
 
 /// <summary>
 /// Runs an explicitly requested transcription only after an owned M4A recording has been
@@ -15,6 +89,7 @@ public sealed class RecordingSessionAsrJobCoordinator : IDisposable
     private readonly TranscriptionArtifactPublisher publisher;
     private readonly Func<CancellationToken, Task<OpenAICompatibleProviderSnapshot>> snapshotGetter;
     private readonly IRecordingSessionAsrTranscriber transcriber;
+    private readonly IRecordingSessionAsrChunkSource chunkSource;
     private long generation;
     private ActiveJob? active;
     private bool disposed;
@@ -22,11 +97,13 @@ public sealed class RecordingSessionAsrJobCoordinator : IDisposable
     public RecordingSessionAsrJobCoordinator(
         Func<CancellationToken, Task<OpenAICompatibleProviderSnapshot>> snapshotGetter,
         IRecordingSessionAsrTranscriber transcriber,
-        TranscriptionArtifactPublisher? publisher = null)
+        TranscriptionArtifactPublisher? publisher = null,
+        IRecordingSessionAsrChunkSource? chunkSource = null)
     {
         this.snapshotGetter = snapshotGetter ?? throw new ArgumentNullException(nameof(snapshotGetter));
         this.transcriber = transcriber ?? throw new ArgumentNullException(nameof(transcriber));
         this.publisher = publisher ?? new TranscriptionArtifactPublisher();
+        this.chunkSource = chunkSource ?? new CompletedM4aAsrChunkSource();
     }
 
     public static RecordingSessionAsrJobCoordinator CreateOpenAiCompatible(
@@ -36,7 +113,12 @@ public sealed class RecordingSessionAsrJobCoordinator : IDisposable
     {
         ArgumentNullException.ThrowIfNull(providers);
         ArgumentNullException.ThrowIfNull(client);
-        return new(providers.SnapshotAsync, new OpenAICompatibleRecordingSessionAsrTranscriber(client), publisher);
+        // New Windows recordings are MP4, and legacy M4A files may exceed a
+        // provider's single-request cap. The decoder is deliberately isolated
+        // so a blocked Media Foundation open/read is killable and cannot hold
+        // the app's ASR cancellation or staging cleanup hostage.
+        return new(providers.SnapshotAsync, new OpenAICompatibleRecordingSessionAsrTranscriber(client), publisher,
+            new IsolatedMediaFoundationAsrChunkSource());
     }
 
     public RecordingSessionAsrJobSnapshot? Snapshot
@@ -53,7 +135,7 @@ public sealed class RecordingSessionAsrJobCoordinator : IDisposable
         ThrowIfDisposed();
         if (!explicitlyOptedIn)
             throw new InvalidOperationException("Transcription requires an explicit user opt-in.");
-        ValidateCompletedM4a(plan);
+        ValidateCompletedMedia(plan, requireSingleUploadBound: chunkSource is CompletedM4aAsrChunkSource);
         cancellationToken.ThrowIfCancellationRequested();
 
         ActiveJob job;
@@ -106,17 +188,42 @@ public sealed class RecordingSessionAsrJobCoordinator : IDisposable
     {
         try
         {
-            await SetStateAsync(job, TranscriptionPhase.Uploading, "Preparing the completed M4A for upload.", null).ConfigureAwait(false);
-            var audio = await ReadCompletedAudioAsync(job.Plan, job.Cancellation.Token).ConfigureAwait(false);
+            await SetStateAsync(job, TranscriptionPhase.Uploading, "Preparing complete 120-second transcription chunks.", null).ConfigureAwait(false);
             var snapshot = await snapshotGetter(job.Cancellation.Token).ConfigureAwait(false);
             ThrowIfStale(job);
-            await SetStateAsync(job, TranscriptionPhase.Transcribing, "Transcribing the completed recording.", null).ConfigureAwait(false);
-            var result = await transcriber.TranscribeAsync(snapshot, audio, RecordingSessionLayout.FinalAudioFileName, job.Cancellation.Token).ConfigureAwait(false);
-            ThrowIfStale(job);
+            var raw = new StringBuilder();
+            var final = new StringBuilder();
+            var formats = new List<string>();
+            var log = new List<string>();
+            var expectedSequence = 0;
+            await foreach (var chunk in chunkSource.ReadChunksAsync(job.Plan, RecordingSessionAsrChunkConstraints.ProviderDefault, job.Cancellation.Token).ConfigureAwait(false))
+            {
+                ThrowIfStale(job);
+                ValidateChunk(chunk, expectedSequence++);
+                await SetStateAsync(job, TranscriptionPhase.Transcribing, $"Transcribing complete chunk {chunk.Sequence + 1}.", null).ConfigureAwait(false);
+                var prompt = RecordingSessionAsrRollingPrompt.Build(snapshot.Profile.Prompt, final.ToString());
+                OpenAICompatibleAsrResult result;
+                if (transcriber is IRecordingSessionAsrChunkTranscriber chunkTranscriber)
+                    result = await chunkTranscriber.TranscribeChunkAsync(snapshot, chunk.Audio, chunk.FileName, prompt, job.Cancellation.Token).ConfigureAwait(false);
+                else
+                {
+                    if (chunk.Sequence > 0 || !string.Equals(prompt, snapshot.Profile.Prompt, StringComparison.Ordinal))
+                        throw new NotSupportedException("Long transcription requires an IRecordingSessionAsrChunkTranscriber so rolling context remains request-scoped.");
+                    result = await transcriber.TranscribeAsync(snapshot, chunk.Audio, chunk.FileName, job.Cancellation.Token).ConfigureAwait(false);
+                }
+                ThrowIfStale(job);
+                if (raw.Length > 0) raw.AppendLine();
+                if (final.Length > 0) final.AppendLine();
+                raw.Append(result.Text.Trim());
+                final.Append(result.Text.Trim());
+                formats.Add(result.ResponseFormat.ToString());
+                log.Add($"Completed chunk {chunk.Sequence + 1}.");
+            }
+            if (expectedSequence == 0) throw new IOException("The media chunk source produced no complete transcription chunks.");
             var profile = OpenAICompatibleProviderProfile.ValidateStored(snapshot.Profile);
-            await publisher.PublishAsync(job.Plan, result.Text, result.Text,
-                new TranscriptionPublicationManifest(profile.AsrModel, profile.Language, 1, [result.ResponseFormat.ToString()]),
-                ["Completed transcription."], cancellationToken: job.Cancellation.Token).ConfigureAwait(false);
+            await publisher.PublishAsync(job.Plan, raw.ToString(), final.ToString(),
+                new TranscriptionPublicationManifest(profile.AsrModel, profile.Language, expectedSequence, formats),
+                log.Append("Completed transcription."), cancellationToken: job.Cancellation.Token).ConfigureAwait(false);
             await SetStateAsync(job, TranscriptionPhase.Completed, "Transcription completed.", DateTimeOffset.UtcNow).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (job.Cancellation.IsCancellationRequested)
@@ -168,27 +275,24 @@ public sealed class RecordingSessionAsrJobCoordinator : IDisposable
         if (!IsCurrent(job)) throw new OperationCanceledException("The transcription job is no longer current.");
     }
 
-    private static async Task<byte[]> ReadCompletedAudioAsync(RecordingSessionPlan plan, CancellationToken cancellationToken)
+    private static void ValidateChunk(RecordingSessionAsrChunk chunk, int expectedSequence)
     {
-        ValidateCompletedM4a(plan);
-        return await File.ReadAllBytesAsync(plan.FinalAudioPath, cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(chunk);
+        if (chunk.Sequence != expectedSequence || chunk.Audio is not { Length: > 0 } ||
+            chunk.Audio.Length > RecordingSessionAsrChunkConstraints.ProviderDefault.MaximumBytes ||
+            chunk.Duration < TimeSpan.Zero || chunk.Duration > RecordingSessionAsrChunkConstraints.ProviderDefault.MaximumDuration ||
+            string.IsNullOrWhiteSpace(chunk.FileName) || Path.GetFileName(chunk.FileName) != chunk.FileName)
+            throw new IOException("The media chunk source produced an invalid or oversized complete chunk.");
     }
 
-    private static void ValidateCompletedM4a(RecordingSessionPlan plan)
+    private static void ValidateCompletedMedia(RecordingSessionPlan plan, bool requireSingleUploadBound)
     {
-        ArgumentNullException.ThrowIfNull(plan);
-        var folder = Path.GetFullPath(plan.FolderPath);
-        var finalPath = Path.GetFullPath(plan.FinalAudioPath);
-        if (!Directory.Exists(folder) || (File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0 ||
-            !RecordingSessionLayout.TryGetKind(Path.GetFileName(folder), out var kind) || kind != plan.Kind ||
-            !string.Equals(finalPath, Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName), StringComparison.OrdinalIgnoreCase) ||
-            !File.Exists(finalPath) || (File.GetAttributes(finalPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
-            throw new IOException("Transcription requires an owned session with a completed recording.m4a.");
-        var length = new FileInfo(finalPath).Length;
-        if (length <= 0) throw new IOException("The completed recording.m4a is empty.");
-        if (length > OpenAICompatibleAsrClient.MaximumAudioBytes)
+        var media = RecordingSessionAsrMediaResolver.Resolve(plan);
+        var length = new FileInfo(media.Path).Length;
+        if (length <= 0) throw new IOException("The completed recording media is empty.");
+        if (requireSingleUploadBound && length > OpenAICompatibleAsrClient.MaximumAudioBytes)
             throw new OpenAICompatibleAsrException(OpenAICompatibleAsrFailure.AudioChunkTooLarge,
-                message: "The completed M4A exceeds the 32 MiB transcription upload limit and was not uploaded.");
+                message: "The completed M4A needs Media Foundation chunk export and no oversized whole-file upload was sent.");
     }
 
     private void ThrowIfDisposed()
@@ -225,10 +329,13 @@ public interface IRecordingSessionAsrTranscriber
 }
 
 /// <summary>Production adapter that keeps provider credential snapshots request-scoped.</summary>
-public sealed class OpenAICompatibleRecordingSessionAsrTranscriber(OpenAICompatibleAsrClient client) : IRecordingSessionAsrTranscriber
+public sealed class OpenAICompatibleRecordingSessionAsrTranscriber(OpenAICompatibleAsrClient client) : IRecordingSessionAsrChunkTranscriber
 {
     public Task<OpenAICompatibleAsrResult> TranscribeAsync(OpenAICompatibleProviderSnapshot snapshot, ReadOnlyMemory<byte> completedM4a, string fileName, CancellationToken cancellationToken) =>
         client.TranscribeAsync(snapshot, completedM4a, fileName, cancellationToken);
+
+    public Task<OpenAICompatibleAsrResult> TranscribeChunkAsync(OpenAICompatibleProviderSnapshot snapshot, ReadOnlyMemory<byte> completeChunk, string fileName, string rollingPrompt, CancellationToken cancellationToken) =>
+        client.TranscribeAsync(snapshot, completeChunk, fileName, rollingPrompt, cancellationToken);
 }
 
 public sealed record RecordingSessionAsrJobSnapshot(long Generation, TranscriptionPhase Phase, string Message);

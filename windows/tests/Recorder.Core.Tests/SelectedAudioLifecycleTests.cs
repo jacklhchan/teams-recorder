@@ -34,8 +34,8 @@ internal static class SelectedAudioLifecycleTests
             throw new InvalidOperationException("Selected test did not auto-stop.");
 
         var publication = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
-        if (!publication.Published || !File.Exists(started.Session.FinalAudioPath))
-            throw new InvalidOperationException("Selected test did not publish its completed M4A session.");
+        if (!publication.Published || !File.Exists(started.Session.FinalVideoPath))
+            throw new InvalidOperationException("Selected test did not publish its completed audio-only MP4 session.");
         Equal(1, bridge.StopCalls);
         if (lifecycle.PublishCompletedAsync().GetAwaiter().GetResult().Session is not null)
             throw new InvalidOperationException("A selected test session was published more than once.");
@@ -77,7 +77,7 @@ internal static class SelectedAudioLifecycleTests
         Equal(RecordingOwner.TeamsAutomatic, lifecycle.Owner);
 
         var recovery = lifecycle.FinalizeForRecoveryAsync().GetAwaiter().GetResult();
-        if (recovery.Published || !File.Exists(started.Session.BackupAudioPath))
+        if (recovery.Published || !File.Exists(started.Session.AudioSafetyPartialPath))
             throw new InvalidOperationException("A selected-process fault discarded accumulated recovery media.");
         if (recovery.Error?.Message.Contains("target exited", StringComparison.Ordinal) != true)
             throw new InvalidOperationException("Fault recovery discarded the native diagnostic that explains the retained evidence.");
@@ -100,7 +100,7 @@ internal static class SelectedAudioLifecycleTests
         bridge.SourceFaulted = true;
         Equal(RecordingCoordinatorState.Faulted, lifecycle.RefreshAsync().GetAwaiter().GetResult().State);
         var retained = lifecycle.FinalizeForRecoveryAsync().GetAwaiter().GetResult();
-        if (retained.Published || !File.Exists(first.Session.BackupAudioPath))
+        if (retained.Published || !File.Exists(first.Session.AudioSafetyPartialPath))
             throw new InvalidOperationException("Fault finalization did not retain the first session evidence.");
         if (lifecycle.Snapshot.State != RecordingCoordinatorState.Stopped ||
             !lifecycle.Snapshot.HasRecoverableFault ||
@@ -135,14 +135,17 @@ internal static class SelectedAudioLifecycleTests
             plan = started.Session;
             Equal(RecordingCoordinatorState.Faulted, lifecycle.RefreshAsync().GetAwaiter().GetResult().State);
             var retained = lifecycle.FinalizeForRecoveryAsync().GetAwaiter().GetResult();
-            if (retained.Published || !File.Exists(plan.BackupAudioPath))
+            if (retained.Published || !File.Exists(plan.AudioSafetyPartialPath))
                 throw new InvalidOperationException("The selected session backup was not retained before relaunch recovery.");
         }
 
         var storage = new TeamsRecorder.Windows.Application.Storage.SessionStorageService(root.Path);
-        var recovery = new SessionRecoveryService(storage, new AlwaysValidAudio());
+        var recovery = new SessionRecoveryService(
+            storage,
+            new AlwaysValidAudio(),
+            new CompletePrefixRecoveryValidator());
         var result = recovery.RecoverAsync().GetAwaiter().GetResult();
-        if (result.Count != 1 || !result[0].Recovered || !File.Exists(plan.FinalAudioPath))
+        if (result.Count != 1 || !result[0].Recovered || !File.Exists(plan.FinalVideoPath))
             throw new InvalidOperationException("Startup recovery did not promote the retained selected session.");
 
         var metadata = RecordingInfoJson.Parse(File.ReadAllText(plan.MetadataPath));
@@ -195,7 +198,7 @@ internal static class SelectedAudioLifecycleTests
         public NativeOperationResult StartMixed(NativeMixedRecordingRequest request)
         {
             MixedStartCalls++;
-            File.WriteAllBytes(request.OutputPath, [1, 2, 3, 4]);
+            File.WriteAllBytes(request.OutputPath, FragmentedEvidence());
             state = NativeRecorderState.Recording;
             return NativeOperationResult.Success();
         }
@@ -203,7 +206,7 @@ internal static class SelectedAudioLifecycleTests
         public NativeOperationResult StartSelectedAudio(NativeSelectedAudioRequest request)
         {
             request.Validate();
-            File.WriteAllBytes(request.OutputPath, [1, 2, 3, 4]);
+            File.WriteAllBytes(request.OutputPath, FragmentedEvidence());
             state = NativeRecorderState.Recording;
             return NativeOperationResult.Success();
         }
@@ -236,6 +239,35 @@ internal static class SelectedAudioLifecycleTests
     private sealed class AlwaysValidAudio : IAudioBackupValidator
     {
         public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
+    }
+
+    private sealed class CompletePrefixRecoveryValidator : IRecoveryMediaValidator
+    {
+        public RecoveryMediaValidationResult ValidateToEnd(string path, RecoveryMediaKind mediaKind)
+        {
+            var scan = FragmentedMp4PrefixScanner.Scan(path);
+            return scan.HasRecoverablePrefix && scan.CompletePrefixLength == new FileInfo(path).Length
+                ? RecoveryMediaValidationResult.Valid
+                : RecoveryMediaValidationResult.Invalid("The injected fMP4 was not complete.");
+        }
+    }
+
+    private static byte[] FragmentedEvidence()
+    {
+        static byte[] Box(string type, byte payload)
+        {
+            var result = new byte[9];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(0, 4), 9);
+            for (var index = 0; index < 4; index++) result[4 + index] = checked((byte)type[index]);
+            result[8] = payload;
+            return result;
+        }
+
+        return Box("ftyp", 1)
+            .Concat(Box("moov", 2))
+            .Concat(Box("moof", 3))
+            .Concat(Box("mdat", 4))
+            .ToArray();
     }
 
     private sealed class ControlledDelay : IRecordingDelay

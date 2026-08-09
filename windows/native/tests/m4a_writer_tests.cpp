@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <windows.h>
@@ -22,6 +24,7 @@
 namespace {
 
 using recorder::m4a::Error;
+using recorder::m4a::DurableCheckpoint;
 using recorder::m4a::Writer;
 using Microsoft::WRL::ComPtr;
 
@@ -494,9 +497,12 @@ void WriteThenAbortRemovesPartialArtifact(const std::filesystem::path& directory
     writer->Abort();
     writer.reset();
 
+    const auto partial_path =
+        std::filesystem::path(final_path.wstring() + L".partial");
     Expect(!std::filesystem::exists(final_path) &&
-               !std::filesystem::exists(final_path.wstring() + L".partial"),
-           "abort-after-write M4A left a session artifact");
+               std::filesystem::exists(partial_path),
+           "abort-after-write discarded accepted audio evidence");
+    ExpectDecodableAacStream(partial_path);
 }
 
 void AbortStateIsIdempotentAndClosed(const std::filesystem::path& directory) {
@@ -515,9 +521,12 @@ void AbortStateIsIdempotentAndClosed(const std::filesystem::path& directory) {
     Expect(writer->Finalize(&detail) == Error::InvalidState,
            "abort-state writer finalized after Abort");
     writer.reset();
+    const auto partial_path =
+        std::filesystem::path(final_path.wstring() + L".partial");
     Expect(!std::filesystem::exists(final_path) &&
-               !std::filesystem::exists(final_path.wstring() + L".partial"),
-           "abort-state M4A left a session artifact");
+               std::filesystem::exists(partial_path),
+           "abort-state discarded accepted audio evidence");
+    ExpectDecodableAacStream(partial_path);
 }
 
 void PublishFailureRetainsDecodablePartial(const std::filesystem::path& directory) {
@@ -600,6 +609,267 @@ void CreateThenAbortCleanly(const std::filesystem::path& directory) {
            "M4A create-only writer retained an artifact");
 }
 
+void ExactSafetyWorkFileFinalizesInPlace(const std::filesystem::path& directory) {
+    const auto work_path = directory / "recording.audio-safety.partial.mp4";
+    Error error = Error::Ok;
+    std::string detail;
+    auto writer = Writer::CreateWorkFile(work_path, 128'000U, &error, &detail);
+    Expect(writer != nullptr && error == Error::Ok,
+           "audio safety exact-work-path writer creation failed");
+
+    std::vector<float> frames(960U * 2U, 0.0F);
+    for (std::uint32_t block = 0; block < 100U; ++block) {
+        frames[(block * 37U) % frames.size()] = 0.20F;
+        Expect(writer->WriteFrames(
+                   frames.data(), 960U,
+                   static_cast<std::uint64_t>(block) * 200'000U,
+                   &detail) == Error::Ok,
+               "audio safety exact-work-path write failed");
+    }
+    DurableCheckpoint checkpoint;
+    Expect(writer->CreateDurableCheckpoint(
+               20'000'000U, &checkpoint, &detail) == Error::Ok,
+           "audio safety marker/byte-stream/file checkpoint failed");
+    Expect(checkpoint.sequence == 1U && checkpoint.file_size_bytes > 0U &&
+               checkpoint.media_time_100ns == 20'000'000U,
+           "audio safety checkpoint evidence was incomplete");
+    Expect(writer->Finalize(&detail) == Error::Ok,
+           "audio safety exact work file could not finalize");
+    writer.reset();
+
+    Expect(std::filesystem::exists(work_path),
+           "audio safety exact work file was unexpectedly renamed");
+    Expect(!std::filesystem::exists(work_path.wstring() + L".partial"),
+           "audio safety exact work mode created a double partial suffix");
+    const auto bytes = ReadBytes(work_path);
+    Expect(HasTopLevelBox(bytes, "moof"),
+           "audio safety exact work file is not fragmented MP4");
+    ExpectDecodableAacStream(work_path);
+}
+
+void WriteKillChildReadyMarker(
+    const std::filesystem::path& path,
+    const DurableCheckpoint& checkpoint) {
+    const HANDLE file = CreateFileW(
+        path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    Expect(file != INVALID_HANDLE_VALUE,
+           "kill child could not create its durable ready marker");
+    std::array<char, 256U> evidence{};
+    const int evidence_length = std::snprintf(
+        evidence.data(), evidence.size(),
+        "sequence=%llu\nbytes=%llu\ncheckpoint100ns=%llu\naccepted100ns=190000000\n",
+        static_cast<unsigned long long>(checkpoint.sequence),
+        static_cast<unsigned long long>(checkpoint.file_size_bytes),
+        static_cast<unsigned long long>(checkpoint.media_time_100ns));
+    Expect(evidence_length > 0 &&
+               static_cast<std::size_t>(evidence_length) < evidence.size(),
+           "kill child checkpoint evidence exceeded its bounded marker");
+    DWORD written = 0;
+    const bool write_ok = WriteFile(
+        file, evidence.data(), static_cast<DWORD>(evidence_length),
+        &written, nullptr) != FALSE;
+    const bool flush_ok = write_ok && written == static_cast<DWORD>(evidence_length) &&
+        FlushFileBuffers(file) != FALSE;
+    CloseHandle(file);
+    Expect(flush_ok, "kill child could not flush its ready marker");
+}
+
+[[noreturn]] void RunCheckpointKillChild(const std::filesystem::path& directory) {
+    Expect(!directory.empty() && std::filesystem::exists(directory),
+           "kill child did not receive its parent-owned directory");
+    const auto work_path = directory / "recording.audio-safety.partial.mp4";
+    Error error = Error::Ok;
+    std::string detail;
+    auto writer = Writer::CreateWorkFile(work_path, 128'000U, &error, &detail);
+    Expect(writer != nullptr && error == Error::Ok,
+           "kill child could not create the audio safety writer");
+
+    std::vector<float> frames(960U * 2U, 0.0F);
+    DurableCheckpoint last_checkpoint;
+    for (std::uint32_t block = 0; block < 950U; ++block) {
+        frames[(static_cast<std::size_t>(block) * 53U) % frames.size()] = 0.15F;
+        Expect(writer->WriteFrames(
+                   frames.data(), 960U,
+                   static_cast<std::uint64_t>(block) * 200'000U,
+                   &detail) == Error::Ok,
+               "kill child could not write audio");
+        const std::uint32_t completed_blocks = block + 1U;
+        if (completed_blocks == 100U || completed_blocks == 500U) {
+            DurableCheckpoint checkpoint;
+            const std::uint64_t media_time =
+                static_cast<std::uint64_t>(completed_blocks) * 200'000U;
+            Expect(writer->CreateDurableCheckpoint(
+                       media_time, &checkpoint, &detail) == Error::Ok,
+                   "kill child durable checkpoint failed");
+            const std::uint64_t expected_sequence =
+                completed_blocks == 100U ? 1U : 2U;
+            Expect(checkpoint.sequence == expected_sequence &&
+                       checkpoint.file_size_bytes > 0U &&
+                       checkpoint.media_time_100ns == media_time,
+                   "kill child checkpoint evidence was incomplete");
+            last_checkpoint = checkpoint;
+        }
+    }
+
+    // The last declared durable checkpoint is 10 seconds. The child has
+    // accepted another 9 seconds when the parent kills it, so an EOS-decodable
+    // prefix of at least 9 seconds proves the advertised <=10 second tail.
+    Expect(last_checkpoint.sequence == 2U,
+           "kill child did not retain its second checkpoint");
+    WriteKillChildReadyMarker(
+        directory / "checkpoint.ready", last_checkpoint);
+    Sleep(INFINITE);
+    std::terminate();
+}
+
+struct KillCheckpointEvidence {
+    std::uint64_t sequence = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t checkpoint_100ns = 0;
+    std::uint64_t accepted_100ns = 0;
+};
+
+std::uint64_t ParseBoundedEvidenceField(
+    std::string_view evidence, std::string_view key) {
+    const std::size_t offset = evidence.find(key);
+    Expect(offset != std::string_view::npos,
+           "kill checkpoint marker is missing a required field");
+    const std::size_t value_start = offset + key.size();
+    const std::size_t value_end = evidence.find('\n', value_start);
+    Expect(value_end != std::string_view::npos && value_end > value_start,
+           "kill checkpoint marker contains a malformed field");
+    std::uint64_t value = 0;
+    const char* begin = evidence.data() + value_start;
+    const char* end = evidence.data() + value_end;
+    const auto parsed = std::from_chars(begin, end, value);
+    Expect(parsed.ec == std::errc{} && parsed.ptr == end,
+           "kill checkpoint marker contains a non-numeric field");
+    return value;
+}
+
+KillCheckpointEvidence ReadKillCheckpointEvidence(
+    const std::filesystem::path& path) {
+    const auto bytes = ReadBytes(path);
+    Expect(!bytes.empty() && bytes.size() <= 255U,
+           "kill checkpoint marker exceeds its bounded format");
+    const std::string_view evidence(
+        reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    return {
+        ParseBoundedEvidenceField(evidence, "sequence="),
+        ParseBoundedEvidenceField(evidence, "bytes="),
+        ParseBoundedEvidenceField(evidence, "checkpoint100ns="),
+        ParseBoundedEvidenceField(evidence, "accepted100ns="),
+    };
+}
+
+void CopyDurablePrefix(
+    const std::filesystem::path& source,
+    const std::filesystem::path& candidate,
+    std::uint64_t byte_count) {
+    Expect(byte_count > 0U && byte_count <= std::filesystem::file_size(source),
+           "durable checkpoint byte offset is outside the killed work file");
+    std::ifstream input(source, std::ios::binary);
+    std::ofstream output(candidate, std::ios::binary | std::ios::trunc);
+    Expect(input.good() && output.good(),
+           "kill harness could not open its durable prefix files");
+    std::array<char, 64U * 1024U> buffer{};
+    std::uint64_t remaining = byte_count;
+    while (remaining > 0U) {
+        const auto amount = static_cast<std::streamsize>((std::min)(
+            remaining, static_cast<std::uint64_t>(buffer.size())));
+        input.read(buffer.data(), amount);
+        Expect(input.gcount() == amount,
+               "killed work file ended before its durable checkpoint offset");
+        output.write(buffer.data(), amount);
+        Expect(output.good(), "writing the durable prefix candidate failed");
+        remaining -= static_cast<std::uint64_t>(amount);
+    }
+    output.flush();
+    Expect(output.good(), "flushing the durable prefix candidate failed");
+}
+
+void ProcessKillRetainsDecodableCheckpoint(const std::filesystem::path& directory) {
+    wchar_t executable[32'768]{};
+    const DWORD executable_length = GetModuleFileNameW(
+        nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    Expect(executable_length > 0U && executable_length < std::size(executable),
+           "kill harness could not resolve its executable path");
+
+    std::wstring command = L"\"";
+    command.append(executable, executable_length);
+    command += L"\" kill-child --input \"";
+    command += directory.wstring();
+    command += L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    Expect(CreateProcessW(
+               nullptr, command.data(), nullptr, nullptr, FALSE,
+               CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process) != FALSE,
+           "kill harness could not start its writer child");
+
+    bool child_terminated = false;
+    const auto cleanup = [&] {
+        if (!child_terminated) {
+            (void)TerminateProcess(process.hProcess, 199U);
+            (void)WaitForSingleObject(process.hProcess, 5'000U);
+            child_terminated = true;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    };
+
+    try {
+        const auto ready_path = directory / "checkpoint.ready";
+        const ULONGLONG deadline = GetTickCount64() + 30'000U;
+        while (!std::filesystem::exists(ready_path)) {
+            Expect(WaitForSingleObject(process.hProcess, 0U) == WAIT_TIMEOUT,
+                   "kill writer child exited before publishing checkpoint evidence");
+            Expect(GetTickCount64() < deadline,
+                   "kill writer child timed out before checkpoint evidence");
+            Sleep(20U);
+        }
+        Expect(TerminateProcess(process.hProcess, 197U) != FALSE,
+               "TerminateProcess failed for the checkpoint child");
+        Expect(WaitForSingleObject(process.hProcess, 5'000U) == WAIT_OBJECT_0,
+               "checkpoint child did not terminate promptly");
+        child_terminated = true;
+        DWORD exit_code = 0;
+        Expect(GetExitCodeProcess(process.hProcess, &exit_code) != FALSE &&
+                   exit_code == 197U,
+               "checkpoint child was not killed at the intended boundary");
+        const auto evidence = ReadKillCheckpointEvidence(ready_path);
+        Expect(evidence.sequence == 2U &&
+                   evidence.checkpoint_100ns == 100'000'000ULL &&
+                   evidence.accepted_100ns == 190'000'000ULL,
+               "kill checkpoint marker does not describe the intended boundary");
+        const auto work_path = directory / "recording.audio-safety.partial.mp4";
+        const auto candidate_path = directory / "recovered-prefix.mp4";
+        CopyDurablePrefix(work_path, candidate_path, evidence.bytes);
+        const auto candidate_bytes = ReadBytes(candidate_path);
+        Expect(HasTopLevelBox(candidate_bytes, "ftyp") &&
+                   HasTopLevelBox(candidate_bytes, "moov") &&
+                   HasTopLevelBox(candidate_bytes, "moof") &&
+                   HasTopLevelBox(candidate_bytes, "mdat"),
+               "durable audio safety prefix is not fragmented MP4");
+        const DecodedAudioAnalysis analysis = AnalyzeDecodedAac(candidate_path);
+        const std::uint64_t decoded_frames = analysis.samples / 2U;
+        const std::uint64_t decoded_duration_100ns =
+            decoded_frames * 10'000'000ULL / 48'000ULL;
+        constexpr std::uint64_t kMaximumTailLoss100ns = 100'000'000ULL;
+        Expect(decoded_duration_100ns >= 95'000'000ULL &&
+                   decoded_duration_100ns <= 105'000'000ULL &&
+                   decoded_duration_100ns + kMaximumTailLoss100ns >=
+                       evidence.accepted_100ns,
+               "durable prefix duration or 10-second tail-loss bound failed");
+        cleanup();
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -623,6 +893,8 @@ int main(int argc, char** argv) {
             } else if (options.test == "runtime") {
                 // Intentionally do no writer work: this isolates MFStartup,
                 // MFShutdown and COM apartment teardown in a fresh process.
+            } else if (options.test == "kill-child") {
+                RunCheckpointKillChild(options.input_path);
             } else {
                 directory = TestDirectory();
                 Diagnostic(options, "before-writer-work");
@@ -650,6 +922,10 @@ int main(int argc, char** argv) {
                     FaultAfterBlocksFinalizesRecoverableBackup(directory, options);
                 } else if (options.test == "create") {
                     CreateThenAbortCleanly(directory);
+                } else if (options.test == "work-file") {
+                    ExactSafetyWorkFileFinalizesInPlace(directory);
+                } else if (options.test == "process-kill") {
+                    ProcessKillRetainsDecodableCheckpoint(directory);
                 } else {
                     return 64;
                 }

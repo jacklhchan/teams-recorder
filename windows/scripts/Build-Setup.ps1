@@ -62,6 +62,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.WinUI.ex
 if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.NativeBridge.dll") -PathType Leaf)) {
     throw "Self-contained publish did not include Recorder.NativeBridge.dll."
 }
+if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.AsrWorker.exe") -PathType Leaf)) {
+    throw "Self-contained publish did not include Recorder.AsrWorker.exe."
+}
 foreach ($runtimeFile in $nativeRuntimeFiles) {
     $runtimeSource = Join-Path $runtimeDirectory $runtimeFile
     if (-not (Test-Path -LiteralPath $runtimeSource -PathType Leaf)) {

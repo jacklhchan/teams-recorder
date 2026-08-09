@@ -24,7 +24,13 @@ function Read-JsonObject {
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
-$canonicalFixtures = @(Get-ChildItem -LiteralPath $fixturesDirectory -Filter "*.json" -File | Sort-Object Name)
+# This validator intentionally owns only recording-session fixtures. Other
+# contracts (for example Meeting Intelligence) share the fixture directory and
+# are validated against their own schemas by their respective test suites.
+$canonicalFixtures = @(
+    Get-ChildItem -LiteralPath $fixturesDirectory -Filter "recording-*.json" -File |
+        Sort-Object Name
+)
 if ($canonicalFixtures.Count -eq 0) {
     throw "The canonical recording-session contract must include at least one fixture."
 }

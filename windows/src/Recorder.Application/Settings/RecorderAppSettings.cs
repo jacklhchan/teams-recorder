@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Recorder.Core;
 
 namespace TeamsRecorder.Windows.Application.Settings;
 
@@ -10,7 +11,7 @@ namespace TeamsRecorder.Windows.Application.Settings;
 /// </summary>
 public sealed record RecorderAppSettings
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; init; } = CurrentSchemaVersion;
     [JsonPropertyName("outputFolder")] public string? OutputFolder { get; init; }
@@ -18,6 +19,12 @@ public sealed record RecorderAppSettings
     [JsonPropertyName("recordMicrophone")] public bool RecordMicrophone { get; init; }
     [JsonPropertyName("microphoneEndpointId")] public string? MicrophoneEndpointId { get; init; }
     [JsonPropertyName("captureSource")] public RecorderPersistedCaptureSource CaptureSource { get; init; } = RecorderPersistedCaptureSource.SystemLoopback;
+    /// <summary>
+    /// Stable, non-sensitive identity used to offer an exact application match
+    /// after restart. PIDs, process start times, executable paths, command lines,
+    /// and window titles are intentionally never persisted.
+    /// </summary>
+    [JsonPropertyName("selectedApplicationExecutable")] public string? SelectedApplicationExecutable { get; init; }
     // These are local opt-ins only. Pairing material remains in the separate DPAPI store.
     [JsonPropertyName("teamsMuteSyncEnabled")] public bool TeamsMuteSyncEnabled { get; init; }
     [JsonPropertyName("teamsAutomaticRecordingEnabled")] public bool TeamsAutomaticRecordingEnabled { get; init; }
@@ -25,7 +32,7 @@ public sealed record RecorderAppSettings
     public static RecorderAppSettings Validate(RecorderAppSettings value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        if (value.SchemaVersion != CurrentSchemaVersion)
+        if (value.SchemaVersion is < 1 or > CurrentSchemaVersion)
             throw new RecorderAppSettingsException("The saved app settings version is not supported.");
         if (!Enum.IsDefined(value.CaptureSource))
             throw new RecorderAppSettingsException("The saved capture source is not supported.");
@@ -36,6 +43,9 @@ public sealed record RecorderAppSettings
             OutputFolder = NormalizeFolder(value.OutputFolder),
             RenderEndpointId = NormalizeIdentifier(value.RenderEndpointId),
             MicrophoneEndpointId = value.RecordMicrophone ? NormalizeIdentifier(value.MicrophoneEndpointId) : null,
+            SelectedApplicationExecutable = value.CaptureSource == RecorderPersistedCaptureSource.SelectedApplication
+                ? NormalizeExecutable(value.SelectedApplicationExecutable)
+                : null,
             // Automatic recording has no meaning without its separately opted-in Teams connection.
             TeamsAutomaticRecordingEnabled = value.TeamsMuteSyncEnabled && value.TeamsAutomaticRecordingEnabled,
         };
@@ -58,6 +68,14 @@ public sealed record RecorderAppSettings
         if (normalized.Length > 512 || normalized.Any(char.IsControl))
             throw new RecorderAppSettingsException("The saved device identifier is invalid.");
         return normalized;
+    }
+
+    private static string? NormalizeExecutable(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return WindowsExecutableBasename.TryCreateExecutableBasename(value.Trim(), out var executable)
+            ? executable
+            : throw new RecorderAppSettingsException("The saved application identity is invalid.");
     }
 }
 

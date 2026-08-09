@@ -170,6 +170,51 @@ public sealed record RecordingSessionPlan(RecordingSessionKind Kind, string Fold
     public string PartialAudioPath => Path.Combine(FolderPath, RecordingSessionLayout.PartialAudioFileName);
     public string FinalVideoPath => Path.Combine(FolderPath, RecordingSessionLayout.FinalVideoFileName);
     public string PartialVideoPath => Path.Combine(FolderPath, RecordingSessionLayout.PartialVideoFileName);
+    public string AudioSafetyPartialPath => Path.Combine(FolderPath, RecordingSessionLayout.AudioSafetyPartialFileName);
+    public string RecoveryJournalPath => Path.Combine(FolderPath, RecordingSessionLayout.RecoveryJournalFileName);
+    public string ActiveLockPath => Path.Combine(FolderPath, RecordingSessionLayout.ActiveLockFileName);
+}
+
+/// <summary>
+/// An OS-backed, cross-process lease for a live session. The marker is useful
+/// for diagnostics, but the non-shareable file handle is the authority: a
+/// marker left by a hard crash becomes acquirable on the next process start.
+/// </summary>
+public sealed class RecordingSessionActiveLock : IDisposable
+{
+    private readonly string path;
+    private readonly byte[] token;
+    private FileStream? stream;
+
+    internal RecordingSessionActiveLock(string path, FileStream stream, byte[] token)
+    {
+        this.path = path;
+        this.stream = stream;
+        this.token = token;
+    }
+
+    public void Dispose()
+    {
+        var held = Interlocked.Exchange(ref stream, null);
+        if (held is null) return;
+        held.Dispose();
+
+        // Delete only our own now-unlocked marker. If another process acquired
+        // it in the meantime, its FileShare.None handle makes this fail safely.
+        try
+        {
+            byte[] current;
+            using (var reader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                if (reader.Length != token.Length) return;
+                current = new byte[token.Length];
+                reader.ReadExactly(current);
+            }
+            if (current.AsSpan().SequenceEqual(token)) File.Delete(path);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
 }
 
 /// <summary>
@@ -206,6 +251,10 @@ public sealed record RecordingSessionLibraryItem(
 public sealed class SessionStorageService
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    private static readonly JsonSerializerOptions RecoveryJournalJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+    };
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> MetadataWriteGates = new(StringComparer.OrdinalIgnoreCase);
     private readonly string rootPath;
     private readonly RecordingStoragePolicy policy;
@@ -269,6 +318,76 @@ public sealed class SessionStorageService
         throw new IOException("Unable to allocate a unique recording session folder.");
     }
 
+    /// <summary>
+    /// Acquires the live-session lease before native ingress starts. Callers
+    /// must retain it until every writer has stopped or failed.
+    /// </summary>
+    public RecordingSessionActiveLock AcquireActiveLock(RecordingSessionPlan plan)
+    {
+        EnsurePlan(plan);
+        if (!TryAcquireSessionLock(plan.FolderPath, out var sessionLock))
+        {
+            throw new IOException("The recording session is already active in another process or its lock is unavailable.");
+        }
+        return sessionLock;
+    }
+
+    /// <summary>
+    /// Durably replaces the small checkpoint journal. The temporary file and
+    /// final rename both use write-through semantics; an old complete JSON
+    /// document is preferable to a newer torn document after power loss.
+    /// </summary>
+    public async Task WriteRecoveryJournalAsync(
+        RecordingSessionPlan plan,
+        RecordingRecoveryJournal journal,
+        CancellationToken cancellationToken = default)
+    {
+        EnsurePlan(plan);
+        ArgumentNullException.ThrowIfNull(journal);
+        if (!journal.IsValid()) throw new ArgumentException("The recovery journal is invalid or unsupported.", nameof(journal));
+        if (IsReparsePoint(plan.RecoveryJournalPath))
+        {
+            throw new IOException("The recovery journal cannot be a symbolic link or reparse point.");
+        }
+
+        var temporary = plan.RecoveryJournalPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var moved = false;
+        try
+        {
+            await using (var stream = new FileStream(
+                temporary,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                4096,
+                FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await JsonSerializer.SerializeAsync(stream, journal, RecoveryJournalJsonOptions, cancellationToken)
+                    .ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                stream.Flush(flushToDisk: true);
+            }
+
+            ReplaceFileWriteThrough(temporary, plan.RecoveryJournalPath);
+            moved = true;
+        }
+        finally
+        {
+            if (!moved)
+            {
+                try { File.Delete(temporary); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+    }
+
+    public RecordingRecoveryJournal? ReadRecoveryJournal(RecordingSessionPlan plan)
+    {
+        EnsurePlan(plan);
+        return ReadRecoveryJournal(plan.RecoveryJournalPath);
+    }
+
     public async Task PublishCompletedMediaAsync(RecordingSessionPlan plan, string? title = null, CancellationToken cancellationToken = default)
     {
         await PublishCompletedMediaAsync(plan, title, windowsCapture: null, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -303,6 +422,25 @@ public sealed class SessionStorageService
         CancellationToken cancellationToken = default)
     {
         EnsurePlan(plan);
+        if (File.Exists(plan.AudioSafetyPartialPath))
+        {
+            if (!IsSafeCompletedAudio(plan.AudioSafetyPartialPath))
+                throw new IOException("The fragmented MP4 audio-safety file is not decodable to end-of-stream.");
+            if (File.Exists(plan.FinalVideoPath))
+                throw new IOException("A final MP4 already exists for this session.");
+
+            var existingMp4 = IsSafeFile(plan.MetadataPath)
+                ? ReadMetadata(plan.MetadataPath)
+                : RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, plan.Kind);
+            var mp4Info = RecordingInfoJson.WithWindowsCapture(
+                RecordingInfoJson.CreateAudioOnly(existingMp4.Document, title, RecordingRecoveryState.None, plan.Kind),
+                windowsCapture ?? existingMp4.WindowsCapture);
+            await WriteMetadataAsync(plan.MetadataPath, mp4Info, cancellationToken).ConfigureAwait(false);
+            File.Move(plan.AudioSafetyPartialPath, plan.FinalVideoPath, false);
+            return;
+        }
+
+        // Legacy sessions still publish their finalized AAC/M4A backup.
         if (!File.Exists(plan.BackupAudioPath)) throw new FileNotFoundException("The recording work file does not exist.", plan.BackupAudioPath);
         if (!audioValidator.IsValidNonEmptyAudio(plan.BackupAudioPath)) throw new IOException("The recording work file is not a decodable AAC/M4A recording.");
         if (File.Exists(plan.FinalAudioPath)) throw new IOException("A final recording already exists for this session.");
@@ -321,7 +459,7 @@ public sealed class SessionStorageService
 
     /// <summary>
     /// Publishes a completed MP4 as the primary media only after a separate
-    /// M4A fallback is final.  The API deliberately accepts no HWND, PID,
+    /// audio-safety MP4 (or legacy M4A fallback) is final. The API deliberately accepts no HWND, PID,
     /// window title, process creation time, or screen image; those values are
     /// transient capture inputs and cannot enter durable metadata here.
     /// </summary>
@@ -485,6 +623,30 @@ public sealed class SessionStorageService
         RecordingRecoveryState recoveryState,
         CancellationToken cancellationToken)
     {
+        if (File.Exists(plan.AudioSafetyPartialPath))
+        {
+            if (!IsSafeCompletedAudio(plan.AudioSafetyPartialPath))
+                throw new IOException("The fragmented MP4 audio-safety file is not decodable to end-of-stream.");
+
+            // During a healthy video publication the safety file remains an
+            // independent sidecar until the primary MP4 is validated and
+            // promoted. It is only promoted itself when video is lost.
+            if (recoveryState == RecordingRecoveryState.None) return;
+            if (File.Exists(plan.FinalVideoPath))
+                throw new IOException("A final MP4 already exists; audio safety will not overwrite it.");
+
+            await WriteAudioMetadataAsync(
+                plan,
+                existing,
+                title,
+                windowsCapture,
+                recoveryState,
+                cancellationToken).ConfigureAwait(false);
+            File.Move(plan.AudioSafetyPartialPath, plan.FinalVideoPath, false);
+            return;
+        }
+
+        // Legacy fallback path.
         if (File.Exists(plan.FinalAudioPath))
         {
             if (!IsSafeCompletedAudio(plan.FinalAudioPath))
@@ -731,7 +893,15 @@ public sealed class SessionStorageService
                 // partial MP4 is always recovery evidence, never library media.
                 if (!TryGetPublishedMediaPath(folder, metadata, out var final)) continue;
                 var backup = Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName);
-                result.Add(new(kind, folder, final, new FileInfo(final).Length, metadata, IsSafeFile(backup) && new FileInfo(backup).Length > 0));
+                var safety = Path.Combine(folder, RecordingSessionLayout.AudioSafetyPartialFileName);
+                result.Add(new(
+                    kind,
+                    folder,
+                    final,
+                    new FileInfo(final).Length,
+                    metadata,
+                    (IsSafeFile(backup) && new FileInfo(backup).Length > 0) ||
+                    (IsSafeFile(safety) && new FileInfo(safety).Length > 0)));
             }
 
             // Early Windows builds wrote M4A files directly beneath the chosen
@@ -822,6 +992,58 @@ public sealed class SessionStorageService
         return result;
     }
 
+    internal bool TryAcquireSessionLock(string folder, out RecordingSessionActiveLock sessionLock)
+    {
+        sessionLock = null!;
+        try
+        {
+            EnsureOwnedFolder(folder);
+            var lockPath = Path.Combine(folder, RecordingSessionLayout.ActiveLockFileName);
+            if (IsReparsePoint(lockPath)) return false;
+            var stream = new FileStream(
+                lockPath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                4096,
+                FileOptions.WriteThrough);
+            try
+            {
+                var token = Guid.NewGuid().ToByteArray();
+                stream.SetLength(0);
+                stream.Write(token);
+                stream.Flush(flushToDisk: true);
+                sessionLock = new RecordingSessionActiveLock(lockPath, stream, token);
+                return true;
+            }
+            catch
+            {
+                stream.Dispose();
+                throw;
+            }
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    internal RecordingRecoveryJournal? ReadRecoveryJournal(string journalPath)
+    {
+        try
+        {
+            if (!IsSafeFile(journalPath)) return null;
+            var info = new FileInfo(journalPath);
+            if (info.Length <= 0 || info.Length > 64 * 1024) return null;
+            var journal = JsonSerializer.Deserialize<RecordingRecoveryJournal>(
+                File.ReadAllText(journalPath),
+                RecoveryJournalJsonOptions);
+            return journal?.IsValid() == true ? journal : null;
+        }
+        catch (JsonException) { return null; }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (NotSupportedException) { return null; }
+    }
+
     internal bool IsSafeFile(string path) => IsDescendant(path) && File.Exists(path) && !IsReparsePoint(path);
 
     /// <summary>Shared by publication and startup recovery; a final MP4 must pass the bounded structural guard.</summary>
@@ -844,7 +1066,15 @@ public sealed class SessionStorageService
     {
         var finalVideo = Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName);
         var finalAudio = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
-        if (metadata.MediaKind == "video" && IsSafeCompletedVideo(finalVideo) && IsSafeCompletedAudio(finalAudio))
+        if (metadata.MediaKind == "video" && IsSafeCompletedVideo(finalVideo))
+        {
+            mediaPath = finalVideo;
+            return true;
+        }
+
+        // New audio-safety recovery is AAC in fragmented MP4. Legacy sessions
+        // continue to use recording.m4a below.
+        if (metadata.MediaKind == "audio" && IsSafeCompletedAudio(finalVideo))
         {
             mediaPath = finalVideo;
             return true;
@@ -909,11 +1139,17 @@ public sealed class SessionStorageService
         var expectedMetadata = Path.Combine(plan.FolderPath, RecordingSessionLayout.MetadataFileName);
         var expectedFinalVideo = Path.Combine(plan.FolderPath, RecordingSessionLayout.FinalVideoFileName);
         var expectedPartialVideo = Path.Combine(plan.FolderPath, RecordingSessionLayout.PartialVideoFileName);
+        var expectedAudioSafety = Path.Combine(plan.FolderPath, RecordingSessionLayout.AudioSafetyPartialFileName);
+        var expectedJournal = Path.Combine(plan.FolderPath, RecordingSessionLayout.RecoveryJournalFileName);
+        var expectedLock = Path.Combine(plan.FolderPath, RecordingSessionLayout.ActiveLockFileName);
         if (!PathEquals(plan.FinalAudioPath, expectedFinal) ||
             !PathEquals(plan.BackupAudioPath, expectedBackup) ||
             !PathEquals(plan.MetadataPath, expectedMetadata) ||
             !PathEquals(plan.FinalVideoPath, expectedFinalVideo) ||
-            !PathEquals(plan.PartialVideoPath, expectedPartialVideo))
+            !PathEquals(plan.PartialVideoPath, expectedPartialVideo) ||
+            !PathEquals(plan.AudioSafetyPartialPath, expectedAudioSafety) ||
+            !PathEquals(plan.RecoveryJournalPath, expectedJournal) ||
+            !PathEquals(plan.ActiveLockPath, expectedLock))
         {
             throw new InvalidOperationException("The recording session plan contains an unexpected path.");
         }
@@ -952,6 +1188,24 @@ public sealed class SessionStorageService
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateDirectory(string lpPathName, IntPtr lpSecurityAttributes);
+
+    private const uint MoveFileReplaceExisting = 0x00000001;
+    private const uint MoveFileWriteThrough = 0x00000008;
+
+    private static void ReplaceFileWriteThrough(string source, string destination)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Durable recovery-journal replacement is implemented for Windows only.");
+        }
+        if (MoveFileEx(source, destination, MoveFileReplaceExisting | MoveFileWriteThrough)) return;
+        var error = Marshal.GetLastWin32Error();
+        throw new IOException("Unable to durably replace the recovery journal.", new Win32Exception(error));
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool MoveFileEx(string existingFileName, string newFileName, uint flags);
 
     private static async Task ReplaceMetadataAtomicallyAsync(string temporary, string metadataPath, CancellationToken cancellationToken)
     {

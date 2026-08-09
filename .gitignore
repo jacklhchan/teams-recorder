@@ -11,4 +11,7 @@ windows/**/bin/
 windows/**/obj/
 windows/out/
 windows/native/out/
+windows/driver/**/.cache/
+windows/driver/**/out/
+windows/driver/**/*.pfx
 /out/

@@ -11,7 +11,7 @@ using TeamsRecorder.Windows.Application.Storage;
 /// </summary>
 internal static class FaultInjectionAcceptanceTests
 {
-    private static readonly byte[] ValidAudioFixture = [0x41, 0x54, 0x30, 0x36, 0x2D, 0x41, 0x41, 0x43];
+    private static readonly byte[] ValidAudioFixture = CreateFragmentedAudioFixture();
     private static readonly byte[] CorruptAudioFixture = [0x00, 0xFF, 0x00, 0xFF];
     private static readonly byte[] CorruptVideoFixture = [0xDE, 0xAD, 0xBE, 0xEF, 0x01];
 
@@ -115,24 +115,26 @@ internal static class FaultInjectionAcceptanceTests
 
         var start = lifecycle.StartAsync(Request(target)).GetAwaiter().GetResult();
         if (start.Snapshot.State != RecordingCoordinatorState.Failed || !bridge.InjectionTriggered ||
-            !File.Exists(start.Session.BackupAudioPath))
+            !File.Exists(start.Session.AudioSafetyPartialPath))
         {
-            throw new InvalidOperationException("AT-06: a fatal A/V initialization return discarded the only M4A recovery artifact.");
+            throw new InvalidOperationException("AT-06: a fatal A/V initialization return discarded the only audio-safety MP4 artifact.");
         }
-        if (!File.ReadAllBytes(start.Session.BackupAudioPath).SequenceEqual(ValidAudioFixture) ||
+        if (!File.ReadAllBytes(start.Session.AudioSafetyPartialPath).SequenceEqual(ValidAudioFixture) ||
             File.Exists(start.Session.FinalAudioPath) || File.Exists(start.Session.FinalVideoPath))
         {
-            throw new InvalidOperationException("AT-06: fatal A/V initialization did not retain the M4A solely as recovery evidence.");
+            throw new InvalidOperationException("AT-06: fatal A/V initialization did not retain audio safety solely as recovery evidence.");
         }
 
         var validator = new FixtureAudioValidator();
         var storage = new SessionStorageService(root.Path, audioValidator: validator);
-        var recovered = new SessionRecoveryService(storage, validator).RecoverAsync().GetAwaiter().GetResult()
+        var recovered = new SessionRecoveryService(storage, validator, new FixtureRecoveryValidator()).RecoverAsync().GetAwaiter().GetResult()
             .Single(result => string.Equals(result.FolderPath, start.Session.FolderPath, StringComparison.OrdinalIgnoreCase));
-        if (!recovered.Recovered || !File.Exists(start.Session.FinalAudioPath) ||
-            File.Exists(start.Session.BackupAudioPath))
+        if (!recovered.Recovered || !File.Exists(start.Session.FinalVideoPath) ||
+            !File.Exists(start.Session.AudioSafetyPartialPath))
         {
-            throw new InvalidOperationException("AT-06: startup recovery could not promote the M4A retained after a fatal video start fault.");
+            throw new InvalidOperationException(
+                "AT-06: startup recovery could not promote audio safety retained after a fatal video start fault. " +
+                recovered.Reason);
         }
     }
 
@@ -199,11 +201,11 @@ internal static class FaultInjectionAcceptanceTests
         RecordingSessionPlan session)
     {
         if (request is null ||
-            !string.Equals(request.AudioRecoveryPath, session.BackupAudioPath, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(request.AudioRecoveryPath, session.AudioSafetyPartialPath, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(request.VideoOutputPath, session.PartialVideoPath, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(request.AudioRecoveryPath, request.VideoOutputPath, StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("AT-06: selected-window A/V did not receive independent owned M4A and MP4 output paths.");
+            throw new InvalidOperationException("AT-06: selected-window A/V did not receive independent owned audio-safety and A/V MP4 paths.");
         }
     }
 
@@ -214,12 +216,12 @@ internal static class FaultInjectionAcceptanceTests
         byte[] expectedAudio,
         string scenario)
     {
-        if (!publication.Published || !File.Exists(session.FinalAudioPath) ||
-            File.Exists(session.BackupAudioPath) || File.Exists(session.FinalVideoPath) ||
+        if (!publication.Published || !File.Exists(session.FinalVideoPath) ||
+            File.Exists(session.FinalAudioPath) || File.Exists(session.AudioSafetyPartialPath) ||
             File.Exists(session.PartialVideoPath) != expectedPartialVideo ||
-            !File.ReadAllBytes(session.FinalAudioPath).SequenceEqual(expectedAudio))
+            !File.ReadAllBytes(session.FinalVideoPath).SequenceEqual(expectedAudio))
         {
-            throw new InvalidOperationException($"AT-06: {scenario} did not preserve the independent M4A fallback and expected evidence.");
+            throw new InvalidOperationException($"AT-06: {scenario} did not preserve the independent audio-only MP4 fallback and expected evidence.");
         }
         var metadata = RecordingInfoJson.Parse(File.ReadAllText(session.MetadataPath));
         if (metadata.MediaKind != "audio" || metadata.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved)
@@ -258,6 +260,32 @@ internal static class FaultInjectionAcceptanceTests
             catch (IOException) { return false; }
             catch (UnauthorizedAccessException) { return false; }
         }
+    }
+
+    private sealed class FixtureRecoveryValidator : IRecoveryMediaValidator
+    {
+        public RecoveryMediaValidationResult ValidateToEnd(string path, RecoveryMediaKind mediaKind) =>
+            File.Exists(path) && File.ReadAllBytes(path).SequenceEqual(ValidAudioFixture)
+                ? RecoveryMediaValidationResult.Valid
+                : RecoveryMediaValidationResult.Invalid("Injected decode-to-EOF rejection.");
+    }
+
+    private static byte[] CreateFragmentedAudioFixture()
+    {
+        static byte[] Box(string type, byte payload)
+        {
+            var result = new byte[9];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(0, 4), 9);
+            for (var index = 0; index < 4; index++) result[4 + index] = checked((byte)type[index]);
+            result[8] = payload;
+            return result;
+        }
+
+        return Box("ftyp", 1)
+            .Concat(Box("moov", 2))
+            .Concat(Box("moof", 3))
+            .Concat(Box("mdat", 4))
+            .ToArray();
     }
 
     private sealed class RejectingVideoValidator : IVideoMediaValidator

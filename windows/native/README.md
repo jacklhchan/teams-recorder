@@ -1,7 +1,7 @@
 # Recorder.NativeBridge
 
 `Recorder.NativeBridge` is the Windows native boundary for audio capture.
-ABI version 0.5 owns the source lifecycle, normalizes captured packets to
+ABI version 0.8 owns the source lifecycle, normalizes captured packets to
 48 kHz stereo float, writes through a `.partial` recovery file, and publishes
 the final WAV only after a successful stop. The legacy no-options
 `recorder_native_start` remains exported but returns `INVALID_ARGUMENT` because
@@ -16,6 +16,29 @@ cmake --build --preset windows-x64-debug
 ctest --preset windows-x64-debug
 Pop-Location
 ```
+
+## Crash-resilient recording containers
+
+New mixed and selected-window sessions use Media Foundation's fragmented MP4
+sink for both the A/V work file and an independent audio-only safety work file.
+The preferred ABI paths are exactly
+`recording.partial.mp4` and `recording.audio-safety.partial.mp4`; native code
+finalizes these files in place and the managed session store owns publication.
+Legacy final `.m4a` paths remain accepted for binary compatibility.
+
+The sink is backed by an `IMFByteStream` over a file `IStream` whose retained
+Windows handle is used for `FlushFileBuffers`. Its minimum fragment duration is
+two seconds. A durable checkpoint requires all configured streams to report
+their sink-writer marker callbacks after `NotifyEndOfSegment`, followed by
+`IMFByteStream::Flush` and `FlushFileBuffers`; `NotifyEndOfSegment == S_OK`
+alone is never reported as durability. Mixed capture creates the first
+checkpoint at two seconds and then every eight seconds. Additive v4 statistics
+publish each writer's sequence, byte offset, and media timestamp independently.
+
+`Recorder.M4aWriter.ProcessKillRecovery` starts a real child writer, confirms
+two checkpoints, writes another nine seconds, terminates the process with
+`TerminateProcess`, then requires the surviving fMP4 to decode through EOS
+within the ten-second tail-loss bound.
 
 The contract tests use no Windows media API, so they can run with any C++17 compiler supported by CMake. `Recorder.NativeBridge.CAbiSmokeTests` is compiled as C11 and validates that the public header and imports work for C callers, not just C++ callers.
 

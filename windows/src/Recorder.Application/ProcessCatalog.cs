@@ -12,6 +12,7 @@ public sealed record ProcessCatalogEntry(uint ProcessId, DateTimeOffset StartedA
     public string? WindowTitle { get; init; }
     public bool HasWindow { get; init; }
     public ProcessCatalogAvailability Availability { get; init; } = ProcessCatalogAvailability.Available;
+    public int SessionId { get; init; } = -1;
     public DateTimeOffset StartedAtUtc => StartedAt.ToUniversalTime();
     public SelectedProcessTarget ToTarget() => new(ProcessId, StartedAt, DisplayName);
 }
@@ -29,13 +30,18 @@ public interface IProcessCatalog
 /// </summary>
 public sealed class ProcessCatalog : IProcessCatalog
 {
-    public IReadOnlyList<ProcessCatalogEntry> GetProcesses() => Process.GetProcesses()
-        .Select(process => { using (process) return TryRead(process, out var entry) ? entry : null; })
-        .Where(entry => entry is not null).Select(entry => entry!)
-        .OrderByDescending(entry => entry.HasWindow)
-        .ThenBy(entry => entry.DisplayName, StringComparer.OrdinalIgnoreCase)
-        .ThenBy(entry => entry.ProcessId)
-        .ToArray();
+    public IReadOnlyList<ProcessCatalogEntry> GetProcesses()
+    {
+        using var current = Process.GetCurrentProcess();
+        var entries = Process.GetProcesses()
+            .Select(process => { using (process) return TryRead(process, out var entry) ? entry : null; })
+            .Where(entry => entry is not null)
+            .Select(entry => entry!);
+        return ApplicationProcessCatalogPolicy.FilterEligible(
+            entries,
+            checked((uint)Environment.ProcessId),
+            current.SessionId);
+    }
 
     public bool IsCurrent(SelectedProcessTarget target)
     {
@@ -67,6 +73,7 @@ public sealed class ProcessCatalog : IProcessCatalog
                 WindowTitle = title,
                 HasWindow = hasWindow,
                 Availability = ProcessCatalogAvailability.Available,
+                SessionId = process.SessionId,
             };
             return true;
         }

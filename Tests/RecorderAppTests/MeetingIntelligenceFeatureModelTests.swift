@@ -449,7 +449,9 @@ final class MeetingIntelligenceFeatureModelTests: XCTestCase {
         await gate.release()
         await fulfillment(of: [finished, published], timeout: 1)
         await fixture.waitForIdle()
-        host.renderWaitingForStatusTransition()
+        host.renderUntilMissing(
+            RecorderActionID.meetingIntelligenceCancel
+        )
 
         XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceSummary))
         XCTAssertTrue(host.contains(RecorderActionID.meetingIntelligenceSuggestedTitle))
@@ -850,12 +852,15 @@ private final class FeatureObservedTranscriptHost {
         hostingView.layoutSubtreeIfNeeded()
     }
 
-    func renderWaitingForStatusTransition() {
-        render()
-        let duration = RecorderMotionPolicy.make(reduceMotion: false).statusDuration
-        RunLoop.main.run(until: Date().addingTimeInterval(duration + 0.05))
-        window.layoutIfNeeded()
-        hostingView.layoutSubtreeIfNeeded()
+    func renderUntilMissing(
+        _ identifier: String,
+        timeout: TimeInterval = 2
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            render()
+            if !contains(identifier) { return }
+        } while Date() < deadline
     }
 
     func contains(_ identifier: String) -> Bool {

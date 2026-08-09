@@ -3,6 +3,313 @@ import XCTest
 
 @MainActor
 final class AIProviderSettingsModelTests: XCTestCase {
+    @MainActor
+    func testProviderSaveObserverTokenCannotRemoveReplacement() {
+        let model = AIProviderSettingsModel(
+            repository: RecordingProviderRepository(),
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        var oldCalls = 0
+        var replacementCalls = 0
+        let oldToken = model.observeProviderSettingsSaved { _ in oldCalls += 1 }
+        let replacementToken = model.observeProviderSettingsSaved { _ in replacementCalls += 1 }
+
+        model.removeProviderSettingsSavedObserver(oldToken)
+        XCTAssertNotNil(model.onProviderSettingsSaved)
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+        model.save()
+        XCTAssertEqual(oldCalls, 0)
+        XCTAssertEqual(replacementCalls, 1)
+
+        model.removeProviderSettingsSavedObserver(replacementToken)
+        XCTAssertNil(model.onProviderSettingsSaved)
+    }
+
+    func testStartupSelectsActivePresetAndRetainsIndependentDraftsWithoutSaving() throws {
+        let generic = try makeProfile()
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "12345",
+            asrModel: "hkt-asr",
+            llmModel: "hkt-llm",
+            language: "yue",
+            prompt: "hkt prompt"
+        )
+        let repository = RecordingProviderRepository(
+            profiles: [.openAICompatible: generic, .hktGenAI: hkt],
+            activeKind: .hktGenAI,
+            keys: [.openAICompatible: true, .hktGenAI: false]
+        )
+        let model = AIProviderSettingsModel(repository: repository, client: StubProviderClient())
+
+        XCTAssertEqual(model.selectedProviderKind, .hktGenAI)
+        XCTAssertEqual(model.groupIDText, "12345")
+        XCTAssertEqual(model.asrModel, "hkt-asr")
+        XCTAssertFalse(model.hasStoredAPIKey)
+
+        model.asrModel = "unsaved-hkt-asr"
+        model.selectedProviderKind = .openAICompatible
+        XCTAssertEqual(model.asrModel, "asr")
+        XCTAssertTrue(model.hasStoredAPIKey)
+        model.selectedProviderKind = .hktGenAI
+
+        XCTAssertEqual(model.asrModel, "unsaved-hkt-asr")
+        XCTAssertEqual(repository.saveCount, 0)
+        XCTAssertEqual(repository.activeKind, .hktGenAI)
+    }
+
+    func testUnsavedGenericAndHKTDraftsRetainASRAndMeetingIntelligencePromptsIndependently() throws {
+        let generic = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "generic-asr",
+            llmModel: "generic-llm",
+            language: "yue",
+            prompt: "saved generic ASR",
+            meetingIntelligencePrompt: "saved generic MI"
+        )
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "42",
+            asrModel: "hkt-asr",
+            llmModel: "hkt-llm",
+            language: "en",
+            prompt: "saved hkt ASR",
+            meetingIntelligencePrompt: "saved hkt MI"
+        )
+        let repository = RecordingProviderRepository(
+            profiles: [.openAICompatible: generic, .hktGenAI: hkt],
+            activeKind: .openAICompatible,
+            keys: [:]
+        )
+        let model = AIProviderSettingsModel(repository: repository, client: StubProviderClient())
+
+        model.prompt = "unsaved generic ASR"
+        model.meetingIntelligencePrompt = "unsaved generic MI"
+        model.selectedProviderKind = .hktGenAI
+        model.prompt = "unsaved hkt ASR"
+        model.meetingIntelligencePrompt = "unsaved hkt MI"
+        model.selectedProviderKind = .openAICompatible
+
+        assertSensitiveEqual(model.prompt, "unsaved generic ASR")
+        assertSensitiveEqual(model.meetingIntelligencePrompt, "unsaved generic MI")
+        model.selectedProviderKind = .hktGenAI
+        assertSensitiveEqual(model.prompt, "unsaved hkt ASR")
+        assertSensitiveEqual(model.meetingIntelligencePrompt, "unsaved hkt MI")
+        XCTAssertEqual(repository.saveCount, 0)
+    }
+
+    func testSaveAndReloadRoundTripsASRAndMeetingIntelligencePrompts() {
+        let repository = RecordingProviderRepository()
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+        model.prompt = "ASR guidance"
+        model.meetingIntelligencePrompt = "Summarize decisions"
+
+        model.save()
+        model.prompt = "discarded ASR"
+        model.meetingIntelligencePrompt = "discarded MI"
+        model.reload()
+
+        assertSensitiveEqual(
+            repository.profiles[.openAICompatible]?.prompt,
+            "ASR guidance"
+        )
+        assertSensitiveEqual(
+            repository.profiles[.openAICompatible]?.meetingIntelligencePrompt,
+            "Summarize decisions"
+        )
+        assertSensitiveEqual(model.prompt, "ASR guidance")
+        assertSensitiveEqual(model.meetingIntelligencePrompt, "Summarize decisions")
+    }
+
+    func testFailedSavePreservesPriorRepositoryPrompts() throws {
+        let prior = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "prior-asr",
+            llmModel: "prior-llm",
+            language: "yue",
+            prompt: "prior ASR",
+            meetingIntelligencePrompt: "prior MI"
+        )
+        let repository = RecordingProviderRepository(profile: prior, saveError: TestError.failed)
+        let model = AIProviderSettingsModel(repository: repository, client: StubProviderClient())
+        model.prompt = "new ASR"
+        model.meetingIntelligencePrompt = "new MI"
+
+        model.save()
+
+        assertSensitiveEqual(repository.profiles[.openAICompatible], prior)
+        XCTAssertEqual(repository.saveCount, 0)
+        XCTAssertEqual(model.status, "Could not update provider settings.")
+    }
+
+    func testPickerKeepsReplacementKeyWithItsUnsavedPresetDraft() throws {
+        let generic = try makeProfile()
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "12345", asrModel: "hkt-asr", llmModel: "hkt-llm",
+            language: "yue", prompt: ""
+        )
+        let repository = RecordingProviderRepository(
+            profiles: [.openAICompatible: generic, .hktGenAI: hkt],
+            activeKind: .openAICompatible,
+            keys: [:]
+        )
+        let model = AIProviderSettingsModel(repository: repository, client: StubProviderClient())
+        model.apiKeyReplacement = "generic-replacement"
+
+        model.selectedProviderKind = .hktGenAI
+        XCTAssertEqual(model.apiKeyReplacement, "")
+        model.apiKeyReplacement = "hkt-replacement"
+        model.selectedProviderKind = .openAICompatible
+
+        XCTAssertEqual(model.apiKeyReplacement, "generic-replacement")
+        model.selectedProviderKind = .hktGenAI
+        XCTAssertEqual(model.apiKeyReplacement, "hkt-replacement")
+        XCTAssertEqual(repository.saveCount, 0)
+    }
+
+    func testSaveHKTValidatesGroupIDAndDoesNotTouchGenericProfileOrKey() throws {
+        let generic = try makeProfile()
+        let repository = RecordingProviderRepository(
+            profiles: [.openAICompatible: generic],
+            activeKind: .openAICompatible,
+            keys: [.openAICompatible: true, .hktGenAI: false]
+        )
+        let model = AIProviderSettingsModel(repository: repository, client: StubProviderClient())
+        model.selectedProviderKind = .hktGenAI
+        model.groupIDText = "not-a-number"
+
+        model.save()
+
+        XCTAssertEqual(repository.saveCount, 0)
+        XCTAssertEqual(repository.profiles[.openAICompatible], generic)
+        XCTAssertTrue(repository.keys[.openAICompatible] ?? false)
+        XCTAssertTrue(model.statusIsError)
+
+        model.groupIDText = "123456"
+        model.apiKeyReplacement = "hkt-key"
+        model.save()
+
+        XCTAssertEqual(repository.saveCount, 1)
+        XCTAssertEqual(repository.activeKind, .hktGenAI)
+        XCTAssertEqual(repository.profiles[.openAICompatible], generic)
+        XCTAssertTrue(repository.keys[.openAICompatible] ?? false)
+        XCTAssertTrue(repository.keys[.hktGenAI] ?? false)
+    }
+
+    func testRemoveKeyOnlyRemovesSelectedPresetKey() throws {
+        let generic = try makeProfile()
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "12345", asrModel: "hkt-asr", llmModel: "hkt-llm",
+            language: "yue", prompt: ""
+        )
+        let repository = RecordingProviderRepository(
+            profiles: [.openAICompatible: generic, .hktGenAI: hkt],
+            activeKind: .openAICompatible,
+            keys: [.openAICompatible: true, .hktGenAI: true]
+        )
+        let model = AIProviderSettingsModel(repository: repository, client: StubProviderClient())
+        model.selectedProviderKind = .hktGenAI
+
+        model.removeAPIKey()
+
+        XCTAssertFalse(repository.keys[.hktGenAI] ?? true)
+        XCTAssertTrue(repository.keys[.openAICompatible] ?? false)
+        XCTAssertFalse(model.hasStoredAPIKey)
+    }
+
+    func testOldPresetConnectionResultCannotOverwriteAfterPickerSwitch() async throws {
+        let generic = try makeProfile()
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "12345",
+            asrModel: "hkt-asr",
+            llmModel: "hkt-llm",
+            language: "yue",
+            prompt: ""
+        )
+        let repository = RecordingProviderRepository(
+            profiles: [.openAICompatible: generic, .hktGenAI: hkt],
+            activeKind: .openAICompatible,
+            keys: [.openAICompatible: true, .hktGenAI: true]
+        )
+        let client = DeferredProviderClient()
+        let model = AIProviderSettingsModel(repository: repository, client: client)
+        let testTask = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+
+        model.selectedProviderKind = .hktGenAI
+        await client.completeNext(
+            with: .success(.init(supportsModelDiscovery: true, models: ["old-generic"]))
+        )
+        await testTask.value
+
+        XCTAssertEqual(model.selectedProviderKind, .hktGenAI)
+        XCTAssertEqual(model.status, "Provider settings loaded")
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+    }
+
+    func testConnectionUsesSelectedHKTDraftSnapshot() async throws {
+        let repository = RecordingProviderRepository()
+        let client = DeferredProviderClient()
+        let model = AIProviderSettingsModel(repository: repository, client: client, loadImmediately: false)
+        model.selectedProviderKind = .hktGenAI
+        model.groupIDText = "9876"
+
+        let testTask = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+        let snapshot = await client.snapshot(at: 0)
+        await client.completeNext(with: .success(.init(supportsModelDiscovery: false, models: [])))
+        await testTask.value
+
+        XCTAssertEqual(snapshot?.providerKind, .hktGenAI)
+        XCTAssertEqual(snapshot?.authentication, .hktAPIKey)
+        XCTAssertEqual(snapshot?.profile.baseURL.absoluteString, "https://api.uat.bot-builder.pccw.com/v1/groups/9876/openai")
+    }
+
+    func testHKTBlankDraftUsesDefaultsAndTypedLanguages() {
+        let model = AIProviderSettingsModel(
+            repository: RecordingProviderRepository(),
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+
+        model.selectedProviderKind = .hktGenAI
+
+        XCTAssertEqual(model.groupIDText, "")
+        XCTAssertEqual(model.asrModel, "private-ai/whisper-large-v3-cantonese-v2")
+        XCTAssertEqual(model.llmModel, "gpt-5.5")
+        XCTAssertEqual(model.selectedLanguage, .cantonese)
+        XCTAssertEqual(MeetingLanguage.allCases.map(\.rawValue), ["yue", "en", "zh"])
+        model.selectedLanguage = .mandarin
+        XCTAssertEqual(model.language, "zh")
+    }
+
+    func testFreshGenericDraftSavesCantoneseWithoutPickerInteraction() {
+        let repository = RecordingProviderRepository()
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient()
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+
+        model.save()
+
+        XCTAssertEqual(repository.saveCount, 1)
+        XCTAssertEqual(repository.profiles[.openAICompatible]?.language, "yue")
+        XCTAssertFalse(model.statusIsError)
+    }
+
     func testBlankKeyOnSavePreservesStoredKey() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
         let model = AIProviderSettingsModel(
@@ -120,6 +427,7 @@ final class AIProviderSettingsModelTests: XCTestCase {
         model.baseURLText = "https://api.example.com/v1"
         model.asrModel = "asr"
         model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
 
         model.save()
 
@@ -127,6 +435,96 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertFalse(model.hasStoredAPIKey)
         XCTAssertEqual(model.status, "Provider settings saved; API key status unavailable")
         XCTAssertTrue(model.statusIsError)
+    }
+
+    func testSuccessfulSavesPublishDistinctRevisionsImmediatelyAfterRepositoryCommit() throws {
+        let repository = RecordingProviderRepository()
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+        var publications: [ProviderSettingsSaved] = []
+        var saveCountAtPublication: [Int] = []
+        model.onProviderSettingsSaved = { event in
+            publications.append(event)
+            saveCountAtPublication.append(repository.saveCount)
+        }
+
+        model.save()
+        model.prompt = "second save"
+        model.save()
+
+        XCTAssertEqual(publications.count, 2)
+        XCTAssertEqual(saveCountAtPublication, [1, 2])
+        let first = try XCTUnwrap(publications.first)
+        let second = try XCTUnwrap(publications.last)
+        XCTAssertNotEqual(first.profileRevision, second.profileRevision)
+    }
+
+    func testInvalidDraftAndRepositorySaveFailurePublishNoRevision() {
+        let invalidRepository = RecordingProviderRepository()
+        let invalidModel = AIProviderSettingsModel(
+            repository: invalidRepository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        var invalidPublications: [ProviderSettingsSaved] = []
+        invalidModel.onProviderSettingsSaved = { invalidPublications.append($0) }
+        invalidModel.save()
+        XCTAssertTrue(invalidPublications.isEmpty)
+
+        let failingRepository = RecordingProviderRepository(saveError: TestError.failed)
+        let failingModel = AIProviderSettingsModel(
+            repository: failingRepository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        failingModel.baseURLText = "https://api.example.com/v1"
+        failingModel.asrModel = "asr"
+        failingModel.llmModel = "llm"
+        failingModel.selectedLanguage = .cantonese
+        var failedPublications: [ProviderSettingsSaved] = []
+        failingModel.onProviderSettingsSaved = { failedPublications.append($0) }
+
+        failingModel.save()
+
+        XCTAssertTrue(failedPublications.isEmpty)
+        XCTAssertEqual(failingRepository.saveCount, 0)
+    }
+
+    func testCommittedSavePublishesDespitePostCommitAPIKeyStatusFailure() {
+        let repository = RecordingProviderRepository(apiKeyStatusError: TestError.failed)
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient(),
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+        var publications: [ProviderSettingsSaved] = []
+        model.onProviderSettingsSaved = { publications.append($0) }
+
+        model.save()
+
+        XCTAssertEqual(repository.saveCount, 1)
+        XCTAssertEqual(publications.count, 1)
+        XCTAssertEqual(model.status, "Provider settings saved; API key status unavailable")
+    }
+
+    func testPRBFeatureEventContractsAreEquatableAndSendable() {
+        func requireEquatableAndSendable<T: Equatable & Sendable>(_: T.Type) {}
+
+        requireEquatableAndSendable(WorkspaceFolderChanged.self)
+        requireEquatableAndSendable(ProviderSettingsSaved.self)
+        requireEquatableAndSendable(RecordingSourceMetadataPublicationOutcome.self)
+        requireEquatableAndSendable(RecordingFinalizationOutcome.self)
     }
 
     func testConnectionFailureDoesNotDeleteManualModelValues() async {
@@ -365,6 +763,20 @@ final class AIProviderSettingsModelTests: XCTestCase {
         return model
     }
 
+    private func assertSensitiveEqual<T: Equatable>(
+        _ actual: @autoclosure () throws -> T,
+        _ expected: @autoclosure () throws -> T,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) rethrows {
+        let actualValue = try actual()
+        let expectedValue = try expected()
+        guard actualValue == expectedValue else {
+            XCTFail("Sensitive values did not match.", file: file, line: line)
+            return
+        }
+    }
+
     private func makeProfile() throws -> OpenAICompatibleProviderProfile {
         try OpenAICompatibleProviderProfile.validated(
             baseURLText: "https://api.example.com/v1",
@@ -377,56 +789,104 @@ final class AIProviderSettingsModelTests: XCTestCase {
 }
 
 final class RecordingProviderRepository: OpenAICompatibleProviderManaging {
-    private var profile: OpenAICompatibleProviderProfile?
-    private var keyPresent: Bool
+    var profiles: [AIProviderKind: OpenAICompatibleProviderProfile]
+    var keys: [AIProviderKind: Bool]
+    private(set) var activeKind: AIProviderKind
     private let migrationError: Error?
     private let apiKeyStatusError: Error?
     private let removeKeyError: Error?
+    private let saveError: Error?
     private(set) var lastReplacementAPIKey: String?
     private(set) var removeKeyCount = 0
+    private(set) var saveCount = 0
 
     init(
         profile: OpenAICompatibleProviderProfile? = nil,
         hasAPIKey: Bool = false,
         migrationError: Error? = nil,
         apiKeyStatusError: Error? = nil,
-        removeKeyError: Error? = nil
+        removeKeyError: Error? = nil,
+        saveError: Error? = nil
     ) {
-        self.profile = profile
-        keyPresent = hasAPIKey
+        profiles = profile.map { [.openAICompatible: $0] } ?? [:]
+        keys = [.openAICompatible: hasAPIKey, .hktGenAI: false]
+        activeKind = .openAICompatible
         self.migrationError = migrationError
         self.apiKeyStatusError = apiKeyStatusError
         self.removeKeyError = removeKeyError
+        self.saveError = saveError
     }
 
-    func loadProfile() throws -> OpenAICompatibleProviderProfile? { profile }
+    init(
+        profiles: [AIProviderKind: OpenAICompatibleProviderProfile],
+        activeKind: AIProviderKind,
+        keys: [AIProviderKind: Bool]
+    ) {
+        self.profiles = profiles
+        self.activeKind = activeKind
+        self.keys = keys
+        migrationError = nil
+        apiKeyStatusError = nil
+        removeKeyError = nil
+        saveError = nil
+    }
+
+    func loadProfile() throws -> OpenAICompatibleProviderProfile? { profiles[activeKind] }
+
+    func loadProfile(for kind: AIProviderKind) throws -> OpenAICompatibleProviderProfile? {
+        profiles[kind]
+    }
+
+    func activeProviderKind() throws -> AIProviderKind { activeKind }
+
+    func setActiveProviderKind(_ kind: AIProviderKind) throws { activeKind = kind }
 
     func save(profile: OpenAICompatibleProviderProfile, replacementAPIKey: String?) throws {
-        self.profile = profile
+        if let saveError { throw saveError }
+        profiles[profile.providerKind] = profile
+        activeKind = profile.providerKind
+        saveCount += 1
         lastReplacementAPIKey = replacementAPIKey
-        if replacementAPIKey != nil { keyPresent = true }
+        if replacementAPIKey != nil { keys[profile.providerKind] = true }
     }
 
     func snapshot() throws -> OpenAICompatibleProviderSnapshot {
-        guard let profile else { throw TestError.failed }
-        return .init(profile: profile, apiKey: keyPresent ? "saved" : nil)
+        guard let profile = profiles[activeKind] else { throw TestError.failed }
+        return try .validated(
+            profile: profile,
+            apiKey: keys[profile.providerKind] == true ? "saved" : nil
+        )
     }
 
     func snapshot(
         overriding profile: OpenAICompatibleProviderProfile
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: profile, apiKey: keyPresent ? "saved" : nil)
+        try .validated(
+            profile: profile,
+            apiKey: keys[profile.providerKind] == true ? "saved" : nil
+        )
     }
 
     func hasAPIKey() throws -> Bool {
         if let apiKeyStatusError { throw apiKeyStatusError }
-        return keyPresent
+        return keys[activeKind] == true
+    }
+
+    func hasAPIKey(for kind: AIProviderKind) throws -> Bool {
+        if let apiKeyStatusError { throw apiKeyStatusError }
+        return keys[kind] == true
     }
 
     func removeAPIKey() throws {
         removeKeyCount += 1
         if let removeKeyError { throw removeKeyError }
-        keyPresent = false
+        keys[activeKind] = false
+    }
+
+    func removeAPIKey(for kind: AIProviderKind) throws {
+        removeKeyCount += 1
+        if let removeKeyError { throw removeKeyError }
+        keys[kind] = false
     }
 
     func migrateLegacyIfNeeded(settingsURL: URL) throws -> LegacyProviderMigrationOutcome {
@@ -443,8 +903,7 @@ private struct StubProviderClient: ProviderConnectionTesting {
     }
 
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport {
         if let error { throw error }
         return .init(supportsModelDiscovery: true, models: [])
@@ -453,14 +912,15 @@ private struct StubProviderClient: ProviderConnectionTesting {
 
 private actor DeferredProviderClient: ProviderConnectionTesting {
     private var continuations: [CheckedContinuation<ProviderConnectionReport, Error>] = []
+    private var snapshots: [OpenAICompatibleProviderSnapshot] = []
     private var requestsStarted = 0
 
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport {
         try await withCheckedThrowingContinuation { continuation in
             requestsStarted += 1
+            snapshots.append(snapshot)
             continuations.append(continuation)
         }
     }
@@ -475,6 +935,10 @@ private actor DeferredProviderClient: ProviderConnectionTesting {
         with result: Result<ProviderConnectionReport, Error>
     ) {
         continuations.removeFirst().resume(with: result)
+    }
+
+    func snapshot(at index: Int) -> OpenAICompatibleProviderSnapshot? {
+        snapshots.indices.contains(index) ? snapshots[index] : nil
     }
 }
 

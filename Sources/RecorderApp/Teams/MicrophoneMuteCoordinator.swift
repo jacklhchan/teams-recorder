@@ -4,14 +4,13 @@ struct MicrophoneMuteCoordinator {
     private(set) var localMuted: Bool
     private(set) var nativeInputMuted = false
     private(set) var teamsMuted = false
-    private(set) var teamsInMeeting = false
 
     init(localMuted: Bool = false) {
         self.localMuted = localMuted
     }
 
     var effectiveMuted: Bool {
-        localMuted || nativeInputMuted || (teamsInMeeting && teamsMuted)
+        localMuted || nativeInputMuted || teamsMuted
     }
 
     @discardableResult
@@ -29,10 +28,9 @@ struct MicrophoneMuteCoordinator {
     }
 
     @discardableResult
-    mutating func applyTeamsState(_ state: TeamsMeetingState) -> Bool? {
+    mutating func setTeamsMuted(_ muted: Bool) -> Bool? {
         let previous = effectiveMuted
-        teamsInMeeting = state.isInMeeting
-        teamsMuted = state.isInMeeting && state.isMuted
+        teamsMuted = muted
         return transition(from: previous)
     }
 
@@ -46,7 +44,6 @@ struct MicrophoneMuteSnapshot: Equatable, Sendable {
     let localMuted: Bool
     let nativeInputMuted: Bool
     let teamsMuted: Bool
-    let teamsInMeeting: Bool
     let effectiveMuted: Bool
 }
 
@@ -96,12 +93,13 @@ final class MicrophoneMuteGate: @unchecked Sendable {
     }
 
     @discardableResult
-    func applyTeamsState(
-        _ state: TeamsMeetingState
+    func setTeamsMuted(
+        _ muted: Bool,
+        ensureAudioGateIsApplied: Bool = false
     ) -> MicrophoneMuteSnapshot {
         applyTransition {
-            let transition = coordinator.applyTeamsState(state)
-            return (transition, false)
+            let transition = coordinator.setTeamsMuted(muted)
+            return (transition, ensureAudioGateIsApplied)
         }
     }
 
@@ -156,7 +154,6 @@ final class MicrophoneMuteGate: @unchecked Sendable {
             localMuted: coordinator.localMuted,
             nativeInputMuted: coordinator.nativeInputMuted,
             teamsMuted: coordinator.teamsMuted,
-            teamsInMeeting: coordinator.teamsInMeeting,
             effectiveMuted: coordinator.effectiveMuted
         )
     }

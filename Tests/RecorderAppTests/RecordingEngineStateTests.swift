@@ -27,6 +27,35 @@ final class RecordingEngineStateTests: XCTestCase {
         _ = await engine.stop()
     }
 
+    func testLocalTeamsRefreshReturnsResolverOutcome() async {
+        let (engine, _, source) = coordinatorEngine()
+        source.windows = [teamsWindow(id: 77)]
+
+        let outcome = await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            mode: .localDetection,
+            manualOverride: nil
+        )
+
+        guard case .resolved(.ready(let match)) = outcome else {
+            return XCTFail("Expected a resolved local Teams window")
+        }
+        XCTAssertEqual(match.window.identity, source.windows[0].identity)
+    }
+
+    func testFailedTeamsWindowInventoryReturnsUnknown() async {
+        let (engine, _, source) = coordinatorEngine()
+        source.teamsWindowRefreshError = TestError.failed
+
+        let outcome = await engine.refreshTeamsWindows(
+            selectedTeamsProcessID: teamsProcessID,
+            mode: .localDetection,
+            manualOverride: nil
+        )
+
+        XCTAssertEqual(outcome, .unknown)
+    }
+
     func testVideoCallbackNeverUsesMixedAudioWriterPath() async throws {
         let (engine, coordinator, source) = coordinatorEngine()
         _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())
@@ -1833,6 +1862,7 @@ private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendabl
     var pauseStop = false
     var pauseVideoTargetUpdates = false
     var windows: [TeamsWindowSnapshot] = []
+    var teamsWindowRefreshError: Error?
     var videoTargetErrors: [Int: Error] = [:]
     private var startContinuations: [CheckedContinuation<Void, Never>] = []
     private var reconnectContinuations: [CheckedContinuation<Void, Never>] = []
@@ -1841,7 +1871,10 @@ private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendabl
 
     func refreshContent() async throws -> [CaptureApplication] { [] }
 
-    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] { windows }
+    func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot] {
+        if let teamsWindowRefreshError { throw teamsWindowRefreshError }
+        return windows
+    }
 
     func updateVideoTarget(_ target: TeamsWindowIdentity?) async throws -> CaptureFilterRevision {
         videoTargets.append(target)

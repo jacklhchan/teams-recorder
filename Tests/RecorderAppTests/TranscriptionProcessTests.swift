@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -70,6 +71,85 @@ final class TranscriptionProcessTests: XCTestCase {
         XCTAssertEqual(result.output, expectedOutput)
         XCTAssertEqual(liveOutput.value, expectedOutput)
     }
+
+    func testLegacyServiceReturnsCommittedRevisionForCanonicalTranscript() async throws {
+        let fixture = try StdinFixture.make()
+        defer { fixture.remove() }
+        let transcript = fixture.root.appendingPathComponent("transcript.txt")
+        let script = "#!/bin/bash\nprintf 'TRANSCRIPT_PATH=%s\\n' \"$2/transcript.txt\"\n"
+        try Data(script.utf8).write(to: fixture.scriptURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fixture.scriptURL.path)
+        try Data("legacy transcript".utf8).write(to: transcript)
+        let service = LegacyProcessTranscriptionService(
+            launcher: FoundationTranscriptionProcessLauncher(), scriptURL: fixture.scriptURL
+        )
+        let result = try await service.transcribe(
+            .init(audioURL: fixture.audioURL, sessionFolder: fixture.root, snapshot: try makeSnapshot()),
+            onProgress: { _ in }
+        )
+        let bytes = Data("legacy transcript".utf8)
+        XCTAssertEqual(
+            result.committedTranscriptRevision,
+            .init(
+                sha256: "sha256:" + SHA256.hash(data: bytes)
+                    .map { String(format: "%02x", $0) }
+                    .joined(),
+                byteCount: bytes.count
+            )
+        )
+    }
+
+    func testLegacyServiceRejectsHKTBeforeLaunchingAnyProcess() async throws {
+        let launcher = CountingLauncher()
+        let service = LegacyProcessTranscriptionService(
+            launcher: launcher,
+            scriptURL: URL(fileURLWithPath: "/unused/transcribe.py")
+        )
+        let profile = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "42", asrModel: "asr", llmModel: "llm", language: "yue", prompt: ""
+        )
+        let request = TranscriptionServiceRequest(
+            audioURL: URL(fileURLWithPath: "/unused/audio.m4a"),
+            sessionFolder: URL(fileURLWithPath: "/unused/session"),
+            snapshot: try .validated(profile: profile, apiKey: "hkt-secret")
+        )
+
+        do {
+            _ = try await service.transcribe(request, onProgress: { _ in })
+            XCTFail("Expected HKT legacy rejection")
+        } catch {
+            XCTAssertEqual(
+                error as? LegacyProcessTranscriptionServiceError,
+                .unsupportedProviderPreset
+            )
+            XCTAssertFalse(error.localizedDescription.contains("hkt-secret"))
+        }
+        XCTAssertEqual(launcher.launchCount, 0)
+    }
+}
+
+private func makeSnapshot() throws -> OpenAICompatibleProviderSnapshot {
+    try .validated(profile: try OpenAICompatibleProviderProfile.validated(
+        baseURLText: "https://api.example/v1", asrModel: "asr", llmModel: "llm", language: "en", prompt: ""
+    ), apiKey: nil)
+}
+
+private final class CountingLauncher: TranscriptionProcessLaunching, @unchecked Sendable {
+    private(set) var launchCount = 0
+
+    func makeProcess(
+        request _: TranscriptionProcessRequest,
+        onOutput _: @escaping @Sendable (String) -> Void
+    ) throws -> any TranscriptionProcessing {
+        launchCount += 1
+        return NeverStartedProcess()
+    }
+}
+
+private final class NeverStartedProcess: TranscriptionProcessing, @unchecked Sendable {
+    func run() throws { XCTFail("Legacy process must not launch") }
+    func waitForExit() async -> TranscriptionProcessResult { fatalError("Unexpected wait") }
+    func terminate() {}
 }
 
 private struct StdinFixture {

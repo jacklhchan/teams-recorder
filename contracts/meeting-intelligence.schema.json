@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jacklhchan/teams-recorder/contracts/meeting-intelligence.schema.json",
+  "title": "Local Meeting Recorder meeting intelligence result",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "summary",
+    "suggestedTitle",
+    "sourceTranscriptSHA256",
+    "sourceTranscriptByteCount",
+    "model",
+    "generatedAt",
+    "intent"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 49152
+    },
+    "suggestedTitle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "sourceTranscriptSHA256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "sourceTranscriptByteCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4194304
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "intent": {
+      "enum": [
+        "automatic",
+        "generate",
+        "regenerate",
+        "retryGeneration"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

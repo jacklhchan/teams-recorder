@@ -83,7 +83,7 @@ enum PCMLayoutValidator {
         }
 
         let channelCount = Int(format.mChannelsPerFrame)
-        guard (1...2).contains(channelCount) else {
+        guard channelCount > 0 else {
             throw SampleBufferConverterError.unsupportedChannelCount(channelCount)
         }
         guard format.mFramesPerPacket == 1 else {
@@ -417,7 +417,7 @@ final class PersistentAudioResampler {
         }
         guard packet.pcm.sampleRate.isFinite,
               packet.pcm.sampleRate > 0,
-              (1...2).contains(packet.pcm.channels.count),
+              !packet.pcm.channels.isEmpty,
               packet.pcm.frameCount > 0,
               packet.pcm.channels.allSatisfy({ $0.count == packet.pcm.frameCount }) else {
             throw SampleBufferConverterError.mismatchedChannelFrames
@@ -474,7 +474,7 @@ final class PersistentAudioResampler {
     }
 
     private func stereoPCM(from pcm: OwnedPCMBuffer) -> OwnedPCMBuffer {
-        let right = pcm.channels.count == 2 ? pcm.channels[1] : pcm.channels[0]
+        let right = pcm.channels.count > 1 ? pcm.channels[1] : pcm.channels[0]
         return OwnedPCMBuffer(
             sampleRate: SampleBufferConverter.outputSampleRate,
             channels: [pcm.channels[0], right]

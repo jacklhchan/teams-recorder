@@ -4,57 +4,30 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-private final class TeamsIntegrationIngress: @unchecked Sendable {
-    typealias Operation = @MainActor @Sendable () -> Void
-    typealias Scheduler = (@escaping Operation) -> Void
-
-    private let lock = NSLock()
-    private let scheduler: Scheduler
-    private var pending: [Operation] = []
-    private var drainScheduled = false
-
-    init(scheduler: @escaping Scheduler) {
-        self.scheduler = scheduler
-    }
-
-    func enqueue(_ operation: @escaping Operation) {
-        lock.lock()
-        pending.append(operation)
-        let shouldScheduleDrain = !drainScheduled
-        drainScheduled = true
-        lock.unlock()
-
-        guard shouldScheduleDrain else { return }
-        scheduler { @MainActor [weak self] in
-            self?.drain()
-        }
-    }
-
-    @MainActor
-    private func drain() {
-        while true {
-            lock.lock()
-            guard !pending.isEmpty else {
-                drainScheduled = false
-                lock.unlock()
-                return
-            }
-            let batch = pending
-            pending.removeAll(keepingCapacity: true)
-            lock.unlock()
-
-            batch.forEach { $0() }
-        }
-    }
-}
-
 enum RecordingOwnership: Equatable {
     case manual
     case teamsAutomatic
 }
 
+enum RecorderControlActionOutcome: Equatable {
+    case accepted
+    case noOp
+    case rejected(code: String, message: String)
+}
+
 @MainActor
 final class AppModel: ObservableObject {
+    typealias TranscriptionFeatureFactory = (
+        any OpenAICompatibleProviderManaging,
+        any TranscriptionAudioPreparing,
+        any TranscriptionServicing,
+        RecordingSessionMutationGate
+    ) -> TranscriptionFeatureModel
+    typealias RecordingSourceMetadataUpdater = (
+        RecordingSource,
+        URL,
+        RecordingSessionMutationGate
+    ) throws -> Void
     @Published var devices: [AudioDevice] = []
     @Published var selectedMicDevice: AudioDevice?
     @Published private(set) var selectedMicrophoneUID: String?
@@ -64,23 +37,21 @@ final class AppModel: ObservableObject {
     @Published var systemAudioPermission: CapturePermissionState = .notDetermined
     @Published var microphonePermission: CapturePermissionState = .notDetermined
     @Published private(set) var captureConnectionState: CaptureConnectionState = .connected
-    @Published var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
+    @Published private(set) var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published var statusMessage = "Ready"
-    @Published var sessions: [RecordingSession] = []
     @Published var lastHealthReport: RecordingHealthReport?
     @Published private(set) var lastRecordingSavedAsM4A = false
     @Published var isRunningTestRecording = false
-    @Published var playingSessionID: RecordingSession.ID?
     @Published private(set) var inputMuteControlAvailable = false
     @Published private(set) var virtualMicInstallationState: VirtualMicInstallationState = .absent
-    @Published private(set) var teamsMuteSyncStatus: TeamsMuteSyncStatus = .disabled
-    @Published private(set) var teamsMuteSyncEnabled: Bool
     @Published private(set) var teamsAutoMeetingEnabled: Bool
     @Published private(set) var teamsAutoMeetingState: TeamsAutoMeetingState
-    @Published private(set) var teamsConnectionStatus: TeamsMuteSyncStatus = .disabled
+    @Published private(set) var teamsLocalMeetingDetectionState:
+        TeamsLocalMeetingDetectionState = .waiting
     @Published private(set) var localMicMuted = false
     @Published private(set) var nativeInputMicMuted = false
-    @Published private(set) var teamsMicMuted = false
+    @Published private(set) var teamsMicMuteState: TeamsMicMuteState =
+        .unknown(.inactive)
     @Published private(set) var isScreenCaptureAllowedByStorage = true
     @Published private(set) var screenCaptureStorageRestrictionReason: String?
     @Published private(set) var storageWarningMessage: String?
@@ -92,10 +63,23 @@ final class AppModel: ObservableObject {
     let aiProviderSettingsModel: AIProviderSettingsModel
     private let recordingSessionCoordinator:
         RecordingSessionCoordinator
-    private let transcriptionCoordinator: TranscriptionJobCoordinator
+    let transcriptionFeature: TranscriptionFeatureModel
+    let libraryFeature: LibraryFeatureModel
+    /// Compatibility bridge until PR C: all mutable recording artifacts use
+    /// the Library feature's one gate, including when that feature is injected.
+    let transcriptMutationGate: RecordingSessionMutationGate
+    /// PR B compatibility construction owner. AppModel retains precisely one
+    /// feature boundary and deliberately mirrors none of its mutable state.
+    let meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
+    private var prbFeatureBridge: PRBFeatureBridge?
+    private let recordingSourceMetadataUpdater: RecordingSourceMetadataUpdater
 
     var isCaptureLifecycleWorking: Bool {
         recordingSessionCoordinator.isWorking
+    }
+
+    var recordingLifecycleOperation: CaptureLifecycleOperation? {
+        recordingSessionCoordinator.activeOperation
     }
 
     private(set) var recordingOwnership: RecordingOwnership? {
@@ -104,75 +88,63 @@ final class AppModel: ObservableObject {
     }
 
     var transcribingSessionID: RecordingSession.ID? {
-        get { transcriptionCoordinator.transcribingSessionID }
-        set { transcriptionCoordinator.transcribingSessionID = newValue }
+        transcriptionFeature.presentation.transcribingSessionID
     }
 
     var transcriptionStatus: String {
-        get { transcriptionCoordinator.transcriptionStatus }
-        set { transcriptionCoordinator.transcriptionStatus = newValue }
+        transcriptionFeature.presentation.transcriptionStatus
     }
 
     var lastTranscriptionSessionID: RecordingSession.ID? {
-        get { transcriptionCoordinator.lastTranscriptionSessionID }
-        set { transcriptionCoordinator.lastTranscriptionSessionID = newValue }
+        transcriptionFeature.presentation.lastTranscriptionSessionID
     }
 
     var lastTranscriptionStatus: String {
-        get { transcriptionCoordinator.lastTranscriptionStatus }
-        set { transcriptionCoordinator.lastTranscriptionStatus = newValue }
+        transcriptionFeature.presentation.lastTranscriptionStatus
     }
 
     var lastTranscriptionDidFail: Bool {
-        get { transcriptionCoordinator.lastTranscriptionDidFail }
-        set { transcriptionCoordinator.lastTranscriptionDidFail = newValue }
+        transcriptionFeature.presentation.lastTranscriptionDidFail
     }
 
     var transcriptURLsBySessionID: [RecordingSession.ID: URL] {
-        get { transcriptionCoordinator.transcriptURLsBySessionID }
-        set { transcriptionCoordinator.transcriptURLsBySessionID = newValue }
+        transcriptionFeature.presentation.transcriptURLsBySessionID
     }
 
     var transcriptLogURLsBySessionID: [RecordingSession.ID: URL] {
-        get { transcriptionCoordinator.transcriptLogURLsBySessionID }
-        set {
-            transcriptionCoordinator.transcriptLogURLsBySessionID =
-                newValue
-        }
+        transcriptionFeature.presentation.transcriptLogURLsBySessionID
     }
 
     var transcriptionStatesBySessionID:
         [RecordingSession.ID: TranscriptionState] {
-        get { transcriptionCoordinator.transcriptionStatesBySessionID }
-        set {
-            transcriptionCoordinator.transcriptionStatesBySessionID =
-                newValue
-        }
+        transcriptionFeature.presentation.transcriptionStatesBySessionID
+    }
+
+    var sessions: [RecordingSession] { libraryFeature.sessions }
+
+    /// Test-only fixture bridge that preserves the same workspace/fence
+    /// admission contract as production refreshes.
+    func seedLibrarySessionsForTesting(_ sessions: [RecordingSession]) {
+        libraryFeature.seedCanonicalSessionsForTesting(
+            sessions,
+            workspace: outputFolder,
+            fence: workspacePublicationFence
+        )
     }
 
     private lazy var hotKeyManager = GlobalHotKeyManager { [weak self] in
         self?.toggleRecorderMicMute(source: "Hotkey")
     }
-    private let playbackCoordinator: any PlaybackCoordinating
-    let playbackPresentation: PlaybackPresentationModel
-    private var playbackLoadTask: Task<Void, Never>?
-    private var playbackGeneration: UInt64 = 0
-    private var playbackSessionID: RecordingSession.ID?
+    let playbackFeature: PlaybackFeatureModel
     private let appPaths: AppPaths
     private let capturePersistence: CaptureSelectionPersistence
     private let inputDevices: () -> [AudioDevice]
     private let defaultInputDeviceID: () -> AudioDeviceID?
     private let inputMuteController: InputMuteControlling
-    private let teamsMuteSyncClient: TeamsMuteSyncing
     private let microphoneMuteGate: MicrophoneMuteGate
-    private let teamsMuteRelay: TeamsMuteRelay
+    private let teamsMuteSyncCoordinator: TeamsMuteSyncCoordinator
     private let teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator
-    private let teamsIntegrationIngress: TeamsIntegrationIngress
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
-    private let recordingSessionLoader: @Sendable (URL) -> [RecordingSession]
-    private let recordingSearchDocumentLoader:
-        @Sendable (RecordingSession) -> RecordingLibrarySearchDocument
-    private let recordingSessionRecovery: @Sendable (URL) -> Void
     private let permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)?
     private let volumeCapacityProvider: any VolumeCapacityProviding
     private let storagePolicy: RecordingStoragePolicy
@@ -183,11 +155,9 @@ final class AppModel: ObservableObject {
         @escaping @MainActor @Sendable () async -> Void
     ) -> Void
     private let defaults: UserDefaults
-    private let recordingSessionLoadingQueue = DispatchQueue(
-        label: "local.meeting.recorder.recording-library",
-        qos: .userInitiated
-    )
     private var cancellables: Set<AnyCancellable> = []
+    private var teamsApplicationLifecycleCancellables:
+        Set<AnyCancellable> = []
     private var captureLifecycleTask: Task<Void, Never>? {
         get { recordingSessionCoordinator.task }
         set { recordingSessionCoordinator.task = newValue }
@@ -222,25 +192,17 @@ final class AppModel: ObservableObject {
         }
     }
     private var inputMuteHandlingInstalled = false
-    private var teamsIntegrationInstalled = false
-    private var teamsIntegrationGeneration: UInt64 = 0
-    private var teamsMuteRelayGeneration: UInt64?
-    private var pendingTeamsMeetingState: TeamsMeetingState?
-    private var lastAuthorizedTeamsMeetingState: TeamsMeetingState?
-    private var recordingSessionRefreshGeneration: UInt = 0
-    private var recordingSearchDocumentRefreshGeneration: UInt64 = 0
-    private var recordingSearchDocumentRefreshGenerations:
-        [RecordingSession.ID: UInt64] = [:]
-    private var recoveredLibraryFolders: Set<URL> = []
     private var storageMonitorTask: Task<Void, Never>?
     private var storageMonitorGeneration: UInt64 = 0
     private var testRecordingStopTask: Task<Void, Never>?
     private var teamsScreenRefreshTask: Task<Void, Never>?
     private var teamsScreenRefreshGeneration: UInt64 = 0
     private var teamsScreenCaptureIntentGeneration: UInt64 = 0
-    private var teamsMeetingActive = false
+    private var teamsLocalMeetingDetector = TeamsLocalMeetingDetector()
+    private var isFloatingRecordingPanelActive = false
+    private var workspacePublicationFence: WorkspacePublicationFence = .initial
+    private var isShutDown = false
 
-    private static let teamsMuteSyncEnabledKey = "teamsMuteSyncEnabled"
     private static let teamsAutoMeetingEnabledKey = "teamsAutoMeetingEnabled"
 
     init(
@@ -251,15 +213,18 @@ final class AppModel: ObservableObject {
         inputDevices: @escaping () -> [AudioDevice] = AudioDeviceManager.inputDevices,
         defaultInputDeviceID: @escaping () -> AudioDeviceID? = AudioDeviceManager.defaultInputDeviceID,
         performStartupWork: Bool = true,
+        initialOutputFolder: URL? = nil,
         inputMuteControllerFactory: (
             (@escaping (Bool) -> Void) -> InputMuteControlling
         )? = nil,
-        teamsMuteSyncClient: TeamsMuteSyncing? = nil,
         virtualMicStateProvider: @escaping () -> VirtualMicInstallationState = {
             VirtualMicInstallation.currentState()
         },
         recordingSessionLoader: @escaping @Sendable (URL) -> [RecordingSession] = {
             RecordingSessionStore.load(from: $0)
+        },
+        recordingSessionReloader: @escaping @Sendable (RecordingSession) -> RecordingSession = {
+            RecordingSessionStore.session(for: $0.folderURL, recordingURL: $0.recordingURL)
         },
         recordingSearchDocumentLoader: @escaping @Sendable (
             RecordingSession
@@ -273,6 +238,11 @@ final class AppModel: ObservableObject {
         },
         recordingSessionRecovery: @escaping @Sendable (URL) -> Void = {
             IncompleteSessionRecovery().recover(in: $0)
+        },
+        recordingSessionTrashHandler: @escaping @Sendable (
+            URL
+        ) throws -> Bool = {
+            try RecordingSessionStore.moveToTrash(folder: $0)
         },
         permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)? = nil,
         volumeCapacityProvider: any VolumeCapacityProviding = SelectedVolumeCapacityProvider(),
@@ -295,26 +265,42 @@ final class AppModel: ObservableObject {
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
         transcriptionScriptURL: URL? = nil,
         transcriptionService: (any TranscriptionServicing)? = nil,
+        transcriptionFeatureFactory: TranscriptionFeatureFactory? = nil,
+        libraryFeature: LibraryFeatureModel? = nil,
+        meetingIntelligenceFeature: MeetingIntelligenceFeatureModel? = nil,
+        meetingIntelligenceFeatureFactory: MeetingIntelligenceFeatureFactory? = nil,
         playbackCoordinator: (any PlaybackCoordinating)? = nil,
+        playbackFeature: PlaybackFeatureModel? = nil,
+        featureBoundaries: PRBFeatureBoundaries? = nil,
+        defaultFeatureBoundariesFactory: PRBFeatureBoundariesFactory? = nil,
+        recordingSourceMetadataUpdater: @escaping RecordingSourceMetadataUpdater = {
+            source, folder, gate in
+            try gate.withMutation(for: folder) {
+                var metadata = RecordingSessionMetadataStore.load(in: folder)
+                metadata.source = source
+                try RecordingSessionMetadataStore.save(metadata, in: folder)
+            }
+        },
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
-        teamsIntegrationScheduler: @escaping (
-            @escaping @MainActor @Sendable () -> Void
-        ) -> Void = { operation in
-            Task { @MainActor in operation() }
+        teamsMuteController: any TeamsMuteControlling =
+            TeamsMuteAccessibilityAdapter(),
+        teamsMuteTick: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(for: .seconds(1))
         }
     ) {
+        if let initialOutputFolder {
+            outputFolder = initialOutputFolder
+        }
         let activeRecorder = recorder ?? RecordingEngine()
         let autoCoordinator = teamsAutoMeetingCoordinator
             ?? TeamsAutoMeetingCoordinator()
         self.recorder = activeRecorder
         recordingSessionCoordinator = RecordingSessionCoordinator()
         self.teamsAutoMeetingCoordinator = autoCoordinator
-        teamsIntegrationIngress = TeamsIntegrationIngress(
-            scheduler: teamsIntegrationScheduler
-        )
         self.inputDevices = inputDevices
         self.defaultInputDeviceID = defaultInputDeviceID
         self.defaults = defaults
+        self.recordingSourceMetadataUpdater = recordingSourceMetadataUpdater
         let activeProviderRepository = providerRepository
             ?? OpenAICompatibleProviderRepository(
                 profiles: OpenAICompatibleProviderProfileStore(defaults: defaults),
@@ -324,38 +310,113 @@ final class AppModel: ObservableObject {
             repository: activeProviderRepository,
             loadImmediately: false
         )
-        let activeTranscriptionService:
-            any TranscriptionServicing
-        if let transcriptionService {
-            activeTranscriptionService = transcriptionService
-        } else if let transcriptionScriptURL {
-            activeTranscriptionService =
-                LegacyProcessTranscriptionService(
+        let hasIndividualFeatureInjection = transcriptionFeatureFactory != nil
+            || libraryFeature != nil
+            || meetingIntelligenceFeature != nil
+            || meetingIntelligenceFeatureFactory != nil
+            || playbackCoordinator != nil
+            || playbackFeature != nil
+        precondition(
+            !hasIndividualFeatureInjection || (
+                featureBoundaries == nil
+                    && defaultFeatureBoundariesFactory == nil
+            ),
+            "Inject either PR B feature boundaries or individual feature seams, not both."
+        )
+        // The fallback is intentionally evaluated only when no aggregate was
+        // supplied.  This makes aggregate injection a strict construction
+        // boundary rather than a second set of parallel feature objects.
+        let selectedFeatureBoundaries = featureBoundaries
+            ?? defaultFeatureBoundariesFactory?()
+        let transcriptMutationGate = selectedFeatureBoundaries?.library.mutationGate
+            ?? libraryFeature?.mutationGate
+            ?? RecordingSessionMutationGate()
+        self.transcriptMutationGate = transcriptMutationGate
+        if let selectedFeatureBoundaries {
+            self.libraryFeature = selectedFeatureBoundaries.library
+            self.transcriptionFeature = selectedFeatureBoundaries.transcription
+            self.meetingIntelligenceFeature = selectedFeatureBoundaries.meetingIntelligence
+            self.playbackFeature = selectedFeatureBoundaries.playback
+        } else {
+            let activeTranscriptionService: any TranscriptionServicing
+            if let transcriptionService {
+                activeTranscriptionService = transcriptionService
+            } else if let transcriptionScriptURL {
+                activeTranscriptionService = LegacyProcessTranscriptionService(
                     launcher: transcriptionProcessLauncher,
                     scriptURL: transcriptionScriptURL
                 )
-        } else {
-            activeTranscriptionService =
-                NativeOpenAICompatibleTranscriptionService()
+            } else {
+                activeTranscriptionService = NativeOpenAICompatibleTranscriptionService(
+                    publisher: TranscriptionArtifactPublisher(
+                        mutationGate: transcriptMutationGate
+                    )
+                )
+            }
+            if let transcriptionFeatureFactory {
+                self.transcriptionFeature = transcriptionFeatureFactory(
+                    activeProviderRepository,
+                    transcriptionAudioPreparer,
+                    activeTranscriptionService,
+                    transcriptMutationGate
+                )
+            } else {
+                self.transcriptionFeature = TranscriptionFeatureModel(
+                    coordinator: TranscriptionJobCoordinator(
+                        providerRepository: activeProviderRepository,
+                        audioPreparer: transcriptionAudioPreparer,
+                        service: activeTranscriptionService,
+                        mutationGate: transcriptMutationGate
+                    )
+                )
+            }
+            precondition(
+                meetingIntelligenceFeature == nil || meetingIntelligenceFeatureFactory == nil,
+                "Inject either a meeting intelligence feature or feature factory, not both."
+            )
+            if let meetingIntelligenceFeature {
+                self.meetingIntelligenceFeature = meetingIntelligenceFeature
+            } else if let meetingIntelligenceFeatureFactory {
+                self.meetingIntelligenceFeature = meetingIntelligenceFeatureFactory(
+                    activeProviderRepository,
+                    self.transcriptionFeature.publicationSourceID,
+                    transcriptMutationGate
+                )
+            } else {
+                self.meetingIntelligenceFeature = MeetingIntelligenceFeatureModel(
+                    coordinator: Self.makeMeetingIntelligenceCoordinator(
+                        repository: activeProviderRepository,
+                        expectedPublicationSourceID: self.transcriptionFeature.publicationSourceID,
+                        mutationGate: transcriptMutationGate
+                    )
+                )
+            }
+            self.libraryFeature = libraryFeature ?? LibraryFeatureModel(
+                sessionLoader: recordingSessionLoader,
+                sessionReloader: recordingSessionReloader,
+                searchDocumentLoader: recordingSearchDocumentLoader,
+                recovery: recordingSessionRecovery,
+                trashHandler: recordingSessionTrashHandler,
+                mutationGate: transcriptMutationGate
+            )
+            precondition(
+                playbackCoordinator == nil || playbackFeature == nil,
+                "Inject either a playback coordinator or playback feature, not both."
+            )
+            if let playbackFeature {
+                self.playbackFeature = playbackFeature
+            } else {
+                self.playbackFeature = PlaybackFeatureModel(
+                    coordinator: playbackCoordinator ?? PlaybackCoordinator()
+                )
+            }
         }
-        transcriptionCoordinator = TranscriptionJobCoordinator(
-            providerRepository: activeProviderRepository,
-            audioPreparer: transcriptionAudioPreparer,
-            service: activeTranscriptionService
-        )
         self.appPaths = appPaths
-        teamsMuteSyncEnabled = defaults.object(
-            forKey: Self.teamsMuteSyncEnabledKey
-        ) as? Bool ?? true
         teamsAutoMeetingEnabled = defaults.bool(
             forKey: Self.teamsAutoMeetingEnabledKey
         )
         teamsAutoMeetingState = autoCoordinator.state
         self.virtualMicStateProvider = virtualMicStateProvider
-        self.recordingSessionLoader = recordingSessionLoader
-        self.recordingSearchDocumentLoader =
-            recordingSearchDocumentLoader
-        self.recordingSessionRecovery = recordingSessionRecovery
         self.permissionRequestHandler = permissionRequestHandler
         self.volumeCapacityProvider = volumeCapacityProvider
         self.storagePolicy = storagePolicy
@@ -364,19 +425,16 @@ final class AppModel: ObservableObject {
         self.teamsScreenRefreshTick = teamsScreenRefreshTick
         self.teamsScreenDisconnectCleanupScheduler =
             teamsScreenDisconnectCleanupScheduler
-        let activePlaybackCoordinator =
-            playbackCoordinator ?? PlaybackCoordinator()
-        self.playbackCoordinator = activePlaybackCoordinator
-        playbackPresentation = PlaybackPresentationModel(
-            player: activePlaybackCoordinator.player
-        )
         let microphoneMuteGate = MicrophoneMuteGate { [weak activeRecorder] muted in
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
         self.microphoneMuteGate = microphoneMuteGate
-        teamsMuteRelay = TeamsMuteRelay(
-            microphoneMuteGate: microphoneMuteGate
+        let teamsMuteSyncCoordinator = TeamsMuteSyncCoordinator(
+            controller: teamsMuteController,
+            microphoneMuteGate: microphoneMuteGate,
+            tick: teamsMuteTick
         )
+        self.teamsMuteSyncCoordinator = teamsMuteSyncCoordinator
         let applyMuteToAudioPaths: (Bool) -> Void = { muted in
             microphoneMuteGate.setNativeInputMuted(
                 muted,
@@ -390,34 +448,63 @@ final class AppModel: ObservableObject {
                 applyMuteToAudioPaths: applyMuteToAudioPaths
             )
         }
-        self.teamsMuteSyncClient = teamsMuteSyncClient ?? TeamsMuteSyncClient(
-            tokenStore: KeychainTeamsPairingTokenStore(defaults: defaults)
-        )
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
-        self.playbackCoordinator.onSnapshot = { [weak self] snapshot in
-            self?.handlePlaybackSnapshot(snapshot)
+        self.playbackFeature.onStatusMessage = { [weak self] message in
+            self?.statusMessage = message
         }
-        transcriptionCoordinator.objectWillChange
-            .sink { [weak self] in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
         recordingSessionCoordinator.objectWillChange
             .sink { [weak self] in
                 self?.objectWillChange.send()
             }
             .store(in: &cancellables)
-        transcriptionCoordinator.onStatusMessage = { [weak self] message in
+        self.transcriptionFeature.onStatusMessage = { [weak self] message in
             self?.statusMessage = message
         }
-        transcriptionCoordinator.onSuccessfulPublication = {
-            [weak self] session in
-            self?.rebuildSearchDocument(for: session)
-        }
+        let retainedFeatureBoundaries = PRBFeatureBoundaries(
+            library: self.libraryFeature,
+            transcription: self.transcriptionFeature,
+            meetingIntelligence: self.meetingIntelligenceFeature,
+            playback: self.playbackFeature
+        )
+        precondition(
+            retainedFeatureBoundaries.isCompatible(
+                with: activeProviderRepository.compositionIdentity
+            ) && aiProviderSettingsModel.providerRepositoryIdentity
+                == activeProviderRepository.compositionIdentity,
+            "PR B boundaries and Provider Settings must share one provider repository, one mutation gate, and compatible ASR/meeting-intelligence publication sources."
+        )
+        let bridge = PRBFeatureBridge(
+            boundaries: retainedFeatureBoundaries,
+            providerSettings: aiProviderSettingsModel,
+            currentWorkspace: { [weak self] in
+                guard let self, !self.isShutDown else { return nil }
+                return .init(
+                    folder: RecordingLibraryURLIdentity.normalized(
+                        self.outputFolder
+                    ),
+                    fence: self.workspacePublicationFence
+                )
+            },
+            transcriptionProviderIsConfigured: {
+                [weak aiProviderSettingsModel] in
+                aiProviderSettingsModel?.hasSavedProfile ?? false
+            },
+            reportStatus: { [weak self] message in
+                self?.statusMessage = message
+            }
+        )
+        prbFeatureBridge = bridge
+        bridge.start()
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
+        }
+        teamsMuteSyncCoordinator.onStateChange = { [weak self] state in
+            self?.teamsMicMuteState = state
+        }
+        teamsMuteSyncCoordinator.onMuteSnapshotChange = { [weak self] snapshot in
+            self?.publishMicrophoneMuteSnapshot(snapshot)
         }
         autoCoordinator.onCommand = { [weak self] command in
             guard let self else { return }
@@ -448,10 +535,16 @@ final class AppModel: ObservableObject {
         observeRecorderRecordingState()
         refreshDevices()
         guard performStartupWork else { return }
-        installInputMuteHandling()
-        if teamsIntegrationRequired {
-            installTeamsIntegrationIfNeeded()
+        installTeamsApplicationLifecycleMonitoring()
+        do {
+            try LegacyTeamsIntegrationCleaner(
+                secureStore: KeychainSecureValueStore(),
+                defaults: defaults
+            ).clean()
+        } catch {
+            statusMessage = "Retired Teams integration cleanup will retry next launch"
         }
+        installInputMuteHandling()
         hotKeyManager.register()
         refreshPermissionPreflight()
         refreshCaptureApplications()
@@ -464,11 +557,135 @@ final class AppModel: ObservableObject {
     deinit {
         storageMonitorTask?.cancel()
         testRecordingStopTask?.cancel()
-        playbackLoadTask?.cancel()
         teamsScreenRefreshTask?.cancel()
-        teamsMuteRelay.invalidate()
-        teamsMuteSyncClient.stop()
         inputMuteController.uninstall()
+    }
+
+    private static func makeMeetingIntelligenceCoordinator(
+        repository: any OpenAICompatibleProviderManaging,
+        expectedPublicationSourceID: UUID,
+        mutationGate: RecordingSessionMutationGate
+    ) -> MeetingIntelligenceJobCoordinator {
+        let client = OpenAICompatibleMeetingIntelligenceClient()
+        let transcriptReader = SecureTranscriptDocumentReader()
+        let artifactStore = MeetingIntelligenceArtifactStore(
+            mutationGate: mutationGate
+        )
+        let publisher = MeetingIntelligencePublisher(
+            mutationGate: mutationGate,
+            transcriptReader: transcriptReader,
+            artifactStore: artifactStore
+        )
+        let artifactEditor = MeetingIntelligenceArtifactEditor(
+            mutationGate: mutationGate,
+            transcriptReader: transcriptReader,
+            artifactStore: artifactStore
+        )
+        return MeetingIntelligenceJobCoordinator(
+            providerRepository: repository,
+            expectedPublicationSourceID: expectedPublicationSourceID,
+            mutationGate: mutationGate,
+            transcriptReader: transcriptReader,
+            availabilityChecker:
+                OpenAICompatibleMeetingIntelligenceAvailabilityChecker(
+                    client: OpenAICompatibleProviderClient()
+                ),
+            generator: MeetingIntelligencePipeline(client: client),
+            publisher: publisher,
+            artifactStore: artifactStore,
+            stateStore: MeetingIntelligenceStateStore(
+                mutationGate: mutationGate
+            ),
+            artifactEditor: artifactEditor,
+            titleApplier: MeetingIntelligenceSuggestedTitleApplier(
+                mutationGate: mutationGate,
+                transcriptReader: transcriptReader
+            )
+        )
+    }
+
+    func meetingIntelligencePresentation(
+        for session: RecordingSession
+    ) -> MeetingIntelligencePresentation {
+        meetingIntelligenceFeature.presentation(for: session)
+    }
+
+    func checkMeetingIntelligenceAvailability(for session: RecordingSession) {
+        meetingIntelligenceFeature.checkAvailability(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
+    }
+
+    func generateMeetingIntelligence(for session: RecordingSession) {
+        meetingIntelligenceFeature.generate(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
+    }
+
+    func regenerateMeetingIntelligence(for session: RecordingSession) {
+        meetingIntelligenceFeature.regenerate(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
+    }
+
+    func retryMeetingIntelligenceGeneration(for session: RecordingSession) {
+        meetingIntelligenceFeature.retryGeneration(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
+    }
+
+    @discardableResult
+    func saveMeetingIntelligenceEdit(
+        for session: RecordingSession,
+        capturedArtifact: MeetingIntelligenceArtifact,
+        capturedTranscriptRevision: TranscriptDocumentRevision,
+        summary: String,
+        suggestedTitle: String
+    ) async -> MeetingIntelligenceEditSaveOutcome {
+        let fence = workspacePublicationFence
+        let outcome = await meetingIntelligenceFeature.saveEdit(
+            for: session,
+            capturedArtifact: capturedArtifact,
+            summary: summary,
+            suggestedTitle: suggestedTitle,
+            capturedTranscriptRevision: capturedTranscriptRevision,
+            workspaceFence: fence
+        )
+        if case .conflict = outcome {
+            let currentSessions = libraryFeature.sessions.filter {
+                $0.id == session.id
+            }
+            meetingIntelligenceFeature.reload(sessions: currentSessions)
+        }
+        return outcome
+    }
+
+    func cancelMeetingIntelligence(for session: RecordingSession) {
+        meetingIntelligenceFeature.cancel(sessionID: session.id)
+    }
+
+    func applyMeetingIntelligenceSuggestedTitle(for session: RecordingSession) {
+        meetingIntelligenceFeature.applySuggestedTitle(
+            for: session,
+            workspaceFence: workspacePublicationFence
+        )
+    }
+
+    func shutdown() {
+        guard !isShutDown else { return }
+        isShutDown = true
+        invalidateTeamsScreenRefresh()
+        teamsMuteSyncCoordinator.resetTeamsSource()
+        teamsApplicationLifecycleCancellables.removeAll()
+        prbFeatureBridge?.shutdown()
+        playbackFeature.shutdown()
+        transcriptionFeature.shutdown()
+        meetingIntelligenceFeature.shutdown()
+        libraryFeature.shutdown()
     }
 
     func refreshDevices() {
@@ -701,14 +918,39 @@ final class AppModel: ObservableObject {
     func refreshTeamsScreenCaptureNow() async {
         guard let selectedTeamsApplication else { return }
         let generation = teamsScreenRefreshGeneration
-        await recorder.refreshTeamsWindows(
+        let outcome = await recorder.refreshTeamsWindows(
             selectedTeamsProcessID: selectedTeamsApplication.processID,
-            meetingActive: teamsMeetingActive,
+            mode: .localDetection,
             manualOverride: teamsManualWindowIdentity
         )
         guard generation == teamsScreenRefreshGeneration else { return }
+        if teamsAutoMeetingEnabled {
+            let observation: TeamsLocalMeetingObservation
+            switch outcome {
+            case .resolved(let resolution):
+                observation = .resolved(resolution)
+            case .unknown:
+                observation = .unknown
+            }
+            applyLocalMeetingUpdate(
+                teamsLocalMeetingDetector.observe(observation)
+            )
+        }
+        guard generation == teamsScreenRefreshGeneration else { return }
         reconcileTeamsManualWindowIdentity()
         refreshTeamsScreenCandidateProjection()
+    }
+
+    private func applyLocalMeetingUpdate(_ update: TeamsLocalMeetingUpdate) {
+        teamsLocalMeetingDetectionState = update.state
+        guard let transition = update.meetingTransition else { return }
+        if transition {
+            teamsAutoMeetingCoordinator.handleMeetingState(isInMeeting: true)
+            suppressAutomationForActiveManualRecording()
+        } else {
+            teamsMuteSyncCoordinator.resetTeamsSource()
+            teamsAutoMeetingCoordinator.handleConfirmedMeetingEnd()
+        }
     }
 
     private func reconcileTeamsManualWindowIdentity() {
@@ -724,14 +966,17 @@ final class AppModel: ObservableObject {
     }
 
     private func handleTeamsScreenSourceChange() {
+        teamsMuteSyncCoordinator.resetTeamsSource()
         invalidateTeamsScreenRefresh()
         invalidateTeamsScreenCaptureIntent()
         isTeamsScreenCaptureRequested = false
-        teamsMeetingActive = false
+        teamsLocalMeetingDetectionState = teamsLocalMeetingDetector.reset().state
         teamsManualWindowIdentity = nil
         teamsScreenCaptureCandidates = []
         recorder.resetTeamsWindowResolution()
+        refreshTeamsMutePolling()
         guard selectedTeamsApplication != nil else { return }
+        restartTeamsScreenRefreshIfNeeded()
         Task { @MainActor [weak self] in
             await self?.refreshTeamsScreenCaptureNow()
         }
@@ -750,7 +995,8 @@ final class AppModel: ObservableObject {
     private func restartTeamsScreenRefreshIfNeeded() {
         invalidateTeamsScreenRefresh()
         guard selectedTeamsApplication != nil,
-              recorder.isRecording || isTeamsScreenCaptureRequested else { return }
+              teamsAutoMeetingEnabled || recorder.isRecording
+                || isTeamsScreenCaptureRequested else { return }
         let generation = teamsScreenRefreshGeneration
         let tick = teamsScreenRefreshTick
         teamsScreenRefreshTask = Task { @MainActor [weak self, tick] in
@@ -761,6 +1007,46 @@ final class AppModel: ObservableObject {
                 await self.refreshTeamsScreenCaptureNow()
             }
         }
+    }
+
+    private func installTeamsApplicationLifecycleMonitoring() {
+        guard teamsApplicationLifecycleCancellables.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        Publishers.Merge(
+            center.publisher(
+                for: NSWorkspace.didLaunchApplicationNotification
+            ),
+            center.publisher(
+                for: NSWorkspace.didTerminateApplicationNotification
+            )
+        )
+        .compactMap { notification in
+            notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+        }
+        .filter {
+            $0.bundleIdentifier == "com.microsoft.teams2"
+        }
+        .receive(on: RunLoop.main)
+        .sink { [weak self] application in
+            self?.handleTeamsApplicationLifecycleChange(
+                processID: application.processIdentifier,
+                isTerminated: application.isTerminated
+            )
+        }
+        .store(in: &teamsApplicationLifecycleCancellables)
+    }
+
+    func handleTeamsApplicationLifecycleChange(
+        processID: pid_t,
+        isTerminated: Bool
+    ) {
+        if isTerminated,
+           selectedTeamsApplication?.processID == processID {
+            teamsMuteSyncCoordinator.resetTeamsSource()
+            teamsAutoMeetingCoordinator.handleConfirmedMeetingEnd()
+        }
+        refreshCaptureApplications()
     }
 
     private func invalidateTeamsScreenRefresh() {
@@ -811,6 +1097,29 @@ final class AppModel: ObservableObject {
 
         teamsAutoMeetingCoordinator.manualRecordingStarted()
         beginRecording(ownership: .manual, requestPermissions: true)
+    }
+
+    func startRecordingFromControl() -> RecorderControlActionOutcome {
+        if recorder.isRecording { return .noOp }
+        guard !isCaptureLifecycleWorking else {
+            return .rejected(
+                code: "busy",
+                message: "Another capture operation is in progress."
+            )
+        }
+        guard captureReadiness == .ready else {
+            return .rejected(code: "not_ready", message: readinessMessage)
+        }
+        teamsAutoMeetingCoordinator.manualRecordingStarted()
+        beginRecording(ownership: .manual, requestPermissions: false)
+        return .accepted
+    }
+
+    func stopRecordingFromControl() -> RecorderControlActionOutcome {
+        let hadWork = recorder.isRecording || pendingRecordingAttempt != nil
+        guard hadWork else { return .noOp }
+        stopCaptureLifecycle(playAfterStop: false)
+        return .accepted
     }
 
     private func takeOverPendingAutomaticRecordingStart() -> Bool {
@@ -1161,11 +1470,13 @@ final class AppModel: ObservableObject {
 
     func setOutputFolder(_ folder: URL) {
         outputFolder = folder
-        sessions = []
-        transcriptionStatesBySessionID = [:]
-        transcriptURLsBySessionID = [:]
-        transcriptLogURLsBySessionID = [:]
-        refreshSessions()
+        workspacePublicationFence = workspacePublicationFence.advanced()
+        prbFeatureBridge?.workspaceDidChange(
+            .init(workspace: .init(
+                folder: RecordingLibraryURLIdentity.normalized(folder),
+                fence: workspacePublicationFence
+            ))
+        )
     }
 
     func chooseAudioFileForTranscription() {
@@ -1180,14 +1491,26 @@ final class AppModel: ObservableObject {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        do {
-            let importedSession = try ManualTranscriptionImporter.importAudioFile(url, into: outputFolder)
-            refreshSessions()
-            statusMessage = "Audio imported for transcription: \(url.lastPathComponent)"
-            transcribe(session: importedSession)
-        } catch {
-            statusMessage = "Audio import failed: \(error.localizedDescription)"
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await self.importAudioForTranscription(url)
         }
+    }
+
+    @discardableResult
+    func importAudioForTranscription(
+        _ url: URL
+    ) async -> Result<RecordingSession, LibraryFeatureFailure> {
+        let workspace = outputFolder
+        let fence = workspacePublicationFence
+        let outcome = await libraryFeature.importAudio(
+            url, workspace: workspace, fence: fence
+        )
+        guard canPresentWorkspaceResult(for: fence) else { return outcome }
+        if case .failure(let error) = outcome {
+            statusMessage = error.message
+        }
+        return outcome
     }
 
     func openRecordingFolder() {
@@ -1199,141 +1522,60 @@ final class AppModel: ObservableObject {
     }
 
     func refreshSessions() {
-        recordingSearchDocumentRefreshGeneration &+= 1
-        recordingSearchDocumentRefreshGenerations.removeAll()
-        recordingSessionRefreshGeneration &+= 1
-        let generation = recordingSessionRefreshGeneration
-        let folder = outputFolder
-        let loader = recordingSessionLoader
-        let recovery = recordingSessionRecovery
-        let shouldRecover = recoveredLibraryFolders.insert(folder.standardizedFileURL).inserted
-
-        recordingSessionLoadingQueue.async { [weak self] in
-            if shouldRecover { recovery(folder) }
-            let loadedSessions = loader(folder)
-            let transcriptionStates: [RecordingSession.ID: TranscriptionState] = Dictionary(
-                uniqueKeysWithValues: loadedSessions.compactMap { session in
-                    guard let state = try? TranscriptionStateStore.load(
-                        in: session.folderURL
-                    ) else {
-                        return nil
-                    }
-                    return (session.id, state)
-                }
-            )
-
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.recordingSessionRefreshGeneration == generation else {
-                    return
-                }
-                self.sessions = loadedSessions
-                self.transcriptionStatesBySessionID = self.projectTranscriptionStates(
-                    transcriptionStates
-                )
-            }
-        }
+        libraryFeature.refresh(
+            workspace: outputFolder,
+            fence: workspacePublicationFence
+        )
     }
 
-    private func rebuildSearchDocument(for session: RecordingSession) {
-        let sessionID = session.id
-        recordingSearchDocumentRefreshGeneration &+= 1
-        let nextGeneration =
-            recordingSearchDocumentRefreshGeneration
-        recordingSearchDocumentRefreshGenerations[sessionID] =
-            nextGeneration
-        let loader = recordingSearchDocumentLoader
-
-        recordingSessionLoadingQueue.async { [weak self] in
-            let document = loader(session)
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.recordingSearchDocumentRefreshGenerations[
-                        sessionID
-                      ] == nextGeneration,
-                      let index = self.sessions.firstIndex(
-                        where: { $0.id == sessionID }
-                      ) else {
-                    return
-                }
-                let current = self.sessions[index]
-                guard current.metadata == session.metadata else {
-                    self.rebuildSearchDocument(for: current)
-                    return
-                }
-                self.sessions[index] =
-                    current.replacingSearchDocument(document)
-                self.recordingSearchDocumentRefreshGenerations[
-                    sessionID
-                ] = nil
-            }
-        }
+    private func canPresentWorkspaceResult(
+        for capturedFence: WorkspacePublicationFence
+    ) -> Bool {
+        !isShutDown && workspacePublicationFence == capturedFence
     }
 
-    private func projectTranscriptionStates(
-        _ loadedStates: [RecordingSession.ID: TranscriptionState]
-    ) -> [RecordingSession.ID: TranscriptionState] {
-        var projected = loadedStates.mapValues { state in
-            guard [.queued, .uploading, .transcribing].contains(state.phase) else {
-                return state
-            }
-            var interrupted = state
-            interrupted.phase = .interrupted
-            interrupted.message = "Transcription interrupted. You can start it again."
-            interrupted.finishedAt = Date()
-            return interrupted
-        }
 
-        guard let currentActiveID = transcribingSessionID else {
-            return projected
-        }
-        if let liveState = transcriptionStatesBySessionID[currentActiveID] {
-            projected[currentActiveID] = liveState
-        } else if let loadedState = loadedStates[currentActiveID] {
-            projected[currentActiveID] = loadedState
-        }
-        return projected
+    var playingSessionID: RecordingSession.ID? { playbackFeature.activeSessionID }
+    var playbackPresentation: PlaybackPresentationModel {
+        playbackFeature.presentation
     }
-
-    var playbackPlayer: AVPlayer { playbackPresentation.player }
-    var playbackProgress: TimeInterval { playbackPresentation.progress }
-    var playbackDuration: TimeInterval { playbackPresentation.duration }
-    var isPlaybackActive: Bool { playbackPresentation.isPlaying }
+    var playbackPlayer: AVPlayer { playbackFeature.presentation.player }
+    var playbackProgress: TimeInterval { playbackFeature.presentation.progress }
+    var playbackDuration: TimeInterval { playbackFeature.presentation.duration }
+    var isPlaybackActive: Bool { playbackFeature.presentation.isPlaying }
 
     func play(session: RecordingSession) {
-        startPlayback(session: session, successStatus: "Playing \(session.displayName)")
+        playbackFeature.play(
+            session,
+            successStatus: "Playing \(session.displayName)"
+        )
     }
 
     func playbackToggle() {
-        guard playbackSessionID != nil else { return }
-        if isPlaybackActive {
-            playbackCoordinator.pause()
-        } else {
-            playbackCoordinator.play()
-        }
+        playbackFeature.toggle()
     }
 
     func stopPlayback(resetStatus: Bool = true) {
-        playbackGeneration &+= 1
-        playbackLoadTask?.cancel()
-        playbackLoadTask = nil
-        playbackSessionID = nil
-        playbackCoordinator.stop()
-        playingSessionID = nil
-        playbackPresentation.clear()
+        playbackFeature.stop()
         if resetStatus {
             statusMessage = recorder.isRecording ? "Recording" : "Monitoring"
         }
     }
 
     func seekPlayback(to time: TimeInterval) {
-        guard playbackSessionID != nil else { return }
-        let generation = playbackGeneration
-        let coordinator = playbackCoordinator
-        Task { [weak self, coordinator] in
-            await coordinator.seek(to: time)
-            guard let self, self.playbackGeneration == generation else { return }
-        }
+        playbackFeature.seek(to: time)
+    }
+
+    func setPlaybackVolume(_ volume: Float) {
+        playbackFeature.setVolume(volume)
+    }
+
+    func setPlaybackRate(_ rate: Float) {
+        playbackFeature.setRate(rate)
+    }
+
+    func revealRecording(_ session: RecordingSession) {
+        NSWorkspace.shared.activateFileViewerSelecting([session.recordingURL])
     }
 
     func open(session: RecordingSession) {
@@ -1341,16 +1583,14 @@ final class AppModel: ObservableObject {
     }
 
     func transcribe(session: RecordingSession) {
-        guard aiProviderSettingsModel.hasSavedProfile else {
-            statusMessage =
-                "Configure and save an AI provider before starting transcription."
-            return
-        }
-        transcriptionCoordinator.start(session: session)
+        transcriptionFeature.start(
+            session: session,
+            providerIsConfigured: aiProviderSettingsModel.hasSavedProfile
+        )
     }
 
     func cancelTranscription() {
-        transcriptionCoordinator.cancel()
+        transcriptionFeature.cancel()
     }
     func openTranscript(for session: RecordingSession) {
         if let url = currentTranscriptURL(for: session) {
@@ -1370,38 +1610,89 @@ final class AppModel: ObservableObject {
 
     func currentTranscriptURL(for session: RecordingSession) -> URL? {
         let url = TranscriptDocumentStore.resolvedURL(in: session.folderURL)
-        transcriptURLsBySessionID[session.id] = url
+        transcriptionFeature.setTranscriptURL(url, for: session.id)
         return url
     }
 
     func currentTranscriptLogURL(for session: RecordingSession) -> URL? {
         let url = TranscriptDocumentStore.logURL(in: session.folderURL)
-        transcriptLogURLsBySessionID[session.id] = url
+        transcriptionFeature.setTranscriptLogURL(url, for: session.id)
         return url
     }
 
     func toggleRecorderMicMute(source: String = "Button") {
         let current = microphoneMuteGate.snapshot
-        if current.teamsInMeeting, current.teamsMuted, !current.localMuted {
-            statusMessage = "\(source): recorder mic is muted by Teams"
-            return
-        }
-        if current.nativeInputMuted, !current.localMuted {
-            statusMessage = "\(source): recorder mic is muted by the input device"
-            return
-        }
-
         let requestedMute = !current.localMuted
-        let snapshot = microphoneMuteGate.setLocalMuted(requestedMute)
-        publishMicrophoneMuteSnapshot(snapshot)
+        setRecorderMicMuted(requestedMute, source: source)
+        let snapshot = microphoneMuteGate.snapshot
         if !requestedMute, snapshot.effectiveMuted {
-            let owner = snapshot.teamsInMeeting && snapshot.teamsMuted
-                ? "Teams"
-                : "the input device"
-            statusMessage = "\(source): recorder mic remains muted by \(owner)"
-        } else {
-            statusMessage = "\(source): recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
+            statusMessage = "\(source): recorder mic remains muted by the input device"
         }
+    }
+
+    func toggleTeamsAndRecorderMicMute() {
+        let wantsMute = !microphoneMuteGate.snapshot.localMuted
+        Task { @MainActor [weak self] in
+            await self?.setTeamsAndRecorderMicMuted(wantsMute)
+        }
+    }
+
+    func setTeamsAndRecorderMicMuted(_ muted: Bool) async {
+        let processID = selectedTeamsApplication?.processID
+        let result = await teamsMuteSyncCoordinator.setMuted(
+            muted,
+            processID: processID
+        )
+
+        guard processID != nil else {
+            statusMessage = "Floating panel: recorder mic \(muted ? "muted" : "active")"
+            return
+        }
+        switch (muted, result) {
+        case (true, .muted):
+            statusMessage = "Recorder and Teams muted"
+        case (true, .unmuted):
+            statusMessage = "Recorder muted; Teams remains live"
+        case (true, .unknown):
+            statusMessage = "Recorder muted; Teams status unknown"
+        case (false, .unmuted):
+            statusMessage = "Recorder and Teams live"
+        case (false, .muted):
+            statusMessage = "Recorder remains muted; Teams remains muted"
+        case (false, .unknown):
+            statusMessage = "Recorder remains muted; Teams status unknown"
+        }
+    }
+
+    func requestTeamsAccessibilityPermission() {
+        teamsMuteSyncCoordinator.requestPermission()
+    }
+
+    func setFloatingRecordingPanelActive(_ active: Bool) {
+        guard isFloatingRecordingPanelActive != active else { return }
+        isFloatingRecordingPanelActive = active
+        refreshTeamsMutePolling()
+    }
+
+    func setRecorderMicMuted(
+        _ muted: Bool,
+        source: String = "Control"
+    ) {
+        let snapshot = microphoneMuteGate.setLocalMuted(muted)
+        publishMicrophoneMuteSnapshot(snapshot)
+        statusMessage = "\(source): recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
+    }
+
+    var recorderMicMuteSnapshot: MicrophoneMuteSnapshot {
+        microphoneMuteGate.snapshot
+    }
+
+    private func refreshTeamsMutePolling() {
+        teamsMuteSyncCoordinator.updatePolling(
+            isPanelActive: isFloatingRecordingPanelActive,
+            isRecording: recorder.isRecording,
+            processID: selectedTeamsApplication?.processID
+        )
     }
 
     func installInputMuteHandling() {
@@ -1429,216 +1720,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private var teamsIntegrationRequired: Bool {
-        teamsMuteSyncEnabled || teamsAutoMeetingEnabled
-    }
-
-    func installTeamsMuteSync() {
-        guard teamsMuteSyncEnabled else { return }
-        installTeamsIntegrationIfNeeded()
-    }
-
-    func installTeamsIntegrationIfNeeded() {
-        guard teamsIntegrationRequired else { return }
-
-        var callbackNeedsRefresh = false
-        if teamsMuteSyncEnabled, teamsMuteRelayGeneration == nil {
-            teamsMuteRelayGeneration = teamsMuteRelay.enable()
-            callbackNeedsRefresh = true
-        }
-        if !teamsIntegrationInstalled {
-            teamsIntegrationInstalled = true
-            callbackNeedsRefresh = true
-        }
-        guard callbackNeedsRefresh else { return }
-        installCurrentTeamsCallback()
-    }
-
-    private func installCurrentTeamsCallback() {
-        teamsIntegrationGeneration &+= 1
-        let integrationGeneration = teamsIntegrationGeneration
-        let relayGeneration = teamsMuteRelayGeneration
-        let relay = teamsMuteRelay
-        let ingress = teamsIntegrationIngress
-        teamsMuteSyncClient.start { [weak self, relay, ingress] event in
-            let relayResult = relayGeneration.flatMap {
-                relay.apply(event, generation: $0)
-            }
-            ingress.enqueue { @MainActor [weak self] in
-                self?.handleTeamsIntegration(
-                    event,
-                    relayResult: relayResult,
-                    generation: integrationGeneration
-                )
-            }
-        }
-    }
-
-    func setTeamsMuteSyncEnabled(_ enabled: Bool) {
-        guard teamsMuteSyncEnabled != enabled else { return }
-
-        teamsMuteSyncEnabled = enabled
-        defaults.set(enabled, forKey: Self.teamsMuteSyncEnabledKey)
-        if enabled {
-            let needsFreshState = teamsIntegrationInstalled
-            let connectionIsInMeeting: Bool
-            if case .inMeeting = teamsConnectionStatus {
-                connectionIsInMeeting = true
-            } else {
-                connectionIsInMeeting = false
-            }
-            let shouldFailClosed =
-                needsFreshState
-                && connectionIsInMeeting
-                && lastAuthorizedTeamsMeetingState?.isInMeeting == true
-            teamsMuteRelayGeneration = teamsMuteRelay.enable()
-            if shouldFailClosed {
-                let snapshot = microphoneMuteGate.applyTeamsState(
-                    TeamsMeetingState(
-                        isInMeeting: true,
-                        isMuted: true,
-                        canToggleMute: false,
-                        canPair: false
-                    )
-                )
-                publishMicrophoneMuteSnapshot(snapshot)
-            }
-            if needsFreshState {
-                pendingTeamsMeetingState = nil
-                lastAuthorizedTeamsMeetingState = nil
-                teamsConnectionStatus = .connecting
-                teamsMuteSyncStatus = .connecting
-                installCurrentTeamsCallback()
-                teamsMuteSyncClient.reconnect()
-            } else {
-                installTeamsIntegrationIfNeeded()
-            }
-            return
-        }
-
-        let snapshot = teamsMuteRelay.disable()
-        teamsMuteRelayGeneration = nil
-        teamsMuteSyncStatus = .disabled
-        publishMicrophoneMuteSnapshot(snapshot)
-        if teamsIntegrationRequired {
-            installCurrentTeamsCallback()
-        } else {
-            stopTeamsIntegrationIfUnused()
-        }
-    }
-
     func setTeamsAutoMeetingEnabled(_ enabled: Bool) {
         guard teamsAutoMeetingEnabled != enabled else { return }
 
         teamsAutoMeetingEnabled = enabled
         defaults.set(enabled, forKey: Self.teamsAutoMeetingEnabledKey)
         teamsAutoMeetingCoordinator.setEnabled(enabled)
-        if enabled {
-            installTeamsIntegrationIfNeeded()
-            if case .inMeeting = teamsConnectionStatus,
-               lastAuthorizedTeamsMeetingState?.isInMeeting == true {
-                teamsAutoMeetingCoordinator.handleMeetingState(
-                    isInMeeting: true
-                )
-                suppressAutomationForActiveManualRecording()
-            }
-        } else {
-            stopTeamsIntegrationIfUnused()
+        if !enabled {
+            teamsLocalMeetingDetectionState = teamsLocalMeetingDetector.reset().state
+        }
+        restartTeamsScreenRefreshIfNeeded()
+        guard selectedTeamsApplication != nil else { return }
+        Task { @MainActor [weak self] in
+            await self?.refreshTeamsScreenCaptureNow()
         }
     }
 
     func cancelTeamsAutoMeetingCountdown() {
         teamsAutoMeetingCoordinator.cancelCountdown()
-    }
-
-    private func stopTeamsIntegrationIfUnused() {
-        guard !teamsIntegrationRequired, teamsIntegrationInstalled else {
-            return
-        }
-
-        invalidateTeamsScreenRefresh()
-        teamsIntegrationGeneration &+= 1
-        teamsIntegrationInstalled = false
-        pendingTeamsMeetingState = nil
-        lastAuthorizedTeamsMeetingState = nil
-        teamsConnectionStatus = .disabled
-        teamsMuteSyncClient.stop()
-        teamsMeetingActive = false
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.refreshTeamsScreenCaptureNow()
-            self.restartTeamsScreenRefreshIfNeeded()
-        }
-    }
-
-    func retryTeamsMuteSync() {
-        guard teamsIntegrationRequired else { return }
-        teamsMuteSyncClient.reconnect()
-    }
-
-    func requestTeamsPairing() {
-        guard teamsIntegrationRequired else { return }
-        teamsMuteSyncClient.requestPairing()
-    }
-
-    private func handleTeamsIntegration(
-        _ event: TeamsMuteSyncEvent,
-        relayResult: TeamsMuteRelayResult?,
-        generation: UInt64
-    ) {
-        guard teamsIntegrationInstalled,
-              teamsIntegrationGeneration == generation else {
-            return
-        }
-
-        switch event {
-        case .status(let status):
-            teamsConnectionStatus = status
-            teamsMuteSyncStatus = teamsMuteSyncEnabled ? status : .disabled
-            routeAuthorizedAutoMeetingState(for: status)
-            if relayResult?.didFailClosed == true {
-                publishMicrophoneMuteSnapshot(microphoneMuteGate.snapshot)
-                statusMessage = "Teams sync lost: recorder mic muted"
-            }
-
-        case .meetingState(let state):
-            pendingTeamsMeetingState = state
-            if relayResult != nil {
-                let snapshot = microphoneMuteGate.snapshot
-                publishMicrophoneMuteSnapshot(snapshot)
-                statusMessage = "Teams / AirPods: recorder mic \(snapshot.effectiveMuted ? "muted" : "active")"
-            }
-            teamsMeetingActive = state.isInMeeting
-            Task { @MainActor [weak self] in
-                await self?.refreshTeamsScreenCaptureNow()
-            }
-        }
-    }
-
-    private func routeAuthorizedAutoMeetingState(
-        for status: TeamsMuteSyncStatus
-    ) {
-        defer { pendingTeamsMeetingState = nil }
-        lastAuthorizedTeamsMeetingState = nil
-        guard let state = pendingTeamsMeetingState else { return }
-
-        switch status {
-        case .inMeeting:
-            guard state.isInMeeting else { return }
-        case .ready:
-            guard !state.isInMeeting else { return }
-        default:
-            return
-        }
-
-        lastAuthorizedTeamsMeetingState = state
-        guard teamsAutoMeetingEnabled else { return }
-        teamsAutoMeetingCoordinator.handleMeetingState(
-            isInMeeting: state.isInMeeting
-        )
-        if state.isInMeeting {
-            suppressAutomationForActiveManualRecording()
-        }
     }
 
     private func suppressAutomationForActiveManualRecording() {
@@ -1652,28 +1751,29 @@ final class AppModel: ObservableObject {
     ) {
         localMicMuted = snapshot.localMuted
         nativeInputMicMuted = snapshot.nativeInputMuted
-        teamsMicMuted = snapshot.teamsInMeeting && snapshot.teamsMuted
         recorder.updateMicMuteDisplay(snapshot.effectiveMuted)
     }
 
     func transcriptText(for session: RecordingSession) -> String {
         do {
-            return try TranscriptDocumentStore.read(in: session.folderURL)
+            return try libraryFeature.transcriptText(for: session)
         } catch {
             statusMessage = "Cannot read transcript: \(error.localizedDescription)"
             return ""
         }
     }
 
-    func saveTranscript(_ text: String, for session: RecordingSession) {
-        do {
-            try TranscriptDocumentStore.save(text, in: session.folderURL)
-            transcriptURLsBySessionID[session.id] = TranscriptDocumentStore.editableURL(in: session.folderURL)
-            rebuildSearchDocument(for: session)
+    func saveTranscript(_ text: String, for session: RecordingSession) async -> LibrarySaveOutcome {
+        let fence = workspacePublicationFence
+        let outcome = await libraryFeature.saveTranscript(text, for: session, fence: fence)
+        guard canPresentWorkspaceResult(for: fence) else { return outcome }
+        if outcome.savedArtifacts.contains(.transcript) {
+            transcriptionFeature.setTranscriptURL(TranscriptDocumentStore.editableURL(in: session.folderURL), for: session.id)
             statusMessage = "Transcript saved"
-        } catch {
-            statusMessage = "Cannot save transcript: \(error.localizedDescription)"
+        } else {
+            statusMessage = outcome.failures.first?.userMessage ?? "Cannot save transcript."
         }
+        return outcome
     }
 
     func exportTranscript(for session: RecordingSession) {
@@ -1695,43 +1795,60 @@ final class AppModel: ObservableObject {
         statusMessage = "Transcript copied"
     }
 
-    func saveMetadata(title: String, tags: String, isFavorite: Bool, for session: RecordingSession) {
-        do {
-            var metadata = RecordingSessionMetadataStore.load(in: session.folderURL)
-            let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            metadata.title = cleanedTitle.isEmpty ? nil : cleanedTitle
-            metadata.tags = tags.split(separator: ",").map(String.init)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            metadata.isFavorite = isFavorite
-            try RecordingSessionMetadataStore.save(metadata, in: session.folderURL)
-            refreshSessions()
+    func saveMetadata(
+        titleEdit: RecordingTitleEdit,
+        tags: String,
+        isFavorite: Bool,
+        for session: RecordingSession
+    ) async -> LibrarySaveOutcome {
+        let fence = workspacePublicationFence
+        let outcome = await libraryFeature.saveMetadata(
+            titleEdit: titleEdit, tags: tags, isFavorite: isFavorite,
+            for: session, fence: fence
+        )
+        guard canPresentWorkspaceResult(for: fence) else { return outcome }
+        if outcome.savedArtifacts.contains(.metadata) {
             statusMessage = "Recording details saved"
-        } catch {
-            statusMessage = "Cannot save recording details: \(error.localizedDescription)"
+        } else {
+            statusMessage = outcome.failures.first?.userMessage ?? "Cannot save recording details."
         }
+        return outcome
     }
 
-    func moveSessionToTrash(_ session: RecordingSession) {
-        do {
-            _ = try RecordingSessionStore.moveToTrash(folder: session.folderURL)
-            if playingSessionID == session.id { stopPlayback() }
-            sessions.removeAll { $0.id == session.id }
-            transcriptionStatesBySessionID.removeValue(forKey: session.id)
-            transcriptURLsBySessionID.removeValue(forKey: session.id)
-            transcriptLogURLsBySessionID.removeValue(forKey: session.id)
-            refreshSessions()
+    /// Compatibility entry point for existing views.  Title identity controls
+    /// origin; a tags/favourite-only edit keeps its existing origin intact.
+    func saveMetadata(title: String, tags: String, isFavorite: Bool, for session: RecordingSession) async -> LibrarySaveOutcome {
+        let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedTitle = cleanedTitle.isEmpty ? nil : cleanedTitle
+        let titleEdit: RecordingTitleEdit = requestedTitle == session.metadata.title
+            ? .unchanged
+            : .manual(requestedTitle)
+        return await saveMetadata(
+            titleEdit: titleEdit,
+            tags: tags,
+            isFavorite: isFavorite,
+            for: session
+        )
+    }
+
+    func moveSessionToTrash(_ session: RecordingSession) async {
+        let fence = workspacePublicationFence
+        let outcome = await libraryFeature.moveToTrash(session, fence: fence)
+        guard canPresentWorkspaceResult(for: fence) else { return }
+        switch outcome {
+        case .success:
+            playbackFeature.stopIfActive(sessionID: session.id)
             statusMessage = "Moved \(session.displayName) to Trash"
-        } catch {
-            statusMessage = "Cannot move recording to Trash: \(error.localizedDescription)"
+        case .failure(let error): statusMessage = error.message
         }
     }
 
-    private func finishRecording(
+    func finishRecording(
         playAfterStop: Bool,
         automaticStopToken: CaptureLifecycleToken? = nil,
         recordingSource: RecordingSource = .manual
     ) async {
+        let finalizationFence = workspacePublicationFence
         let result = await recorder.stop()
         isRunningTestRecording = false
         if let result {
@@ -1740,18 +1857,29 @@ final class AppModel: ObservableObject {
                 result.recordingURL.lastPathComponent == "recording.m4a"
             var metadataSaveError: Error?
             do {
-                var metadata = RecordingSessionMetadataStore.load(
-                    in: result.folderURL
-                )
-                metadata.source = recordingSource
-                try RecordingSessionMetadataStore.save(
-                    metadata,
-                    in: result.folderURL
+                try recordingSourceMetadataUpdater(
+                    recordingSource,
+                    result.folderURL,
+                    transcriptMutationGate
                 )
             } catch {
                 metadataSaveError = error
             }
-            refreshSessions()
+            prbFeatureBridge?.recordingDidFinalize(.init(
+                finalizationID: UUID(),
+                folder: RecordingLibraryURLIdentity.normalized(
+                    result.folderURL
+                ),
+                workspaceFence: finalizationFence,
+                recordingURL: RecordingLibraryURLIdentity.normalized(
+                    result.recordingURL
+                ),
+                health: result.health,
+                metadataOutcome: metadataSaveError.map {
+                    .warning($0.localizedDescription)
+                } ?? .saved,
+                source: recordingSource
+            ))
             if let metadataSaveError {
                 statusMessage =
                     "Recording saved, but source metadata could not be written: "
@@ -1765,8 +1893,8 @@ final class AppModel: ObservableObject {
                     for: result.folderURL,
                     recordingURL: result.recordingURL
                 )
-                startPlayback(
-                    session: session,
+                playbackFeature.play(
+                    session,
                     successStatus:
                         "Test saved and playing: \(result.health.summary)"
                 )
@@ -1786,47 +1914,6 @@ final class AppModel: ObservableObject {
               token == nil || token == pendingToken else { return }
         automaticStopIntentToken = nil
         teamsAutoMeetingCoordinator.automaticStopCompleted()
-    }
-
-    private func startPlayback(session: RecordingSession, successStatus: String) {
-        playbackGeneration &+= 1
-        let generation = playbackGeneration
-        playbackLoadTask?.cancel()
-        playbackCoordinator.stop()
-        playbackSessionID = session.id
-        playbackPresentation.begin(session: session)
-        playingSessionID = session.id
-        let coordinator = playbackCoordinator
-        playbackLoadTask = Task { [weak self, coordinator] in
-            do {
-                try await coordinator.load(session)
-                guard !Task.isCancelled,
-                      let self,
-                      self.playbackGeneration == generation,
-                      self.playbackSessionID == session.id else { return }
-                coordinator.play()
-                self.statusMessage = successStatus
-                self.playbackLoadTask = nil
-            } catch {
-                guard !Task.isCancelled,
-                      let self,
-                      self.playbackGeneration == generation,
-                      self.playbackSessionID == session.id else { return }
-                self.playbackLoadTask = nil
-                self.playbackSessionID = nil
-                self.playingSessionID = nil
-                self.playbackPresentation.clear()
-                self.statusMessage = "Playback failed: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func handlePlaybackSnapshot(_ snapshot: PlaybackSnapshot) {
-        guard snapshot.sessionID == playbackSessionID else { return }
-        if playingSessionID != snapshot.sessionID {
-            playingSessionID = snapshot.sessionID
-        }
-        playbackPresentation.apply(snapshot)
     }
 
     func requestSystemAudioPermission() {
@@ -2046,13 +2133,19 @@ final class AppModel: ObservableObject {
         recorder.$isRecording
             .dropFirst()
             .sink { [weak self] isRecording in
-                guard let self, !isRecording else { return }
+                guard let self else { return }
+                if !isRecording {
+                    self.teamsMuteSyncCoordinator.resetTeamsSource()
+                }
+                self.refreshTeamsMutePolling()
+                guard !isRecording else { return }
                 self.invalidateStorageMonitoring()
                 self.invalidateTeamsScreenRefresh()
                 self.invalidateTeamsScreenCaptureIntent()
                 self.isTeamsScreenCaptureRequested = false
                 self.clearTestRecordingRuntimeState()
                 self.completeAutomaticStopIntent()
+                self.restartTeamsScreenRefreshIfNeeded()
                 guard let ownership = self.recordingOwnership else { return }
                 self.recordingOwnership = nil
                 if ownership == .teamsAutomatic {

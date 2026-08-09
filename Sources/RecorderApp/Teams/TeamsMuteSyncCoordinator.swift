@@ -1,0 +1,157 @@
+import Foundation
+
+@MainActor
+final class TeamsMuteSyncCoordinator {
+    private let controller: any TeamsMuteControlling
+    private let microphoneMuteGate: MicrophoneMuteGate
+    private let tick: @Sendable () async -> Void
+    private var pollTask: Task<Void, Never>?
+    private var pollingProcessID: pid_t?
+    private var actionGeneration: UInt64 = 0
+    private var actionProcessID: pid_t?
+
+    private(set) var state: TeamsMicMuteState = .unknown(.inactive) {
+        didSet {
+            guard oldValue != state else { return }
+            onStateChange?(state)
+        }
+    }
+
+    var onStateChange: ((TeamsMicMuteState) -> Void)?
+    var onMuteSnapshotChange: ((MicrophoneMuteSnapshot) -> Void)?
+
+    var hasPollingTask: Bool { pollTask != nil }
+
+    init(
+        controller: any TeamsMuteControlling,
+        microphoneMuteGate: MicrophoneMuteGate,
+        tick: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(for: .seconds(1))
+        }
+    ) {
+        self.controller = controller
+        self.microphoneMuteGate = microphoneMuteGate
+        self.tick = tick
+    }
+
+    deinit {
+        pollTask?.cancel()
+    }
+
+    func updatePolling(
+        isPanelActive: Bool,
+        isRecording: Bool,
+        processID: pid_t?
+    ) {
+        if actionProcessID != nil, actionProcessID != processID {
+            invalidateAction()
+        }
+        guard isPanelActive, isRecording, let processID else {
+            stopPolling()
+            return
+        }
+        guard pollTask == nil || pollingProcessID != processID else { return }
+
+        stopPolling()
+        pollingProcessID = processID
+        let controller = self.controller
+        let tick = self.tick
+        pollTask = Task { @MainActor [weak self, controller, tick] in
+            while !Task.isCancelled {
+                await tick()
+                guard !Task.isCancelled, let self,
+                      self.pollingProcessID == processID else { return }
+                let observation = await controller.readState(
+                    processID: processID
+                )
+                guard !Task.isCancelled,
+                      self.pollingProcessID == processID else { return }
+                self.applyObservation(observation)
+            }
+        }
+    }
+
+    func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
+        pollingProcessID = nil
+        state = .unknown(.inactive)
+    }
+
+    func resetTeamsSource() {
+        invalidateAction()
+        stopPolling()
+        publishMuteSnapshot(microphoneMuteGate.setTeamsMuted(false))
+    }
+
+    func setMuted(
+        _ muted: Bool,
+        processID: pid_t?
+    ) async -> TeamsMicMuteState {
+        let generation = beginAction(processID: processID)
+        guard let processID else {
+            publishMuteSnapshot(microphoneMuteGate.setLocalMuted(muted))
+            return .unknown(.inactive)
+        }
+
+        if muted {
+            publishMuteSnapshot(microphoneMuteGate.setLocalMuted(true))
+            let result = await controller.setMuted(true, processID: processID)
+            guard isCurrentAction(
+                generation: generation,
+                processID: processID
+            ) else { return .unknown(.inactive) }
+            applyObservation(result)
+            return result
+        }
+
+        let result = await controller.setMuted(false, processID: processID)
+        guard isCurrentAction(
+            generation: generation,
+            processID: processID
+        ) else { return .unknown(.inactive) }
+        applyObservation(result)
+        if result == .unmuted {
+            publishMuteSnapshot(microphoneMuteGate.setLocalMuted(false))
+        }
+        return result
+    }
+
+    func requestPermission() {
+        controller.requestPermission()
+    }
+
+    private func beginAction(processID: pid_t?) -> UInt64 {
+        actionGeneration &+= 1
+        actionProcessID = processID
+        return actionGeneration
+    }
+
+    private func invalidateAction() {
+        actionGeneration &+= 1
+        actionProcessID = nil
+    }
+
+    private func isCurrentAction(
+        generation: UInt64,
+        processID: pid_t
+    ) -> Bool {
+        actionGeneration == generation && actionProcessID == processID
+    }
+
+    private func applyObservation(_ observation: TeamsMicMuteState) {
+        state = observation
+        switch observation {
+        case .muted:
+            publishMuteSnapshot(microphoneMuteGate.setTeamsMuted(true))
+        case .unmuted:
+            publishMuteSnapshot(microphoneMuteGate.setTeamsMuted(false))
+        case .unknown:
+            break
+        }
+    }
+
+    private func publishMuteSnapshot(_ snapshot: MicrophoneMuteSnapshot) {
+        onMuteSnapshotChange?(snapshot)
+    }
+}

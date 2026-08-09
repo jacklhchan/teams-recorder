@@ -3,6 +3,30 @@ import XCTest
 
 @MainActor
 final class AppRuntimeTests: XCTestCase {
+    func testRuntimeShutsDownControllerAndPresenterBeforeModelExactlyOnce() {
+        let fixture = makeFixture()
+        var producerCallbacksWereStillInstalledDuringDismiss = false
+        fixture.presenter.onDismiss = {
+            producerCallbacksWereStillInstalledDuringDismiss =
+                fixture.model.transcriptionFeature.onSuccessfulPublication != nil
+                && fixture.model.libraryFeature.onSessionsLoaded != nil
+                && fixture.model.meetingIntelligenceFeature.onPublished != nil
+        }
+        let runtime = AppRuntime(
+            model: fixture.model,
+            recordingControllerFactory: fixture.presenterFactory
+        )
+
+        runtime.shutdown()
+        runtime.shutdown()
+
+        XCTAssertEqual(fixture.presenter.dismissCount, 1)
+        XCTAssertTrue(producerCallbacksWereStillInstalledDuringDismiss)
+        XCTAssertNil(fixture.model.transcriptionFeature.onSuccessfulPublication)
+        XCTAssertNil(fixture.model.libraryFeature.onSessionsLoaded)
+        XCTAssertNil(fixture.model.meetingIntelligenceFeature.onPublished)
+    }
+
     func testRuntimeExposesInjectedModelAndCreatesOnePresenter() {
         let fixture = makeFixture()
 
@@ -89,6 +113,7 @@ private struct AppRuntimeFixture {
 private final class AppRuntimePresenterSpy: RecordingControllerPresenting {
     private(set) var presentedModels: [AppModel] = []
     private(set) var dismissCount = 0
+    var onDismiss: (() -> Void)?
 
     func present(model: AppModel) {
         presentedModels.append(model)
@@ -96,6 +121,7 @@ private final class AppRuntimePresenterSpy: RecordingControllerPresenting {
 
     func dismiss() {
         dismissCount += 1
+        onDismiss?()
     }
 }
 

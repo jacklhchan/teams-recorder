@@ -140,6 +140,28 @@ final class TeamsAutoMeetingCoordinator {
         }
     }
 
+    func handleConfirmedMeetingEnd() {
+        isInMeeting = false
+        guard isEnabled else { return }
+
+        switch state {
+        case .startCountdown:
+            invalidateTimer()
+            state = .waitingForMeeting
+        case .starting:
+            state = .waitingForMeeting
+            onCommand?(.cancelAutomaticStart)
+        case .automaticRecording:
+            invalidateTimer()
+            automaticStopPhase = .committed
+            onCommand?(.stopRecording)
+        case .suppressedUntilMeetingEnd, .startBlocked, .startFailed:
+            state = .waitingForMeeting
+        default:
+            break
+        }
+    }
+
     func cancelCountdown() {
         guard case .startCountdown = state else { return }
         invalidateTimer()

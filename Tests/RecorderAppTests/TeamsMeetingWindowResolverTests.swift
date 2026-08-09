@@ -282,6 +282,65 @@ final class TeamsMeetingWindowResolverTests: XCTestCase {
         XCTAssertEqual(candidates.map(\.identity), [first, second])
     }
 
+    func testLocalObservationSelectsEligibleWindowWithoutMeetingAPIState() {
+        var resolver = TeamsMeetingWindowResolver()
+        let identity = TeamsWindowIdentity(processID: 7, windowID: 42)
+
+        assertReady(
+            resolver.observeLocal(
+                [snapshot(identity: identity, title: "Weekly sync")],
+                now: meetingStarted
+            ),
+            identity: identity
+        )
+    }
+
+    func testLocalObservationTracksSameWindowFromCalendarThroughMeetingAndBack() {
+        var resolver = TeamsMeetingWindowResolver()
+        let identity = TeamsWindowIdentity(processID: 7, windowID: 42)
+
+        XCTAssertEqual(
+            resolver.observeLocal(
+                [snapshot(
+                    identity: identity,
+                    title: "Calendar | pccw.com | Microsoft Teams"
+                )],
+                now: beforeMeeting
+            ),
+            .waiting
+        )
+        XCTAssertEqual(
+            resolver.observeLocal(
+                [snapshot(
+                    identity: identity,
+                    title: "Meeting join | Weekly sync | Microsoft Teams"
+                )],
+                now: meetingStarted
+            ),
+            .waiting
+        )
+        assertReady(
+            resolver.observeLocal(
+                [snapshot(
+                    identity: identity,
+                    title: "Weekly sync | pccw.com | Microsoft Teams"
+                )],
+                now: meetingStarted.addingTimeInterval(1)
+            ),
+            identity: identity
+        )
+        XCTAssertEqual(
+            resolver.observeLocal(
+                [snapshot(
+                    identity: identity,
+                    title: "Calendar | pccw.com | Microsoft Teams"
+                )],
+                now: meetingStarted.addingTimeInterval(2)
+            ),
+            .waiting
+        )
+    }
+
     func testOwnerPIDPreventsReusedWindowIDFromInheritingPreMeetingState() {
         var resolver = TeamsMeetingWindowResolver()
         let oldIdentity = TeamsWindowIdentity(processID: 7, windowID: 10)

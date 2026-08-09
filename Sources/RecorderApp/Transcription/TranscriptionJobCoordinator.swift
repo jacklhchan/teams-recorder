@@ -3,39 +3,64 @@ import Foundation
 
 @MainActor
 final class TranscriptionJobCoordinator: ObservableObject {
-    @Published var transcribingSessionID: RecordingSession.ID?
-    @Published var transcriptionStatus = ""
-    @Published var lastTranscriptionSessionID: RecordingSession.ID?
-    @Published var lastTranscriptionStatus = ""
-    @Published var lastTranscriptionDidFail = false
-    @Published var transcriptURLsBySessionID:
+    @Published private(set) var transcribingSessionID: RecordingSession.ID?
+    @Published private(set) var transcriptionStatus = ""
+    @Published private(set) var lastTranscriptionSessionID: RecordingSession.ID?
+    @Published private(set) var lastTranscriptionStatus = ""
+    @Published private(set) var lastTranscriptionDidFail = false
+    @Published private(set) var transcriptURLsBySessionID:
         [RecordingSession.ID: URL] = [:]
-    @Published var transcriptLogURLsBySessionID:
+    @Published private(set) var transcriptLogURLsBySessionID:
         [RecordingSession.ID: URL] = [:]
-    @Published var transcriptionStatesBySessionID:
+    @Published private(set) var transcriptionStatesBySessionID:
         [RecordingSession.ID: TranscriptionState] = [:]
 
     var onStatusMessage: ((String) -> Void)?
-    var onSuccessfulPublication: ((RecordingSession) -> Void)?
+    var onSuccessfulPublication: ((TranscriptPublished) -> Void)?
+
+    /// The only publication stream which a meeting-intelligence coordinator
+    /// may consume.  This is intentionally read-only outside this type.
+    var publicationSourceID: UUID { coordinatorInstanceID }
 
     private let providerRepository:
         any OpenAICompatibleProviderManaging
+    let providerRepositoryIdentity: ObjectIdentifier
     private let audioPreparer: any TranscriptionAudioPreparing
     private let service: any TranscriptionServicing
+    /// The feature boundary exposes this identity for PR B aggregate
+    /// composition validation; this coordinator remains its sole user for ASR
+    /// artifact publication.
+    let mutationGate: RecordingSessionMutationGate
+    private let failureDiagnosticPublisher: TranscriptionArtifactPublisher
+    private let transcriptReader: any TranscriptDocumentReading
+    private let coordinatorInstanceID: UUID
+    private let attemptIDFactory: () -> UUID
     private var task: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var activeAttempt: UUID?
     private var activeSession: RecordingSession?
     private var cancellationRequested = false
+    private var workspacePublicationFence: WorkspacePublicationFence = .initial
 
     init(
         providerRepository: any OpenAICompatibleProviderManaging,
         audioPreparer: any TranscriptionAudioPreparing,
-        service: any TranscriptionServicing
+        service: any TranscriptionServicing,
+        mutationGate: RecordingSessionMutationGate = .init(),
+        transcriptReader: any TranscriptDocumentReading =
+            SecureTranscriptDocumentReader(),
+        coordinatorInstanceID: UUID = UUID(),
+        attemptIDFactory: @escaping () -> UUID = UUID.init
     ) {
         self.providerRepository = providerRepository
+        providerRepositoryIdentity = providerRepository.compositionIdentity
         self.audioPreparer = audioPreparer
         self.service = service
+        self.mutationGate = mutationGate
+        failureDiagnosticPublisher = .init(mutationGate: mutationGate)
+        self.transcriptReader = transcriptReader
+        self.coordinatorInstanceID = coordinatorInstanceID
+        self.attemptIDFactory = attemptIDFactory
     }
 
     deinit {
@@ -44,6 +69,16 @@ final class TranscriptionJobCoordinator: ObservableObject {
 
     var isRunning: Bool {
         task != nil || transcribingSessionID != nil
+    }
+
+    func advanceWorkspacePublicationFence(
+        to fence: WorkspacePublicationFence
+    ) {
+        precondition(
+            fence.revision > workspacePublicationFence.revision,
+            "Workspace publication fence must advance monotonically."
+        )
+        workspacePublicationFence = fence
     }
 
     func start(session: RecordingSession) {
@@ -64,8 +99,9 @@ final class TranscriptionJobCoordinator: ObservableObject {
         }
 
         generation &+= 1
-        let attempt = UUID()
+        let attempt = attemptIDFactory()
         let attemptGeneration = generation
+        let attemptWorkspaceFence = workspacePublicationFence
         activeAttempt = attempt
         activeSession = session
         cancellationRequested = false
@@ -150,14 +186,45 @@ final class TranscriptionJobCoordinator: ObservableObject {
                    ) == nil {
                     throw CoordinatorError.invalidArtifact
                 }
-                self?.transcriptURLsBySessionID[session.id] =
-                    transcriptURL
-                if let logURL = result.logURL {
-                    self?.transcriptLogURLsBySessionID[session.id] =
-                        logURL
+                guard let self else { return }
+                let event = try self.mutationGate.withMutation(
+                    for: session.folderURL
+                ) {
+                    guard self.isActive(
+                        generation: attemptGeneration,
+                        attempt: attempt
+                    ), !self.cancellationRequested else {
+                        throw CoordinatorError.staleAttempt
+                    }
+                    let snapshot = try self.transcriptReader.readCanonical(
+                        in: session.folderURL,
+                        allowLegacy: true
+                    )
+                    guard snapshot.url == transcriptURL,
+                          snapshot.revision == result.committedTranscriptRevision else {
+                        throw CoordinatorError.committedRevisionMismatch
+                    }
+                    self.transcriptURLsBySessionID[session.id] = transcriptURL
+                    if let logURL = result.logURL {
+                        self.transcriptLogURLsBySessionID[session.id] = logURL
+                    }
+                    return TranscriptPublished(
+                        session: session,
+                        canonicalURL: transcriptURL,
+                        revision: result.committedTranscriptRevision,
+                        normalizedSessionFolder: session.folderURL
+                            .resolvingSymlinksInPath()
+                            .standardizedFileURL,
+                        identity: .init(
+                            coordinatorInstanceID: self.coordinatorInstanceID,
+                            generation: attemptGeneration,
+                            attemptID: attempt
+                        ),
+                        workspaceFence: attemptWorkspaceFence
+                    )
                 }
-                self?.onSuccessfulPublication?(session)
-                self?.finishSuccess(
+                self.onSuccessfulPublication?(event)
+                self.finishSuccess(
                     session: session,
                     generation: attemptGeneration,
                     attempt: attempt
@@ -170,27 +237,14 @@ final class TranscriptionJobCoordinator: ObservableObject {
                 )
             } catch {
                 guard let self else { return }
-                if Task.isCancelled || self.cancellationRequested {
-                    self.finishCancellation(
-                        session: session,
-                        generation: attemptGeneration,
-                        attempt: attempt
-                    )
-                } else {
-                    let prefix = prepared == nil
-                        ? "Transcription preparation failed"
-                        : "Transcription launch failed"
-                    let detail = self.redacted(
-                        error.localizedDescription,
-                        secret: snapshot.apiKey
-                    )
-                    self.finishFailure(
-                        session: session,
-                        message: "\(prefix): \(detail)",
-                        generation: attemptGeneration,
-                        attempt: attempt
-                    )
-                }
+                self.handleFailure(
+                    error,
+                    prepared: prepared,
+                    session: session,
+                    snapshot: snapshot,
+                    generation: attemptGeneration,
+                    attempt: attempt
+                )
             }
         }
     }
@@ -224,6 +278,48 @@ final class TranscriptionJobCoordinator: ObservableObject {
         activeSession = nil
     }
 
+    func replaceLoadedStates(_ states: [RecordingSession.ID: TranscriptionState]) {
+        var projected = states.mapValues { state in
+            guard [.queued, .uploading, .transcribing].contains(state.phase) else {
+                return state
+            }
+            var interrupted = state
+            interrupted.phase = .interrupted
+            interrupted.message = "Transcription interrupted. You can start it again."
+            interrupted.finishedAt = Date()
+            return interrupted
+        }
+
+        if let activeID = transcribingSessionID {
+            if let liveState = transcriptionStatesBySessionID[activeID] {
+                projected[activeID] = liveState
+            } else if let loadedState = states[activeID] {
+                projected[activeID] = loadedState
+            }
+        }
+        transcriptionStatesBySessionID = projected
+    }
+
+    func clearProjections() {
+        transcriptURLsBySessionID = [:]
+        transcriptLogURLsBySessionID = [:]
+        transcriptionStatesBySessionID = [:]
+    }
+
+    func setTranscriptURL(_ url: URL?, for sessionID: RecordingSession.ID) {
+        transcriptURLsBySessionID[sessionID] = url
+    }
+
+    func setTranscriptLogURL(_ url: URL?, for sessionID: RecordingSession.ID) {
+        transcriptLogURLsBySessionID[sessionID] = url
+    }
+
+    func removeProjection(for sessionID: RecordingSession.ID) {
+        transcriptionStatesBySessionID.removeValue(forKey: sessionID)
+        transcriptURLsBySessionID.removeValue(forKey: sessionID)
+        transcriptLogURLsBySessionID.removeValue(forKey: sessionID)
+    }
+
     private func apply(
         _ progress: TranscriptionServiceProgress,
         session: RecordingSession,
@@ -246,7 +342,6 @@ final class TranscriptionJobCoordinator: ObservableObject {
             ),
             for: session
         )
-        publishGlobalStatus(progress.message)
     }
 
     private func finishSuccess(
@@ -371,6 +466,117 @@ final class TranscriptionJobCoordinator: ObservableObject {
         )
     }
 
+    func handleFailure(
+        _ error: Error,
+        prepared: PreparedTranscriptionAudio?,
+        session: RecordingSession,
+        snapshot: OpenAICompatibleProviderSnapshot,
+        generation: UInt64,
+        attempt: UUID
+    ) {
+        guard isActive(generation: generation, attempt: attempt) else {
+            return
+        }
+        if Task.isCancelled
+            || cancellationRequested
+            || (error as? URLError)?.code == .cancelled {
+            finishCancellation(
+                session: session,
+                generation: generation,
+                attempt: attempt
+            )
+            return
+        }
+
+        _ = try? failureDiagnosticPublisher.publishFailureDiagnostic(
+            failureDiagnostic(for: error, prepared: prepared),
+            sessionFolder: session.folderURL
+        )
+        let prefix = prepared == nil
+            ? "Transcription preparation failed"
+            : "Transcription launch failed"
+        let detail = redacted(
+            error.localizedDescription,
+            secret: snapshot.apiKey
+        )
+        finishFailure(
+            session: session,
+            message: "\(prefix): \(detail)",
+            generation: generation,
+            attempt: attempt
+        )
+    }
+
+    private func failureDiagnostic(
+        for error: Error,
+        prepared: PreparedTranscriptionAudio?
+    ) -> TranscriptionFailureDiagnostic {
+        guard prepared != nil else {
+            return .init(
+                stage: .preparation,
+                errorCode: .preparationFailure
+            )
+        }
+
+        switch error {
+        case let error as OpenAICompatibleTranscriptionError:
+            switch error {
+            case .audioChunkTooLarge:
+                return .init(
+                    stage: .upload,
+                    errorCode: .audioChunkTooLarge
+                )
+            case .httpStatus(let status):
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerHTTPFailure,
+                    httpStatus: status
+                )
+            case .invalidResponse, .authenticationRejected:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerTransportFailure
+                )
+            }
+        case let error as ProviderHTTPTransportError:
+            switch error {
+            case .responseTooLarge:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerResponseTooLarge
+                )
+            case .redirectRejected:
+                return .init(
+                    stage: .upload,
+                    errorCode: .providerTransportFailure
+                )
+            }
+        case let error as CoordinatorError:
+            switch error {
+            case .invalidArtifact:
+                return .init(
+                    stage: .publication,
+                    errorCode: .invalidArtifact
+                )
+            case .committedRevisionMismatch:
+                return .init(
+                    stage: .publication,
+                    errorCode: .committedRevisionMismatch
+                )
+            case .staleAttempt:
+                return .init(
+                    stage: .publication,
+                    errorCode: .publicationFailure
+                )
+            }
+        default:
+            return .init(
+                stage: .upload,
+                errorCode: .providerTransportFailure
+            )
+        }
+    }
+
     private func updateState(
         _ state: TranscriptionState,
         for session: RecordingSession
@@ -388,9 +594,18 @@ final class TranscriptionJobCoordinator: ObservableObject {
 
     private enum CoordinatorError: LocalizedError {
         case invalidArtifact
+        case committedRevisionMismatch
+        case staleAttempt
 
         var errorDescription: String? {
-            "Transcription reported an invalid artifact path."
+            switch self {
+            case .invalidArtifact:
+                "Transcription reported an invalid artifact path."
+            case .committedRevisionMismatch:
+                "Committed transcript revision did not match the canonical file."
+            case .staleAttempt:
+                "Transcription attempt is no longer active."
+            }
         }
     }
 }

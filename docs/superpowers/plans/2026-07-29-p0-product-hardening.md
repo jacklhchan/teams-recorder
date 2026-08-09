@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- macOS deployment target remains `15.0`.
+- macOS deployment target is `26.0`.
 - Production app transcription must not require Python, FFmpeg, FFprobe, OpenCC, or PATH lookup.
 - Remote provider URLs remain HTTPS-only; HTTP remains allowed only for loopback.
 - API keys remain in Keychain and must never appear in logs, status text, manifests, or persisted errors.

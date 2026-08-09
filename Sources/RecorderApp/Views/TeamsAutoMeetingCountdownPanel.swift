@@ -1,51 +1,21 @@
 import AppKit
 import SwiftUI
 
+enum TeamsAutoMeetingCountdownAccessibility {
+    static let panelID = "teams-auto-countdown-panel"
+    static let secondsID = "teams-auto-countdown-seconds"
+    static let cancelID = "teams-auto-countdown-cancel"
+    static let allIDs = [panelID, secondsID, cancelID]
+    static let cancelLabel = "Cancel automatic recording"
+}
+
 struct TeamsAutoMeetingPresentation: Equatable {
     let title: String
     let detail: String
     let systemImage: String
     let showsCancel: Bool
 
-    static func make(
-        state: TeamsAutoMeetingState,
-        connectionStatus: TeamsMuteSyncStatus
-    ) -> TeamsAutoMeetingPresentation {
-        if state == .waitingForMeeting {
-            switch connectionStatus {
-            case .connecting:
-                return .init(
-                    title: "Connecting to Teams",
-                    detail: "Automatic recording remains armed",
-                    systemImage: "arrow.triangle.2.circlepath",
-                    showsCancel: false
-                )
-            case .waitingForTeamsAPI:
-                return .init(
-                    title: "Teams API unavailable",
-                    detail: "Automatic recording remains armed",
-                    systemImage: "exclamationmark.triangle.fill",
-                    showsCancel: false
-                )
-            case .waitingForPairingApproval:
-                return .init(
-                    title: "Waiting for Teams approval",
-                    detail: "Automatic recording remains armed",
-                    systemImage: "exclamationmark.triangle.fill",
-                    showsCancel: false
-                )
-            case .failed(let message):
-                return .init(
-                    title: "Teams connection error",
-                    detail: message,
-                    systemImage: "exclamationmark.triangle.fill",
-                    showsCancel: false
-                )
-            case .disabled, .waitingForMeeting, .ready, .inMeeting:
-                break
-            }
-        }
-
+    static func make(state: TeamsAutoMeetingState) -> TeamsAutoMeetingPresentation {
         return switch state {
         case .disabled:
             .init(
@@ -57,7 +27,7 @@ struct TeamsAutoMeetingPresentation: Equatable {
         case .waitingForMeeting:
             .init(
                 title: "Waiting for meeting",
-                detail: "Automatic recording is armed",
+                detail: "Watching Teams meeting windows locally",
                 systemImage: "clock",
                 showsCancel: false
             )
@@ -204,7 +174,7 @@ final class TeamsAutoMeetingCountdownPanelController:
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.title = "Teams Auto Recording"
+        panel.title = "Teams Window Auto Recording"
         panel.delegate = self
     }
 
@@ -259,7 +229,7 @@ final class TeamsAutoMeetingCountdownPanelController:
     }
 }
 
-private struct TeamsAutoMeetingCountdownView: View {
+struct TeamsAutoMeetingCountdownView: View {
     let seconds: Int
     let cancel: @MainActor () -> Void
 
@@ -276,8 +246,9 @@ private struct TeamsAutoMeetingCountdownView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier(
-                        "teams-auto-countdown-seconds"
+                        TeamsAutoMeetingCountdownAccessibility.secondsID
                     )
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
             }
 
             Spacer(minLength: 8)
@@ -285,13 +256,16 @@ private struct TeamsAutoMeetingCountdownView: View {
             Button(action: cancel) {
                 Image(systemName: "xmark")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(RecorderMotionButtonStyle(prominence: .compact, tint: .secondary))
             .help("Cancel automatic recording")
-            .accessibilityLabel("Cancel automatic recording")
-            .accessibilityIdentifier("teams-auto-countdown-cancel")
+            .accessibilityLabel(TeamsAutoMeetingCountdownAccessibility.cancelLabel)
+            .accessibilityIdentifier(TeamsAutoMeetingCountdownAccessibility.cancelID)
+            .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.cancelID))
         }
         .padding(.horizontal, 16)
-        .frame(minWidth: 360, minHeight: 62)
-        .accessibilityIdentifier("teams-auto-countdown-panel")
+        .frame(width: 360, height: 94)
+        .recorderGlassSurface(.navigation)
+        .accessibilityIdentifier(TeamsAutoMeetingCountdownAccessibility.panelID)
+        .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.panelID))
     }
 }

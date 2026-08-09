@@ -10,7 +10,7 @@ Add a local virtual microphone so an AirPods mute gesture can silence both the
 recorded microphone and audio sent to Microsoft Teams while Teams remains
 unmuted.
 
-This work targets the existing macOS 15+ SwiftUI application and preserves its
+This work targets the existing macOS 26+ SwiftUI application and preserves its
 single-file recording, waveform, playback, library, health, and transcription
 features.
 

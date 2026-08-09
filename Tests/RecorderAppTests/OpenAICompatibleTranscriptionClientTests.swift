@@ -3,6 +3,31 @@ import XCTest
 @testable import RecorderApp
 
 final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
+    func testUploadUsesOnlySnapshotSelectedHKTHeader() async throws {
+        let transport = RecordingTranscriptionTransport(responses: [
+            .http(status: 200, body: #"{"text":"done"}"#)
+        ])
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(
+            profile: try .hktValidated(
+                groupID: "89", asrModel: "hkt-asr", llmModel: "hkt-llm",
+                language: "yue", prompt: "prompt"
+            ),
+            apiKey: "hkt-secret"
+        )
+
+        _ = try await makeClient(transport: transport).transcribe(
+            audioData: Data("audio".utf8), fileName: "meeting.m4a",
+            snapshot: snapshot, prompt: "prompt"
+        )
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.uat.bot-builder.pccw.com/v1/groups/89/openai/audio/transcriptions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-API-KEY"), "hkt-secret")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertTrue(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains("hkt-asr"))
+        XCTAssertFalse(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains("hkt-llm"))
+    }
+
     func testRetryPolicyRetriesOnlyTransientStatuses() {
         let policy = TranscriptionRetryPolicy()
 
@@ -169,6 +194,43 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
                 statusCode: 308
             )
         )
+    }
+
+    func testRedirectPolicyAcceptsNormalizedJSONAndRejectsGETOrContentTypeChangesWithoutAuthorization() throws {
+        var source = URLRequest(url: try XCTUnwrap(URL(string: "https://api.example/v1/chat/completions")))
+        source.httpMethod = "POST"
+        source.httpBody = Data("{}".utf8)
+        source.setValue("Application/JSON; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        source.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        var proposed = source
+        proposed.url = try XCTUnwrap(URL(string: "https://api.example/v1/chat/redirected"))
+        proposed.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        proposed.setValue("Bearer leaked", forHTTPHeaderField: "Authorization")
+        XCTAssertEqual(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 308)?.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        proposed.httpMethod = "GET"
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 307))
+        proposed.httpMethod = "POST"
+        proposed.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: proposed, statusCode: 307))
+
+        let multipart = try uploadRequest(url: "https://api.example/v1/audio/transcriptions")
+        var changedBoundary = multipart
+        changedBoundary.url = try XCTUnwrap(URL(string: "https://api.example/v1/audio/redirected"))
+        changedBoundary.setValue("multipart/form-data; boundary=changed", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: multipart, proposed: changedBoundary, statusCode: 307))
+        changedBoundary.setValue("multipart/form-data; boundary=test-BOUNDARY", forHTTPHeaderField: "Content-Type")
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: multipart, proposed: changedBoundary, statusCode: 307))
+    }
+
+    func testRedirectPolicyRestoresAPIKeyOnlyAfterSameOriginValidation() throws {
+        var source = try uploadRequest(url: "https://api.example/v1/audio/transcriptions")
+        source.setValue("api-key", forHTTPHeaderField: "X-API-KEY")
+        var accepted = source
+        accepted.url = try XCTUnwrap(URL(string: "https://api.example/v1/audio/redirected"))
+        accepted.setValue("leaked", forHTTPHeaderField: "X-API-KEY")
+        XCTAssertEqual(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: accepted, statusCode: 307)?.value(forHTTPHeaderField: "X-API-KEY"), "api-key")
+        accepted.url = try XCTUnwrap(URL(string: "https://evil.example/redirected"))
+        XCTAssertNil(ProviderRedirectPolicy.redirectedRequest(from: source, proposed: accepted, statusCode: 307))
     }
 
     func testMultipartBuilderCapsAudioAndIncludesTypedFields() throws {
@@ -417,79 +479,97 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
         XCTAssertEqual(sleeps.values.count, 2)
     }
 
-    func testCancellationDuringTransportRetryDelayStopsAnotherUpload() async throws {
+    func testCancellationDuringTransportRetryDelayStopsAnotherUpload() throws {
         let transport = RecordingTranscriptionTransport(
             responses: [
                 .urlError(.cannotConnectToHost),
                 .http(status: 200, body: #"{"text":"too late"}"#)
             ]
         )
-        let sleeps = LockedValues<Double>()
+        let retryDelayStarted = expectation(
+            description: "Transport retry delay started"
+        )
+        let sleeper = ManualTranscriptionSleeper {
+            retryDelayStarted.fulfill()
+        }
         let client = makeClient(
             transport: transport,
             sleep: { seconds in
-                sleeps.append(seconds)
-                try await Task.sleep(for: .seconds(60))
+                try await sleeper.sleep(seconds)
             }
         )
+        let snapshot = try makeSnapshot()
+        let cancellationOutcomes = LockedValues<Bool>()
+        let cancellationFinished = expectation(
+            description: "Transport retry cancellation finished"
+        )
         let task = Task {
-            try await client.transcribe(
-                audioData: Data([1]),
-                fileName: "chunk.m4a",
-                snapshot: try makeSnapshot(),
-                prompt: ""
-            )
+            defer { cancellationFinished.fulfill() }
+            do {
+                _ = try await client.transcribe(
+                    audioData: Data([1]),
+                    fileName: "chunk.m4a",
+                    snapshot: snapshot,
+                    prompt: ""
+                )
+                cancellationOutcomes.append(false)
+            } catch {
+                cancellationOutcomes.append(error is CancellationError)
+            }
         }
-        for _ in 0..<500 where sleeps.values.isEmpty {
-            await Task.yield()
-        }
+        wait(for: [retryDelayStarted], timeout: 5)
 
         task.cancel()
+        wait(for: [cancellationFinished], timeout: 5)
 
-        do {
-            _ = try await task.value
-            XCTFail("Expected cancellation during the retry delay")
-        } catch {
-            XCTAssertTrue(error is CancellationError)
-        }
+        XCTAssertEqual(cancellationOutcomes.values, [true])
         XCTAssertEqual(transport.requests.count, 1)
     }
 
-    func testCancellationDuringRetryDelayStopsBeforeAnotherUpload() async throws {
+    func testCancellationDuringRetryDelayStopsBeforeAnotherUpload() throws {
         let transport = RecordingTranscriptionTransport(
             responses: [
                 .http(status: 503, body: "{}"),
                 .http(status: 200, body: #"{"text":"too late"}"#)
             ]
         )
-        let sleeps = LockedValues<Double>()
+        let retryDelayStarted = expectation(
+            description: "HTTP retry delay started"
+        )
+        let sleeper = ManualTranscriptionSleeper {
+            retryDelayStarted.fulfill()
+        }
         let client = makeClient(
             transport: transport,
             sleep: { seconds in
-                sleeps.append(seconds)
-                try await Task.sleep(for: .seconds(60))
+                try await sleeper.sleep(seconds)
             }
         )
+        let snapshot = try makeSnapshot()
+        let cancellationOutcomes = LockedValues<Bool>()
+        let cancellationFinished = expectation(
+            description: "HTTP retry cancellation finished"
+        )
         let task = Task {
-            try await client.transcribe(
-                audioData: Data([1]),
-                fileName: "chunk.m4a",
-                snapshot: try makeSnapshot(),
-                prompt: ""
-            )
+            defer { cancellationFinished.fulfill() }
+            do {
+                _ = try await client.transcribe(
+                    audioData: Data([1]),
+                    fileName: "chunk.m4a",
+                    snapshot: snapshot,
+                    prompt: ""
+                )
+                cancellationOutcomes.append(false)
+            } catch {
+                cancellationOutcomes.append(error is CancellationError)
+            }
         }
-        for _ in 0..<500 where sleeps.values.isEmpty {
-            await Task.yield()
-        }
+        wait(for: [retryDelayStarted], timeout: 5)
 
         task.cancel()
+        wait(for: [cancellationFinished], timeout: 5)
 
-        do {
-            _ = try await task.value
-            XCTFail("Expected cancellation during the retry delay")
-        } catch {
-            XCTAssertTrue(error is CancellationError)
-        }
+        XCTAssertEqual(cancellationOutcomes.values, [true])
         XCTAssertEqual(transport.requests.count, 1)
     }
 
@@ -504,18 +584,25 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
             ]
         )
         let client = makeClient(transport: transport)
-
-        do {
-            _ = try await client.transcribe(
+        let task = Task {
+            try await client.transcribe(
                 audioData: Data([1]),
                 fileName: "chunk.m4a",
                 snapshot: try makeSnapshot(),
                 prompt: ""
             )
+        }
+
+        do {
+            _ = try await task.value
             XCTFail("Expected cancellation before response processing")
         } catch {
             XCTAssertTrue(error is CancellationError)
         }
+        XCTAssertFalse(
+            Task.isCancelled,
+            "The XCTest harness task must remain active."
+        )
     }
 
     func testConfiguration4xxStopsWithoutRetryingJSONRequest() async throws {
@@ -601,7 +688,7 @@ final class OpenAICompatibleTranscriptionClientTests: XCTestCase {
     private func makeSnapshot(
         apiKey: String? = nil
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(
+        try .validated(
             profile: try OpenAICompatibleProviderProfile.validated(
                 baseURLText: "https://api.example/v1",
                 asrModel: "asr-model",
@@ -711,6 +798,45 @@ private final class RecordingTranscriptionTransport:
                 )!
             )
         }
+    }
+}
+
+private final class ManualTranscriptionSleeper: @unchecked Sendable {
+    private let lock = NSLock()
+    private let onStart: @Sendable () -> Void
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var wasCancelled = false
+
+    init(onStart: @escaping @Sendable () -> Void) {
+        self.onStart = onStart
+    }
+
+    func sleep(_: Double) async throws {
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                let cancelImmediately = lock.withLock {
+                    if wasCancelled {
+                        return true
+                    }
+                    self.continuation = continuation
+                    return false
+                }
+                onStart()
+                if cancelImmediately {
+                    continuation.resume(
+                        throwing: CancellationError()
+                    )
+                }
+            }
+        }, onCancel: {
+            let continuation = self.lock.withLock {
+                self.wasCancelled = true
+                let continuation = self.continuation
+                self.continuation = nil
+                return continuation
+            }
+            continuation?.resume(throwing: CancellationError())
+        })
     }
 }
 

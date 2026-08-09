@@ -29,7 +29,7 @@ xcrun clang \
     -fblocks \
     -fPIC \
     -fvisibility=hidden \
-    -mmacosx-version-min=15.0 \
+    -mmacosx-version-min=26.0 \
     -I "$ROOT_DIR/Sources/VirtualMicBridge/include" \
     -c \
     "$DRIVER_DIR/LocalRecorderVirtualMic.c" \
@@ -41,7 +41,7 @@ xcrun clang++ \
     -O2 \
     -fPIC \
     -fvisibility=hidden \
-    -mmacosx-version-min=15.0 \
+    -mmacosx-version-min=26.0 \
     -I "$ROOT_DIR/Sources/VirtualMicBridge/include" \
     -c \
     "$ROOT_DIR/Sources/VirtualMicBridge/VirtualMicBridge.cpp" \
@@ -50,7 +50,7 @@ xcrun clang++ \
 xcrun clang++ \
     -arch arm64 \
     -bundle \
-    -mmacosx-version-min=15.0 \
+    -mmacosx-version-min=26.0 \
     "$DRIVER_OBJECT" \
     "$BRIDGE_OBJECT" \
     -Wl,-exported_symbol,_LocalRecorderVirtualMic_Create \

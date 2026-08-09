@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "summary": "The team reviewed the migration sequence.",
+  "suggestedTitle": "ClearPass migration review",
+  "sourceTranscriptSHA256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "sourceTranscriptByteCount": 4096,
+  "model": "llm-model",
+  "generatedAt": "2026-07-31T03:00:00Z",
+  "intent": "automatic"
+}

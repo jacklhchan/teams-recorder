@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 2,
+  "title": "ClearPass migration review",
+  "titleOrigin": "meetingIntelligence",
+  "tags": [
+    "customer",
+    "clearpass"
+  ],
+  "isFavorite": true,
+  "mediaKind": "audio",
+  "screenIntervals": [],
+  "recoveryState": "none",
+  "source": "imported",
+  "meetingType": "Technical Workshop",
+  "participants": [
+    "Alex Chan",
+    "Sam Lee"
+  ],
+  "crossPlatformExtension": {
+    "nested": [
+      "preserve",
+      {
+        "unknown": true
+      }
+    ]
+  }
+}

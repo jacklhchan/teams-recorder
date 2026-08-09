@@ -3,23 +3,67 @@
   "$id": "https://github.com/jacklhchan/teams-recorder/contracts/recording-session.schema.json",
   "title": "Local Meeting Recorder session metadata",
   "type": "object",
-  "required": [
-    "schemaVersion",
-    "tags",
-    "isFavorite",
-    "mediaKind",
-    "screenIntervals",
-    "recoveryState",
-    "source",
-    "participants"
+  "oneOf": [
+    {
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "tags",
+        "isFavorite",
+        "mediaKind",
+        "screenIntervals",
+        "recoveryState",
+        "source",
+        "participants"
+      ]
+    },
+    {
+      "properties": {
+        "schemaVersion": {
+          "const": 2
+        },
+        "titleOrigin": {
+          "enum": [
+            "unset",
+            "meetingIntelligence",
+            "manual"
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "tags",
+        "isFavorite",
+        "mediaKind",
+        "screenIntervals",
+        "recoveryState",
+        "source",
+        "participants",
+        "titleOrigin"
+      ]
+    }
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "enum": [
+        1,
+        2
+      ]
     },
     "title": {
       "type": "string",
       "minLength": 1
+    },
+    "titleOrigin": {
+      "enum": [
+        "unset",
+        "meetingIntelligence",
+        "manual"
+      ]
     },
     "tags": {
       "type": "array",

@@ -3,11 +3,58 @@ import Combine
 import SwiftUI
 
 enum RecordingControllerAccessibility {
+    static let statusID = "recording-controller-status"
+    static let elapsedID = "recording-controller-elapsed"
+    static let systemWaveformID = "recording-controller-system-waveform"
+    static let microphoneWaveformID = "recording-controller-microphone-waveform"
+    static let microphoneMuteID = "recording-controller-microphone-mute"
+    static let teamsMicrophoneStatusID =
+        "recording-controller-teams-microphone-status"
+    static let teamsAccessibilityID =
+        "recording-controller-enable-teams-accessibility"
+    static let screenStatusID = "recording-controller-screen-status"
+    static let screenToggleID = "recording-controller-screen-toggle"
+    static let stopID = "recording-controller-stop"
+    static let allIDs = [
+        statusID,
+        elapsedID,
+        systemWaveformID,
+        microphoneWaveformID,
+        microphoneMuteID,
+        screenStatusID,
+        screenToggleID,
+        stopID
+    ]
     static let stopLabel = "Stop recording"
     static let screenCaptureLabel = "Capture Teams screen"
 
+    static func microphoneMuteLabel(isMuted: Bool) -> String {
+        isMuted ? "Unmute microphone" : "Mute microphone"
+    }
+
+    static func microphoneMuteValue(isMuted: Bool) -> String {
+        isMuted ? "Muted" : "Active"
+    }
+
     static func screenCaptureValue(isOn: Bool) -> String {
         isOn ? "On" : "Off"
+    }
+}
+
+enum RecordingControllerInputStatus: String, Equatable {
+    case signal = "Signal"
+    case quiet = "Quiet"
+    case muted = "Muted"
+    case disconnected = "Disconnected"
+
+    static func make(
+        level: LevelSnapshot,
+        isConnected: Bool,
+        isMuted: Bool
+    ) -> Self {
+        if !isConnected { return .disconnected }
+        if isMuted { return .muted }
+        return level.isSilent ? .quiet : .signal
     }
 }
 
@@ -89,6 +136,7 @@ final class RecordingControllerCoordinator {
         isShutdown = true
         observation?.cancel()
         observation = nil
+        model.setFloatingRecordingPanelActive(false)
         presenter.dismiss()
     }
 
@@ -97,8 +145,10 @@ final class RecordingControllerCoordinator {
         case .none:
             break
         case .present:
+            model.setFloatingRecordingPanelActive(true)
             presenter.present(model: model)
         case .dismiss:
+            model.setFloatingRecordingPanelActive(false)
             presenter.dismiss()
         }
     }
@@ -139,7 +189,7 @@ final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
 
 @MainActor
 final class RecordingControllerPanel: NSPanel {
-    private static let panelSize = NSSize(width: 390, height: 112)
+    private static let panelSize = NSSize(width: 390, height: 180)
     private static let screenInset: CGFloat = 16
 
     init() {
@@ -191,91 +241,31 @@ struct RecordingControllerView: View {
                 snapshot: snapshot,
                 now: context.date
             )
-
-            VStack(spacing: 10) {
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 10, height: 10)
-                    Text(presentation.title)
-                        .font(.headline)
-                        .accessibilityIdentifier(
-                            "recording-controller-status"
-                        )
-                    Spacer(minLength: 8)
-                    Text(presentation.elapsedText)
-                        .font(.system(.body, design: .monospaced))
-                        .monospacedDigit()
-                        .accessibilityIdentifier(
-                            "recording-controller-elapsed"
-                        )
-                    Button(action: model.startOrStop) {
-                        Image(systemName: "stop.fill")
+            RecordingControllerPanelContent(
+                presentation: presentation,
+                stop: model.startOrStop,
+                toggleMicrophoneMute: {
+                    model.toggleTeamsAndRecorderMicMute()
+                },
+                setScreenRequested: { requested in
+                    Task {
+                        await model.setTeamsScreenCaptureRequested(requested)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                    .controlSize(.small)
-                    .disabled(presentation.stopDisabled)
-                    .help("Stop recording")
-                    .accessibilityLabel(
-                        RecordingControllerAccessibility.stopLabel
-                    )
-                    .accessibilityIdentifier(
-                        "recording-controller-stop"
-                    )
-                }
-
-                HStack(spacing: 10) {
-                    Image(systemName: "rectangle.inset.filled")
-                        .foregroundStyle(screenColor(
-                            for: presentation.screenTone
-                        ))
-                    Text(presentation.screenStatusText)
-                        .foregroundStyle(screenColor(
-                            for: presentation.screenTone
-                        ))
-                        .lineLimit(1)
-                        .accessibilityIdentifier(
-                            "recording-controller-screen-status"
-                        )
-                    Spacer(minLength: 8)
-                    Toggle(
-                        "",
-                        isOn: Binding(
-                            get: { presentation.screenRequested },
-                            set: { requested in
-                                Task {
-                                    await model
-                                        .setTeamsScreenCaptureRequested(
-                                            requested
-                                        )
-                                }
-                            }
-                        )
-                    )
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .disabled(
-                        presentation.screenToggleDisabled ||
-                            presentation.stopDisabled
-                    )
-                    .help("Capture Teams screen")
-                    .accessibilityLabel(
-                        RecordingControllerAccessibility.screenCaptureLabel
-                    )
-                    .accessibilityValue(
-                        RecordingControllerAccessibility.screenCaptureValue(
-                            isOn: presentation.screenRequested
-                        )
-                    )
-                    .accessibilityIdentifier(
-                        "recording-controller-screen-toggle"
-                    )
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(width: 390, height: 112)
+                },
+                systemLevel: recorder.systemLevel,
+                microphoneLevel: recorder.micLevel,
+                isSystemConnected: recorder.isSystemCaptureConnected,
+                isMicrophoneConnected: recorder.isMicrophoneCaptureConnected,
+                isMicrophoneMuted: recorder.micMuted,
+                isLocalMicrophoneMuted: model.localMicMuted,
+                microphonePresentation:
+                    RecordingControllerMicrophonePresentation.make(
+                        recorderMuted: recorder.micMuted,
+                        teamsState: model.teamsMicMuteState
+                    ),
+                requestTeamsAccessibilityPermission:
+                    model.requestTeamsAccessibilityPermission
+            )
         }
     }
 
@@ -292,9 +282,266 @@ struct RecordingControllerView: View {
         )
     }
 
-    private func screenColor(
-        for tone: RecordingControllerTone
-    ) -> Color {
+}
+
+struct RecordingControllerPanelContent: View {
+    let presentation: RecordingControllerPresentation
+    let stop: () -> Void
+    let toggleMicrophoneMute: () -> Void
+    let setScreenRequested: (Bool) -> Void
+    let systemLevel: LevelSnapshot
+    let microphoneLevel: LevelSnapshot
+    let isSystemConnected: Bool
+    let isMicrophoneConnected: Bool
+    let isMicrophoneMuted: Bool
+    let isLocalMicrophoneMuted: Bool
+    var microphonePresentation =
+        RecordingControllerMicrophonePresentation.make(
+            recorderMuted: false,
+            teamsState: .unknown(.inactive)
+        )
+    var requestTeamsAccessibilityPermission: () -> Void = {}
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Circle().fill(.red).frame(width: 10, height: 10)
+                Text(presentation.title)
+                    .font(.headline)
+                    .accessibilityIdentifier(RecordingControllerAccessibility.statusID)
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: RecordingControllerAccessibility.statusID))
+                Spacer(minLength: 8)
+                Text(presentation.elapsedText)
+                    .font(.system(.body, design: .monospaced))
+                    .monospacedDigit()
+                    .accessibilityIdentifier(RecordingControllerAccessibility.elapsedID)
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: RecordingControllerAccessibility.elapsedID))
+                Button(action: stop) {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .buttonStyle(RecorderMotionButtonStyle(prominence: .prominent, tint: .red))
+                .disabled(presentation.stopDisabled)
+                .help("Stop recording")
+                .accessibilityLabel(RecordingControllerAccessibility.stopLabel)
+                .accessibilityIdentifier(RecordingControllerAccessibility.stopID)
+                .background(RecorderPanelRenderLocationMarker(productionIdentifier: RecordingControllerAccessibility.stopID))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            RecordingControllerInputRow(
+                title: "System / Teams",
+                systemImage: "speaker.wave.2.fill",
+                level: systemLevel,
+                isConnected: isSystemConnected,
+                isMuted: false,
+                tint: RecorderVisualStyle.systemAudio,
+                accessibilityID: RecordingControllerAccessibility.systemWaveformID,
+                iconAction: nil
+            )
+
+            RecordingControllerInputRow(
+                title: "Microphone",
+                systemImage: isLocalMicrophoneMuted ? "mic.slash.fill" : "mic.fill",
+                level: microphoneLevel,
+                isConnected: isMicrophoneConnected,
+                isMuted: isMicrophoneMuted,
+                tint: RecorderVisualStyle.microphone,
+                accessibilityID: RecordingControllerAccessibility.microphoneWaveformID,
+                iconAction: toggleMicrophoneMute,
+                iconIsMuted: isLocalMicrophoneMuted,
+                microphonePresentation: microphonePresentation,
+                requestTeamsAccessibilityPermission:
+                    requestTeamsAccessibilityPermission
+            )
+
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.inset.filled").foregroundStyle(screenColor(for: presentation.screenTone))
+                Text(presentation.screenStatusText)
+                    .foregroundStyle(screenColor(for: presentation.screenTone))
+                    .lineLimit(1)
+                    .accessibilityIdentifier(RecordingControllerAccessibility.screenStatusID)
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: RecordingControllerAccessibility.screenStatusID))
+                Spacer(minLength: 8)
+                Toggle("", isOn: Binding(get: { presentation.screenRequested }, set: setScreenRequested))
+                    .labelsHidden().toggleStyle(.switch)
+                    .disabled(presentation.screenToggleDisabled || presentation.stopDisabled)
+                    .help("Capture Teams screen")
+                    .accessibilityLabel(RecordingControllerAccessibility.screenCaptureLabel)
+                    .accessibilityValue(RecordingControllerAccessibility.screenCaptureValue(isOn: presentation.screenRequested))
+                    .accessibilityIdentifier(RecordingControllerAccessibility.screenToggleID)
+                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: RecordingControllerAccessibility.screenToggleID))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(width: 390, height: 180)
+        .recorderGlassSurface(.navigation)
+    }
+}
+
+private struct RecordingControllerInputRow: View {
+    let title: String
+    let systemImage: String
+    let level: LevelSnapshot
+    let isConnected: Bool
+    let isMuted: Bool
+    let tint: Color
+    let accessibilityID: String
+    let iconAction: (() -> Void)?
+    var iconIsMuted: Bool? = nil
+    var microphonePresentation: RecordingControllerMicrophonePresentation?
+        = nil
+    var requestTeamsAccessibilityPermission: (() -> Void)? = nil
+
+    private var status: RecordingControllerInputStatus {
+        RecordingControllerInputStatus.make(
+            level: level,
+            isConnected: isConnected,
+            isMuted: isMuted
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let iconAction {
+                let buttonIsMuted = iconIsMuted ?? isMuted
+                Button(action: iconAction) {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(buttonIsMuted ? .orange : tint)
+                        .frame(width: 18)
+                }
+                .buttonStyle(.plain)
+                .help(
+                    RecordingControllerAccessibility
+                        .microphoneMuteLabel(isMuted: buttonIsMuted)
+                )
+                .accessibilityLabel(
+                    RecordingControllerAccessibility
+                        .microphoneMuteLabel(isMuted: buttonIsMuted)
+                )
+                .accessibilityValue(
+                    RecordingControllerAccessibility
+                        .microphoneMuteValue(isMuted: buttonIsMuted)
+                )
+                .accessibilityIdentifier(
+                    RecordingControllerAccessibility.microphoneMuteID
+                )
+                .background(
+                    RecorderPanelRenderLocationMarker(
+                        productionIdentifier:
+                            RecordingControllerAccessibility.microphoneMuteID
+                    )
+                )
+            } else {
+                Image(systemName: systemImage)
+                    .foregroundStyle(tint)
+                    .frame(width: 18)
+            }
+            Text(title)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+                .frame(width: 84, alignment: .leading)
+            WaveformView(samples: level.samples, tint: tint)
+                .frame(maxWidth: .infinity)
+                .frame(height: 18)
+                .accessibilityHidden(true)
+                .background(
+                    RecordingControllerInputAccessibilityMarker(
+                        identifier: accessibilityID,
+                        label: title,
+                        value: status.rawValue
+                    )
+                )
+                .background(RecorderPanelRenderLocationMarker(productionIdentifier: accessibilityID))
+            if let microphonePresentation {
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(microphonePresentation.recorderStatusText)
+                        .font(.caption2)
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(microphonePresentation.teamsStatusText)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .foregroundStyle(
+                                microphonePresentation.hasMismatch
+                                    ? .orange
+                                    : .secondary
+                            )
+                            .accessibilityIdentifier(
+                                RecordingControllerAccessibility
+                                    .teamsMicrophoneStatusID
+                            )
+                        if microphonePresentation
+                            .showsEnableAccessibilityAction,
+                           let requestTeamsAccessibilityPermission {
+                            Button("Enable") {
+                                requestTeamsAccessibilityPermission()
+                            }
+                            .buttonStyle(.link)
+                            .font(.caption2)
+                            .help("Enable Accessibility")
+                            .accessibilityLabel("Enable Accessibility")
+                            .accessibilityIdentifier(
+                                RecordingControllerAccessibility
+                                    .teamsAccessibilityID
+                            )
+                        }
+                    }
+                }
+                .frame(width: 150, alignment: .trailing)
+            } else {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 6, height: 6)
+                Text(status.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 72, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var statusColor: Color {
+        switch status {
+        case .signal:
+            tint
+        case .quiet:
+            .secondary
+        case .muted:
+            .orange
+        case .disconnected:
+            .red
+        }
+    }
+}
+
+private struct RecordingControllerInputAccessibilityMarker: NSViewRepresentable {
+    let identifier: String
+    let label: String
+    let value: String
+
+    func makeNSView(context: Context) -> RecorderPassiveMarkerView {
+        let view = RecorderPassiveMarkerView(frame: .zero)
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: RecorderPassiveMarkerView, context _: Context) {
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.staticText)
+        view.setAccessibilityIdentifier(identifier)
+        view.setAccessibilityLabel(label)
+        view.setAccessibilityValue(value)
+    }
+}
+
+private func screenColor(for tone: RecordingControllerTone) -> Color {
         switch tone {
         case .neutral:
             return .secondary
@@ -304,6 +551,5 @@ struct RecordingControllerView: View {
             return .red
         case .warning:
             return .orange
-        }
     }
 }

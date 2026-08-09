@@ -131,6 +131,9 @@ class BuildAppContractTests(unittest.TestCase):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
     def make_swift_shim(self, directory, binary_directory):
+        helper = binary_directory / "recorderctl"
+        shutil.copyfile(binary_directory / "LocalMeetingRecorder", helper)
+        helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
         shim = directory / "swift-shim"
         self.write_executable(
             shim,
@@ -173,22 +176,35 @@ esac
         self.write_executable(shim, "#!/usr/bin/env bash\nprintf '%s: arm64\\n' \"$1\"\n")
         return shim
 
+    def make_vtool_shim(self, directory):
+        shim = directory / "vtool-shim"
+        self.write_executable(
+            shim,
+            "#!/usr/bin/env bash\nprintf ' platform MACOS\\n    minos 26.0\\n'\n",
+        )
+        return shim
+
     def make_app_fixture(self, root):
         app = root / "Fixture.app"
         macos = app / "Contents/MacOS"
+        helpers = app / "Contents/Helpers"
         resources = app / "Contents/Resources"
         macos.mkdir(parents=True)
+        helpers.mkdir()
         resources.mkdir()
         executable = macos / "LocalMeetingRecorder"
         executable.write_text("fixture", encoding="utf-8")
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        helper = helpers / "recorderctl"
+        helper.write_text("fixture", encoding="utf-8")
+        helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
         with (app / "Contents/Info.plist").open("wb") as stream:
             plistlib.dump(
                 {
                     "CFBundleIdentifier": "local.meeting.recorder.fixture",
                     "CFBundleShortVersionString": "1.2.3",
                     "CFBundleVersion": "7",
-                    "LSMinimumSystemVersion": "15.0",
+                    "LSMinimumSystemVersion": "26.0",
                 },
                 stream,
             )
@@ -208,6 +224,7 @@ esac
         self, app, codesign, file_command, entitlement_path, sign_mode="ad-hoc", **extra
     ):
         env = os.environ.copy()
+        vtool = self.make_vtool_shim(app.parent)
         env.update(
             {
                 "CODESIGN_BIN": str(codesign),
@@ -216,6 +233,7 @@ esac
                 "CODESIGN_SIGNATURE": "adhoc",
                 "CODESIGN_TEAM": "not set",
                 "CODESIGN_DV_EXIT": "1",
+                "VTOOL_BIN": str(vtool),
             }
         )
         env.update(extra)
@@ -509,3 +527,51 @@ esac
                 self.run_verify(app, codesign, file_command, entitlements).returncode,
                 0,
             )
+
+    def test_verifier_rejects_test_contract_and_runtime_content_anywhere_in_contents(self):
+        forbidden_paths = (
+            "Contents/Resources/meeting_intelligence_provider.py",
+            "Contents/Resources/Tests/ManualFixtures/fixture",
+            "Contents/Resources/contracts/meeting-intelligence.schema.json",
+            "Contents/Resources/contracts/fixtures/meeting-intelligence-v1.json",
+            "Contents/Resources/contracts/fixtures/recording-info-v2-meeting-intelligence.json",
+            "Contents/Frameworks/python3",
+            "Contents/Resources/runtime/helper.py",
+            "Contents/Resources/runtime/helper.pyc",
+            "Contents/Resources/runtime/__pycache__/helper",
+            "Contents/Helpers/ffmpeg",
+            "Contents/Helpers/ffprobe",
+            "Contents/Resources/MEETING_INTELLIGENCE_PROVIDER.PY",
+            "Contents/Frameworks/PYTHON3",
+            "Contents/Resources/runtime/HELPER.PY",
+            "Contents/Resources/runtime/HELPER.PYC",
+            "Contents/Resources/runtime/__PYCACHE__/helper",
+            "Contents/Helpers/FFMPEG",
+            "Contents/Helpers/FfPrObE",
+            "Contents/Resources/TRANSCRIBE-OPENAI-COMPATIBLE.SH",
+            "Contents/Resources/TRANSCRIBE-QWEN-ASR.SH",
+            "Contents/Resources/OPENAI_ASR_LONGFORM.PY",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codesign = self.make_codesign_shim(root)
+            file_command = self.make_file_shim(root)
+            entitlements = root / "entitlements.plist"
+            with entitlements.open("wb") as stream:
+                plistlib.dump({"com.apple.security.device.audio-input": True}, stream)
+
+            for index, relative_path in enumerate(forbidden_paths):
+                with self.subTest(relative_path=relative_path):
+                    app = self.make_app_fixture(root / f"forbidden-{index}")
+                    forbidden = app / relative_path
+                    forbidden.parent.mkdir(parents=True, exist_ok=True)
+                    forbidden.write_text("development-only", encoding="utf-8")
+                    self.assertNotEqual(
+                        self.run_verify(
+                            app,
+                            codesign,
+                            file_command,
+                            entitlements,
+                        ).returncode,
+                        0,
+                    )

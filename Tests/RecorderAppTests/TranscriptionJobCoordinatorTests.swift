@@ -13,7 +13,8 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
                     transcriptURL: fixture.transcriptURL,
                     rawTranscriptURL: nil,
                     manifestURL: nil,
-                    logURL: fixture.logURL
+                    logURL: fixture.logURL,
+                    committedTranscriptRevision: try fixture.revision()
                 )
             )
         )
@@ -82,6 +83,172 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
         )
     }
 
+    func testCompletedActiveAttemptEmitsOwnershipCheckedPublicationEvent() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let revision = try fixture.revision()
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(snapshot: try fixture.snapshot()),
+            audioPreparer: CoordinatorPreparer(result: .success(.init(audioURL: fixture.audioURL, cleanupURL: nil))),
+            service: CoordinatorService(result: .success(.init(
+                transcriptURL: fixture.transcriptURL, rawTranscriptURL: nil,
+                manifestURL: nil, logURL: fixture.logURL,
+                committedTranscriptRevision: revision
+            ))),
+            mutationGate: RecordingSessionMutationGate(),
+            coordinatorInstanceID: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        )
+        var events: [TranscriptPublished] = []
+        coordinator.onSuccessfulPublication = { events.append($0) }
+
+        coordinator.start(session: fixture.session)
+        await waitForIdle(coordinator)
+
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].session.id, fixture.session.id)
+        XCTAssertEqual(events[0].revision, revision)
+        XCTAssertEqual(events[0].identity.generation, 1)
+        XCTAssertEqual(
+            coordinator.publicationSourceID,
+            UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        )
+    }
+
+    func testCommittedRevisionMismatchEmitsNoEvent() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let committed = try fixture.revision()
+        let mismatched = TranscriptDocumentRevision(sha256: "sha256:mismatch", byteCount: 1)
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(snapshot: try fixture.snapshot()),
+            audioPreparer: CoordinatorPreparer(result: .success(.init(audioURL: fixture.audioURL, cleanupURL: nil))),
+            service: CoordinatorService(result: .success(.init(
+                transcriptURL: fixture.transcriptURL, rawTranscriptURL: nil,
+                manifestURL: nil, logURL: fixture.logURL,
+                committedTranscriptRevision: committed
+            ))),
+            mutationGate: RecordingSessionMutationGate(),
+            transcriptReader: StaticTranscriptReader(url: fixture.transcriptURL, revision: mismatched)
+        )
+        var events: [TranscriptPublished] = []
+        coordinator.onSuccessfulPublication = { events.append($0) }
+        coordinator.start(session: fixture.session)
+        await waitForIdle(coordinator)
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertTrue(coordinator.lastTranscriptionDidFail)
+    }
+
+    func testOldCompletionAfterReplacementAttemptEmitsOnlyNewAttemptIdentity() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let service = DeferredCoordinatorService(result: .init(
+            transcriptURL: fixture.transcriptURL, rawTranscriptURL: nil,
+            manifestURL: nil, logURL: fixture.logURL,
+            committedTranscriptRevision: try fixture.revision()
+        ))
+        let oldAttempt = UUID()
+        let newAttempt = UUID()
+        var attemptIDs = [oldAttempt, newAttempt]
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(snapshot: try fixture.snapshot()),
+            audioPreparer: CoordinatorPreparer(result: .success(.init(audioURL: fixture.audioURL, cleanupURL: nil))),
+            service: service,
+            attemptIDFactory: { attemptIDs.removeFirst() }
+        )
+        var events: [TranscriptPublished] = []
+        coordinator.onSuccessfulPublication = { events.append($0) }
+        coordinator.start(session: fixture.session)
+        await service.waitForRequestCount(1)
+        coordinator.shutdown()
+        coordinator.start(session: fixture.session)
+        await service.waitForRequestCount(2)
+        _ = service.complete(at: 1)
+        await waitForIdle(coordinator)
+        _ = service.complete(at: 0)
+        await Task.yield()
+
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].identity.generation, 3)
+        XCTAssertEqual(events[0].identity.attemptID, newAttempt)
+        XCTAssertNotEqual(events[0].identity.attemptID, oldAttempt)
+    }
+
+    func testFailureHandlerRejectsWrongActiveAttemptWithoutDiagnosticOrStatusMutation() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let service = DeferredFailureCoordinatorService()
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: CoordinatorPreparer(
+                result: .success(
+                    .init(audioURL: fixture.audioURL, cleanupURL: nil)
+                )
+            ),
+            service: service
+        )
+
+        coordinator.start(session: fixture.session)
+        await service.waitForRequestCount(1)
+        let statusBefore = coordinator.lastTranscriptionStatus
+        coordinator.handleFailure(
+            CoordinatorError.failed,
+            prepared: .init(audioURL: fixture.audioURL, cleanupURL: nil),
+            session: fixture.session,
+            snapshot: try fixture.snapshot(),
+            generation: 999,
+            attempt: UUID()
+        )
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.failureDiagnosticURL.path)
+        )
+        XCTAssertEqual(coordinator.transcribingSessionID, fixture.session.id)
+        XCTAssertEqual(coordinator.lastTranscriptionStatus, statusBefore)
+        service.fail(at: 0)
+        await waitForIdle(coordinator)
+    }
+
+    func testPublicationSnapshotsWorkspaceFenceAtAttemptStart() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let service = DeferredCoordinatorService(result: .init(
+            transcriptURL: fixture.transcriptURL,
+            rawTranscriptURL: nil,
+            manifestURL: nil,
+            logURL: fixture.logURL,
+            committedTranscriptRevision: try fixture.revision()
+        ))
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: CoordinatorPreparer(result: .success(.init(
+                audioURL: fixture.audioURL,
+                cleanupURL: nil
+            ))),
+            service: service
+        )
+        var events: [TranscriptPublished] = []
+        coordinator.onSuccessfulPublication = { events.append($0) }
+
+        coordinator.start(session: fixture.session)
+        await service.waitForRequestCount(1)
+        coordinator.advanceWorkspacePublicationFence(
+            to: WorkspacePublicationFence(revision: 1)
+        )
+        _ = service.complete(at: 0)
+        await waitForIdle(coordinator)
+
+        coordinator.start(session: fixture.session)
+        await service.waitForRequestCount(2)
+        _ = service.complete(at: 1)
+        await waitForIdle(coordinator)
+
+        XCTAssertEqual(events.map(\.workspaceFence.revision), [0, 1])
+    }
+
     func testProviderSecretIsRedactedFromFailureAndPersistedState() async throws {
         let fixture = try CoordinatorFixture.make()
         defer { fixture.remove() }
@@ -118,6 +285,59 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
             )
         )
         XCTAssertFalse(persisted.message.contains(secret))
+    }
+
+    func testNonCancelledFailurePublishesOneSanitizedDiagnostic() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let secret = "Bearer coordinator-private-key"
+        let providerURL = "https://provider.example/v1/audio/transcriptions"
+        let path = "/Users/example/private/recording.m4a"
+        let transcript = "private meeting transcript"
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot(apiKey: secret)
+            ),
+            audioPreparer: CoordinatorPreparer(
+                result: .success(
+                    .init(audioURL: fixture.audioURL, cleanupURL: nil)
+                )
+            ),
+            service: CoordinatorService(
+                result: .failure(
+                    NSError(
+                        domain: [secret, providerURL, path, transcript]
+                            .joined(separator: " "),
+                        code: 1
+                    )
+                )
+            )
+        )
+
+        coordinator.start(session: fixture.session)
+        await waitForIdle(coordinator)
+
+        let data = try Data(contentsOf: fixture.failureDiagnosticURL)
+        let diagnostic = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(diagnostic["stage"] as? String, "upload")
+        XCTAssertEqual(
+            diagnostic["errorCode"] as? String,
+            "provider_transport_failure"
+        )
+        XCTAssertNil(diagnostic["httpStatus"])
+        let persisted = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(persisted.contains(secret))
+        XCTAssertFalse(persisted.contains(providerURL))
+        XCTAssertFalse(persisted.contains(path))
+        XCTAssertFalse(persisted.contains(transcript))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: fixture.session.folderURL.path)
+                .filter { $0 == TranscriptionArtifactPublisher.failureDiagnosticFileName }
+                .count,
+            1
+        )
     }
 
     func testResponseTooLargeUsesTransportGenericUserFacingMessage() async throws {
@@ -158,6 +378,59 @@ final class TranscriptionJobCoordinatorTests: XCTestCase {
         )
     }
 
+    func testCancellationDoesNotPublishFailureDiagnostic() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let preparer = CoordinatorPreparer()
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: preparer,
+            service: CoordinatorService(
+                result: .failure(CoordinatorError.failed)
+            )
+        )
+
+        coordinator.start(session: fixture.session)
+        await preparer.waitUntilStarted()
+        coordinator.cancel()
+        await waitForIdle(coordinator)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.failureDiagnosticURL.path)
+        )
+    }
+
+    func testTransportCancellationDoesNotPublishFailureDiagnostic() async throws {
+        let fixture = try CoordinatorFixture.make()
+        defer { fixture.remove() }
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: CoordinatorPreparer(
+                result: .success(
+                    .init(audioURL: fixture.audioURL, cleanupURL: nil)
+                )
+            ),
+            service: CoordinatorService(
+                result: .failure(URLError(.cancelled))
+            )
+        )
+
+        coordinator.start(session: fixture.session)
+        await waitForIdle(coordinator)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.failureDiagnosticURL.path)
+        )
+        XCTAssertEqual(
+            coordinator.transcriptionStatesBySessionID[fixture.session.id]?.phase,
+            .cancelled
+        )
+    }
+
     private func waitForIdle(
         _ coordinator: TranscriptionJobCoordinator
     ) async {
@@ -175,12 +448,26 @@ private enum CoordinatorError: Error {
     case failed
 }
 
+private struct StaticTranscriptReader: TranscriptDocumentReading {
+    let url: URL
+    let revision: TranscriptDocumentRevision
+    func readCanonical(in sessionFolder: URL, allowLegacy: Bool) throws -> TranscriptDocumentSnapshot {
+        .init(url: url, data: Data("done".utf8), revision: revision)
+    }
+}
+
 private struct CoordinatorFixture {
     let root: URL
     let session: RecordingSession
     let audioURL: URL
     let transcriptURL: URL
     let logURL: URL
+
+    var failureDiagnosticURL: URL {
+        session.folderURL.appendingPathComponent(
+            TranscriptionArtifactPublisher.failureDiagnosticFileName
+        )
+    }
 
     static func make() throws -> CoordinatorFixture {
         let root = FileManager.default.temporaryDirectory
@@ -228,7 +515,7 @@ private struct CoordinatorFixture {
     func snapshot(
         apiKey: String? = nil
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(
+        try .validated(
             profile: try OpenAICompatibleProviderProfile.validated(
                 baseURLText: "https://api.example/v1",
                 asrModel: "asr",
@@ -238,6 +525,13 @@ private struct CoordinatorFixture {
             ),
             apiKey: apiKey
         )
+    }
+
+    func revision() throws -> TranscriptDocumentRevision {
+        try SecureTranscriptDocumentReader().readCanonical(
+            in: session.folderURL,
+            allowLegacy: false
+        ).revision
     }
 
     func remove() {
@@ -271,7 +565,7 @@ private final class CoordinatorRepository:
     func snapshot(
         overriding profile: OpenAICompatibleProviderProfile
     ) throws -> OpenAICompatibleProviderSnapshot {
-        .init(profile: profile, apiKey: value.apiKey)
+        try .validated(profile: profile, apiKey: value.apiKey)
     }
 
     func hasAPIKey() throws -> Bool {
@@ -372,5 +666,76 @@ private final class CoordinatorService:
         lock.withLock { requests.append(request) }
         onProgress(.uploading(chunk: 1, total: 1))
         return try result.get()
+    }
+}
+
+private final class DeferredCoordinatorService: TranscriptionServicing, @unchecked Sendable {
+    private let lock = NSLock()
+    private let result: TranscriptionServiceResult
+    private var continuations: [CheckedContinuation<TranscriptionServiceResult, Error>?] = []
+    private var attemptIDs: [UUID] = []
+
+    init(result: TranscriptionServiceResult) { self.result = result }
+
+    func transcribe(
+        _ request: TranscriptionServiceRequest,
+        onProgress: @escaping @Sendable (TranscriptionServiceProgress) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                continuations.append(continuation)
+                attemptIDs.append(UUID())
+            }
+        }
+    }
+
+    func waitForRequestCount(_ expected: Int) async {
+        while lock.withLock({ continuations.count < expected }) { await Task.yield() }
+    }
+
+    func complete(at index: Int) -> UUID {
+        lock.withLock {
+            let continuation = continuations[index]
+            continuations[index] = nil
+            guard let continuation else { fatalError("Attempt already completed") }
+            continuation.resume(returning: result)
+            return attemptIDs[index]
+        }
+    }
+}
+
+private final class DeferredFailureCoordinatorService:
+    TranscriptionServicing,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var continuations: [
+        CheckedContinuation<TranscriptionServiceResult, Error>?
+    ] = []
+
+    func transcribe(
+        _: TranscriptionServiceRequest,
+        onProgress _: @escaping @Sendable (TranscriptionServiceProgress) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                continuations.append(continuation)
+            }
+        }
+    }
+
+    func waitForRequestCount(_ expected: Int) async {
+        while lock.withLock({ continuations.count < expected }) {
+            await Task.yield()
+        }
+    }
+
+    func fail(at index: Int) {
+        let continuation = lock.withLock {
+            let continuation = continuations[index]
+            continuations[index] = nil
+            return continuation
+        }
+        continuation?.resume(throwing: CoordinatorError.failed)
     }
 }

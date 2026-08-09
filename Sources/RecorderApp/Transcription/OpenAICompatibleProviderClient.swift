@@ -70,7 +70,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
     private var body = Data()
     private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
     private var isFinished = false
-    private var currentRedirectRequest: URLRequest?
+    private var redirectDelegate: ProviderRedirectDelegate?
 
     init(
         configuration: URLSessionConfiguration,
@@ -89,7 +89,7 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 self.continuation = continuation
-                currentRedirectRequest = request
+                redirectDelegate = ProviderRedirectDelegate(source: request)
                 if Task.isCancelled {
                     lock.unlock()
                     finish(.failure(CancellationError()))
@@ -194,16 +194,10 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
         lock.lock()
-        let redirected = currentRedirectRequest.flatMap {
-            ProviderRedirectPolicy.redirectedRequest(
-                from: $0,
-                proposed: request,
-                statusCode: response.statusCode
-            )
-        }
-        if let redirected {
-            currentRedirectRequest = redirected
-        }
+        let redirected = redirectDelegate?.redirectedRequest(
+            proposed: request,
+            statusCode: response.statusCode
+        )
         lock.unlock()
 
         guard let redirected else {
@@ -221,8 +215,8 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         lock.lock()
         let task = self.task
         lock.unlock()
-        task?.cancel()
         finish(.failure(CancellationError()))
+        task?.cancel()
     }
 
     private func finish(_ result: Result<(Data, HTTPURLResponse), Error>) {
@@ -238,11 +232,29 @@ private final class CappedHTTPResponseCollector: NSObject, URLSessionDataDelegat
         self.session = nil
         body.removeAll(keepingCapacity: false)
         response = nil
-        currentRedirectRequest = nil
+        redirectDelegate = nil
         lock.unlock()
         session?.finishTasksAndInvalidate()
         lifecycle.markReleased()
         continuation.resume(with: result)
+    }
+}
+
+final class ProviderRedirectDelegate: @unchecked Sendable {
+    private var source: URLRequest
+
+    init(source: URLRequest) {
+        self.source = source
+    }
+
+    func redirectedRequest(proposed: URLRequest, statusCode: Int) -> URLRequest? {
+        guard let redirected = ProviderRedirectPolicy.redirectedRequest(
+            from: source,
+            proposed: proposed,
+            statusCode: statusCode
+        ) else { return nil }
+        source = redirected
+        return redirected
     }
 }
 
@@ -253,8 +265,7 @@ struct ProviderConnectionReport: Equatable, Sendable {
 
 protocol ProviderConnectionTesting: Sendable {
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport
 }
 
@@ -291,19 +302,21 @@ struct OpenAICompatibleProviderClient: ProviderConnectionTesting {
     }
 
     func testConnection(
-        profile: OpenAICompatibleProviderProfile,
-        apiKey: String?
+        for snapshot: OpenAICompatibleProviderSnapshot
     ) async throws -> ProviderConnectionReport {
         var request = URLRequest(
-            url: profile.baseURL.appendingPathComponent("models")
+            url: snapshot.profile.baseURL.appendingPathComponent("models")
         )
         request.httpMethod = "GET"
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let apiKey, !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
+        ProviderRequestAuthentication.apply(snapshot: snapshot, to: &request)
+        return try await send(request: request)
+    }
 
+    private func send(
+        request: URLRequest
+    ) async throws -> ProviderConnectionReport {
         let (data, response) = try await transport.response(
             for: request,
             maximumBodyBytes: Self.maximumModelDiscoveryResponseBytes

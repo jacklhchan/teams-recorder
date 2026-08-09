@@ -6,7 +6,7 @@
 
 **Architecture:** The recorder publishes normalized 48 kHz mono microphone PCM into a bounded lock-free shared ring buffer. A local Core Audio HAL plug-in exposes the buffer as an input device and emits silence whenever the producer is missing, muted, disconnected, or late. `AVAudioApplication` unifies compatible AirPods gestures, the app button, and the existing hotkey.
 
-**Tech Stack:** Swift 5.9, AVFAudio, CoreAudio AudioServerPlugIn, C++17 atomics, POSIX shared memory, XCTest, XCTest/C++ harness, macOS 15+
+**Tech Stack:** Swift 5.9, AVFAudio, CoreAudio AudioServerPlugIn, C++17 atomics, POSIX shared memory, XCTest, XCTest/C++ harness, macOS 26+
 
 ## Global Constraints
 

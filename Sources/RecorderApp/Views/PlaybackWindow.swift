@@ -9,7 +9,35 @@ protocol PlaybackWindowPresenting: AnyObject {
         stopPlayback: @escaping @MainActor () -> Void,
         seekPlayback: @escaping @MainActor (TimeInterval) -> Void
     )
+    func present(
+        presentation: PlaybackPresentationModel,
+        togglePlayback: @escaping @MainActor () -> Void,
+        stopPlayback: @escaping @MainActor () -> Void,
+        seekPlayback: @escaping @MainActor (TimeInterval) -> Void,
+        revealRecording: @escaping @MainActor () -> Void,
+        setVolume: @escaping @MainActor (Float) -> Void,
+        setRate: @escaping @MainActor (Float) -> Void
+    )
     func dismiss()
+}
+
+extension PlaybackWindowPresenting {
+    func present(
+        presentation: PlaybackPresentationModel,
+        togglePlayback: @escaping @MainActor () -> Void,
+        stopPlayback: @escaping @MainActor () -> Void,
+        seekPlayback: @escaping @MainActor (TimeInterval) -> Void,
+        revealRecording _: @escaping @MainActor () -> Void,
+        setVolume _: @escaping @MainActor (Float) -> Void,
+        setRate _: @escaping @MainActor (Float) -> Void
+    ) {
+        present(
+            presentation: presentation,
+            togglePlayback: togglePlayback,
+            stopPlayback: stopPlayback,
+            seekPlayback: seekPlayback
+        )
+    }
 }
 
 @MainActor
@@ -40,8 +68,8 @@ final class PlaybackWindowController:
             contentRect: NSRect(
                 x: 0,
                 y: 0,
-                width: 760,
-                height: 510
+                width: 720,
+                height: 360
             ),
             styleMask: [
                 .titled,
@@ -57,7 +85,7 @@ final class PlaybackWindowController:
         window.isReleasedWhenClosed = false
         window.title = "Recording Playback"
         window.delegate = self
-        window.contentMinSize = NSSize(width: 560, height: 110)
+        window.contentMinSize = NSSize(width: 600, height: 300)
     }
 
     func present(
@@ -66,25 +94,47 @@ final class PlaybackWindowController:
         stopPlayback: @escaping @MainActor () -> Void,
         seekPlayback: @escaping @MainActor (TimeInterval) -> Void
     ) {
+        present(
+            presentation: presentation,
+            togglePlayback: togglePlayback,
+            stopPlayback: stopPlayback,
+            seekPlayback: seekPlayback,
+            revealRecording: {},
+            setVolume: { _ in },
+            setRate: { _ in }
+        )
+    }
+
+    func present(
+        presentation: PlaybackPresentationModel,
+        togglePlayback: @escaping @MainActor () -> Void,
+        stopPlayback: @escaping @MainActor () -> Void,
+        seekPlayback: @escaping @MainActor (TimeInterval) -> Void,
+        revealRecording: @escaping @MainActor () -> Void,
+        setVolume: @escaping @MainActor (Float) -> Void,
+        setRate: @escaping @MainActor (Float) -> Void
+    ) {
         guard let session = presentation.session else { return }
+        let playbackPresentation = RecordingPlaybackPresentation.make(
+            session: session,
+            progress: presentation.progress,
+            duration: presentation.duration
+        )
         self.stopPlayback = stopPlayback
         window.title = "Playing \(session.displayName)"
         window.contentView = NSHostingView(
             rootView: PlaybackWindowView(
                 presentation: presentation,
                 togglePlayback: togglePlayback,
-                stopPlayback: stopPlayback,
-                seekPlayback: seekPlayback
+                seekPlayback: seekPlayback,
+                revealRecording: revealRecording,
+                setVolume: setVolume,
+                setRate: setRate
             )
         )
 
-        let contentSize = session.screenIntervals.isEmpty
-            ? NSSize(width: 600, height: 150)
-            : NSSize(width: 760, height: 510)
-        window.contentMinSize = session.screenIntervals.isEmpty
-            ? NSSize(width: 560, height: 110)
-            : NSSize(width: 560, height: 380)
-        window.setContentSize(contentSize)
+        window.contentMinSize = playbackPresentation.minimumContentSize
+        window.setContentSize(playbackPresentation.defaultContentSize)
         if !window.isVisible {
             window.center()
         }
@@ -108,12 +158,19 @@ final class PlaybackWindowController:
 private struct PlaybackWindowView: View {
     @ObservedObject var presentation: PlaybackPresentationModel
     let togglePlayback: @MainActor () -> Void
-    let stopPlayback: @MainActor () -> Void
     let seekPlayback: @MainActor (TimeInterval) -> Void
+    let revealRecording: @MainActor () -> Void
+    let setVolume: @MainActor (Float) -> Void
+    let setRate: @MainActor (Float) -> Void
 
     var body: some View {
         Group {
             if let session = presentation.session {
+                let playbackPresentation = RecordingPlaybackPresentation.make(
+                    session: session,
+                    progress: presentation.progress,
+                    duration: presentation.duration
+                )
                 RecordingPlaybackView(
                     session: session,
                     player: presentation.player,
@@ -121,21 +178,21 @@ private struct PlaybackWindowView: View {
                     duration: presentation.duration,
                     isPlaying: presentation.isPlaying,
                     togglePlayback: togglePlayback,
-                    stopPlayback: stopPlayback,
-                    seekPlayback: seekPlayback
+                    seekPlayback: seekPlayback,
+                    revealRecording: revealRecording,
+                    setVolume: setVolume,
+                    setRate: setRate
                 )
-                .padding(16)
+                .id(presentation.loadRevision)
+                .frame(
+                    minWidth: playbackPresentation.minimumContentSize.width,
+                    minHeight: playbackPresentation.minimumContentSize.height
+                )
             } else {
                 ProgressView()
                     .controlSize(.small)
             }
         }
-        .frame(
-            minWidth: 560,
-            minHeight: presentation.session?.screenIntervals.isEmpty == false
-                ? 470
-                : 110
-        )
         .background(Color(nsColor: .windowBackgroundColor))
     }
 }

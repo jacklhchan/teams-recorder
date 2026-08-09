@@ -35,7 +35,7 @@ final class AppModelPlaybackTests: XCTestCase {
         XCTAssertTrue(model.isPlaybackActive)
     }
 
-    func testPeriodicPlaybackSnapshotDoesNotRepublishWholeAppModel() async {
+    func testPeriodicSnapshotsPublishPlaybackPresentationWithoutRepublishingAppModel() async {
         let coordinator = FakePlaybackCoordinator()
         let model = makeModel(playbackCoordinator: coordinator)
         let session = makeSession(extension: "mp4")
@@ -65,6 +65,26 @@ final class AppModelPlaybackTests: XCTestCase {
         withExtendedLifetime(observation) {}
     }
 
+    func testAppModelForwardsTheInjectedPlaybackFeatureWithoutFallback() async {
+        let coordinator = FakePlaybackCoordinator()
+        let feature = PlaybackFeatureModel(coordinator: coordinator)
+        let model = AppModel(
+            defaults: makeDefaults(),
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            playbackFeature: feature
+        )
+        let session = makeSession(extension: "m4a")
+
+        XCTAssertTrue(model.playbackFeature === feature)
+        model.play(session: session)
+        await Task.yield()
+
+        XCTAssertEqual(coordinator.loadedSessionIDs, [session.id])
+        XCTAssertEqual(model.playingSessionID, session.id)
+    }
+
     func testVideoPlaybackIsNotEmbeddedInMainContentHierarchy() async {
         let coordinator = FakePlaybackCoordinator()
         let model = makeModel(playbackCoordinator: coordinator)
@@ -74,7 +94,7 @@ final class AppModelPlaybackTests: XCTestCase {
                 RecordedScreenInterval(startSeconds: 0, endSeconds: 10)
             ]
         )
-        model.sessions = [session]
+        model.seedLibrarySessionsForTesting([session])
         model.play(session: session)
         await Task.yield()
 
@@ -110,6 +130,176 @@ final class AppModelPlaybackTests: XCTestCase {
             "Video playback must live in a dedicated window, outside the main ScrollView"
         )
         window.contentView = nil
+    }
+
+    func testContentViewRetainsOnePresenterPairAndVideoPlaybackStaysOutsideWorkspace() async throws {
+        let coordinator = FakePlaybackCoordinator()
+        let model = makeModel(playbackCoordinator: coordinator)
+        let session = makeSession(
+            extension: "mp4",
+            screenIntervals: [.init(startSeconds: 0, endSeconds: 12)]
+        )
+        model.seedLibrarySessionsForTesting([session])
+        let countdownFactory = CountdownPresenterFactorySpy()
+        let playbackFactory = PlaybackPresenterFactorySpy()
+        let navigationDriver = ContentViewNavigationDriver()
+        let hostingView = NSHostingView(
+            rootView: ContentView(
+                model: model,
+                autoMeetingPanelFactory: countdownFactory,
+                playbackWindowPresenterFactory: playbackFactory,
+                navigationOverride: Binding(
+                    get: { navigationDriver.navigation },
+                    set: { navigationDriver.navigation = $0 }
+                )
+            )
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        await Task.yield()
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        defer {
+            window.contentView = nil
+            window.orderOut(nil)
+        }
+
+        navigationDriver.navigation.select(
+            .recordings,
+            hasUnsavedChanges: false
+        )
+        model.objectWillChange.send()
+        try? await Task.sleep(for: .milliseconds(10))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(
+            containsAccessibilityIdentifier(
+                "recorder.destination.recordings",
+                in: hostingView
+            )
+        )
+        navigationDriver.navigation.select(.record, hasUnsavedChanges: false)
+        model.objectWillChange.send()
+        try? await Task.sleep(for: .milliseconds(10))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(
+            containsAccessibilityIdentifier(
+                "recorder.destination.record",
+                in: hostingView
+            )
+        )
+        XCTAssertEqual(countdownFactory.makeCount, 1)
+        XCTAssertEqual(playbackFactory.makeCount, 1)
+
+        model.play(session: session)
+        await waitUntil { playbackFactory.presenter.presentCount == 1 }
+        XCTAssertNotNil(playbackFactory.presenter.revealRecording)
+        playbackFactory.presenter.setVolume?(0.35)
+        playbackFactory.presenter.setRate?(1.25)
+        XCTAssertEqual(coordinator.volumeRequests, [0.35])
+        XCTAssertEqual(coordinator.rateRequests, [1.25])
+        XCTAssertFalse(
+            containsAVPlayerView(in: hostingView),
+            "The exercised video presentation must remain outside ContentView's workspace hierarchy"
+        )
+        XCTAssertEqual(countdownFactory.makeCount, 1)
+        XCTAssertEqual(playbackFactory.makeCount, 1)
+    }
+
+    func testContentViewPresenterLifecycleDismissesForStateStopTerminationAndDisappearance() async throws {
+        let playbackCoordinator = FakePlaybackCoordinator()
+        let autoMeetingCoordinator = TeamsAutoMeetingCoordinator()
+        let model = makeModel(
+            playbackCoordinator: playbackCoordinator,
+            teamsAutoMeetingCoordinator: autoMeetingCoordinator
+        )
+        let session = makeSession(
+            extension: "mp4",
+            screenIntervals: [.init(startSeconds: 0, endSeconds: 12)]
+        )
+        let countdownFactory = CountdownPresenterFactorySpy()
+        let playbackFactory = PlaybackPresenterFactorySpy()
+        let hostingView = NSHostingView(
+            rootView: ContentView(
+                model: model,
+                autoMeetingPanelFactory: countdownFactory,
+                playbackWindowPresenterFactory: playbackFactory
+            )
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        await Task.yield()
+        defer { window.orderOut(nil) }
+
+        // The pre-existing non-countdown state first exercises the initial
+        // dismissal path. A countdown then must present and its transition
+        // away from countdown must dismiss through ContentView's handler.
+        await waitUntil {
+            countdownFactory.presenter.dismissCount == 1 &&
+                playbackFactory.presenter.dismissCount == 1
+        }
+        autoMeetingCoordinator.setEnabled(true)
+        autoMeetingCoordinator.handleMeetingState(isInMeeting: true)
+        await waitUntil { countdownFactory.presenter.presentCount == 1 }
+        autoMeetingCoordinator.setEnabled(false)
+        await waitUntil { countdownFactory.presenter.dismissCount == 2 }
+
+        // Playback presentation is driven by the existing playing-session
+        // handler, and stopPlayback must drive the corresponding dismissal.
+        model.play(session: session)
+        await waitUntil { playbackFactory.presenter.presentCount == 1 }
+        model.stopPlayback()
+        await waitUntil { playbackFactory.presenter.dismissCount == 2 }
+
+        // Re-present both surfaces, then prove the termination handler
+        // dismisses each one without moving presenter ownership.
+        autoMeetingCoordinator.setEnabled(true)
+        autoMeetingCoordinator.handleMeetingState(isInMeeting: true)
+        model.play(session: session)
+        await waitUntil {
+            countdownFactory.presenter.presentCount == 2 &&
+                playbackFactory.presenter.presentCount == 2
+        }
+        NotificationCenter.default.post(
+            name: NSApplication.willTerminateNotification,
+            object: nil
+        )
+        await waitUntil {
+            countdownFactory.presenter.dismissCount == 3 &&
+                playbackFactory.presenter.dismissCount == 3
+        }
+
+        // Host removal is the other teardown route: onDisappear must dismiss
+        // both presenters after they have been exercised again.
+        autoMeetingCoordinator.setEnabled(false)
+        await waitUntil { countdownFactory.presenter.dismissCount == 4 }
+        autoMeetingCoordinator.setEnabled(true)
+        autoMeetingCoordinator.handleMeetingState(isInMeeting: true)
+        model.stopPlayback()
+        await waitUntil { playbackFactory.presenter.dismissCount == 4 }
+        await waitUntil { countdownFactory.presenter.presentCount == 3 }
+        model.play(session: session)
+        await waitUntil { playbackFactory.presenter.presentCount == 3 }
+        window.contentView = nil
+        await waitUntil {
+            countdownFactory.presenter.dismissCount == 5 &&
+                playbackFactory.presenter.dismissCount == 5
+        }
     }
 
     func testStopSeekPauseAndStaleSnapshotDoNotPolluteReplacementPlayback() async {
@@ -153,6 +343,72 @@ final class AppModelPlaybackTests: XCTestCase {
         XCTAssertTrue(model.statusMessage.contains("Playback failed"))
     }
 
+    func testSuccessfulTrashStopsActivePlaybackAndClearsPresenterSessionID() async {
+        let coordinator = FakePlaybackCoordinator()
+        let model = makeModel(
+            playbackCoordinator: coordinator,
+            recordingSessionTrashHandler: { _ in true }
+        )
+        let session = makeSession(in: model.outputFolder, extension: "m4a")
+        model.seedLibrarySessionsForTesting([session])
+        model.libraryFeature.onSessionRemoved = { _ in }
+        model.play(session: session)
+        await Task.yield()
+        XCTAssertEqual(model.playingSessionID, session.id)
+        let stopCountBeforeTrash = coordinator.stopCount
+
+        await model.moveSessionToTrash(session)
+
+        XCTAssertNil(
+            model.playingSessionID,
+            "The existing presenter observes this active ID to dismiss itself."
+        )
+        XCTAssertFalse(model.isPlaybackActive)
+        XCTAssertEqual(coordinator.stopCount, stopCountBeforeTrash + 1)
+    }
+
+    func testFailedOrUnrelatedTrashDoesNotStopCurrentPlayback() async {
+        let coordinator = FakePlaybackCoordinator()
+        let model = makeModel(
+            playbackCoordinator: coordinator,
+            recordingSessionTrashHandler: { url in
+                url.lastPathComponent != "fails"
+            }
+        )
+        let failing = makeSession(
+            in: model.outputFolder,
+            named: "fails",
+            extension: "m4a"
+        )
+        let unrelated = makeSession(
+            in: model.outputFolder,
+            named: "unrelated",
+            extension: "m4a"
+        )
+        let removed = makeSession(
+            in: model.outputFolder,
+            named: "removed",
+            extension: "m4a"
+        )
+        model.seedLibrarySessionsForTesting([failing, unrelated, removed])
+        model.play(session: failing)
+        await Task.yield()
+        let stopCountBeforeFailure = coordinator.stopCount
+
+        await model.moveSessionToTrash(failing)
+
+        XCTAssertEqual(model.playingSessionID, failing.id)
+        XCTAssertEqual(coordinator.stopCount, stopCountBeforeFailure)
+
+        model.play(session: unrelated)
+        await Task.yield()
+        let stopCountBeforeUnrelatedTrash = coordinator.stopCount
+        await model.moveSessionToTrash(removed)
+
+        XCTAssertEqual(model.playingSessionID, unrelated.id)
+        XCTAssertEqual(coordinator.stopCount, stopCountBeforeUnrelatedTrash)
+    }
+
     func testTestRecordingAutoplayUsesCoordinatorWithSavedResultSession() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -172,13 +428,13 @@ final class AppModelPlaybackTests: XCTestCase {
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
+            initialOutputFolder: root,
             permissionRequestHandler: { _, _ in },
             volumeCapacityProvider: TestCapacityProvider(),
             storageMonitorTick: { try? await Task.sleep(for: .seconds(3_600)) },
             testRecordingDelay: { await delay.wait() },
             playbackCoordinator: coordinator
         )
-        model.outputFolder = root
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
         XCTAssertEqual(model.captureReadiness, .ready)
@@ -227,13 +483,13 @@ final class AppModelPlaybackTests: XCTestCase {
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
+            initialOutputFolder: root,
             permissionRequestHandler: { _, _ in },
             volumeCapacityProvider: TestCapacityProvider(),
             storageMonitorTick: { try? await Task.sleep(for: .seconds(3_600)) },
             testRecordingDelay: { await delay.wait() },
             playbackCoordinator: FakePlaybackCoordinator()
         )
-        model?.outputFolder = root
         model?.systemAudioPermission = .granted
         model?.microphonePermission = .granted
 
@@ -259,13 +515,21 @@ final class AppModelPlaybackTests: XCTestCase {
         _ = await engine.stop()
     }
 
-    private func makeModel(playbackCoordinator: FakePlaybackCoordinator) -> AppModel {
+    private func makeModel(
+        playbackCoordinator: FakePlaybackCoordinator,
+        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
+        recordingSessionTrashHandler: @escaping @Sendable (URL) throws -> Bool = {
+            _ in true
+        }
+    ) -> AppModel {
         AppModel(
             defaults: makeDefaults(),
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
             performStartupWork: false,
-            playbackCoordinator: playbackCoordinator
+            recordingSessionTrashHandler: recordingSessionTrashHandler,
+            playbackCoordinator: playbackCoordinator,
+            teamsAutoMeetingCoordinator: teamsAutoMeetingCoordinator
         )
     }
 
@@ -293,10 +557,37 @@ final class AppModelPlaybackTests: XCTestCase {
         )
     }
 
+    private func makeSession(
+        in workspace: URL,
+        named name: String = UUID().uuidString,
+        extension fileExtension: String
+    ) -> RecordingSession {
+        let folder = workspace.appendingPathComponent(name, isDirectory: true)
+        return RecordingSession(
+            id: folder,
+            folderURL: folder,
+            recordingURL: folder.appendingPathComponent("recording.\(fileExtension)"),
+            createdAt: .now,
+            duration: 12,
+            fileSize: 0,
+            metadata: .init()
+        )
+    }
+
     private func containsAVPlayerView(in view: NSView) -> Bool {
         if view is AVPlayerView { return true }
         return view.subviews.contains(where: containsAVPlayerView(in:))
     }
+
+    private func containsAccessibilityIdentifier(_ identifier: String, in root: NSView) -> Bool {
+        if root.accessibilityIdentifier() == identifier { return true }
+        for subview in root.subviews {
+            if containsAccessibilityIdentifier(identifier, in: subview) { return true }
+        }
+        return false
+    }
+
+
 
     private func firstScrollView(in view: NSView) -> NSScrollView? {
         if let scrollView = view as? NSScrollView {
@@ -327,6 +618,11 @@ final class AppModelPlaybackTests: XCTestCase {
 }
 
 @MainActor
+private final class ContentViewNavigationDriver: ObservableObject {
+    @Published var navigation = RecorderNavigationState(selection: .record)
+}
+
+@MainActor
 private final class FakePlaybackCoordinator: PlaybackCoordinating {
     let player = AVPlayer()
     var onSnapshot: ((PlaybackSnapshot) -> Void)?
@@ -335,6 +631,8 @@ private final class FakePlaybackCoordinator: PlaybackCoordinating {
     private(set) var pauseCount = 0
     private(set) var stopCount = 0
     private(set) var seekRequests: [TimeInterval] = []
+    private(set) var volumeRequests: [Float] = []
+    private(set) var rateRequests: [Float] = []
     var loadError: Error?
 
     func load(_ session: RecordingSession) async throws {
@@ -345,8 +643,83 @@ private final class FakePlaybackCoordinator: PlaybackCoordinating {
     func play() { playCount += 1 }
     func pause() { pauseCount += 1 }
     func seek(to seconds: TimeInterval) async { seekRequests.append(seconds) }
+    func setVolume(_ volume: Float) { volumeRequests.append(volume) }
+    func setRate(_ rate: Float) { rateRequests.append(rate) }
     func stop() { stopCount += 1 }
     func emit(_ snapshot: PlaybackSnapshot) { onSnapshot?(snapshot) }
+}
+
+@MainActor
+private final class CountdownPresenterFactorySpy: TeamsAutoMeetingCountdownPresenterFactory {
+    let presenter = CountdownPresenterSpy()
+    private(set) var makeCount = 0
+
+    func makePresenter() -> any TeamsAutoMeetingCountdownPresenting {
+        makeCount += 1
+        return presenter
+    }
+}
+
+@MainActor
+private final class CountdownPresenterSpy: TeamsAutoMeetingCountdownPresenting {
+    private(set) var presentCount = 0
+    private(set) var dismissCount = 0
+
+    func present(seconds _: Int, cancel _: @escaping @MainActor () -> Void) {
+        presentCount += 1
+    }
+
+    func dismiss() {
+        dismissCount += 1
+    }
+}
+
+@MainActor
+private final class PlaybackPresenterFactorySpy: PlaybackWindowPresenterFactory {
+    let presenter = PlaybackPresenterSpy()
+    private(set) var makeCount = 0
+
+    func makePresenter() -> any PlaybackWindowPresenting {
+        makeCount += 1
+        return presenter
+    }
+}
+
+@MainActor
+private final class PlaybackPresenterSpy: PlaybackWindowPresenting {
+    private(set) var presentCount = 0
+    private(set) var dismissCount = 0
+    private(set) var revealRecording: (@MainActor () -> Void)?
+    private(set) var setVolume: (@MainActor (Float) -> Void)?
+    private(set) var setRate: (@MainActor (Float) -> Void)?
+
+    func present(
+        presentation _: PlaybackPresentationModel,
+        togglePlayback _: @escaping @MainActor () -> Void,
+        stopPlayback _: @escaping @MainActor () -> Void,
+        seekPlayback _: @escaping @MainActor (TimeInterval) -> Void
+    ) {
+        presentCount += 1
+    }
+
+    func present(
+        presentation _: PlaybackPresentationModel,
+        togglePlayback _: @escaping @MainActor () -> Void,
+        stopPlayback _: @escaping @MainActor () -> Void,
+        seekPlayback _: @escaping @MainActor (TimeInterval) -> Void,
+        revealRecording: @escaping @MainActor () -> Void,
+        setVolume: @escaping @MainActor (Float) -> Void,
+        setRate: @escaping @MainActor (Float) -> Void
+    ) {
+        presentCount += 1
+        self.revealRecording = revealRecording
+        self.setVolume = setVolume
+        self.setRate = setRate
+    }
+
+    func dismiss() {
+        dismissCount += 1
+    }
 }
 
 private enum PlaybackTestError: LocalizedError {

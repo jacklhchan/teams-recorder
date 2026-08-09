@@ -90,7 +90,7 @@ class WorkflowContractTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 self.assertRegex(
                     self.job_body(workflow, job_name),
-                    r"(?m)^    runs-on: macos-15$",
+                    r"(?m)^    runs-on: macos-26$",
                 )
 
         packaging = self.job_body(workflow, "packaging")
@@ -102,16 +102,29 @@ class WorkflowContractTests(unittest.TestCase):
     def test_ci_anchors_required_test_and_packaging_commands(self):
         workflow = self.read_workflow()
         swift_tests = self.job_body(workflow, "swift-tests")
-        self.assertEqual(len(re.findall(r"(?m)^        run: swift test$", swift_tests)), 2)
-        self.assert_step_command(
-            swift_tests,
-            "Swift tests first pass",
-            "swift test",
+        self.assertEqual(
+            len(re.findall(r"(?m)^        run: swift test$", swift_tests)),
+            1,
         )
         self.assert_step_command(
             swift_tests,
-            "Swift tests stability pass",
+            "Targeted transcription tests",
+            "swift test --filter OpenAICompatibleTranscriptionClientTests",
+        )
+        self.assert_step_command(
+            swift_tests,
+            "Swift tests",
             "swift test",
+        )
+        self.assertRegex(
+            swift_tests,
+            r"(?m)^      - name: Workspace stability tests\n"
+            r"        if: github\.event_name == 'push' && "
+            r"github\.ref == 'refs/heads/main'\n"
+            r"        env:\n"
+            r'          RECORDER_STABILITY: "1"\n'
+            r"        run: swift test --filter "
+            r"RecorderWorkspaceStabilityTests$",
         )
 
         script_tests = self.job_body(workflow, "script-tests")
@@ -266,7 +279,7 @@ if kind == "rm":
             re.findall(r"(?m)^  ([a-z][a-z-]*):\n", workflow.split("jobs:\n", 1)[1]),
             ["release"],
         )
-        self.assertRegex(workflow, r"(?m)^    runs-on: macos-15$")
+        self.assertRegex(workflow, r"(?m)^    runs-on: macos-26$")
         self.assertRegex(workflow, r"(?m)^    environment: production$")
         self.assertIn("refs/heads/main", workflow)
 

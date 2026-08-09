@@ -6,7 +6,7 @@
 
 **Architecture:** Keep one ScreenCaptureKit stream. A deterministic Teams-window resolver selects a meeting window, and a serialized filter coordinator switches the running stream between its current application filter and a desktop-independent window filter. Existing timestamp-aligned mixed audio and bounded video frames enter a dedicated media coordinator, which writes a fixed-profile HEVC/AAC MP4 plus a temporary AAC safety file. Library, recovery, playback, and transcription layers consume one final MP4 or a recovered M4A.
 
-**Tech Stack:** Swift 5.9, SwiftUI, ScreenCaptureKit, AVFoundation, AVKit, VideoToolbox, CoreMedia, CoreVideo, CoreGraphics, XCTest, macOS 15+
+**Tech Stack:** Swift 5.9, SwiftUI, ScreenCaptureKit, AVFoundation, AVKit, VideoToolbox, CoreMedia, CoreVideo, CoreGraphics, XCTest, macOS 26+
 
 ## Global Constraints
 

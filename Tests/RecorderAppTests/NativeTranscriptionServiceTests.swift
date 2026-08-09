@@ -204,7 +204,7 @@ final class NativeTranscriptionServiceTests: XCTestCase {
     private func makeSnapshot() throws
         -> OpenAICompatibleProviderSnapshot
     {
-        .init(
+        try .validated(
             profile: try OpenAICompatibleProviderProfile.validated(
                 baseURLText: "https://api.example/v1",
                 asrModel: "asr-model",

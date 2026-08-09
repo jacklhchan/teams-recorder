@@ -15,6 +15,87 @@ final class ProviderProfileStoreTests: XCTestCase {
         XCTAssertNotNil(defaults.data(forKey: OpenAICompatibleProviderProfileStore.key))
     }
 
+    func testLegacyV1DirectProfileMigratesAndRewritesAsV2Envelope() throws {
+        let defaults = makeDefaults()
+        defaults.set(
+            storedProfileData(
+                baseURL: "https://api.example.com/v1",
+                prompt: "ASR guidance"
+            ),
+            forKey: OpenAICompatibleProviderProfileStore.key
+        )
+
+        let profile = try XCTUnwrap(
+            OpenAICompatibleProviderProfileStore(defaults: defaults).load()
+        )
+
+        XCTAssertEqual(profile.schemaVersion, 2)
+        assertSensitiveEqual(profile.prompt, "ASR guidance")
+        assertSensitiveEqual(profile.meetingIntelligencePrompt, "")
+
+        let savedJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: XCTUnwrap(defaults.data(forKey: OpenAICompatibleProviderProfileStore.key))
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(savedJSON["schemaVersion"] as? Int, 2)
+        let genericJSON = try XCTUnwrap(savedJSON["genericProfile"] as? [String: Any])
+        XCTAssertEqual(genericJSON["schemaVersion"] as? Int, 2)
+        assertSensitiveEqual(genericJSON["meetingIntelligencePrompt"] as? String, "")
+    }
+
+    func testCurrentEnvelopeMigratesV1ProfilesAndRewritesBothPresets() throws {
+        let defaults = makeDefaults()
+        defaults.set(
+            Data(
+                #"{"schemaVersion":2,"activeProviderKind":"hktGenAI","genericProfile":{"schemaVersion":1,"baseURL":"https://api.example.com/v1","asrModel":"generic-asr","llmModel":"generic-llm","language":"yue","prompt":"generic ASR"},"hktProfile":{"schemaVersion":1,"providerKind":"hktGenAI","baseURL":"https://api.uat.bot-builder.pccw.com/v1/groups/42/openai","groupID":"42","asrModel":"hkt-asr","llmModel":"hkt-llm","language":"en","prompt":"hkt ASR"}}"#.utf8
+            ),
+            forKey: OpenAICompatibleProviderProfileStore.key
+        )
+
+        let store = OpenAICompatibleProviderProfileStore(defaults: defaults)
+        let generic = try XCTUnwrap(try store.loadProfile(for: .openAICompatible))
+        let hkt = try XCTUnwrap(try store.loadProfile(for: .hktGenAI))
+
+        XCTAssertEqual(generic.schemaVersion, 2)
+        assertSensitiveEqual(generic.prompt, "generic ASR")
+        assertSensitiveEqual(generic.meetingIntelligencePrompt, "")
+        XCTAssertEqual(hkt.schemaVersion, 2)
+        assertSensitiveEqual(hkt.prompt, "hkt ASR")
+        assertSensitiveEqual(hkt.meetingIntelligencePrompt, "")
+
+        let savedJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: XCTUnwrap(defaults.data(forKey: OpenAICompatibleProviderProfileStore.key))
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(savedJSON["schemaVersion"] as? Int, 2)
+        for key in ["genericProfile", "hktProfile"] {
+            let profileJSON = try XCTUnwrap(savedJSON[key] as? [String: Any])
+            XCTAssertEqual(profileJSON["schemaVersion"] as? Int, 2)
+            assertSensitiveEqual(profileJSON["meetingIntelligencePrompt"] as? String, "")
+        }
+    }
+
+    func testCurrentEnvelopeRejectsFutureNestedProfileSchemaV3() {
+        let defaults = makeDefaults()
+        defaults.set(
+            Data(
+                #"{"schemaVersion":2,"activeProviderKind":"openAICompatible","genericProfile":{"schemaVersion":3,"baseURL":"https://api.example.com/v1","asrModel":"asr","llmModel":"llm","language":"yue","prompt":"ASR guidance","meetingIntelligencePrompt":"future"},"hktProfile":null}"#.utf8
+            ),
+            forKey: OpenAICompatibleProviderProfileStore.key
+        )
+
+        XCTAssertThrowsError(
+            try OpenAICompatibleProviderProfileStore(defaults: defaults).load()
+        ) {
+            XCTAssertEqual(
+                $0 as? ProviderProfileValidationError,
+                .unsupportedSchemaVersion(3)
+            )
+        }
+    }
+
     func testRejectsUnsupportedStoredSchema() throws {
         let defaults = makeDefaults()
         let data = Data(
@@ -68,6 +149,85 @@ final class ProviderProfileStoreTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: OpenAICompatibleProviderProfileStore.key))
     }
 
+    func testIndependentPresetsAndActiveKindRoundTripWithoutCopyingFields() throws {
+        let store = OpenAICompatibleProviderProfileStore(defaults: makeDefaults())
+        let generic = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "asr",
+            llmModel: "llm",
+            language: "yue",
+            prompt: "generic ASR",
+            meetingIntelligencePrompt: "generic MI"
+        )
+        let hkt = try OpenAICompatibleProviderProfile.hktValidated(
+            groupID: "42", asrModel: "hkt-asr", llmModel: "hkt-llm",
+            language: "en", prompt: "hkt ASR",
+            meetingIntelligencePrompt: "hkt MI"
+        )
+
+        try store.save(generic)
+        try store.save(hkt, makingActive: false)
+        try store.setActiveProviderKind(.hktGenAI)
+
+        XCTAssertEqual(try store.activeProviderKind(), .hktGenAI)
+        try assertSensitiveEqual(try store.load(), hkt)
+        try assertSensitiveEqual(try store.loadProfile(for: .openAICompatible), generic)
+        try assertSensitiveEqual(try store.loadProfile(for: .hktGenAI), hkt)
+        try assertSensitiveEqual(
+            try store.loadProfile(for: .openAICompatible)?.prompt,
+            "generic ASR"
+        )
+        try assertSensitiveEqual(
+            try store.loadProfile(for: .openAICompatible)?.meetingIntelligencePrompt,
+            "generic MI"
+        )
+        try assertSensitiveEqual(
+            try store.loadProfile(for: .hktGenAI)?.prompt,
+            "hkt ASR"
+        )
+        try assertSensitiveEqual(
+            try store.loadProfile(for: .hktGenAI)?.meetingIntelligencePrompt,
+            "hkt MI"
+        )
+    }
+
+    func testLegacyV1ProfileMigratesAsGenericAndFutureEnvelopeIsRejected() throws {
+        let defaults = makeDefaults()
+        defaults.set(storedProfileData(baseURL: "https://api.example.com/v1"), forKey: OpenAICompatibleProviderProfileStore.key)
+        let store = OpenAICompatibleProviderProfileStore(defaults: defaults)
+        XCTAssertEqual(try store.load()?.providerKind, .openAICompatible)
+        XCTAssertEqual(try store.activeProviderKind(), .openAICompatible)
+
+        defaults.set(Data(#"{"schemaVersion":99,"activeProviderKind":"hktGenAI","genericProfile":null,"hktProfile":null}"#.utf8), forKey: OpenAICompatibleProviderProfileStore.key)
+        XCTAssertThrowsError(try store.load()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .unsupportedSchemaVersion(99))
+        }
+    }
+
+    func testTamperedHKTFixedEndpointIsRejected() throws {
+        let defaults = makeDefaults()
+        defaults.set(Data(#"{"schemaVersion":2,"activeProviderKind":"hktGenAI","genericProfile":null,"hktProfile":{"schemaVersion":1,"providerKind":"hktGenAI","baseURL":"https://attacker.example/v1","groupID":"42","asrModel":"asr","llmModel":"llm","language":"yue","prompt":""}}"#.utf8), forKey: OpenAICompatibleProviderProfileStore.key)
+        XCTAssertThrowsError(try OpenAICompatibleProviderProfileStore(defaults: defaults).load()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidProviderConfiguration)
+        }
+    }
+
+    func testTamperedEnvelopeAndLegacyProfileRejectUnsupportedLanguage() {
+        let envelopeDefaults = makeDefaults()
+        envelopeDefaults.set(Data(#"{"schemaVersion":2,"activeProviderKind":"openAICompatible","genericProfile":{"schemaVersion":1,"providerKind":"openAICompatible","baseURL":"https://api.example.com/v1","asrModel":"asr","llmModel":"llm","language":"zh-HK","prompt":""},"hktProfile":null}"#.utf8), forKey: OpenAICompatibleProviderProfileStore.key)
+
+        XCTAssertThrowsError(try OpenAICompatibleProviderProfileStore(defaults: envelopeDefaults).load()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidLanguage)
+        }
+
+        let legacyDefaults = makeDefaults()
+        legacyDefaults.set(storedProfileData(baseURL: "https://api.example.com/v1", language: ""), forKey: OpenAICompatibleProviderProfileStore.key)
+
+        XCTAssertThrowsError(try OpenAICompatibleProviderProfileStore(defaults: legacyDefaults).load()) {
+            XCTAssertEqual($0 as? ProviderProfileValidationError, .invalidLanguage)
+        }
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "ProviderProfileStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -88,7 +248,11 @@ final class ProviderProfileStoreTests: XCTestCase {
         )
     }
 
-    private func storedProfileData(baseURL: String) -> Data {
+    private func storedProfileData(
+        baseURL: String,
+        language: String = "yue",
+        prompt: String = ""
+    ) -> Data {
         Data(
             """
             {
@@ -96,10 +260,24 @@ final class ProviderProfileStoreTests: XCTestCase {
               "baseURL": "\(baseURL)",
               "asrModel": "asr",
               "llmModel": "llm",
-              "language": "yue",
-              "prompt": ""
+              "language": "\(language)",
+              "prompt": "\(prompt)"
             }
             """.utf8
         )
+    }
+
+    private func assertSensitiveEqual<T: Equatable>(
+        _ actual: @autoclosure () throws -> T,
+        _ expected: @autoclosure () throws -> T,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) rethrows {
+        let actualValue = try actual()
+        let expectedValue = try expected()
+        guard actualValue == expectedValue else {
+            XCTFail("Sensitive values did not match.", file: file, line: line)
+            return
+        }
     }
 }

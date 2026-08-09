@@ -7,7 +7,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship one ad-hoc-signed arm64 DMG whose Local Meeting Recorder app guides an M1/macOS 15+ administrator through BlackHole, oMLX, Qwen ASR, audio routing, permissions, and an end-to-end test without Terminal.
+**Goal:** Ship one ad-hoc-signed arm64 DMG whose Local Meeting Recorder app guides an M1/macOS 26+ administrator through BlackHole, oMLX, Qwen ASR, audio routing, permissions, and an end-to-end test without Terminal.
 
 **Architecture:** Add a probe-driven setup domain beside the existing recorder domain. Small services own paths, release metadata, oMLX authentication, model download, audio checks, diagnostics, and setup actions; a `SetupCoordinator` exposes their state to a dedicated SwiftUI Setup Assistant and gates the existing recorder UI until required probes pass.
 
@@ -15,7 +15,7 @@
 
 ## Global Constraints
 
-- Target Apple Silicon only and set the platform floor to macOS 15.0.
+- Target Apple Silicon only and set the platform floor to macOS 26.0.
 - Deliver exactly one end-user app named `Local Meeting Recorder.app` with bundle identifier `local.meeting.recorder`.
 - Do not bundle or redistribute BlackHole; open only its pinned official source.
 - Use oMLX from its pinned official GitHub release source.
@@ -249,7 +249,7 @@ Create `Sources/RecorderApp/Resources/release-manifest.json` with BlackHole `0.7
 
 - [ ] **Step 6: Package resources and raise the deployment floor**
 
-Change `Package.swift` to `.macOS("15.0")`, add `resources: [.process("Resources/release-manifest.json")]` to `RecorderApp`, and link `Security`. Update `scripts/build-app.sh` to copy the manifest into `Contents/Resources` and set `LSMinimumSystemVersion` to `15.0`.
+Change `Package.swift` to `.macOS("26.0")`, add `resources: [.process("Resources/release-manifest.json")]` to `RecorderApp`, and link `Security`. Update `scripts/build-app.sh` to copy the manifest into `Contents/Resources` and set `LSMinimumSystemVersion` to `26.0`.
 
 - [ ] **Step 7: Run focused and full tests**
 
@@ -405,7 +405,7 @@ git commit -m "Add secure oMLX configuration and API client"
 
 - [ ] **Step 1: Write failing probe mapping tests**
 
-Test these exact cases: app launched outside `/Applications` -> `.waitingForUser`; Intel CPU -> failed system step; macOS 14 -> failed system step; less than `model.estimatedBytes + 2_147_483_648` free bytes -> failed system step; missing BlackHole -> `.notInstalled`; installed BlackHole -> `.ready`; missing `/Applications/oMLX.app` -> `.notInstalled`; port 8000 answering non-oMLX data -> `.failed(.portConflict)`; denied microphone -> `.failed(.microphoneDenied)`; valid Multi-Output default -> `.ready`.
+Test these exact cases: app launched outside `/Applications` -> `.waitingForUser`; Intel CPU -> failed system step; macOS 25 or earlier -> failed system step; less than `model.estimatedBytes + 2_147_483_648` free bytes -> failed system step; missing BlackHole -> `.notInstalled`; installed BlackHole -> `.ready`; missing `/Applications/oMLX.app` -> `.notInstalled`; port 8000 answering non-oMLX data -> `.failed(.portConflict)`; denied microphone -> `.failed(.microphoneDenied)`; valid Multi-Output default -> `.ready`.
 
 - [ ] **Step 2: Run probe tests and confirm they fail**
 
@@ -911,7 +911,7 @@ set -euo pipefail
 APP_PATH="$1"
 test -d "$APP_PATH"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Contents/Info.plist")" = "local.meeting.recorder"
-test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP_PATH/Contents/Info.plist")" = "15.0"
+test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP_PATH/Contents/Info.plist")" = "26.0"
 test -x "$APP_PATH/Contents/MacOS/LocalMeetingRecorder"
 test -f "$APP_PATH/Contents/Resources/release-manifest.json"
 test ! -e "$APP_PATH/Contents/Resources/BlackHole2ch.pkg"
@@ -964,7 +964,7 @@ git commit -m "Add self-service DMG release pipeline"
 - Modify: files implicated by acceptance failures only.
 
 **Interfaces:**
-- Consumes: Task 9 DMG on an M1 MacBook running macOS 15+ with an administrator account.
+- Consumes: Task 9 DMG on an M1 MacBook running macOS 26+ with an administrator account.
 - Produces: recorded pass/fail evidence and a release-candidate commit.
 
 - [ ] **Step 1: Run automated verification from a clean build**

@@ -26,11 +26,61 @@ struct TranscriptionPublicationManifest: Codable, Equatable, Sendable {
     }
 }
 
+enum TranscriptionFailureDiagnosticStage: String, Codable, Equatable, Sendable {
+    case preparation
+    case upload
+    case publication
+}
+
+enum TranscriptionFailureDiagnosticCode: String, Codable, Equatable, Sendable {
+    case preparationFailure = "preparation_failure"
+    case providerHTTPFailure = "provider_http_failure"
+    case providerTransportFailure = "provider_transport_failure"
+    case providerResponseTooLarge = "provider_response_too_large"
+    case audioChunkTooLarge = "audio_chunk_too_large"
+    case invalidArtifact = "invalid_artifact"
+    case committedRevisionMismatch = "committed_revision_mismatch"
+    case publicationFailure = "publication_failure"
+}
+
+struct TranscriptionFailureDiagnostic: Encodable, Equatable, Sendable {
+    static let maximumBytes = 64 * 1_024
+    static let event = "transcription_failure"
+
+    var event: String { Self.event }
+    let stage: TranscriptionFailureDiagnosticStage
+    let errorCode: TranscriptionFailureDiagnosticCode
+    let httpStatus: Int?
+
+    init(
+        stage: TranscriptionFailureDiagnosticStage,
+        errorCode: TranscriptionFailureDiagnosticCode,
+        httpStatus: Int? = nil
+    ) {
+        self.stage = stage
+        self.errorCode = errorCode
+        self.httpStatus = httpStatus.flatMap { (100...599).contains($0) ? $0 : nil }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case event, stage, errorCode, httpStatus
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(Self.event, forKey: .event)
+        try container.encode(stage, forKey: .stage)
+        try container.encode(errorCode, forKey: .errorCode)
+        try container.encodeIfPresent(httpStatus, forKey: .httpStatus)
+    }
+}
+
 struct PublishedTranscriptionArtifacts: Equatable, Sendable {
     let transcriptURL: URL
     let rawTranscriptURL: URL
     let manifestURL: URL
     let logURL: URL
+    let committedTranscriptRevision: TranscriptDocumentRevision
 }
 
 enum TranscriptionArtifactPublicationError:
@@ -38,16 +88,23 @@ enum TranscriptionArtifactPublicationError:
     Equatable
 {
     case unsafeExistingArtifact(String)
+    case unsafeSessionFolder
+    case diagnosticTooLarge
 
     var errorDescription: String? {
         switch self {
         case .unsafeExistingArtifact(let name):
             "Refusing to replace unsafe transcription artifact \(name)."
+        case .unsafeSessionFolder:
+            "Refusing to write a transcription diagnostic outside a regular session folder."
+        case .diagnosticTooLarge:
+            "Transcription diagnostic exceeds the maximum size."
         }
     }
 }
 
 struct TranscriptionArtifactPublisher: @unchecked Sendable {
+    static let failureDiagnosticFileName = "transcription.failure.json"
     static let canonicalNames = [
         "transcript.raw.txt",
         "transcript.txt",
@@ -57,16 +114,19 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
 
     let maximumBackupsPerArtifact: Int
     private let fileManager: FileManager
+    private let mutationGate: RecordingSessionMutationGate
 
     init(
         maximumBackupsPerArtifact: Int = 3,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        mutationGate: RecordingSessionMutationGate = .init()
     ) {
         self.maximumBackupsPerArtifact = max(
             0,
             maximumBackupsPerArtifact
         )
         self.fileManager = fileManager
+        self.mutationGate = mutationGate
     }
 
     func publish(
@@ -77,6 +137,7 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         sessionFolder: URL,
         now: Date = Date()
     ) throws -> PublishedTranscriptionArtifacts {
+        try mutationGate.withMutation(for: sessionFolder) {
         let staging = sessionFolder.appendingPathComponent(
             ".transcription-publish-\(UUID().uuidString)",
             isDirectory: true
@@ -137,6 +198,10 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             now: now
         )
 
+        let revision = try SecureTranscriptDocumentReader().readCanonical(
+            in: sessionFolder,
+            allowLegacy: false
+        ).revision
         return .init(
             transcriptURL: sessionFolder.appendingPathComponent(
                 "transcript.txt"
@@ -149,8 +214,32 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             ),
             logURL: sessionFolder.appendingPathComponent(
                 "transcription.log"
-            )
+            ),
+            committedTranscriptRevision: revision
         )
+        }
+    }
+
+    func publishFailureDiagnostic(
+        _ diagnostic: TranscriptionFailureDiagnostic,
+        sessionFolder: URL
+    ) throws -> URL {
+        let safeSessionFolder = sessionFolder.standardizedFileURL
+        try validateSessionFolder(safeSessionFolder)
+        return try mutationGate.withMutation(for: safeSessionFolder) {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(diagnostic)
+            guard data.count <= TranscriptionFailureDiagnostic.maximumBytes else {
+                throw TranscriptionArtifactPublicationError.diagnosticTooLarge
+            }
+            let destination = safeSessionFolder.appendingPathComponent(
+                Self.failureDiagnosticFileName
+            )
+            try validateExistingArtifact(destination)
+            try data.write(to: destination, options: .atomic)
+            return destination
+        }
     }
 
     func expireLegacyRuns(
@@ -196,10 +285,21 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
     }
 
     private func validateExistingArtifact(_ url: URL) throws {
-        guard fileManager.fileExists(atPath: url.path) else { return }
-        guard RecordingSessionStore.isRegularFile(url) else {
+        var attributes = stat()
+        guard url.path.withCString({ lstat($0, &attributes) }) == 0 else {
+            return
+        }
+        guard (attributes.st_mode & S_IFMT) == S_IFREG else {
             throw TranscriptionArtifactPublicationError
                 .unsafeExistingArtifact(url.lastPathComponent)
+        }
+    }
+
+    private func validateSessionFolder(_ url: URL) throws {
+        var attributes = stat()
+        guard url.path.withCString({ lstat($0, &attributes) }) == 0,
+              (attributes.st_mode & S_IFMT) == S_IFDIR else {
+            throw TranscriptionArtifactPublicationError.unsafeSessionFolder
         }
     }
 

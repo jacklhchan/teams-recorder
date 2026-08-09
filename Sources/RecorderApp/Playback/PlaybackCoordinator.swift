@@ -17,6 +17,7 @@ final class PlaybackPresentationModel: ObservableObject {
 
     @Published private(set) var session: RecordingSession?
     @Published private(set) var snapshot = PlaybackSnapshot.empty
+    @Published private(set) var loadRevision: UInt64 = 0
 
     var progress: TimeInterval { snapshot.progress }
     var duration: TimeInterval { snapshot.duration }
@@ -27,6 +28,7 @@ final class PlaybackPresentationModel: ObservableObject {
     }
 
     func begin(session: RecordingSession) {
+        loadRevision &+= 1
         self.session = session
         snapshot = PlaybackSnapshot(
             sessionID: session.id,
@@ -56,7 +58,14 @@ protocol PlaybackCoordinating: AnyObject {
     func play()
     func pause()
     func seek(to seconds: TimeInterval) async
+    func setVolume(_ volume: Float)
+    func setRate(_ rate: Float)
     func stop()
+}
+
+extension PlaybackCoordinating {
+    func setVolume(_: Float) {}
+    func setRate(_: Float) {}
 }
 
 @MainActor
@@ -122,6 +131,7 @@ final class PlaybackCoordinator: PlaybackCoordinating {
     private var isPlaying = false
     private var generation = 0
     private var seekRequestGeneration = 0
+    private var selectedRate: Float = 1
 
     init(player: AVPlayer, observer: PlaybackObserving) {
         self.player = player
@@ -155,6 +165,9 @@ final class PlaybackCoordinator: PlaybackCoordinating {
         generation += 1
         let loadGeneration = generation
         removeObserversAndItem()
+        selectedRate = 1
+        player.defaultRate = 1
+        player.volume = 1
 
         let item = AVPlayerItem(url: session.recordingURL)
         player.replaceCurrentItem(with: item)
@@ -181,7 +194,8 @@ final class PlaybackCoordinator: PlaybackCoordinating {
 
     func play() {
         guard currentItem != nil else { return }
-        player.play()
+        player.defaultRate = selectedRate
+        player.playImmediately(atRate: selectedRate)
         isPlaying = true
         publish(progress: currentProgress)
     }
@@ -208,6 +222,20 @@ final class PlaybackCoordinator: PlaybackCoordinating {
               seekRequestGeneration == requestGeneration,
               currentItem === item else { return }
         publish(progress: target)
+    }
+
+    func setVolume(_ volume: Float) {
+        guard volume.isFinite else { return }
+        player.volume = min(max(volume, 0), 1)
+    }
+
+    func setRate(_ rate: Float) {
+        guard [0.5, 1, 1.25, 1.5, 2].contains(rate) else { return }
+        selectedRate = rate
+        player.defaultRate = rate
+        if isPlaying {
+            player.rate = rate
+        }
     }
 
     func stop() {

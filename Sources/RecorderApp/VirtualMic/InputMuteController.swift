@@ -1,7 +1,6 @@
 import AVFAudio
 import Foundation
 
-@available(macOS 14.0, *)
 protocol InputMuteControlling: AnyObject {
     var isMuted: Bool { get }
     func install(onChange: @escaping (Bool) -> Void) throws
@@ -9,14 +8,12 @@ protocol InputMuteControlling: AnyObject {
     func uninstall()
 }
 
-@available(macOS 14.0, *)
 protocol InputMuteApplication {
     var isInputMuted: Bool { get }
     func setInputMuted(_ muted: Bool) throws
     func setInputMuteStateChangeHandler(_ handler: ((Bool) -> Bool)?) throws
 }
 
-@available(macOS 14.0, *)
 final class InputMuteController: InputMuteControlling {
     private let application: InputMuteApplication
     private let notificationCenter: NotificationCenter
@@ -102,7 +99,6 @@ final class InputMuteController: InputMuteControlling {
     }
 }
 
-@available(macOS 14.0, *)
 private struct SystemInputMuteApplication: InputMuteApplication {
     var isInputMuted: Bool {
         AVAudioApplication.shared.isInputMuted

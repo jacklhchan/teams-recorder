@@ -13,6 +13,7 @@ EXPECTED_BUILD="$4"
 SIGN_MODE="$5"
 CODESIGN_BIN="${CODESIGN_BIN:-codesign}"
 FILE_BIN="${FILE_BIN:-file}"
+VTOOL_BIN="${VTOOL_BIN:-/usr/bin/xcrun}"
 
 [[ "$SIGN_MODE" == "ad-hoc" || "$SIGN_MODE" == "none" ]] || {
   echo "Sign mode must be ad-hoc or none." >&2
@@ -28,8 +29,15 @@ plutil -lint "$PLIST" >&2
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "$EXPECTED_ID"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")" = "$EXPECTED_VERSION"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")" = "$EXPECTED_BUILD"
-test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "15.0"
+test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" = "26.0"
+test -x "$APP/Contents/MacOS/LocalMeetingRecorder"
 "$FILE_BIN" "$APP/Contents/MacOS/LocalMeetingRecorder" | grep -q 'arm64'
+HELPER="$APP/Contents/Helpers/recorderctl"
+test -x "$HELPER"
+"$FILE_BIN" "$HELPER" | grep -q 'arm64'
+HELPER_BUILD_INFO="$("$VTOOL_BIN" vtool -show-build "$HELPER")"
+printf '%s\n' "$HELPER_BUILD_INFO" | grep -Eq '^[[:space:]]*platform MACOS$'
+printf '%s\n' "$HELPER_BUILD_INFO" | grep -Eq '^[[:space:]]*minos 26\.0$'
 test -f "$APP/Contents/Resources/AppIcon.icns"
 test ! -e "$APP/Contents/Resources/transcribe-openai-compatible.sh"
 test ! -e "$APP/Contents/Resources/transcribe-qwen-asr.sh"
@@ -38,6 +46,33 @@ test -f "$APP/Contents/Resources/LICENSE"
 test -f "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 test ! -e "$APP/Contents/Resources/release-manifest.json"
 test "$(<"$APP/Contents/Resources/.lmr-build-owner")" = "local.meeting.recorder.build-app.v1"
+
+FORBIDDEN_BUNDLE_CONTENT="$(
+  /usr/bin/find "$APP/Contents" -mindepth 1 \
+    \( \
+      -name 'Tests' -o \
+      -name 'ManualFixtures' -o \
+      -name 'contracts' -o \
+      -name '*.schema.json' -o \
+      -name 'recording-info-v*.json' -o \
+      -name 'meeting-intelligence-v*.json' -o \
+      -iname 'meeting_intelligence_provider.py' -o \
+      -iname '*.py' -o \
+      -iname '*.pyc' -o \
+      -iname '__pycache__' -o \
+      -iname 'python*' -o \
+      -iname 'ffmpeg' -o \
+      -iname 'ffprobe' -o \
+      -iname 'transcribe-openai-compatible.sh' -o \
+      -iname 'transcribe-qwen-asr.sh' -o \
+      -iname 'openai_asr_longform.py' \
+    \) \
+    -print -quit
+)"
+if [[ -n "$FORBIDDEN_BUNDLE_CONTENT" ]]; then
+  echo "Forbidden test, contract, or runtime helper in app Contents." >&2
+  exit 70
+fi
 
 if [[ "$SIGN_MODE" == "ad-hoc" ]]; then
   "$CODESIGN_BIN" --verify --deep --strict "$APP" >&2

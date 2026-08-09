@@ -6,7 +6,7 @@
 
 **Architecture:** `SCShareableContent` resolves displays and running applications into a `CaptureSelection`. One audio-only `SCStream` emits system/application and microphone `CMSampleBuffer` values. A timestamp-aware 48 kHz Float32 mixer aligns both sources, inserts silence for gaps, and feeds the existing AAC writer, meters, and health report.
 
-**Tech Stack:** Swift 5.9, SwiftUI, ScreenCaptureKit, AVFoundation, CoreMedia, CoreAudio, XCTest, macOS 15+
+**Tech Stack:** Swift 5.9, SwiftUI, ScreenCaptureKit, AVFoundation, CoreMedia, CoreAudio, XCTest, macOS 26+
 
 ## Global Constraints
 

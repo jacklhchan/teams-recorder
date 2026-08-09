@@ -1,6 +1,6 @@
 import Foundation
 
-struct RecordingHealthReport: Equatable {
+struct RecordingHealthReport: Equatable, Sendable {
     var systemSignalSeen = false
     var micSignalSeen = false
     var clippingEvents = 0
@@ -81,7 +81,7 @@ enum TeamsScreenStatusText {
     static let unavailable = "Screen capture unavailable"
 }
 
-struct RecordingResult: Equatable {
+struct RecordingResult: Equatable, Sendable {
     let folderURL: URL
     let recordingURL: URL
     let health: RecordingHealthReport

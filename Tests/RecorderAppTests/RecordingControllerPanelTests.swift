@@ -23,6 +23,94 @@ final class RecordingControllerPanelTests: XCTestCase {
         )
     }
 
+    func testInputStatusUsesConnectionMuteAndSignalPrecedence() {
+        XCTAssertEqual(
+            RecordingControllerInputStatus.make(
+                level: .init(rms: -12, peak: -3, samples: [0.7]),
+                isConnected: true,
+                isMuted: false
+            ),
+            .signal
+        )
+        XCTAssertEqual(
+            RecordingControllerInputStatus.make(
+                level: .init(),
+                isConnected: true,
+                isMuted: false
+            ),
+            .quiet
+        )
+        XCTAssertEqual(
+            RecordingControllerInputStatus.make(
+                level: .init(rms: -12, peak: -3, samples: [0.7]),
+                isConnected: true,
+                isMuted: true
+            ),
+            .muted
+        )
+        XCTAssertEqual(
+            RecordingControllerInputStatus.make(
+                level: .init(rms: -12, peak: -3, samples: [0.7]),
+                isConnected: false,
+                isMuted: false
+            ),
+            .disconnected
+        )
+    }
+
+    func testRecorderAndTeamsMutedLiveUnknownAndMismatchRemainDistinct() {
+        let muted = RecordingControllerMicrophonePresentation.make(
+            recorderMuted: true,
+            teamsState: .muted
+        )
+        XCTAssertEqual(muted.recorderStatusText, "Recorder muted")
+        XCTAssertEqual(muted.teamsStatusText, "Teams muted")
+        XCTAssertFalse(muted.hasMismatch)
+
+        let live = RecordingControllerMicrophonePresentation.make(
+            recorderMuted: false,
+            teamsState: .unmuted
+        )
+        XCTAssertEqual(live.recorderStatusText, "Recorder live")
+        XCTAssertEqual(live.teamsStatusText, "Teams live")
+        XCTAssertFalse(live.hasMismatch)
+
+        let unknown = RecordingControllerMicrophonePresentation.make(
+            recorderMuted: true,
+            teamsState: .unknown(.controlNotFound)
+        )
+        XCTAssertEqual(unknown.teamsStatusText, "Teams status unknown")
+        XCTAssertFalse(unknown.hasMismatch)
+
+        let mismatch = RecordingControllerMicrophonePresentation.make(
+            recorderMuted: true,
+            teamsState: .unmuted
+        )
+        XCTAssertTrue(mismatch.hasMismatch)
+        XCTAssertNotEqual(mismatch.recorderStatusText, mismatch.teamsStatusText)
+    }
+
+    func testAccessibilityActionAppearsOnlyForPermissionRequiredUnknown() {
+        XCTAssertTrue(
+            RecordingControllerMicrophonePresentation.make(
+                recorderMuted: false,
+                teamsState: .unknown(.accessibilityPermissionRequired)
+            ).showsEnableAccessibilityAction
+        )
+        XCTAssertFalse(
+            RecordingControllerMicrophonePresentation.make(
+                recorderMuted: false,
+                teamsState: .unknown(.controlNotFound)
+            ).showsEnableAccessibilityAction
+        )
+        XCTAssertFalse(
+            RecordingControllerMicrophonePresentation.make(
+                recorderMuted: false,
+                teamsState: .muted
+            ).showsEnableAccessibilityAction
+        )
+    }
+
     func testEpisodeEmitsOneCommandPerRecordingTransition() {
         var episode = RecordingControllerPanelEpisode()
 
@@ -45,6 +133,7 @@ final class RecordingControllerPanelTests: XCTestCase {
             ),
             isRecordingPublisher: subject.eraseToAnyPublisher()
         )
+        defer { coordinator.shutdown() }
 
         subject.send(false)
         XCTAssertEqual(presenter.presentedModels.count, 0)
@@ -99,7 +188,10 @@ final class RecordingControllerPanelTests: XCTestCase {
         let recorder = RecordingEngine()
         let model = AppModel(
             recorder: recorder,
-            performStartupWork: false
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            virtualMicStateProvider: { .absent }
         )
         return (model, recorder)
     }

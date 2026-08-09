@@ -37,3 +37,8 @@ if ($LASTEXITCODE -eq 0 -or ($releaseOutput -join "`n") -notmatch "permitted onl
     throw "Release build unexpectedly accepted EnableTestSignedVirtualMicPreview."
 }
 Write-Host "PASS: Release build rejects the test-signed virtual microphone property."
+
+# The rejected build above is an expected negative test. PowerShell preserves
+# its native exit code even though the assertion passed, which would otherwise
+# make a successful parent verification script exit with code 1 on pwsh.
+$global:LASTEXITCODE = 0

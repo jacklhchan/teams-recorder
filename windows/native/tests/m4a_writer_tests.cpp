@@ -115,7 +115,9 @@ struct Options {
     std::uint32_t iterations = 16U;
     std::uint32_t frames = 960U;
     bool diagnostic = false;
+    bool hard_exit_after_inspect = false;
     std::filesystem::path input_path;
+    std::wstring ready_event_name;
 };
 
 bool ParseUnsigned(const char* text, std::uint32_t* value) {
@@ -134,12 +136,22 @@ bool ParseOptions(int argc, char** argv, Options* options) {
     bool have_test = false;
     for (int index = 1; index < argc; ++index) {
         const std::string argument(argv[index]);
-        if (argument == "--iterations" || argument == "--frames" || argument == "--input") {
+        if (argument == "--iterations" || argument == "--frames" || argument == "--input" ||
+            argument == "--ready-event") {
             if (++index >= argc) {
                 return false;
             }
             if (argument == "--input") {
                 options->input_path = argv[index];
+                continue;
+            }
+            if (argument == "--ready-event") {
+                const std::string event_name(argv[index]);
+                if (event_name.empty() || event_name.size() > 200U ||
+                    event_name.find_first_of(" \t\r\n\"") != std::string::npos) {
+                    return false;
+                }
+                options->ready_event_name.assign(event_name.begin(), event_name.end());
                 continue;
             }
             std::uint32_t parsed = 0U;
@@ -153,6 +165,8 @@ bool ParseOptions(int argc, char** argv, Options* options) {
             }
         } else if (argument == "--diagnostic") {
             options->diagnostic = true;
+        } else if (argument == "--hard-exit") {
+            options->hard_exit_after_inspect = true;
         } else if (!have_test && !argument.empty() && argument.front() != '-') {
             options->test = argument;
             have_test = true;
@@ -160,7 +174,8 @@ bool ParseOptions(int argc, char** argv, Options* options) {
             return false;
         }
     }
-    return options->iterations <= 10'000U && options->frames <= 48'000U;
+    return options->iterations <= 10'000U && options->frames <= 48'000U &&
+        (!options->hard_exit_after_inspect || options->test == "inspect");
 }
 
 struct DecodedAudioAnalysis {
@@ -647,11 +662,40 @@ void ExactSafetyWorkFileFinalizesInPlace(const std::filesystem::path& directory)
     ExpectDecodableAacStream(work_path);
 }
 
+constexpr DWORD kWriterChildReadyTimeoutMilliseconds = 20'000U;
+constexpr DWORD kChildTerminationTimeoutMilliseconds = 5'000U;
+constexpr DWORD kDecodeAnalysisTimeoutMilliseconds = 15'000U;
+constexpr std::size_t kMaximumAnalysisOutputBytes = 4U * 1024U;
+
+void ProcessKillDiagnostic(const char* stage) {
+    std::fprintf(stderr, "M4A_PROCESS_KILL:%s\n", stage);
+    std::fflush(stderr);
+}
+
+std::wstring CurrentExecutablePath() {
+    wchar_t executable[32'768]{};
+    const DWORD executable_length = GetModuleFileNameW(
+        nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    Expect(executable_length > 0U && executable_length < std::size(executable),
+           "kill harness could not resolve its executable path");
+    return {executable, executable_length};
+}
+
+std::wstring QuoteCommandArgument(const std::wstring& value) {
+    // Test paths and event names are generated locally and cannot contain a
+    // quote. Rejecting that shape is safer than attempting a partial command
+    // line escaping implementation in this kill harness.
+    Expect(!value.empty() && value.find(L'"') == std::wstring::npos,
+           "kill harness command argument is invalid");
+    return L"\"" + value + L"\"";
+}
+
 void WriteKillChildReadyMarker(
     const std::filesystem::path& path,
     const DurableCheckpoint& checkpoint) {
+    const std::filesystem::path temporary_path(path.wstring() + L".tmp");
     const HANDLE file = CreateFileW(
-        path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+        temporary_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
         FILE_ATTRIBUTE_NORMAL, nullptr);
     Expect(file != INVALID_HANDLE_VALUE,
            "kill child could not create its durable ready marker");
@@ -672,12 +716,36 @@ void WriteKillChildReadyMarker(
     const bool flush_ok = write_ok && written == static_cast<DWORD>(evidence_length) &&
         FlushFileBuffers(file) != FALSE;
     CloseHandle(file);
-    Expect(flush_ok, "kill child could not flush its ready marker");
+    if (!flush_ok) {
+        (void)DeleteFileW(temporary_path.c_str());
+        Expect(false, "kill child could not flush its ready marker");
+    }
+    const bool published = MoveFileExW(
+        temporary_path.c_str(), path.c_str(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+    if (!published) {
+        (void)DeleteFileW(temporary_path.c_str());
+    }
+    Expect(published, "kill child could not atomically publish its ready marker");
 }
 
-[[noreturn]] void RunCheckpointKillChild(const std::filesystem::path& directory) {
+void SignalKillChildReadyEvent(const std::wstring& event_name) {
+    const HANDLE ready_event = OpenEventW(
+        EVENT_MODIFY_STATE, FALSE, event_name.c_str());
+    Expect(ready_event != nullptr,
+           "kill child could not open the parent readiness event");
+    const bool signaled = SetEvent(ready_event) != FALSE;
+    CloseHandle(ready_event);
+    Expect(signaled, "kill child could not signal the parent readiness event");
+}
+
+[[noreturn]] void RunCheckpointKillChild(
+    const std::filesystem::path& directory,
+    const std::wstring& ready_event_name) {
     Expect(!directory.empty() && std::filesystem::exists(directory),
            "kill child did not receive its parent-owned directory");
+    Expect(!ready_event_name.empty(),
+           "kill child did not receive a readiness event name");
     const auto work_path = directory / "recording.audio-safety.partial.mp4";
     Error error = Error::Ok;
     std::string detail;
@@ -719,6 +787,7 @@ void WriteKillChildReadyMarker(
            "kill child did not retain its second checkpoint");
     WriteKillChildReadyMarker(
         directory / "checkpoint.ready", last_checkpoint);
+    SignalKillChildReadyEvent(ready_event_name);
     Sleep(INFINITE);
     std::terminate();
 }
@@ -789,51 +858,194 @@ void CopyDurablePrefix(
     Expect(output.good(), "flushing the durable prefix candidate failed");
 }
 
-void ProcessKillRetainsDecodableCheckpoint(const std::filesystem::path& directory) {
-    wchar_t executable[32'768]{};
-    const DWORD executable_length = GetModuleFileNameW(
-        nullptr, executable, static_cast<DWORD>(std::size(executable)));
-    Expect(executable_length > 0U && executable_length < std::size(executable),
-           "kill harness could not resolve its executable path");
+std::uint64_t ParseAnalysisField(
+    std::string_view output,
+    std::string_view key) {
+    const std::size_t offset = output.find(key);
+    Expect(offset != std::string_view::npos,
+           "decode analysis output is missing a required field");
+    const std::size_t value_start = offset + key.size();
+    std::size_t value_end = value_start;
+    while (value_end < output.size() && output[value_end] >= '0' &&
+           output[value_end] <= '9') {
+        ++value_end;
+    }
+    Expect(value_end > value_start,
+           "decode analysis output contains a malformed numeric field");
+    std::uint64_t value = 0U;
+    const auto parsed = std::from_chars(
+        output.data() + value_start, output.data() + value_end, value);
+    Expect(parsed.ec == std::errc{} && parsed.ptr == output.data() + value_end,
+           "decode analysis output contains a non-numeric field");
+    return value;
+}
 
-    std::wstring command = L"\"";
-    command.append(executable, executable_length);
-    command += L"\" kill-child --input \"";
-    command += directory.wstring();
-    command += L"\"";
+void TerminateBoundedChild(HANDLE process, DWORD exit_code,
+                           const char* failure_message) {
+    Expect(process != nullptr, "bounded child process handle is invalid");
+    Expect(TerminateProcess(process, exit_code) != FALSE, failure_message);
+    Expect(WaitForSingleObject(
+               process, kChildTerminationTimeoutMilliseconds) == WAIT_OBJECT_0,
+           "bounded child did not terminate promptly");
+}
+
+DecodedAudioAnalysis AnalyzeDecodedAacInBoundedChild(
+    const std::wstring& executable,
+    const std::filesystem::path& candidate_path,
+    const std::filesystem::path& directory) {
+    const auto output_path = directory / "decode-analysis.txt";
+    SECURITY_ATTRIBUTES inheritable{};
+    inheritable.nLength = sizeof(inheritable);
+    inheritable.bInheritHandle = TRUE;
+    const HANDLE output_file = CreateFileW(
+        output_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inheritable,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Expect(output_file != INVALID_HANDLE_VALUE,
+           "could not create bounded decode-analysis output");
+    const HANDLE input = CreateFileW(
+        L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &inheritable, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (input == INVALID_HANDLE_VALUE) {
+        CloseHandle(output_file);
+        Expect(false, "could not create bounded decode-analysis input");
+    }
+
+    std::wstring command = QuoteCommandArgument(executable);
+    command += L" inspect --input ";
+    command += QuoteCommandArgument(candidate_path.wstring());
+    // The child flushes its one bounded result line and exits directly. This
+    // deliberately isolates any CI-only MFShutdown stall from the parent
+    // kill/recovery test while retaining a real SourceReader EOS traversal.
+    command += L" --diagnostic --hard-exit";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = input;
+    startup.hStdOutput = output_file;
+    startup.hStdError = output_file;
+    PROCESS_INFORMATION process{};
+    const BOOL created = CreateProcessW(
+        nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+        nullptr, nullptr, &startup, &process);
+    CloseHandle(input);
+    CloseHandle(output_file);
+    Expect(created != FALSE,
+           "could not start bounded decode-analysis child");
+
+    const DWORD wait = WaitForSingleObject(
+        process.hProcess, kDecodeAnalysisTimeoutMilliseconds);
+    if (wait == WAIT_TIMEOUT) {
+        ProcessKillDiagnostic("decode-analysis-timeout");
+        TerminateBoundedChild(
+            process.hProcess, 198U,
+            "could not terminate a timed-out decode-analysis child");
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        throw std::runtime_error(
+            "decode-analysis child exceeded its internal 15-second timeout");
+    }
+    if (wait != WAIT_OBJECT_0) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        throw std::runtime_error("waiting for the decode-analysis child failed");
+    }
+    DWORD exit_code = 0U;
+    const bool have_exit_code = GetExitCodeProcess(
+        process.hProcess, &exit_code) != FALSE;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    Expect(have_exit_code && exit_code == 0U,
+           "decode-analysis child failed before it reached end-of-stream");
+
+    std::error_code size_error;
+    const std::uintmax_t output_size = std::filesystem::file_size(
+        output_path, size_error);
+    Expect(!size_error && output_size > 0U &&
+               output_size <= kMaximumAnalysisOutputBytes,
+           "decode-analysis child output exceeded its bounded protocol");
+    const auto bytes = ReadBytes(output_path);
+    Expect(bytes.size() == output_size,
+           "decode-analysis child output could not be read completely");
+    const std::string_view output(
+        reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    const std::uint64_t samples = ParseAnalysisField(
+        output, "M4A_ANALYSIS: samples=");
+    Expect(samples > 0U && samples % 2U == 0U,
+           "decode-analysis child produced an invalid PCM sample count");
+    return {samples, 0.0F, 0.0};
+}
+
+void ProcessKillRetainsDecodableCheckpoint(const std::filesystem::path& directory) {
+    const std::wstring executable = CurrentExecutablePath();
+    const std::wstring ready_event_name =
+        L"Local\\TeamsRecorderM4aKillReady-" +
+        std::to_wstring(GetCurrentProcessId()) + L"-" +
+        std::to_wstring(GetTickCount64());
+    const HANDLE ready_event = CreateEventW(
+        nullptr, TRUE, FALSE, ready_event_name.c_str());
+    Expect(ready_event != nullptr,
+           "kill harness could not create its readiness event");
+
+    std::wstring command = QuoteCommandArgument(executable);
+    command += L" kill-child --input ";
+    command += QuoteCommandArgument(directory.wstring());
+    command += L" --ready-event ";
+    command += QuoteCommandArgument(ready_event_name);
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
-    Expect(CreateProcessW(
+    const BOOL created = CreateProcessW(
                nullptr, command.data(), nullptr, nullptr, FALSE,
-               CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process) != FALSE,
-           "kill harness could not start its writer child");
+               CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+    if (created == FALSE) {
+        CloseHandle(ready_event);
+        Expect(false, "kill harness could not start its writer child");
+    }
+    ProcessKillDiagnostic("writer-child-started");
 
     bool child_terminated = false;
     const auto cleanup = [&] {
         if (!child_terminated) {
             (void)TerminateProcess(process.hProcess, 199U);
-            (void)WaitForSingleObject(process.hProcess, 5'000U);
+            (void)WaitForSingleObject(
+                process.hProcess, kChildTerminationTimeoutMilliseconds);
             child_terminated = true;
         }
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
+        CloseHandle(ready_event);
     };
 
     try {
         const auto ready_path = directory / "checkpoint.ready";
-        const ULONGLONG deadline = GetTickCount64() + 30'000U;
-        while (!std::filesystem::exists(ready_path)) {
-            Expect(WaitForSingleObject(process.hProcess, 0U) == WAIT_TIMEOUT,
-                   "kill writer child exited before publishing checkpoint evidence");
-            Expect(GetTickCount64() < deadline,
-                   "kill writer child timed out before checkpoint evidence");
-            Sleep(20U);
+        const HANDLE wait_handles[] = {process.hProcess, ready_event};
+        const DWORD readiness = WaitForMultipleObjects(
+            static_cast<DWORD>(std::size(wait_handles)), wait_handles, FALSE,
+            kWriterChildReadyTimeoutMilliseconds);
+        if (readiness == WAIT_TIMEOUT) {
+            ProcessKillDiagnostic("writer-child-ready-timeout");
+            throw std::runtime_error(
+                "writer child exceeded its internal 20-second readiness timeout");
         }
-        Expect(TerminateProcess(process.hProcess, 197U) != FALSE,
-               "TerminateProcess failed for the checkpoint child");
-        Expect(WaitForSingleObject(process.hProcess, 5'000U) == WAIT_OBJECT_0,
-               "checkpoint child did not terminate promptly");
+        if (readiness == WAIT_OBJECT_0) {
+            DWORD exit_code = 0U;
+            const bool have_exit_code = GetExitCodeProcess(
+                process.hProcess, &exit_code) != FALSE;
+            throw std::runtime_error(
+                have_exit_code
+                    ? "kill writer child exited before publishing checkpoint evidence"
+                    : "could not obtain the pre-readiness child exit code");
+        }
+        Expect(readiness == WAIT_OBJECT_0 + 1U,
+               "waiting for the writer child readiness event failed");
+        Expect(std::filesystem::exists(ready_path),
+               "writer child signaled readiness without a marker");
+        ProcessKillDiagnostic("writer-child-ready");
+        Expect(WaitForSingleObject(process.hProcess, 0U) == WAIT_TIMEOUT,
+               "kill writer child exited at the readiness boundary");
+        TerminateBoundedChild(
+            process.hProcess, 197U,
+            "TerminateProcess failed for the checkpoint child");
         child_terminated = true;
         DWORD exit_code = 0;
         Expect(GetExitCodeProcess(process.hProcess, &exit_code) != FALSE &&
@@ -852,8 +1064,11 @@ void ProcessKillRetainsDecodableCheckpoint(const std::filesystem::path& director
                    HasTopLevelBox(candidate_bytes, "moov") &&
                    HasTopLevelBox(candidate_bytes, "moof") &&
                    HasTopLevelBox(candidate_bytes, "mdat"),
-               "durable audio safety prefix is not fragmented MP4");
-        const DecodedAudioAnalysis analysis = AnalyzeDecodedAac(candidate_path);
+                   "durable audio safety prefix is not fragmented MP4");
+        ProcessKillDiagnostic("decode-analysis-started");
+        const DecodedAudioAnalysis analysis = AnalyzeDecodedAacInBoundedChild(
+            executable, candidate_path, directory);
+        ProcessKillDiagnostic("decode-analysis-complete");
         const std::uint64_t decoded_frames = analysis.samples / 2U;
         const std::uint64_t decoded_duration_100ns =
             decoded_frames * 10'000'000ULL / 48'000ULL;
@@ -880,6 +1095,17 @@ int main(int argc, char** argv) {
     std::error_code cleanup_error;
     std::filesystem::path directory;
     try {
+        // Keep the parent process free of Media Foundation.  This makes the
+        // true external-kill test independent of a CI-only MFShutdown stall;
+        // the writer and the SourceReader EOS proof each still run in their
+        // own bounded child process.
+        if (options.test == "process-kill") {
+            directory = TestDirectory();
+            ProcessKillRetainsDecodableCheckpoint(directory);
+            std::filesystem::remove_all(directory, cleanup_error);
+            directory.clear();
+            return cleanup_error ? 1 : 0;
+        }
         Diagnostic(options, "before-runtime-startup");
         {
             MediaFoundationTestRuntime media_foundation;
@@ -890,11 +1116,18 @@ int main(int argc, char** argv) {
                             static_cast<unsigned long long>(analysis.samples),
                             static_cast<unsigned long long>(analysis.samples / 2U),
                             analysis.peak, analysis.rms);
+                if (options.hard_exit_after_inspect) {
+                    std::fflush(stdout);
+                    // The bounded process has emitted its complete protocol
+                    // line. Avoid allowing a CI-specific MF shutdown hang to
+                    // consume the parent recovery test's CTest budget.
+                    ExitProcess(0);
+                }
             } else if (options.test == "runtime") {
                 // Intentionally do no writer work: this isolates MFStartup,
                 // MFShutdown and COM apartment teardown in a fresh process.
             } else if (options.test == "kill-child") {
-                RunCheckpointKillChild(options.input_path);
+                RunCheckpointKillChild(options.input_path, options.ready_event_name);
             } else {
                 directory = TestDirectory();
                 Diagnostic(options, "before-writer-work");
@@ -924,8 +1157,6 @@ int main(int argc, char** argv) {
                     CreateThenAbortCleanly(directory);
                 } else if (options.test == "work-file") {
                     ExactSafetyWorkFileFinalizesInPlace(directory);
-                } else if (options.test == "process-kill") {
-                    ProcessKillRetainsDecodableCheckpoint(directory);
                 } else {
                     return 64;
                 }
@@ -939,11 +1170,22 @@ int main(int argc, char** argv) {
             Diagnostic(options, "before-runtime-shutdown");
         }
         Diagnostic(options, "after-runtime-shutdown");
+    } catch (const std::exception& exception) {
+        if (!directory.empty()) {
+            std::filesystem::remove_all(directory, cleanup_error);
+        }
+        std::fprintf(stderr, "FAIL M4A writer test (%s): %s\n",
+                     options.test.c_str(), exception.what());
+        std::fflush(stderr);
+        return 1;
     } catch (...) {
         if (!directory.empty()) {
             std::filesystem::remove_all(directory, cleanup_error);
         }
-        throw;
+        std::fprintf(stderr, "FAIL M4A writer test (%s): unknown exception\n",
+                     options.test.c_str());
+        std::fflush(stderr);
+        return 1;
     }
     return cleanup_error ? 1 : 0;
 }

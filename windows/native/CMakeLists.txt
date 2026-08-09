@@ -305,6 +305,11 @@ if(RECORDER_NATIVE_BUILD_TESTS)
             RUN_SERIAL TRUE
             TIMEOUT 90
     )
+    # The real process-kill harness has its own staged hard limits (20s
+    # writer readiness, 5s termination, 15s decode proof). Keep CTest's
+    # deadline comfortably below the suite default so a regressed child or
+    # Media Foundation teardown cannot consume the full CI job budget.
+    set_tests_properties(Recorder.M4aWriter.ProcessKillRecovery PROPERTIES TIMEOUT 60)
 
     if(WIN32)
         add_executable(Recorder.WasapiCapture.EndpointProbe

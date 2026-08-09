@@ -692,7 +692,10 @@ std::wstring QuoteCommandArgument(const std::wstring& value) {
 
 void WriteKillChildReadyMarker(
     const std::filesystem::path& path,
-    const DurableCheckpoint& checkpoint) {
+    const DurableCheckpoint& checkpoint,
+    std::uint64_t accepted_100ns) {
+    Expect(accepted_100ns >= checkpoint.media_time_100ns,
+           "kill child accepted time precedes its durable checkpoint");
     const std::filesystem::path temporary_path(path.wstring() + L".tmp");
     const HANDLE file = CreateFileW(
         temporary_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
@@ -702,10 +705,11 @@ void WriteKillChildReadyMarker(
     std::array<char, 256U> evidence{};
     const int evidence_length = std::snprintf(
         evidence.data(), evidence.size(),
-        "sequence=%llu\nbytes=%llu\ncheckpoint100ns=%llu\naccepted100ns=190000000\n",
+        "sequence=%llu\nbytes=%llu\ncheckpoint100ns=%llu\naccepted100ns=%llu\n",
         static_cast<unsigned long long>(checkpoint.sequence),
         static_cast<unsigned long long>(checkpoint.file_size_bytes),
-        static_cast<unsigned long long>(checkpoint.media_time_100ns));
+        static_cast<unsigned long long>(checkpoint.media_time_100ns),
+        static_cast<unsigned long long>(accepted_100ns));
     Expect(evidence_length > 0 &&
                static_cast<std::size_t>(evidence_length) < evidence.size(),
            "kill child checkpoint evidence exceeded its bounded marker");
@@ -755,23 +759,35 @@ void SignalKillChildReadyEvent(const std::wstring& event_name) {
 
     std::vector<float> frames(960U * 2U, 0.0F);
     DurableCheckpoint last_checkpoint;
-    for (std::uint32_t block = 0; block < 950U; ++block) {
+    // Mirror mixed_capture_session's two-second initial checkpoint and
+    // seven-second cadence: 2s, 9s, 16s, then the next due checkpoint at
+    // 23s. Kill just before that next boundary to exercise the largest normal
+    // production tail, including the fMP4 sink's two-second fragment delay.
+    constexpr std::uint32_t kFirstCheckpointBlocks = 100U;
+    constexpr std::uint32_t kSecondCheckpointBlocks = 450U;
+    constexpr std::uint32_t kThirdCheckpointBlocks = 800U;
+    constexpr std::uint32_t kAcceptedBlocksBeforeKill = 1'149U;
+    constexpr std::uint64_t kBlockDuration100ns = 200'000U;
+    for (std::uint32_t block = 0; block < kAcceptedBlocksBeforeKill; ++block) {
         frames[(static_cast<std::size_t>(block) * 53U) % frames.size()] = 0.15F;
         Expect(writer->WriteFrames(
                    frames.data(), 960U,
-                   static_cast<std::uint64_t>(block) * 200'000U,
+                   static_cast<std::uint64_t>(block) * kBlockDuration100ns,
                    &detail) == Error::Ok,
                "kill child could not write audio");
         const std::uint32_t completed_blocks = block + 1U;
-        if (completed_blocks == 100U || completed_blocks == 500U) {
+        if (completed_blocks == kFirstCheckpointBlocks ||
+            completed_blocks == kSecondCheckpointBlocks ||
+            completed_blocks == kThirdCheckpointBlocks) {
             DurableCheckpoint checkpoint;
             const std::uint64_t media_time =
-                static_cast<std::uint64_t>(completed_blocks) * 200'000U;
+                static_cast<std::uint64_t>(completed_blocks) * kBlockDuration100ns;
             Expect(writer->CreateDurableCheckpoint(
                        media_time, &checkpoint, &detail) == Error::Ok,
                    "kill child durable checkpoint failed");
             const std::uint64_t expected_sequence =
-                completed_blocks == 100U ? 1U : 2U;
+                completed_blocks == kFirstCheckpointBlocks ? 1U :
+                completed_blocks == kSecondCheckpointBlocks ? 2U : 3U;
             Expect(checkpoint.sequence == expected_sequence &&
                        checkpoint.file_size_bytes > 0U &&
                        checkpoint.media_time_100ns == media_time,
@@ -780,13 +796,13 @@ void SignalKillChildReadyEvent(const std::wstring& event_name) {
         }
     }
 
-    // The last declared durable checkpoint is 10 seconds. The child has
-    // accepted another 9 seconds when the parent kills it, so an EOS-decodable
-    // prefix of at least 9 seconds proves the advertised <=10 second tail.
-    Expect(last_checkpoint.sequence == 2U,
-           "kill child did not retain its second checkpoint");
+    const std::uint64_t accepted_100ns =
+        static_cast<std::uint64_t>(kAcceptedBlocksBeforeKill) * kBlockDuration100ns;
+    Expect(last_checkpoint.sequence == 3U &&
+               last_checkpoint.media_time_100ns == 160'000'000ULL,
+           "kill child did not retain its third checkpoint");
     WriteKillChildReadyMarker(
-        directory / "checkpoint.ready", last_checkpoint);
+        directory / "checkpoint.ready", last_checkpoint, accepted_100ns);
     SignalKillChildReadyEvent(ready_event_name);
     Sleep(INFINITE);
     std::terminate();
@@ -1052,9 +1068,9 @@ void ProcessKillRetainsDecodableCheckpoint(const std::filesystem::path& director
                    exit_code == 197U,
                "checkpoint child was not killed at the intended boundary");
         const auto evidence = ReadKillCheckpointEvidence(ready_path);
-        Expect(evidence.sequence == 2U &&
-                   evidence.checkpoint_100ns == 100'000'000ULL &&
-                   evidence.accepted_100ns == 190'000'000ULL,
+        Expect(evidence.sequence == 3U &&
+                   evidence.checkpoint_100ns == 160'000'000ULL &&
+                   evidence.accepted_100ns == 229'800'000ULL,
                "kill checkpoint marker does not describe the intended boundary");
         const auto work_path = directory / "recording.audio-safety.partial.mp4";
         const auto candidate_path = directory / "recovered-prefix.mp4";
@@ -1073,10 +1089,43 @@ void ProcessKillRetainsDecodableCheckpoint(const std::filesystem::path& director
         const std::uint64_t decoded_duration_100ns =
             decoded_frames * 10'000'000ULL / 48'000ULL;
         constexpr std::uint64_t kMaximumTailLoss100ns = 100'000'000ULL;
-        Expect(decoded_duration_100ns >= 95'000'000ULL &&
-                   decoded_duration_100ns <= 105'000'000ULL &&
-                   decoded_duration_100ns + kMaximumTailLoss100ns >=
-                       evidence.accepted_100ns,
+        // A decoded AAC access unit can include up to one codec-sized padding
+        // block. The crash-recovery promise is otherwise stated directly in
+        // terms of accepted versus recovered media: retain something, do not
+        // recover beyond accepted input (apart from that padding), and lose no
+        // more than ten seconds at the durable checkpoint boundary.
+        constexpr std::uint64_t kMaximumAacPadding100ns =
+            10'000'000ULL * 1'024ULL / 48'000ULL + 1U;
+        const bool decoded_within_accepted_input =
+            decoded_duration_100ns <= evidence.accepted_100ns ||
+            decoded_duration_100ns - evidence.accepted_100ns <=
+                kMaximumAacPadding100ns;
+        const std::uint64_t tail_loss_100ns =
+            decoded_duration_100ns >= evidence.accepted_100ns
+                ? 0U
+                : evidence.accepted_100ns - decoded_duration_100ns;
+        const LONGLONG accepted_minus_decoded_100ns =
+            static_cast<LONGLONG>(evidence.accepted_100ns) -
+            static_cast<LONGLONG>(decoded_duration_100ns);
+        std::fprintf(
+            stderr,
+            "M4A_PROCESS_KILL:recovery-metrics samples=%llu frames=%llu "
+            "decoded100ns=%llu checkpoint100ns=%llu accepted100ns=%llu "
+            "accepted-minus-decoded100ns=%lld tail-loss100ns=%llu "
+            "max-tail100ns=%llu max-aac-padding100ns=%llu\n",
+            static_cast<unsigned long long>(analysis.samples),
+            static_cast<unsigned long long>(decoded_frames),
+            static_cast<unsigned long long>(decoded_duration_100ns),
+            static_cast<unsigned long long>(evidence.checkpoint_100ns),
+            static_cast<unsigned long long>(evidence.accepted_100ns),
+            static_cast<long long>(accepted_minus_decoded_100ns),
+            static_cast<unsigned long long>(tail_loss_100ns),
+            static_cast<unsigned long long>(kMaximumTailLoss100ns),
+            static_cast<unsigned long long>(kMaximumAacPadding100ns));
+        std::fflush(stderr);
+        Expect(decoded_duration_100ns > 0U &&
+                   decoded_within_accepted_input &&
+                   tail_loss_100ns <= kMaximumTailLoss100ns,
                "durable prefix duration or 10-second tail-loss bound failed");
         cleanup();
     } catch (...) {

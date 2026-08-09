@@ -32,13 +32,15 @@ two seconds. A durable checkpoint requires all configured streams to report
 their sink-writer marker callbacks after `NotifyEndOfSegment`, followed by
 `IMFByteStream::Flush` and `FlushFileBuffers`; `NotifyEndOfSegment == S_OK`
 alone is never reported as durability. Mixed capture creates the first
-checkpoint at two seconds and then every eight seconds. Additive v4 statistics
+checkpoint at two seconds and then every seven seconds. This leaves margin for
+the sink's two-second fragment cadence and AAC block rounding while preserving
+the ten-second crash-recovery tail bound. Additive v4 statistics
 publish each writer's sequence, byte offset, and media timestamp independently.
 
-`Recorder.M4aWriter.ProcessKillRecovery` starts a real child writer, confirms
-two checkpoints, writes another nine seconds, terminates the process with
-`TerminateProcess`, then requires the surviving fMP4 to decode through EOS
-within the ten-second tail-loss bound.
+`Recorder.M4aWriter.ProcessKillRecovery` starts a real child writer, mirrors
+that checkpoint cadence, terminates it immediately before the next scheduled
+checkpoint with `TerminateProcess`, then requires the surviving fMP4 to decode
+through EOS within the ten-second tail-loss bound.
 
 The contract tests use no Windows media API, so they can run with any C++17 compiler supported by CMake. `Recorder.NativeBridge.CAbiSmokeTests` is compiled as C11 and validates that the public header and imports work for C callers, not just C++ callers.
 

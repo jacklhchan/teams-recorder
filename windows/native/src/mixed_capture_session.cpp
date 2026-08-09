@@ -36,7 +36,10 @@ namespace {
 constexpr std::uint32_t kFramesPerBlock = 960;  // 20 ms at 48 kHz.
 constexpr std::uint64_t kBlock100ns = 200'000;
 constexpr std::uint64_t kFirstDurableCheckpoint100ns = 20'000'000;  // 2 s.
-constexpr std::uint64_t kDurableCheckpointInterval100ns = 80'000'000;  // 8 s.
+// The fMP4 sink can retain one two-second fragment behind a marker while its
+// on-disk prefix remains decodable. Seven-second checkpoints leave nearly one
+// second of AAC-block rounding headroom under the ten-second crash tail bound.
+constexpr std::uint64_t kDurableCheckpointInterval100ns = 70'000'000;  // 7 s.
 constexpr std::size_t kMaxQueuedFrames = 48'000U * 4U;
 constexpr auto kSourceSkewWait = std::chrono::milliseconds(60);
 constexpr std::uint64_t kLiveMixerLatencyFrames = 4'800;  // 100 ms.

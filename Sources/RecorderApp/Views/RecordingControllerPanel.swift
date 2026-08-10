@@ -8,10 +8,6 @@ enum RecordingControllerAccessibility {
     static let systemWaveformID = "recording-controller-system-waveform"
     static let microphoneWaveformID = "recording-controller-microphone-waveform"
     static let microphoneMuteID = "recording-controller-microphone-mute"
-    static let teamsMicrophoneStatusID =
-        "recording-controller-teams-microphone-status"
-    static let teamsAccessibilityID =
-        "recording-controller-enable-teams-accessibility"
     static let screenStatusID = "recording-controller-screen-status"
     static let screenToggleID = "recording-controller-screen-toggle"
     static let stopID = "recording-controller-stop"
@@ -245,7 +241,7 @@ struct RecordingControllerView: View {
                 presentation: presentation,
                 stop: model.startOrStop,
                 toggleMicrophoneMute: {
-                    model.toggleTeamsAndRecorderMicMute()
+                    model.toggleRecorderMicMute(source: "Floating panel")
                 },
                 setScreenRequested: { requested in
                     Task {
@@ -257,14 +253,7 @@ struct RecordingControllerView: View {
                 isSystemConnected: recorder.isSystemCaptureConnected,
                 isMicrophoneConnected: recorder.isMicrophoneCaptureConnected,
                 isMicrophoneMuted: recorder.micMuted,
-                isLocalMicrophoneMuted: model.localMicMuted,
-                microphonePresentation:
-                    RecordingControllerMicrophonePresentation.make(
-                        recorderMuted: recorder.micMuted,
-                        teamsState: model.teamsMicMuteState
-                    ),
-                requestTeamsAccessibilityPermission:
-                    model.requestTeamsAccessibilityPermission
+                isLocalMicrophoneMuted: model.localMicMuted
             )
         }
     }
@@ -295,12 +284,6 @@ struct RecordingControllerPanelContent: View {
     let isMicrophoneConnected: Bool
     let isMicrophoneMuted: Bool
     let isLocalMicrophoneMuted: Bool
-    var microphonePresentation =
-        RecordingControllerMicrophonePresentation.make(
-            recorderMuted: false,
-            teamsState: .unknown(.inactive)
-        )
-    var requestTeamsAccessibilityPermission: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 10) {
@@ -349,10 +332,7 @@ struct RecordingControllerPanelContent: View {
                 tint: RecorderVisualStyle.microphone,
                 accessibilityID: RecordingControllerAccessibility.microphoneWaveformID,
                 iconAction: toggleMicrophoneMute,
-                iconIsMuted: isLocalMicrophoneMuted,
-                microphonePresentation: microphonePresentation,
-                requestTeamsAccessibilityPermission:
-                    requestTeamsAccessibilityPermission
+                iconIsMuted: isLocalMicrophoneMuted
             )
 
             HStack(spacing: 10) {
@@ -391,9 +371,6 @@ private struct RecordingControllerInputRow: View {
     let accessibilityID: String
     let iconAction: (() -> Void)?
     var iconIsMuted: Bool? = nil
-    var microphonePresentation: RecordingControllerMicrophonePresentation?
-        = nil
-    var requestTeamsAccessibilityPermission: (() -> Void)? = nil
 
     private var status: RecordingControllerInputStatus {
         RecordingControllerInputStatus.make(
@@ -455,52 +432,14 @@ private struct RecordingControllerInputRow: View {
                     )
                 )
                 .background(RecorderPanelRenderLocationMarker(productionIdentifier: accessibilityID))
-            if let microphonePresentation {
-                VStack(alignment: .trailing, spacing: 0) {
-                    Text(microphonePresentation.recorderStatusText)
-                        .font(.caption2)
-                        .lineLimit(1)
-                    HStack(spacing: 4) {
-                        Text(microphonePresentation.teamsStatusText)
-                            .font(.caption2)
-                            .lineLimit(1)
-                            .foregroundStyle(
-                                microphonePresentation.hasMismatch
-                                    ? .orange
-                                    : .secondary
-                            )
-                            .accessibilityIdentifier(
-                                RecordingControllerAccessibility
-                                    .teamsMicrophoneStatusID
-                            )
-                        if microphonePresentation
-                            .showsEnableAccessibilityAction,
-                           let requestTeamsAccessibilityPermission {
-                            Button("Enable") {
-                                requestTeamsAccessibilityPermission()
-                            }
-                            .buttonStyle(.link)
-                            .font(.caption2)
-                            .help("Enable Accessibility")
-                            .accessibilityLabel("Enable Accessibility")
-                            .accessibilityIdentifier(
-                                RecordingControllerAccessibility
-                                    .teamsAccessibilityID
-                            )
-                        }
-                    }
-                }
-                .frame(width: 150, alignment: .trailing)
-            } else {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 6, height: 6)
-                Text(status.rawValue)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .frame(width: 72, alignment: .trailing)
-            }
+            Circle()
+                .fill(statusColor)
+                .frame(width: 6, height: 6)
+            Text(status.rawValue)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 72, alignment: .trailing)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)

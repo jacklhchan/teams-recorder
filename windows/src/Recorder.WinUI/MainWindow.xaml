@@ -12,18 +12,5 @@
         <MicaBackdrop />
     </Window.SystemBackdrop>
 
-    <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
-
-        <TitleBar x:Name="AppTitleBar" Title="Teams Recorder">
-            <TitleBar.IconSource>
-                <ImageIconSource ImageSource="Assets/AppIcon.ico" />
-            </TitleBar.IconSource>
-        </TitleBar>
-
-        <Frame x:Name="RootFrame" Grid.Row="1" />
-    </Grid>
+    <Frame x:Name="RootFrame" />
 </Window>

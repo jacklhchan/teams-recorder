@@ -23,8 +23,6 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
 
-        ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AppTitleBar);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         RootFrame.Navigate(typeof(MainPage));
         Activated += OnFirstActivated;

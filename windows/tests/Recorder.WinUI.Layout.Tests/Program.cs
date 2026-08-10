@@ -4,6 +4,7 @@ var fixtureRoot = Path.Combine(AppContext.BaseDirectory, "Fixtures");
 var page = XDocument.Load(Path.Combine(fixtureRoot, "MainPage.xaml"));
 var codeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "MainPage.xaml.cs"));
 var appCodeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "App.xaml.cs"));
+var mainWindow = XDocument.Load(Path.Combine(fixtureRoot, "MainWindow.xaml"));
 var windowCodeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "MainWindow.xaml.cs"));
 var viewModelCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingViewModel.cs"));
 var overlay = XDocument.Load(Path.Combine(fixtureRoot, "RecordingOverlayWindow.xaml"));
@@ -94,6 +95,12 @@ void SourceDeviceGridHasRows()
 
 void MainWindowEnforcesMinimumSize()
 {
+    Equal(0, mainWindow.Descendants(xaml + "TitleBar").Count(),
+        "The system title bar and a client TitleBar must not render the app title twice.");
+    DoesNotContain("ExtendsContentIntoTitleBar", windowCodeBehind,
+        "Navigation content must begin below the standard Windows title bar.");
+    Equal(0, page.Descendants(xaml + "NavigationView.PaneHeader").Count(),
+        "The localized PaneTitle and a custom pane header must not render the brand twice.");
     Contains("WorkAreaWidthRatio = 0.90", windowCodeBehind, "Main window must use most of the available width.");
     Contains("WorkAreaHeightRatio = 0.88", windowCodeBehind, "Main window must use most of the available height.");
     Contains("MinimumLogicalWidth = 960", windowCodeBehind, "Main window minimum width changed.");

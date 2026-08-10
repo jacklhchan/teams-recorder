@@ -20,27 +20,6 @@
         OpenPaneLength="224"
         PaneDisplayMode="Auto"
         SelectionChanged="OnNavigationSelectionChanged">
-        <NavigationView.PaneHeader>
-            <StackPanel Margin="4,8,0,14" Orientation="Horizontal" Spacing="10">
-                <Border
-                    Width="34"
-                    Height="34"
-                    Background="{ThemeResource RecorderPrimaryBrush}"
-                    CornerRadius="10">
-                    <FontIcon
-                        Foreground="White"
-                        Glyph="&#xE720;"
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Center" />
-                </Border>
-                <TextBlock
-                    FontSize="16"
-                    FontWeight="SemiBold"
-                    Text="Teams Recorder"
-                    VerticalAlignment="Center" />
-            </StackPanel>
-        </NavigationView.PaneHeader>
-
         <NavigationView.MenuItems>
             <NavigationViewItem
                 x:Name="RecordNavigationItem"

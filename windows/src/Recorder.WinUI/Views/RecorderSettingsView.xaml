@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="TeamsRecorder.Windows.WinUI.Views.RecorderSettingsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+    mc:Ignorable="d">
+
+    <ScrollViewer
+        AutomationProperties.AutomationId="RecorderSettingsScrollViewer"
+        HorizontalScrollBarVisibility="Disabled"
+        VerticalScrollBarVisibility="Auto">
+        <Grid MaxWidth="1180" Padding="32,24,32,40" ColumnSpacing="28">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="210" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- A compact, non-interactive guide keeps related settings easy to scan
+                 without introducing a second navigation state for the host page. -->
+            <StackPanel Spacing="6">
+                <TextBlock
+                    Margin="12,0,0,8"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="設定" />
+                <RadioButton Content="錄製裝置" GroupName="SettingsSections" IsChecked="True" IsEnabled="False" />
+                <RadioButton Content="自動錄音" GroupName="SettingsSections" IsEnabled="False" />
+                <RadioButton Content="儲存與復原" GroupName="SettingsSections" IsEnabled="False" />
+                <RadioButton Content="AI 服務" GroupName="SettingsSections" IsEnabled="False" />
+                <RadioButton Content="快捷鍵與診斷" GroupName="SettingsSections" IsEnabled="False" />
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Spacing="18">
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource TitleTextBlockStyle}" Text="設定" />
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="管理本機錄音、儲存與 AI 服務。所有 Teams 偵測均在此電腦上進行。"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+
+                <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                    <StackPanel Spacing="14">
+                        <StackPanel Spacing="2">
+                            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="錄製裝置" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="選擇要保留的系統輸出和選用麥克風。" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button
+                            AutomationProperties.AutomationId="SettingsRefreshAudioDevicesButton"
+                            Command="{Binding RefreshDevicesCommand}"
+                            Content="重新整理音訊裝置"
+                            HorizontalAlignment="Left" />
+                        <Grid ColumnSpacing="16" RowSpacing="14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="6" Visibility="{Binding RenderEndpointSelectionVisibility}">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="系統輸出" />
+                                <ComboBox
+                                    AutomationProperties.AutomationId="SettingsRenderEndpointPicker"
+                                    DisplayMemberPath="DisplayName"
+                                    IsEnabled="{Binding IsDeviceSelectionEnabled}"
+                                    ItemsSource="{Binding RenderEndpoints}"
+                                    SelectedItem="{Binding SelectedRenderEndpoint, Mode=TwoWay}" />
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding SelectedRenderDescription}" TextWrapping="Wrap" />
+                                <InfoBar IsClosable="False" IsOpen="{Binding HasTeamsPlaybackEndpointWarning}" Message="{Binding TeamsPlaybackEndpointWarning}" Severity="Warning" Title="確認 Teams 播放裝置" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="6">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="麥克風（選用）" />
+                                <ComboBox
+                                    AutomationProperties.AutomationId="SettingsMicrophoneEndpointPicker"
+                                    DisplayMemberPath="DisplayName"
+                                    IsEnabled="{Binding IsDeviceSelectionEnabled}"
+                                    ItemsSource="{Binding CaptureEndpoints}"
+                                    SelectedItem="{Binding SelectedMicrophoneEndpoint, Mode=TwoWay}" />
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding SelectedMicrophoneDescription}" TextWrapping="Wrap" />
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding RecordingMicrophoneMuteText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel Spacing="6">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="錄製來源" />
+                            <ComboBox
+                                AutomationProperties.AutomationId="SettingsCaptureSourcePicker"
+                                DisplayMemberPath="DisplayName"
+                                IsEnabled="{Binding IsDeviceSelectionEnabled}"
+                                ItemsSource="{Binding CaptureSources}"
+                                SelectedItem="{Binding SelectedCaptureSource, Mode=TwoWay}" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding SelectedCaptureSourceDescription}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                    <StackPanel Spacing="12">
+                        <StackPanel Spacing="2">
+                            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="本機 Teams 自動錄音" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="完全在本機根據 Teams 播放活動推測會議狀態；不會連線至 Teams 服務或同步 Teams 靜音。" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <CheckBox
+                            AutomationProperties.AutomationId="SettingsEnableLocalTeamsHeuristicCheckBox"
+                            Content="啟用本機 Teams 自動錄音推測"
+                            IsChecked="{Binding IsLocalHeuristicAutoStartEnabled, Mode=TwoWay}" />
+                        <InfoBar IsClosable="False" IsOpen="True" Message="必須在真實 Teams 會議中驗證。偵測失敗或會議靜音不會自動停止錄音。" Severity="Informational" Title="Preview 限制" />
+                        <TextBlock Text="{Binding TeamsLocalAutomaticRecordingStatusText}" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <Button AutomationProperties.AutomationId="SettingsEnableTeamsAutomaticRecordingButton" Command="{Binding EnableTeamsAutomaticRecordingCommand}" Content="啟用自動錄音" />
+                            <Button AutomationProperties.AutomationId="SettingsDisableTeamsAutomaticRecordingButton" Command="{Binding DisableTeamsAutomaticRecordingCommand}" Content="停用自動錄音" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                    <StackPanel Spacing="12">
+                        <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="儲存與復原" />
+                        <TextBox
+                            AutomationProperties.AutomationId="SettingsOutputFolderTextBox"
+                            Header="工作階段資料夾"
+                            IsEnabled="{Binding IsDeviceSelectionEnabled}"
+                            PlaceholderText="選擇儲存工作階段的資料夾"
+                            Text="{Binding OutputFolder, Mode=TwoWay}" />
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding NextOutputPath}" TextWrapping="Wrap" />
+                        <InfoBar IsClosable="False" IsOpen="True" Message="錄製中斷時會保留可用復原資料，並在下次啟動時安全完成或標示結果。" Severity="Informational" Title="復原保護" />
+                        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="{Binding StorageReadinessText}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                    <StackPanel MaxWidth="720" Spacing="12">
+                        <StackPanel Spacing="2">
+                            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="AI 轉錄與摘要" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="設定 OpenAI 相容服務。送出音訊或逐字稿前，應用程式會另外要求確認。" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <TextBox AutomationProperties.AutomationId="SettingsOpenAiBaseUrlTextBox" Header="API Base URL" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiApiBaseUrl, Mode=TwoWay}" />
+                        <PasswordBox x:Name="OpenAiApiKeyPasswordBox" AutomationProperties.AutomationId="SettingsOpenAiApiKeyPasswordBox" Header="{Binding OpenAiApiKeyFieldLabel}" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="留空會保留已儲存的 API Key" />
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <ComboBox AutomationProperties.AutomationId="SettingsOpenAiAsrModelComboBox" Header="ASR Model" IsEditable="True" IsEnabled="{Binding IsOpenAiProviderAvailable}" ItemsSource="{Binding OpenAiDiscoveredModels}" Text="{Binding OpenAiAsrModel, Mode=TwoWay}" />
+                            <ComboBox Grid.Column="1" AutomationProperties.AutomationId="SettingsOpenAiLlmModelComboBox" Header="LLM Model" IsEditable="True" IsEnabled="{Binding IsOpenAiProviderAvailable}" ItemsSource="{Binding OpenAiDiscoveredModels}" Text="{Binding OpenAiLlmModel, Mode=TwoWay}" />
+                        </Grid>
+                        <TextBox AutomationProperties.AutomationId="SettingsOpenAiLanguageTextBox" Header="語言（選填）" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="例如：zh 或 en" Text="{Binding OpenAiLanguage, Mode=TwoWay}" />
+                        <TextBox AutomationProperties.AutomationId="SettingsOpenAiPromptTextBox" AcceptsReturn="True" Header="轉錄提示（選填）" Height="76" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="提供專有名詞或轉錄偏好" Text="{Binding OpenAiPrompt, Mode=TwoWay}" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <Button AutomationProperties.AutomationId="SettingsSaveOpenAiSettingsButton" Click="OnSaveOpenAiProviderSettingsClick" Content="儲存" IsEnabled="{Binding CanSaveOpenAiProvider}" />
+                            <Button AutomationProperties.AutomationId="SettingsTestOpenAiConnectionButton" Command="{Binding TestOpenAiProviderConnectionCommand}" Content="測試連線" />
+                            <Button AutomationProperties.AutomationId="SettingsClearOpenAiApiKeyButton" Click="OnClearOpenAiApiKeyClick" Content="移除 Key" IsEnabled="{Binding CanRemoveOpenAiApiKey}" />
+                            <ProgressRing Height="20" IsActive="{Binding IsTestingOpenAiProvider}" Width="20" />
+                        </StackPanel>
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding OpenAiProviderIntegrationStatus}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                    <StackPanel Spacing="10">
+                        <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="快捷鍵與診斷" />
+                        <TextBlock Text="{Binding GlobalMuteHotKeyStatus}" TextWrapping="Wrap" />
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="此快捷鍵只控制錄音程式的麥克風靜音，不會變更 Teams 或 Windows 的靜音狀態。" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <Button AutomationProperties.AutomationId="SettingsSaveDiagnosticsButton" Command="{Binding SaveDiagnosticsCommand}" Content="儲存診斷報告" />
+                            <Button AutomationProperties.AutomationId="SettingsOpenDiagnosticsFolderButton" Command="{Binding OpenDiagnosticsFolderCommand}" Content="開啟診斷資料夾" />
+                        </StackPanel>
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding DiagnosticsExportStatusText}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

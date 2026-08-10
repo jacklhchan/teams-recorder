@@ -28,4 +28,8 @@
   <data name="TeamsSettingsTitle.Text" xml:space="preserve"><value>Teams 整合</value></data>
   <data name="TranscriptionSettingsTitle.Text" xml:space="preserve"><value>轉錄與 AI</value></data>
   <data name="DiagnosticsSettingsTitle.Text" xml:space="preserve"><value>診斷</value></data>
+  <data name="NavigationAI.Content" xml:space="preserve"><value>AI 工作區</value></data>
+  <data name="AiWorkspaceTitle.Text" xml:space="preserve"><value>AI 工作區</value></data>
+  <data name="AiTranscriptionTitle.Text" xml:space="preserve"><value>逐字稿</value></data>
+  <data name="AiSummaryTitle.Text" xml:space="preserve"><value>會議摘要</value></data>
 </root>

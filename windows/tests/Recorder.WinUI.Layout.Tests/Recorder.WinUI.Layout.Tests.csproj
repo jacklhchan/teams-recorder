@@ -12,7 +12,11 @@
     <None Include="../../src/Recorder.WinUI/RecordingViewModel.cs" Link="Fixtures/RecordingViewModel.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/RecordingOverlayWindow.xaml" Link="Fixtures/RecordingOverlayWindow.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/RecordingOverlayWindow.xaml.cs" Link="Fixtures/RecordingOverlayWindow.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/Recorder.WinUI/RecordingOverlayPresentation.cs" Link="Fixtures/RecordingOverlayPresentation.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/RecorderControlLifecycleOwnerAdapter.cs" Link="Fixtures/RecorderControlLifecycleOwnerAdapter.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/Recorder.WinUI/Views/**/*.xaml" Link="Fixtures/Views/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/Recorder.WinUI/Views/**/*.xaml.cs" Link="Fixtures/Views/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/Recorder.WinUI/Styles/RecorderDesign.xaml" Link="Fixtures/Styles/RecorderDesign.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/Strings/zh-Hant/Resources.resw" Link="Fixtures/zh-Hant/Resources.resw" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/Strings/en-US/Resources.resw" Link="Fixtures/en-US/Resources.resw" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

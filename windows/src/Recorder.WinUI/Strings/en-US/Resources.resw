@@ -28,4 +28,8 @@
   <data name="TeamsSettingsTitle.Text" xml:space="preserve"><value>Teams integration</value></data>
   <data name="TranscriptionSettingsTitle.Text" xml:space="preserve"><value>Transcription and AI</value></data>
   <data name="DiagnosticsSettingsTitle.Text" xml:space="preserve"><value>Diagnostics</value></data>
+  <data name="NavigationAI.Content" xml:space="preserve"><value>AI workspace</value></data>
+  <data name="AiWorkspaceTitle.Text" xml:space="preserve"><value>AI workspace</value></data>
+  <data name="AiTranscriptionTitle.Text" xml:space="preserve"><value>Transcript</value></data>
+  <data name="AiSummaryTitle.Text" xml:space="preserve"><value>Meeting summary</value></data>
 </root>

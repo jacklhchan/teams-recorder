@@ -13,7 +13,12 @@ public sealed record RecordingOverlayState(
     bool CanStopRecording,
     bool CanToggleTeamsWindowCapture = false,
     bool IsTeamsWindowCaptureEnabled = false,
-    string? TeamsWindowCaptureStatus = null);
+    string? TeamsWindowCaptureStatus = null,
+    bool IsFinalizing = false,
+    TimeSpan? Elapsed = null,
+    RecordingOverlayInputStatus SystemAudioStatus = RecordingOverlayInputStatus.Signal,
+    RecordingOverlayInputStatus MicrophoneStatus = RecordingOverlayInputStatus.Quiet,
+    bool IsRecorderMicrophoneMuted = false);
 
 /// <summary>
 /// Optional adapter boundary for a ViewModel. The overlay itself needs no
@@ -35,6 +40,16 @@ public enum RecordingOverlayMode
 {
     Countdown,
     Recording,
+    Finalizing,
+}
+
+/// <summary>Privacy-safe health projection for one captured audio source.</summary>
+public enum RecordingOverlayInputStatus
+{
+    Signal,
+    Quiet,
+    Muted,
+    Disconnected,
 }
 
 /// <summary>
@@ -58,7 +73,12 @@ public sealed record RecordingOverlayPresentation(
     RecordingOverlayRecordingKind? RecordingKind = null,
     bool CanToggleTeamsWindowCapture = false,
     bool IsTeamsWindowCaptureEnabled = false,
-    string? TeamsWindowCaptureStatus = null)
+    string? TeamsWindowCaptureStatus = null,
+    TimeSpan? Elapsed = null,
+    RecordingOverlayInputStatus SystemAudioStatus = RecordingOverlayInputStatus.Signal,
+    RecordingOverlayInputStatus MicrophoneStatus = RecordingOverlayInputStatus.Quiet,
+    bool IsRecorderMicrophoneMuted = false,
+    string? FinalizingStatus = null)
 {
     public static RecordingOverlayPresentation Countdown(int remainingSeconds) =>
         new(RecordingOverlayMode.Countdown, Math.Max(0, remainingSeconds));
@@ -74,6 +94,9 @@ public sealed record RecordingOverlayPresentation(
             CanToggleTeamsWindowCapture: canToggleTeamsWindowCapture,
             IsTeamsWindowCaptureEnabled: isTeamsWindowCaptureEnabled,
             TeamsWindowCaptureStatus: teamsWindowCaptureStatus);
+
+    public static RecordingOverlayPresentation Finalizing(string? status = null) =>
+        new(RecordingOverlayMode.Finalizing, FinalizingStatus: status);
 }
 
 /// <summary>
@@ -87,6 +110,15 @@ public sealed class TeamsWindowCaptureToggleRequestedEventArgs(bool enabled) : E
 }
 
 /// <summary>
+/// Requests a Recorder-local microphone mute transition. This never reads or
+/// changes the Teams mute state.
+/// </summary>
+public sealed class RecorderMicrophoneMuteToggleRequestedEventArgs(bool muted) : EventArgs
+{
+    public bool Muted { get; } = muted;
+}
+
+/// <summary>
 /// Presents an auxiliary, non-activating recording window. Consumers subscribe
 /// to the events and keep recording ownership in their existing coordinator.
 /// </summary>
@@ -97,6 +129,8 @@ public interface IRecordingOverlayPresenter : IDisposable
     event EventHandler? StopRequested;
 
     event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+
+    event EventHandler<RecorderMicrophoneMuteToggleRequestedEventArgs>? RecorderMicrophoneMuteToggleRequested;
 
     /// <summary>Shows the Teams automatic-recording cancellation countdown.</summary>
     void ShowCountdown(int remainingSeconds);
@@ -119,11 +153,20 @@ public interface IRecordingOverlayPresenter : IDisposable
 }
 
 /// <summary>
+/// Optional safe-write capability, separate from the original presenter
+/// contract so existing implementations remain source-compatible.
+/// </summary>
+public interface IRecordingOverlayFinalizationPresenter
+{
+    void ShowFinalizing(string? status = null);
+}
+
+/// <summary>
 /// Reuses one overlay window for the whole application lifetime. Construct and
 /// use this presenter from the WinUI UI thread; later updates may come from a
 /// worker thread and are marshalled back to that UI thread.
 /// </summary>
-public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter
+public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRecordingOverlayFinalizationPresenter
 {
     private readonly RecordingOverlayWindow window;
     private bool disposed;
@@ -135,6 +178,8 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter
         window.StopRequested += (_, _) => StopRequested?.Invoke(this, EventArgs.Empty);
         window.TeamsWindowCaptureToggleRequested += (_, args) =>
             TeamsWindowCaptureToggleRequested?.Invoke(this, args);
+        window.RecorderMicrophoneMuteToggleRequested += (_, args) =>
+            RecorderMicrophoneMuteToggleRequested?.Invoke(this, args);
     }
 
     public event EventHandler? CancelRequested;
@@ -142,6 +187,8 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter
     public event EventHandler? StopRequested;
 
     public event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+
+    public event EventHandler<RecorderMicrophoneMuteToggleRequestedEventArgs>? RecorderMicrophoneMuteToggleRequested;
 
     public void ShowCountdown(int remainingSeconds) =>
         Update(RecordingOverlayPresentation.Countdown(remainingSeconds));
@@ -159,6 +206,31 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter
             canToggleTeamsWindowCapture,
             isTeamsWindowCaptureEnabled,
             teamsWindowCaptureStatus));
+
+    /// <summary>Projects live source health into the recording controller.</summary>
+    public void ShowRecording(
+        RecordingOverlayRecordingKind kind,
+        bool canToggleTeamsWindowCapture,
+        bool isTeamsWindowCaptureEnabled,
+        string? teamsWindowCaptureStatus,
+        TimeSpan? elapsed,
+        RecordingOverlayInputStatus systemAudioStatus,
+        RecordingOverlayInputStatus microphoneStatus,
+        bool isRecorderMicrophoneMuted) =>
+        Update(RecordingOverlayPresentation.Recording(
+            kind,
+            canToggleTeamsWindowCapture,
+            isTeamsWindowCaptureEnabled,
+            teamsWindowCaptureStatus) with
+        {
+            Elapsed = elapsed,
+            SystemAudioStatus = systemAudioStatus,
+            MicrophoneStatus = microphoneStatus,
+            IsRecorderMicrophoneMuted = isRecorderMicrophoneMuted,
+        });
+
+    public void ShowFinalizing(string? status = null) =>
+        Update(RecordingOverlayPresentation.Finalizing(status));
 
     public void Hide()
     {

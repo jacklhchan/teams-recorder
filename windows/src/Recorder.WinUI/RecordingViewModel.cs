@@ -343,7 +343,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     /// (manual, test, or Teams automatic), plus the Teams-only start countdown.
     /// </summary>
     public RecordingOverlayState RecordingOverlayState => new(
-        IsVisible: snapshot.State == RecordingCoordinatorState.Recording || IsTeamsAutomaticRecordingCountdownVisible,
+        IsVisible: snapshot.State is RecordingCoordinatorState.Recording or RecordingCoordinatorState.Stopping ||
+            isFaultFinalizationInProgress || IsTeamsAutomaticRecordingCountdownVisible,
         IsRecording: snapshot.State == RecordingCoordinatorState.Recording,
         IsTeamsAutomaticStartCountdown: IsTeamsAutomaticRecordingCountdownVisible,
         CountdownSeconds: TeamsAutomaticRecordingCountdownSeconds,
@@ -351,7 +352,22 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         CanStopRecording: CanStopRecordingFromOverlay,
         CanToggleTeamsWindowCapture: CanToggleTeamsWindowCapture,
         IsTeamsWindowCaptureEnabled: isTeamsWindowCaptureEnabled,
-        TeamsWindowCaptureStatus: teamsWindowCaptureStatus);
+        TeamsWindowCaptureStatus: teamsWindowCaptureStatus,
+        IsFinalizing: snapshot.State == RecordingCoordinatorState.Stopping || isFaultFinalizationInProgress,
+        Elapsed: recordingStartedAt is { } startedAt ? DateTimeOffset.Now - startedAt : elapsed,
+        SystemAudioStatus: !IsPrimaryCaptureAvailable
+            ? RecordingOverlayInputStatus.Disconnected
+            : snapshot.Stats.PrimaryLevelRms > 0.0001f
+                ? RecordingOverlayInputStatus.Signal
+                : RecordingOverlayInputStatus.Quiet,
+        MicrophoneStatus: SelectedMicrophoneEndpoint switch
+        {
+            null or { EndpointId: null } or { IsAvailable: false } => RecordingOverlayInputStatus.Disconnected,
+            _ when IsRecordingMicrophoneMuted => RecordingOverlayInputStatus.Muted,
+            _ when snapshot.Stats.MicrophoneLevelRms > 0.0001f => RecordingOverlayInputStatus.Signal,
+            _ => RecordingOverlayInputStatus.Quiet,
+        },
+        IsRecorderMicrophoneMuted: IsRecordingMicrophoneMuted);
 
     public bool CanToggleTeamsWindowCapture =>
         snapshot.State == RecordingCoordinatorState.Recording &&
@@ -3277,6 +3293,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
 
         isFaultFinalizationInProgress = true;
+        NotifyRecordingOverlayStateChanged();
         try
         {
             var result = await lifecycle.FinalizeForRecoveryAsync();
@@ -3296,6 +3313,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         finally
         {
             isFaultFinalizationInProgress = false;
+            NotifyRecordingOverlayStateChanged();
             UpdateCommandStates();
         }
     }
@@ -3615,8 +3633,10 @@ public sealed record LibraryRecording(
     // before the library became media-kind neutral.
     public long AudioBytes => MediaBytes;
 
-    public bool IsVideo => string.Equals(MediaKind, "video", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(Path.GetExtension(MediaPath), ".mp4", StringComparison.OrdinalIgnoreCase);
+    // MP4 is a container, not a promise of a video track. Crash-safe Windows
+    // sessions may publish AAC-only MP4, so the canonical metadata must own
+    // playback-stage selection.
+    public bool IsVideo => string.Equals(MediaKind, "video", StringComparison.OrdinalIgnoreCase);
 
     public string MediaKindText => IsVideo ? "影片" : "純音訊";
 

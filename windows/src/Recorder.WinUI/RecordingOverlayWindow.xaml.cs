@@ -8,8 +8,8 @@ using WinRT.Interop;
 namespace TeamsRecorder.Windows.WinUI;
 
 /// <summary>
-/// An always-on-top auxiliary window which is shown without taking keyboard
-/// focus from Teams or another foreground application.
+/// An always-on-top auxiliary window shown without taking keyboard focus from
+/// Teams. It has only lifecycle-specific actions: cancel, stop, and capture.
 /// </summary>
 public sealed partial class RecordingOverlayWindow : Window
 {
@@ -32,7 +32,7 @@ public sealed partial class RecordingOverlayWindow : Window
     {
         InitializeComponent();
 
-        AppWindow.Resize(new SizeInt32(420, 158));
+        AppWindow.Resize(new SizeInt32(448, 276));
         AppWindow.IsShownInSwitchers = false;
         MoveToWorkingAreaCorner();
         if (AppWindow.Presenter is OverlappedPresenter presenter)
@@ -53,31 +53,52 @@ public sealed partial class RecordingOverlayWindow : Window
     }
 
     public event EventHandler? CancelRequested;
-
     public event EventHandler? StopRequested;
-
     public event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+    public event EventHandler<RecorderMicrophoneMuteToggleRequestedEventArgs>? RecorderMicrophoneMuteToggleRequested;
 
     internal void ApplyPresentation(RecordingOverlayPresentation presentation)
     {
         var isRecording = presentation.Mode == RecordingOverlayMode.Recording;
+        var isFinalizing = presentation.Mode == RecordingOverlayMode.Finalizing;
         isApplyingPresentation = true;
         try
         {
-        StatusText.Text = isRecording ? "錄音中" : "自動錄音即將開始";
-        CountdownText.Visibility = isRecording ? Visibility.Collapsed : Visibility.Visible;
-        CountdownText.Text = $"倒數 {presentation.RemainingSeconds} 秒";
-        ActionButton.Content = isRecording ? "停止" : "取消";
-        ActionButton.AccessKey = isRecording ? "停止錄音" : "取消自動錄音";
-        AutomationProperties.SetName(ActionButton, isRecording ? "停止錄音" : "取消自動錄音");
-        TeamsWindowCaptureToggle.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
-        TeamsWindowCaptureToggle.IsEnabled = isRecording && presentation.CanToggleTeamsWindowCapture;
-        TeamsWindowCaptureToggle.IsOn = presentation.IsTeamsWindowCaptureEnabled;
-        TeamsWindowCaptureStatusText.Visibility = isRecording &&
-            !string.IsNullOrWhiteSpace(presentation.TeamsWindowCaptureStatus)
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        TeamsWindowCaptureStatusText.Text = presentation.TeamsWindowCaptureStatus ?? string.Empty;
+            StatusText.Text = isFinalizing ? "正在完成錄音" : isRecording ? "錄音中" : "自動錄音即將開始";
+            StatusDetailText.Text = isFinalizing
+                ? presentation.FinalizingStatus ?? "正在安全寫入檔案；完成後會自動關閉。"
+                : isRecording ? "正在擷取 Teams／系統輸出與麥克風。" : "錄音控制器不會取得 Teams 焦點";
+            CountdownCard.Visibility = isRecording || isFinalizing ? Visibility.Collapsed : Visibility.Visible;
+            CountdownText.Text = $"倒數 {presentation.RemainingSeconds} 秒";
+            ElapsedText.Visibility = isRecording && presentation.Elapsed is not null ? Visibility.Visible : Visibility.Collapsed;
+            ElapsedText.Text = presentation.Elapsed is { } elapsed ? elapsed.ToString(@"hh\:mm\:ss") : string.Empty;
+            ActionButton.Visibility = isFinalizing ? Visibility.Collapsed : Visibility.Visible;
+            ActionButton.IsEnabled = !isFinalizing;
+            ActionButton.Content = isRecording ? "停止" : "取消";
+            ActionButton.AccessKey = isRecording ? "停止錄音" : "取消自動錄音";
+            AutomationProperties.SetName(ActionButton, isRecording ? "停止錄音" : "取消自動錄音");
+
+            SourcesPanel.Visibility = isRecording || isFinalizing ? Visibility.Visible : Visibility.Collapsed;
+            SystemAudioStatusText.Text = InputStatusText(presentation.SystemAudioStatus);
+            MicrophoneScopeText.Text = presentation.IsRecorderMicrophoneMuted
+                ? "Recorder 麥克風已靜音；不會同步 Teams"
+                : "僅影響 Recorder，不會同步 Teams";
+            MicrophoneIcon.Glyph = presentation.IsRecorderMicrophoneMuted ? "\uE74F" : "\uE720";
+            SystemWaveform.Value = WaveformValue(presentation.SystemAudioStatus);
+            MicrophoneWaveform.Value = presentation.IsRecorderMicrophoneMuted ? 0 : WaveformValue(presentation.MicrophoneStatus);
+            MicrophoneMuteButton.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
+            MicrophoneMuteButton.IsEnabled = isRecording && presentation.MicrophoneStatus != RecordingOverlayInputStatus.Disconnected;
+            MicrophoneMuteButton.Content = presentation.IsRecorderMicrophoneMuted ? "取消靜音" : "靜音";
+            AutomationProperties.SetName(
+                MicrophoneMuteButton,
+                presentation.IsRecorderMicrophoneMuted ? "取消 Recorder 麥克風靜音" : "將 Recorder 麥克風靜音");
+
+            // Finalizing is deliberately inert: it is neither dismissible nor
+            // able to change the active A/V target while the file is written.
+            ScreenCaptureCard.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
+            TeamsWindowCaptureToggle.IsEnabled = isRecording && presentation.CanToggleTeamsWindowCapture;
+            TeamsWindowCaptureToggle.IsOn = presentation.IsTeamsWindowCaptureEnabled;
+            TeamsWindowCaptureStatusText.Text = presentation.TeamsWindowCaptureStatus ?? "可在錄音期間切換";
         }
         finally
         {
@@ -103,13 +124,7 @@ public sealed partial class RecordingOverlayWindow : Window
     internal void ShowNonActivating()
     {
         var hwnd = WindowNative.GetWindowHandle(this);
-        _ = SetWindowPos(
-            hwnd,
-            HwndTopmost,
-            0,
-            0,
-            0,
-            0,
+        _ = SetWindowPos(hwnd, HwndTopmost, 0, 0, 0, 0,
             SwpNoSize | SwpNoMove | SwpNoActivate | SwpShowWindow);
     }
 
@@ -147,6 +162,16 @@ public sealed partial class RecordingOverlayWindow : Window
         CancelRequested?.Invoke(this, EventArgs.Empty);
     }
 
+    private void OnMicrophoneMuteButtonClick(object sender, RoutedEventArgs e)
+    {
+        if (MicrophoneMuteButton.IsEnabled && MicrophoneMuteButton.Content is string action)
+        {
+            RecorderMicrophoneMuteToggleRequested?.Invoke(
+                this,
+                new RecorderMicrophoneMuteToggleRequestedEventArgs(action == "靜音"));
+        }
+    }
+
     private void OnTeamsWindowCaptureToggleToggled(object sender, RoutedEventArgs e)
     {
         if (isApplyingPresentation)
@@ -166,8 +191,7 @@ public sealed partial class RecordingOverlayWindow : Window
             return;
         }
 
-        // The indicator must not be dismissible while recording. Its explicit
-        // action is Stop, and the primary window remains the app close target.
+        // Never expose a generic close route while the recording lifecycle owns this window.
         args.Cancel = true;
     }
 
@@ -176,6 +200,22 @@ public sealed partial class RecordingOverlayWindow : Window
         indicatorVisible = !indicatorVisible;
         RecordingIndicator.Opacity = indicatorVisible ? 1 : 0.25;
     }
+
+    private static string InputStatusText(RecordingOverlayInputStatus status) => status switch
+    {
+        RecordingOverlayInputStatus.Signal => "有訊號",
+        RecordingOverlayInputStatus.Quiet => "安靜",
+        RecordingOverlayInputStatus.Muted => "已靜音",
+        RecordingOverlayInputStatus.Disconnected => "已中斷",
+        _ => "未知",
+    };
+
+    private static double WaveformValue(RecordingOverlayInputStatus status) => status switch
+    {
+        RecordingOverlayInputStatus.Signal => 62,
+        RecordingOverlayInputStatus.Quiet => 12,
+        _ => 0,
+    };
 
     private void ApplyNoActivateStyle()
     {
@@ -192,14 +232,7 @@ public sealed partial class RecordingOverlayWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetWindowPos(
-        nint hWnd,
-        nint hWndInsertAfter,
-        int x,
-        int y,
-        int cx,
-        int cy,
-        uint uFlags);
+    private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

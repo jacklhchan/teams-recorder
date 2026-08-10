@@ -7,22 +7,27 @@ var windowCodeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "MainWindow.xa
 var viewModelCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingViewModel.cs"));
 var overlay = XDocument.Load(Path.Combine(fixtureRoot, "RecordingOverlayWindow.xaml"));
 var overlayCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingOverlayWindow.xaml.cs"));
+var overlayPresentationCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingOverlayPresentation.cs"));
 var controlAdapterCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecorderControlLifecycleOwnerAdapter.cs"));
 var xaml = (XNamespace)"http://schemas.microsoft.com/winfx/2006/xaml/presentation";
 var x = (XNamespace)"http://schemas.microsoft.com/winfx/2006/xaml";
 
 var tests = new (string Name, Action Run)[]
 {
-    ("shell exposes exactly three stable workspace routes", WorkspaceRoutesAreStable),
+    ("shell exposes exactly four stable workspace routes", WorkspaceRoutesAreStable),
     ("record is the default workspace", RecordIsDefault),
     ("primary recording state and actions stay above the record scroller", PrimaryControlsStayAboveTheFold),
-    ("main window enforces the 860 by 680 minimum", MainWindowEnforcesMinimumSize),
+    ("source and device controls occupy two explicit rows", SourceDeviceGridHasRows),
+    ("main window is DPI-aware and enforces the dashboard minimum", MainWindowEnforcesMinimumSize),
     ("existing view-model command surface remains wired", ExistingCommandsRemainWired),
-    ("recordings and settings own their existing controls", ControlsAreRoutedToTheirWorkspace),
+    ("each workspace owns its controls", ControlsAreRoutedToTheirWorkspace),
     ("automation identifiers are unique and stable", AutomationIdentifiersAreUnique),
     ("English and Traditional Chinese resources stay in sync", LocaleResourcesStayInSync),
+    ("custom theme resources resolve at runtime", CustomThemeResourcesResolve),
+    ("audio-only MP4 uses the audio playback stage", AudioOnlyMp4UsesAudioStage),
     ("Teams runtime uses local monitoring and retires WebSocket construction", TeamsRuntimeUsesLocalMonitoring),
     ("recording overlay owns a safe dynamic Teams video toggle", OverlayVideoToggleIsSafe),
+    ("recording overlay supports active countdown and finalizing states", OverlayStatesAreComplete),
     ("pipe control joins the UI lifecycle and stops before finalization", ControlRuntimeLifecycleIsBounded),
     ("pipe status remains a bounded privacy-safe projection", ControlStatusIsPrivate),
 };
@@ -53,48 +58,47 @@ void WorkspaceRoutesAreStable()
         .Descendants(xaml + "NavigationViewItem")
         .Select(item => item.Attribute("Tag")?.Value)
         .ToArray();
-    SequenceEqual(new[] { "Record", "Recordings", "Settings" }, routes, "Unexpected workspace route order.");
+    SequenceEqual(new[] { "Record", "Recordings", "AI", "Settings" }, routes, "Unexpected workspace route order.");
 }
 
 void RecordIsDefault()
 {
     Equal("Visible", SingleByName("RecordWorkspace").Attribute("Visibility")?.Value ?? "Visible", "Record must be visible by default.");
     Equal("Collapsed", SingleByName("RecordingsWorkspace").Attribute("Visibility")?.Value, "Recordings must start collapsed.");
+    Equal("Collapsed", SingleByName("AiWorkspace").Attribute("Visibility")?.Value, "AI must start collapsed.");
     Equal("Collapsed", SingleByName("SettingsWorkspace").Attribute("Visibility")?.Value, "Settings must start collapsed.");
     Contains("WorkspaceNavigation.SelectedItem = RecordNavigationItem;", codeBehind, "Code-behind must select Record after XAML initialization.");
 }
 
 void PrimaryControlsStayAboveTheFold()
 {
-    var criticalControls = new[]
-    {
-        "RecordingStatusText",
-        "ElapsedText",
-        "StartRecordingButton",
-        "StopRecordingButton",
-        "OutputWaveform",
-        "InputWaveform",
-    };
+    var dashboard = WorkspaceDocument("RecordDashboardView.xaml");
+    AssertDocumentContains(dashboard, "StatusText");
+    AssertDocumentContains(dashboard, "ElapsedText");
+    AssertDocumentContains(dashboard, "OutputWaveformBars");
+    AssertDocumentContains(dashboard, "InputWaveformBars");
+    AssertDocumentContains(dashboard, "StartCommand");
+    AssertDocumentContains(dashboard, "StopCommand");
+}
 
-    foreach (var automationId in criticalControls)
-    {
-        var control = SingleByAutomationId(automationId);
-        if (control.Ancestors(xaml + "ScrollViewer").Any())
-        {
-            throw new InvalidOperationException($"{automationId} must remain outside the configuration ScrollViewer.");
-        }
-
-        if (!control.AncestorsAndSelf().Any(element => element.Attribute(x + "Name")?.Value == "RecordWorkspace"))
-        {
-            throw new InvalidOperationException($"{automationId} must belong to RecordWorkspace.");
-        }
-    }
+void SourceDeviceGridHasRows()
+{
+    var dashboard = WorkspaceDocument("RecordDashboardView.xaml");
+    var grid = dashboard.Descendants(xaml + "Grid").Single(element =>
+        element.Attribute(x + "Name")?.Value == "SourceDeviceGrid");
+    var rows = grid.Element(xaml + "Grid.RowDefinitions")?.Elements(xaml + "RowDefinition").Count() ?? 0;
+    Equal(2, rows, "Source and device controls require two real rows to prevent overlap.");
 }
 
 void MainWindowEnforcesMinimumSize()
 {
-    Contains("presenter.PreferredMinimumWidth = 860;", windowCodeBehind, "Main window minimum width changed.");
-    Contains("presenter.PreferredMinimumHeight = 680;", windowCodeBehind, "Main window minimum height changed.");
+    Contains("WorkAreaWidthRatio = 0.90", windowCodeBehind, "Main window must use most of the available width.");
+    Contains("WorkAreaHeightRatio = 0.88", windowCodeBehind, "Main window must use most of the available height.");
+    Contains("MinimumLogicalWidth = 960", windowCodeBehind, "Main window minimum width changed.");
+    Contains("MinimumLogicalHeight = 700", windowCodeBehind, "Main window minimum height changed.");
+    Contains("RasterizationScale", windowCodeBehind, "Main window size must account for Windows display scaling.");
+    Contains("DisplayArea.GetFromWindowId", windowCodeBehind, "Main window must stay inside the working area.");
+    Contains("Activated += OnFirstActivated", windowCodeBehind, "DPI sizing must wait until XamlRoot has a real scale.");
 }
 
 void ExistingCommandsRemainWired()
@@ -107,8 +111,6 @@ void ExistingCommandsRemainWired()
         "SaveDiagnosticsCommand",
         "OpenDiagnosticsFolderCommand",
         "RefreshDevicesCommand",
-        "RefreshProcessCatalogCommand",
-        "RefreshTeamsWindowsCommand",
         "RefreshLibraryCommand",
         "PlayCommand",
         "PauseCommand",
@@ -124,7 +126,7 @@ void ExistingCommandsRemainWired()
         "TestOpenAiProviderConnectionCommand",
     };
 
-    var values = page.Descendants().Attributes().Select(attribute => attribute.Value).ToArray();
+    var values = AllWorkspaceDocuments().SelectMany(document => document.Descendants().Attributes()).Select(attribute => attribute.Value).ToArray();
     foreach (var command in expectedCommands)
     {
         if (!values.Contains($"{{Binding {command}}}", StringComparer.Ordinal))
@@ -224,18 +226,23 @@ void ControlStatusIsPrivate()
 
 void ControlsAreRoutedToTheirWorkspace()
 {
-    AssertInsideWorkspace("RecordingLibraryList", "RecordingsWorkspace");
-    AssertInsideWorkspace("PlaybackSlider", "RecordingsWorkspace");
-    AssertInsideWorkspace("StartTranscriptionButton", "RecordingsWorkspace");
-    AssertInsideWorkspace("EnableLocalTeamsHeuristicCheckBox", "SettingsWorkspace");
-    AssertInsideWorkspace("OpenAiApiKeyPasswordBox", "SettingsWorkspace");
-    AssertInsideWorkspace("SaveDiagnosticsButton", "SettingsWorkspace");
+    var recordings = WorkspaceDocument("RecordingLibraryView.xaml");
+    foreach (var binding in new[] { "PlayCommand", "PauseCommand", "StopPlaybackCommand", "SkipBackward15Command", "SkipForward15Command", "PlaybackPositionSeconds, Mode=TwoWay", "PlaybackVolume, Mode=TwoWay", "SelectedPlaybackRate, Mode=TwoWay" })
+        AssertDocumentContains(recordings, binding);
+
+    var ai = WorkspaceDocument("AiWorkspaceView.xaml");
+    foreach (var required in new[] { "CanStartOpenAiTranscription", "CanGenerateOpenAiSummary", "OnStartTranscriptionClick", "OnGenerateSummaryClick" })
+        AssertDocumentContains(ai, required);
+
+    var settings = WorkspaceDocument("RecorderSettingsView.xaml");
+    foreach (var required in new[] { "SettingsEnableLocalTeamsHeuristicCheckBox", "SettingsOpenAiApiKeyPasswordBox", "SettingsSaveDiagnosticsButton" })
+        AssertDocumentContains(settings, required);
 }
 
 void AutomationIdentifiersAreUnique()
 {
-    var identifiers = page
-        .Descendants()
+    var identifiers = AllWorkspaceDocuments()
+        .SelectMany(document => document.Descendants())
         .Select(element => element.Attribute("AutomationProperties.AutomationId")?.Value)
         .Where(value => !string.IsNullOrWhiteSpace(value))
         .Cast<string>()
@@ -251,7 +258,7 @@ void AutomationIdentifiersAreUnique()
         throw new InvalidOperationException($"Duplicate AutomationIds: {string.Join(", ", duplicates)}");
     }
 
-    foreach (var required in new[] { "WorkspaceNavigation", "NavigationRecord", "NavigationRecordings", "NavigationSettings" })
+    foreach (var required in new[] { "WorkspaceNavigation", "NavigationRecord", "NavigationRecordings", "NavigationAI", "NavigationSettings" })
     {
         _ = SingleByAutomationId(required);
     }
@@ -263,7 +270,7 @@ void LocaleResourcesStayInSync()
     var english = ReadResourceKeys(Path.Combine(fixtureRoot, "en-US", "Resources.resw"));
     SequenceEqual(traditionalChinese, english, "Locale resource keys differ.");
 
-    var uids = page.Descendants()
+    var uids = AllWorkspaceDocuments().SelectMany(document => document.Descendants())
         .Select(element => element.Attribute(x + "Uid")?.Value)
         .Where(value => !string.IsNullOrWhiteSpace(value))
         .Cast<string>();
@@ -276,13 +283,69 @@ void LocaleResourcesStayInSync()
     }
 }
 
-void AssertInsideWorkspace(string automationId, string workspaceName)
+void CustomThemeResourcesResolve()
 {
-    var element = SingleByAutomationId(automationId);
-    if (!element.AncestorsAndSelf().Any(ancestor => ancestor.Attribute(x + "Name")?.Value == workspaceName))
+    var design = XDocument.Load(Path.Combine(fixtureRoot, "Styles", "RecorderDesign.xaml"));
+    var defined = design.Descendants()
+        .Select(element => element.Attribute(x + "Key")?.Value)
+        .Where(value => !string.IsNullOrWhiteSpace(value))
+        .Cast<string>()
+        .ToHashSet(StringComparer.Ordinal);
+
+    foreach (var value in AllWorkspaceDocuments()
+        .SelectMany(document => document.Descendants().Attributes())
+        .Select(attribute => attribute.Value))
     {
-        throw new InvalidOperationException($"{automationId} is not inside {workspaceName}.");
+        const string marker = "{ThemeResource Recorder";
+        var start = value.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            continue;
+        }
+
+        var keyStart = start + "{ThemeResource ".Length;
+        var keyEnd = value.IndexOf('}', keyStart);
+        var key = keyEnd > keyStart ? value[keyStart..keyEnd] : string.Empty;
+        if (!defined.Contains(key))
+        {
+            throw new InvalidOperationException($"Theme resource '{key}' is referenced but not defined.");
+        }
     }
+}
+
+void AudioOnlyMp4UsesAudioStage()
+{
+    Contains("public bool IsVideo => string.Equals(MediaKind, \"video\"", viewModelCode,
+        "Playback stage must follow canonical mediaKind metadata.");
+    DoesNotContain("Path.GetExtension(MediaPath)", viewModelCode,
+        "An AAC-only MP4 must not be misclassified as video by its extension.");
+}
+
+void OverlayStatesAreComplete()
+{
+    foreach (var mode in new[] { "Countdown", "Recording", "Finalizing" })
+    {
+        Contains(mode, overlayPresentationCode, $"Overlay state contract must include {mode}.");
+    }
+
+    foreach (var automationId in new[]
+    {
+        "ElapsedText", "SystemWaveform", "MicrophoneWaveform",
+        "RecorderMicrophoneMuteButton", "TeamsWindowCaptureToggle", "StatusDetailText",
+    })
+    {
+        _ = SingleByAutomationIdOrName(overlay, automationId);
+    }
+
+    Contains("RecorderMicrophoneMuteToggleRequested", overlayPresentationCode, "Overlay microphone mute must be recorder-local.");
+    DoesNotContain("TeamsMute", overlayCode, "Overlay must not synchronize Teams mute.");
+    Contains("IsAlwaysOnTop = true", overlayCode, "Overlay must stay on top.");
+    Contains("WsExNoActivate", overlayCode, "Overlay must not activate.");
+    Contains("SwpNoActivate", overlayCode, "Overlay must show without activation.");
+    Contains("SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false)", overlayCode, "Overlay must not expose a standard close title bar.");
+    Contains("args.Cancel = true", overlayCode, "Overlay close must be rejected until controlled shutdown.");
+    Contains("ActionButton.IsEnabled = !isFinalizing", overlayCode, "Finalizing must lock the overlay action.");
+    Contains("TeamsWindowCaptureToggle.IsEnabled = isRecording", overlayCode, "Capture toggle must be editable only while active.");
 }
 
 XElement SingleByName(string name) =>
@@ -290,6 +353,31 @@ XElement SingleByName(string name) =>
 
 XElement SingleByAutomationId(string automationId) =>
     page.Descendants().Single(element => element.Attribute("AutomationProperties.AutomationId")?.Value == automationId);
+
+XElement SingleByAutomationIdOrName(XDocument document, string identifier) =>
+    document.Descendants().Single(element =>
+        element.Attribute("AutomationProperties.AutomationId")?.Value == identifier ||
+        element.Attribute(x + "Name")?.Value == identifier);
+
+XDocument WorkspaceDocument(string fileName) =>
+    XDocument.Load(Path.Combine(fixtureRoot, "Views", fileName));
+
+IEnumerable<XDocument> AllWorkspaceDocuments()
+{
+    yield return page;
+    foreach (var path in Directory.EnumerateFiles(Path.Combine(fixtureRoot, "Views"), "*.xaml", SearchOption.AllDirectories))
+    {
+        yield return XDocument.Load(path);
+    }
+}
+
+static void AssertDocumentContains(XDocument document, string expected)
+{
+    if (!document.ToString(SaveOptions.DisableFormatting).Contains(expected, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException($"The view must contain {expected}.");
+    }
+}
 
 static string[] ReadResourceKeys(string path) =>
     XDocument.Load(path)

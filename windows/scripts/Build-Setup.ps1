@@ -83,6 +83,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.AsrWorke
     --configuration Release `
     --runtime win-x64 `
     --self-contained true `
+    --no-restore `
     --property:PublishSingleFile=true `
     --property:PublishTrimmed=false `
     --output $controlPublishDirectory `

@@ -10,7 +10,12 @@ namespace TeamsRecorder.Windows.WinUI;
 /// </summary>
 public sealed partial class MainWindow : Window
 {
+    private const double WorkAreaWidthRatio = 0.90;
+    private const double WorkAreaHeightRatio = 0.88;
+    private const double MinimumLogicalWidth = 960;
+    private const double MinimumLogicalHeight = 700;
     private readonly TrayIconService trayIcon;
+    private bool initialSizeApplied;
     private bool shutdownInProgress;
     private bool shutdownComplete;
 
@@ -21,16 +26,38 @@ public sealed partial class MainWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
-        AppWindow.Resize(new SizeInt32(1000, 760));
-        if (AppWindow.Presenter is OverlappedPresenter presenter)
-        {
-            presenter.PreferredMinimumWidth = 860;
-            presenter.PreferredMinimumHeight = 680;
-        }
-
         RootFrame.Navigate(typeof(MainPage));
+        Activated += OnFirstActivated;
         AppWindow.Closing += OnAppWindowClosing;
         trayIcon = new TrayIconService(this, ShowFromTray, HideToTray, RequestExitFromTray);
+    }
+
+    private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
+    {
+        if (initialSizeApplied)
+        {
+            return;
+        }
+
+        initialSizeApplied = true;
+        Activated -= OnFirstActivated;
+        ResizeForWorkingArea();
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            var scale = Math.Max(1d, RootFrame.XamlRoot?.RasterizationScale ?? 1d);
+            presenter.PreferredMinimumWidth = (int)Math.Round(MinimumLogicalWidth * scale);
+            presenter.PreferredMinimumHeight = (int)Math.Round(MinimumLogicalHeight * scale);
+        }
+    }
+
+    private void ResizeForWorkingArea()
+    {
+        var displayArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest);
+        var workArea = displayArea.WorkArea;
+        var scale = Math.Max(1d, RootFrame.XamlRoot?.RasterizationScale ?? 1d);
+        var width = Math.Max(1, (int)Math.Round(workArea.Width * WorkAreaWidthRatio));
+        var height = Math.Max(1, (int)Math.Round(workArea.Height * WorkAreaHeightRatio));
+        AppWindow.Resize(new SizeInt32(width, height));
     }
 
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)

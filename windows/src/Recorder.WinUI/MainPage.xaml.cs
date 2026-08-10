@@ -4,6 +4,10 @@ using TeamsRecorder.Windows.Application.Diagnostics;
 
 namespace TeamsRecorder.Windows.WinUI;
 
+/// <summary>
+/// Owns the app's single recording view model and routes it into four focused
+/// workspaces. Child views are presentation-only and inherit this DataContext.
+/// </summary>
 public sealed partial class MainPage : Page
 {
     private readonly RecordingViewModel viewModel;
@@ -15,15 +19,17 @@ public sealed partial class MainPage : Page
         InitializeComponent();
         WorkspaceNavigation.SelectedItem = RecordNavigationItem;
         ShowWorkspace("Record");
+
         viewModel = new RecordingViewModel();
+        viewModel.InitializePlayer();
+        DataContext = viewModel;
+
         recordingOverlayPresenter = new RecordingOverlayPresenter();
         viewModel.RecordingOverlayStateChanged += OnRecordingOverlayStateChanged;
         recordingOverlayPresenter.CancelRequested += OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested += OnRecordingOverlayStopRequested;
         recordingOverlayPresenter.TeamsWindowCaptureToggleRequested += OnTeamsWindowCaptureToggleRequested;
-        viewModel.InitializePlayer();
-        PlaybackVideoStage.SetMediaPlayer(viewModel.PlaybackMediaPlayer!);
-        DataContext = viewModel;
+        recordingOverlayPresenter.RecorderMicrophoneMuteToggleRequested += OnRecorderMicrophoneMuteToggleRequested;
         Loaded += OnLoaded;
     }
 
@@ -39,10 +45,13 @@ public sealed partial class MainPage : Page
         recordingOverlayPresenter.CancelRequested -= OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested -= OnRecordingOverlayStopRequested;
         recordingOverlayPresenter.TeamsWindowCaptureToggleRequested -= OnTeamsWindowCaptureToggleRequested;
+        recordingOverlayPresenter.RecorderMicrophoneMuteToggleRequested -= OnRecorderMicrophoneMuteToggleRequested;
         recordingOverlayPresenter.Hide();
         await viewModel.ShutdownAsync();
         recordingOverlayPresenter.Dispose();
     }
+
+    internal RecorderCrashContext CaptureCrashContext() => viewModel.CaptureCrashContext();
 
     private async void OnLoaded(object sender, RoutedEventArgs args)
     {
@@ -60,93 +69,12 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void OnLibrarySearchTextChanged(object sender, TextChangedEventArgs args)
-    {
-        // TextBox bindings can otherwise wait for focus to move before they
-        // commit.  The library's bounded local index is safe to filter on each
-        // keystroke and never sends transcript content anywhere.
-        if (sender is TextBox searchBox && DataContext is RecordingViewModel model)
-        {
-            model.LibrarySearchText = searchBox.Text;
-        }
-    }
-
-    internal RecorderCrashContext CaptureCrashContext() => viewModel.CaptureCrashContext();
-
     private void ShowWorkspace(string workspace)
     {
         RecordWorkspace.Visibility = workspace == "Record" ? Visibility.Visible : Visibility.Collapsed;
         RecordingsWorkspace.Visibility = workspace == "Recordings" ? Visibility.Visible : Visibility.Collapsed;
+        AiWorkspace.Visibility = workspace == "AI" ? Visibility.Visible : Visibility.Collapsed;
         SettingsWorkspace.Visibility = workspace == "Settings" ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private async void OnSaveOpenAiProviderSettingsClick(object sender, RoutedEventArgs args)
-    {
-        var replacementKey = OpenAiApiKeyPasswordBox.Password;
-        try
-        {
-            await viewModel.SaveOpenAiProviderSettingsAsync(replacementKey);
-        }
-        finally
-        {
-            // Never retain the password-box value after the save attempt. An empty value
-            // means "keep the existing key"; deletion has its own explicit action.
-            OpenAiApiKeyPasswordBox.Password = string.Empty;
-        }
-    }
-
-    private async void OnClearOpenAiApiKeyClick(object sender, RoutedEventArgs args)
-    {
-        if (!await ConfirmAsync(
-                "移除本機 API Key",
-                "這會移除目前 Windows 使用者的本機加密 API Key。供應商設定會保留，但之後若供應商需要驗證，請重新輸入金鑰。",
-                "移除"))
-        {
-            return;
-        }
-
-        await viewModel.ClearOpenAiApiKeyAsync();
-        OpenAiApiKeyPasswordBox.Password = string.Empty;
-    }
-
-    private async void OnStartOpenAiTranscriptionClick(object sender, RoutedEventArgs args)
-    {
-        if (!await ConfirmAsync(
-                "確認上傳音訊",
-                "將把目前選取、已完成的 M4A 錄音傳送至您設定的 OpenAI 相容 ASR 供應商。按「繼續」才會開始；錄音不會在背景自動上傳。",
-                "繼續"))
-        {
-            return;
-        }
-
-        await viewModel.StartOpenAiTranscriptionAsync();
-    }
-
-    private async void OnGenerateOpenAiSummaryClick(object sender, RoutedEventArgs args)
-    {
-        if (!await ConfirmAsync(
-                "確認上傳逐字稿",
-                "將把目前選取錄音的已完成逐字稿文字傳送至您設定的 OpenAI 相容 LLM 供應商，以產生摘要。音訊不會再次上傳。",
-                "繼續"))
-        {
-            return;
-        }
-
-        await viewModel.GenerateOpenAiSummaryAsync();
-    }
-
-    private async Task<bool> ConfirmAsync(string title, string message, string primaryButtonText)
-    {
-        var dialog = new ContentDialog
-        {
-            XamlRoot = Content.XamlRoot,
-            Title = title,
-            Content = message,
-            PrimaryButtonText = primaryButtonText,
-            CloseButtonText = "取消",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        return await dialog.ShowAsync() == ContentDialogResult.Primary;
     }
 
     private void OnRecordingOverlayStateChanged(object? sender, RecordingOverlayState state)
@@ -160,13 +88,32 @@ public sealed partial class MainPage : Page
         {
             recordingOverlayPresenter.ShowCountdown(seconds);
         }
+        else if (state.IsFinalizing && recordingOverlayPresenter is IRecordingOverlayFinalizationPresenter finalizationPresenter)
+        {
+            finalizationPresenter.ShowFinalizing("正在安全寫入錄音與復原資訊；完成後會自動關閉。");
+        }
         else if (state.IsRecording)
         {
-            recordingOverlayPresenter.ShowRecording(
-                viewModel.ActiveRecordingOverlayKind ?? RecordingOverlayRecordingKind.Manual,
-                state.CanToggleTeamsWindowCapture,
-                state.IsTeamsWindowCaptureEnabled,
-                state.TeamsWindowCaptureStatus);
+            if (recordingOverlayPresenter is RecordingOverlayPresenter livePresenter)
+            {
+                livePresenter.ShowRecording(
+                    viewModel.ActiveRecordingOverlayKind ?? RecordingOverlayRecordingKind.Manual,
+                    state.CanToggleTeamsWindowCapture,
+                    state.IsTeamsWindowCaptureEnabled,
+                    state.TeamsWindowCaptureStatus,
+                    state.Elapsed,
+                    state.SystemAudioStatus,
+                    state.MicrophoneStatus,
+                    state.IsRecorderMicrophoneMuted);
+            }
+            else
+            {
+                recordingOverlayPresenter.ShowRecording(
+                    viewModel.ActiveRecordingOverlayKind ?? RecordingOverlayRecordingKind.Manual,
+                    state.CanToggleTeamsWindowCapture,
+                    state.IsTeamsWindowCaptureEnabled,
+                    state.TeamsWindowCaptureStatus);
+            }
         }
         else
         {
@@ -194,11 +141,19 @@ public sealed partial class MainPage : Page
         object? sender,
         TeamsWindowCaptureToggleRequestedEventArgs args)
     {
-        if (isShutdown)
+        if (!isShutdown)
         {
-            return;
+            await viewModel.SetTeamsWindowCaptureDuringRecordingAsync(args.Enabled);
         }
+    }
 
-        await viewModel.SetTeamsWindowCaptureDuringRecordingAsync(args.Enabled);
+    private async void OnRecorderMicrophoneMuteToggleRequested(
+        object? sender,
+        RecorderMicrophoneMuteToggleRequestedEventArgs args)
+    {
+        if (!isShutdown)
+        {
+            await viewModel.SetRecorderControlMicrophoneMutedAsync(args.Muted, CancellationToken.None);
+        }
     }
 }

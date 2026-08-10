@@ -234,7 +234,6 @@ struct RecorderCLIApplication {
             "Selected microphone UID: \(status.selectedMicrophoneUID ?? "-")",
             "Recorder mic muted: \(yesNo(status.localMicMuted))",
             "Native input mic muted: \(yesNo(status.nativeInputMicMuted))",
-            "Teams mic state: \(status.teamsMicState)",
             "Effective mic muted: \(yesNo(status.effectiveMicMuted))",
             "Virtual Mic: \(status.virtualMicState)",
             "Virtual Mic publisher: \(status.virtualMicPublisherState ?? "unknown")",

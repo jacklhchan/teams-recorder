@@ -31,7 +31,7 @@ final class RecorderControlMessagesTests: XCTestCase {
             selectedMicrophoneUID: "builtin-mic",
             localMicMuted: false,
             nativeInputMicMuted: false,
-            teamsMicState: "unmuted",
+            teamsMicState: "notMonitored",
             effectiveMicMuted: false,
             virtualMicState: "available",
             virtualMicPublisherState: "ready",

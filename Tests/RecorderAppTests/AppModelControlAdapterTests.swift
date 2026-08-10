@@ -201,40 +201,8 @@ final class AppModelControlAdapterTests: XCTestCase {
         XCTAssertTrue(status.localMicMuted)
         XCTAssertFalse(status.nativeInputMicMuted)
         XCTAssertTrue(status.effectiveMicMuted)
-        XCTAssertEqual(status.teamsMicState, "unknown")
+        XCTAssertEqual(status.teamsMicState, "notMonitored")
         XCTAssertEqual(status.outputFolder, output.path)
-    }
-
-    func testStatusProjectsKnownTeamsMicStates() async throws {
-        let model = makeModel(
-            teamsMuteController: ControlAdapterTeamsMuteController()
-        )
-        model.resolvedCaptureSelection = .application(CaptureApplication(
-            processID: 42,
-            bundleIdentifier: "com.microsoft.teams2",
-            name: "Microsoft Teams"
-        ))
-        let adapter = AppModelControlAdapter(model: model)
-
-        var status = try await controlStatus(
-            adapter,
-            requestID: "teams-unknown"
-        )
-        XCTAssertEqual(status.teamsMicState, "unknown")
-
-        await model.setTeamsAndRecorderMicMuted(true)
-        status = try await controlStatus(
-            adapter,
-            requestID: "teams-muted"
-        )
-        XCTAssertEqual(status.teamsMicState, "muted")
-
-        await model.setTeamsAndRecorderMicMuted(false)
-        status = try await controlStatus(
-            adapter,
-            requestID: "teams-unmuted"
-        )
-        XCTAssertEqual(status.teamsMicState, "unmuted")
     }
 
     func testStatusProjectsCountdownSecondsOnlyDuringCountdowns() async throws {
@@ -327,8 +295,6 @@ final class AppModelControlAdapterTests: XCTestCase {
         outputFolder: URL = URL(fileURLWithPath: "/tmp", isDirectory: true),
         recorder: RecordingEngine? = nil,
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
-        teamsMuteController: any TeamsMuteControlling =
-            ControlAdapterTeamsMuteController(),
         autoModeEnabled: Bool = false
     ) -> AppModel {
         let suiteName = "AppModelControlAdapterTests.\(UUID().uuidString)"
@@ -344,8 +310,7 @@ final class AppModelControlAdapterTests: XCTestCase {
             initialOutputFolder: outputFolder,
             virtualMicStateProvider: { .absent },
             volumeCapacityProvider: ControlAdapterStorageProvider(),
-            teamsAutoMeetingCoordinator: teamsAutoMeetingCoordinator,
-            teamsMuteController: teamsMuteController
+            teamsAutoMeetingCoordinator: teamsAutoMeetingCoordinator
         )
     }
 
@@ -401,24 +366,6 @@ private struct ControlAdapterStorageProvider: VolumeCapacityProviding {
     func availableBytes(onVolumeContaining _: URL) throws -> Int64 {
         Int64(10) * 1_024 * 1_024 * 1_024
     }
-}
-
-private final class ControlAdapterTeamsMuteController: TeamsMuteControlling,
-    @unchecked Sendable
-{
-    func readState(processID _: pid_t) async -> TeamsMicMuteState {
-        .unknown(.inactive)
-    }
-
-    func setMuted(
-        _ muted: Bool,
-        processID _: pid_t
-    ) async -> TeamsMicMuteState {
-        muted ? .muted : .unmuted
-    }
-
-    @MainActor
-    func requestPermission() {}
 }
 
 private final class ControlAdapterVirtualMicPublisher: VirtualMicPublishing {

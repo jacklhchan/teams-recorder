@@ -132,7 +132,6 @@ final class RecordingControllerCoordinator {
         isShutdown = true
         observation?.cancel()
         observation = nil
-        model.setFloatingRecordingPanelActive(false)
         presenter.dismiss()
     }
 
@@ -141,10 +140,8 @@ final class RecordingControllerCoordinator {
         case .none:
             break
         case .present:
-            model.setFloatingRecordingPanelActive(true)
             presenter.present(model: model)
         case .dismiss:
-            model.setFloatingRecordingPanelActive(false)
             presenter.dismiss()
         }
     }

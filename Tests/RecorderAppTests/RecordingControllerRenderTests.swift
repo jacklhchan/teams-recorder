@@ -6,12 +6,10 @@ import XCTest
 @MainActor
 final class RecordingControllerRenderTests: XCTestCase {
     func testProductionMicrophoneButtonMutesThenUnmutesRecorderLocally() async throws {
-        let teamsController = RecordingControllerUnknownTeamsMuteController()
         let model = AppModel(
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
-            performStartupWork: false,
-            teamsMuteController: teamsController
+            performStartupWork: false
         )
         model.resolvedCaptureSelection = .application(.init(
             processID: 42,
@@ -30,9 +28,6 @@ final class RecordingControllerRenderTests: XCTestCase {
         await waitUntil { !model.localMicMuted }
 
         XCTAssertFalse(model.localMicMuted)
-        XCTAssertTrue(teamsController.setMutedCalls.isEmpty)
-        XCTAssertFalse(host.contains("recording-controller-teams-microphone-status"))
-        XCTAssertFalse(host.contains("recording-controller-enable-teams-accessibility"))
     }
 
     func testActiveControllerRendersFixedBoundsAndInvokesStopOnce() throws {
@@ -165,34 +160,6 @@ final class RecordingControllerRenderTests: XCTestCase {
         }
         XCTAssertTrue(condition())
     }
-}
-
-private final class RecordingControllerUnknownTeamsMuteController: TeamsMuteControlling,
-    @unchecked Sendable
-{
-    private let lock = NSLock()
-    private var storedSetMutedCalls: [Bool] = []
-
-    var setMutedCalls: [Bool] {
-        lock.withLock { storedSetMutedCalls }
-    }
-
-    func readState(processID _: pid_t) async -> TeamsMicMuteState {
-        .unknown(.controlNotFound)
-    }
-
-    func setMuted(
-        _ muted: Bool,
-        processID _: pid_t
-    ) async -> TeamsMicMuteState {
-        lock.withLock {
-            storedSetMutedCalls.append(muted)
-        }
-        return .unknown(.controlNotFound)
-    }
-
-    @MainActor
-    func requestPermission() {}
 }
 
 @MainActor

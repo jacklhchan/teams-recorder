@@ -818,7 +818,13 @@ private:
     void DetectUnexpectedDisconnectLocked(Source& source) {
         const bool running = source.capture ? source.capture->is_running()
             : source.process_capture && source.process_capture->is_running();
-        if ((!source.capture && !source.process_capture) || running || stop_requested_ ||
+        // The mixer is deliberately brought up before either capture source so
+        // it can create the crash-safe sink.  During that startup window a
+        // source object can exist while WasapiCapture::Start is still waiting
+        // for its worker to publish running_=true.  Treating that transient as
+        // a disconnect races successful startup and truncates the recording.
+        // CaptureSession already gates this same health check on started_.
+        if (!started_ || (!source.capture && !source.process_capture) || running || stop_requested_ ||
             source.disconnect_accounted) {
             return;
         }

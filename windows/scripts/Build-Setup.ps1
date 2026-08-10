@@ -12,9 +12,11 @@ if ($Version -notmatch "^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$") {
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 $windowsRoot = Join-Path $repoRoot "windows"
 $project = Join-Path $windowsRoot "src\Recorder.WinUI\Recorder.WinUI.csproj"
+$controlProject = Join-Path $windowsRoot "src\Recorder.ControlCli\Recorder.ControlCli.csproj"
 $nativeBridge = Join-Path $windowsRoot "out\native\Release\Recorder.NativeBridge.dll"
 $installerScript = Join-Path $windowsRoot "installer\TeamsRecorder.iss"
 $publishDirectory = Join-Path $windowsRoot "out\publish\setup-win-x64"
+$controlPublishDirectory = Join-Path $windowsRoot "out\publish\setup-control-win-x64"
 $outputDirectory = Join-Path $windowsRoot "out\installer"
 
 if (-not (Test-Path -LiteralPath $nativeBridge -PathType Leaf)) {
@@ -39,7 +41,18 @@ if (-not $iscc) {
 }
 
 $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
-New-Item -ItemType Directory -Path $publishDirectory, $outputDirectory -Force | Out-Null
+$publishRoot = [IO.Path]::GetFullPath((Join-Path $windowsRoot "out\publish"))
+foreach ($directory in @($publishDirectory, $controlPublishDirectory)) {
+    $fullDirectory = [IO.Path]::GetFullPath($directory)
+    if (-not $fullDirectory.StartsWith($publishRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean a setup staging directory outside ${publishRoot}: $fullDirectory"
+    }
+    if (Test-Path -LiteralPath $fullDirectory) {
+        Remove-Item -LiteralPath $fullDirectory -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $fullDirectory -Force | Out-Null
+}
+New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 
 & $dotnet publish $project `
     --configuration Release `
@@ -65,6 +78,24 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.NativeBr
 if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.AsrWorker.exe") -PathType Leaf)) {
     throw "Self-contained publish did not include Recorder.AsrWorker.exe."
 }
+
+& $dotnet publish $controlProject `
+    --configuration Release `
+    --runtime win-x64 `
+    --self-contained true `
+    --property:PublishSingleFile=true `
+    --property:PublishTrimmed=false `
+    --output $controlPublishDirectory `
+    --tl:off
+if ($LASTEXITCODE -ne 0) {
+    throw "Self-contained recorderctl publish failed with exit code $LASTEXITCODE."
+}
+$controlExecutable = Join-Path $controlPublishDirectory "recorderctl.exe"
+if (-not (Test-Path -LiteralPath $controlExecutable -PathType Leaf)) {
+    throw "Self-contained control publish did not produce recorderctl.exe."
+}
+Copy-Item -LiteralPath $controlExecutable -Destination (Join-Path $publishDirectory "recorderctl.exe") -Force
+
 foreach ($runtimeFile in $nativeRuntimeFiles) {
     $runtimeSource = Join-Path $runtimeDirectory $runtimeFile
     if (-not (Test-Path -LiteralPath $runtimeSource -PathType Leaf)) {

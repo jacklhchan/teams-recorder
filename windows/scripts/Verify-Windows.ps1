@@ -62,7 +62,11 @@ try {
 
 Push-Location $windowsRoot
 try {
-    Invoke-Checked $dotnet "build" ".\TeamsRecorder.Windows.sln" "--configuration" "Release" "--tl:off"
+    # WinUI's deployment target publishes the ASR worker while the solution also
+    # builds that worker as a first-class project. Serialize this solution build
+    # so both graph nodes never write the worker runtimeconfig/output concurrently
+    # on a clean hosted runner.
+    Invoke-Checked $dotnet "build" ".\TeamsRecorder.Windows.sln" "--configuration" "Release" "--maxcpucount:1" "--tl:off"
     Invoke-Checked $dotnet "build" ".\src\Recorder.WinUI\Recorder.WinUI.csproj" "--configuration" "Release" "--property:Platform=x64" "--property:RuntimeIdentifier=win-x64" "--no-restore" "--tl:off"
     Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.Core.Tests\Recorder.Core.Tests.csproj" "--configuration" "Release" "--no-build"
     Invoke-Checked $dotnet "run" "--project" ".\tests\Recorder.Control.Tests\Recorder.Control.Tests.csproj" "--configuration" "Release" "--no-build"

@@ -43,17 +43,14 @@ public sealed record TeamsLocalIntegrationSnapshot(
 /// <summary>
 /// Replaces Teams Third-party-App-API pairing/WebSocket state with local,
 /// identity-validated window detection and strict UI Automation.  It has no
-/// credential storage or network transport.  Recorder mute changes happen
-/// only after a fresh UIA read/action has been confirmed against the same live
-/// process instance + top-level HWND; stale/rejected UIA controls never change
-/// recorder mute.
+/// credential storage or network transport. Teams mute observations are status
+/// only: they never read, guess, or change the Recorder microphone contribution.
 /// </summary>
 public sealed class TeamsLocalIntegrationCoordinator : IAsyncDisposable
 {
     private readonly object gate = new();
     private readonly TeamsLocalMeetingMonitor monitor;
     private readonly ITeamsLocalMuteController muteController;
-    private readonly IRecorderMicrophoneMuteSink recorderMute;
     private readonly ITeamsMeetingPresenceSink meetingPresence;
     private TeamsLocalIntegrationSnapshot snapshot = TeamsLocalIntegrationSnapshot.Initial;
     private bool started;
@@ -63,12 +60,10 @@ public sealed class TeamsLocalIntegrationCoordinator : IAsyncDisposable
     public TeamsLocalIntegrationCoordinator(
         TeamsLocalMeetingMonitor monitor,
         ITeamsLocalMuteController muteController,
-        IRecorderMicrophoneMuteSink recorderMute,
         ITeamsMeetingPresenceSink meetingPresence)
     {
         this.monitor = monitor ?? throw new ArgumentNullException(nameof(monitor));
         this.muteController = muteController ?? throw new ArgumentNullException(nameof(muteController));
-        this.recorderMute = recorderMute ?? throw new ArgumentNullException(nameof(recorderMute));
         this.meetingPresence = meetingPresence ?? throw new ArgumentNullException(nameof(meetingPresence));
     }
 
@@ -110,17 +105,15 @@ public sealed class TeamsLocalIntegrationCoordinator : IAsyncDisposable
     }
 
     /// <summary>
-    /// Reads Teams' current mute state and mirrors it only if UIA is current and
-    /// unambiguous.  Unknown/stale/rejected results update status but preserve
-    /// the recorder's existing mute state.
+    /// Reads Teams' current mute state for status only. Recorder microphone
+    /// state remains independently user-controlled.
     /// </summary>
     public Task<TeamsUiAutomationMuteResult> RefreshMuteAsync(CancellationToken cancellationToken = default) =>
         ApplyMuteOperationAsync(muted: null, cancellationToken);
 
     /// <summary>
-    /// Requests an absolute Teams mute state.  It is not a blind toggle and it
-    /// never changes recorder mute until the post-action read confirms the same
-    /// requested state on the same active window identity.
+    /// Compatibility-only Teams UIA operation. Its result is never routed into
+    /// Recorder microphone state.
     /// </summary>
     public Task<TeamsUiAutomationMuteResult> SetMutedAsync(bool muted, CancellationToken cancellationToken = default) =>
         ApplyMuteOperationAsync(muted, cancellationToken);
@@ -141,31 +134,19 @@ public sealed class TeamsLocalIntegrationCoordinator : IAsyncDisposable
         if (identity is null)
         {
             return Task.FromResult(PublishMuteResult(
-                TeamsUiAutomationMuteResult.Unknown(TeamsUiAutomationFailure.WindowIdentityInvalid),
-                applyToRecorder: false));
+                TeamsUiAutomationMuteResult.Unknown(TeamsUiAutomationFailure.WindowIdentityInvalid)));
         }
 
         var result = muted is { } desired
             ? muteController.SetMuted(identity.Value, desired)
             : muteController.Read(identity.Value);
 
-        var shouldApply = result.IsVerified &&
-            monitor.ActiveIdentity == identity &&
-            IsRunning();
-        return Task.FromResult(PublishMuteResult(result, shouldApply));
+        return Task.FromResult(PublishMuteResult(result));
     }
 
     private TeamsUiAutomationMuteResult PublishMuteResult(
-        TeamsUiAutomationMuteResult result,
-        bool applyToRecorder)
+        TeamsUiAutomationMuteResult result)
     {
-        if (applyToRecorder)
-        {
-            // The absolute result was verified, so an unknown result cannot
-            // accidentally open or close the recorder microphone.
-            recorderMute.SetMuted(result.State == TeamsLocalMuteState.Muted);
-        }
-
         lock (gate)
         {
             PublishLocked(snapshot with

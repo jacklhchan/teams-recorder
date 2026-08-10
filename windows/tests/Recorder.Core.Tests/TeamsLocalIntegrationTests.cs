@@ -184,23 +184,21 @@ internal static class TeamsLocalIntegrationTests
                 MinimumObservationSpacing = TimeSpan.Zero,
             }),
             clock);
-        var recorder = new FakeRecorderMuteSink();
         var coordinator = new TeamsLocalIntegrationCoordinator(
             monitor,
             new WindowsTeamsMuteAutomation(
                 new TeamsMuteAutomationBinding { AutomationId = "teams.microphone.toggle" },
                 new AlwaysCurrentIdentityVerifier(),
                 new FakeAutomationBackend(() => control)),
-            recorder,
             new FakeMeetingPresenceSink());
 
         try
         {
             coordinator.StartAsync().GetAwaiter().GetResult();
             var result = coordinator.SetMutedAsync(true).GetAwaiter().GetResult();
-            if (result.IsVerified || recorder.Values.Count != 0)
+            if (result.IsVerified)
             {
-                throw new InvalidOperationException("A stale or rejected UIA control changed recorder mute.");
+                throw new InvalidOperationException("A stale or rejected UIA control was accepted.");
             }
         }
         finally
@@ -360,12 +358,6 @@ internal static class TeamsLocalIntegrationTests
         }
 
         public void Dispose() { }
-    }
-
-    private sealed class FakeRecorderMuteSink : IRecorderMicrophoneMuteSink
-    {
-        public List<bool> Values { get; } = [];
-        public void SetMuted(bool muted) => Values.Add(muted);
     }
 
     private sealed class FakeMeetingPresenceSink : ITeamsMeetingPresenceSink

@@ -1,6 +1,21 @@
 # 實作狀態更新（2026-07-29）
 
-本文件原為實作前架構規格，部分 Phase 0/1 文字不代表目前的產品承諾。請先以 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md) 為準：它記錄已完成的 system-loopback／可選麥克風 AAC M4A 路徑，以及已接入 WinUI 的 storage、無覆寫 promotion、library、capacity gate 與保守 recovery 流程；實機 release gate 仍未完成。Teams API、程序隔離錄製、視訊、虛擬麥克風與轉寫均不在此 MVP 範圍。
+## Local Teams automation and dynamic video policy
+
+The Windows product does not construct the retired Teams Third-party App API
+client and does not use pairing or WebSocket tokens. An explicit opt-in local
+sampler observes bounded Teams process and WASAPI render-session evidence. It
+is heuristic only: three active observations can propose start; silence and
+probe faults cannot propose stop; three healthy observations with no Teams
+process can propose stop. Legacy settings require fresh consent after upgrade.
+
+Recorder microphone mute is an independent input contribution and is never
+derived from Teams UI or API state. Exact-window WGC is dynamically routed into
+one fragmented MP4. Disabling or losing the target produces privacy-black video
+without stopping audio, rotating output files, or falling back to another
+capture target.
+
+本文件原為實作前架構規格，部分 Phase 0/1 文字不代表目前的產品承諾。請先以 [audio-first MVP 範圍與發行驗證](audio-first-mvp.md) 與 [功能對等狀態矩陣](feature-parity.md) 為準。現行 Draft 已加入 crash-safe fMP4、exact-window WGC、本機 Teams heuristic 與動態畫面 routing；實機 release gate 仍未完成，且不宣稱 Teams API、mute sync 或一般可用 Teams-only isolation。
 
 # Windows Migration：Phase 0/1 架構規格
 
@@ -112,13 +127,13 @@ finalize 採同一目錄內的 temporary/partial → validate → no-replace pro
 
 - UI 顯示穩定的使用者訊息及可選動作；診斷保留 HRESULT/exception 類型、adapter、session generation、輸入 endpoint、timeline counters。診斷不記錄 PCM、螢幕內容、Teams token 或完整使用者路徑。
 - 寫檔錯誤的優先順序是保存音訊和 session evidence；primary mux/final failure 可降級為可播放 audio backup，但 metadata 必須反映真實結果。
-- 容量政策固定：<256 MiB 停止；256 MiB 至 <1 GiB 只容許 audio；1 GiB 至 <5 GiB 警告；>=5 GiB 正常。Phase 1 沒有 video，仍需實作以保證將來不破壞 contract。
+- 容量政策固定：<256 MiB 停止；256 MiB 至 <1 GiB 只容許 audio；1 GiB 至 <5 GiB 警告；>=5 GiB 正常。Video 路徑必須服從同一容量 gate，audio safety artifact 優先。
 
 ### 安全與隱私
 
 - 錄音預設完全本機；Phase 1 不上傳媒體、telemetry、transcript 或 endpoint inventory。
 - 資料夾、檔案開啟、刪除與復原均以 canonical path 驗證在使用者選定 output root 內；拒絕 reparse point、非 regular file 與 path traversal。刪除走 Recycle Bin，且僅針對使用者選取 session。
-- 不把 Teams pairing token（目前 macOS 暫存於 UserDefaults 的已知限制）複製到 Windows。日後若啟用 Teams，token 需使用 Windows credential protection 並從 log/redaction 清單排除。
+- Windows 已退役 Teams Third-party API pairing/token/WebSocket 產品路徑；不得讀取、持久化或在診斷中輸出舊 token。升級時只可 best-effort 清除舊 credential，且不能把舊 opt-in 轉成新的本機監看同意。
 - 虛擬麥克風屬 driver 安全邊界；在有簽章、最小權限、安裝／卸載及音訊隔離設計前，禁止納入應用程式權限或 Phase 1 安裝器。
 
 ## Phase 0/1 測試責任

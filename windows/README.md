@@ -35,21 +35,28 @@ The repository now contains:
   tray icon are generated from the macOS `Assets/Generated/app-icon-source.png`;
 - deterministic native and managed tests, JSON contract fixtures, and real
   process-audio diagnostic tools.
+- crash-safe fragmented MP4 recording with an independent M4A audio safety
+  track, exact-HWND Teams window capture, privacy-black gaps, and bounded
+  startup recovery;
+- an explicit local-only Teams automatic-recording heuristic. It starts only
+  after three healthy Teams WASAPI render-session observations; silence and
+  probe failure never stop a recording, and only three healthy observations
+  with no Teams process can propose a stop;
+- a floating recording window that can enable or disable exact Teams-window
+  pixels during a recording. The session remains one MP4 and audio continues
+  while disabled; disabled intervals contain privacy-black video;
+- system-loopback headroom, explicit-discontinuity fades, conservative
+  single-frame impulse repair, and device-confirmed QPC jitter handling.
 
-This is an audio-first MVP, not a generally available Teams integration. In one
-Windows validation environment, Teams Third-party App API pairing completed,
-authoritative meeting-presence updates were received, and the automatic-recording
-flow finalized an M4A file. This is limited single-environment evidence only; it
-does not establish general Teams API availability, Teams-only process recording,
-or cross-tenant support. Teams UI mute/unmute actions did not deliver reliable
-mute-state updates in that validation. Teams Mute Sync therefore remains an
-unverified Preview and must not be presented as working, reliable, or capable of
-controlling Teams mute. The integration relies on supported pushed events and
-uses one best-effort `query-state` request after its receive loop is active, so
-an authenticated connection can obtain its current meeting state even when Teams
-does not emit a new transition push. Video capture and a
-virtual microphone driver are not available. Aggregate
-health is available, but source-specific health statistics are not yet exposed.
+The Windows product no longer connects to the retired Teams Third-party App API,
+does not request pairing, and does not consume or persist a Teams WebSocket
+token. Automatic recording is an explicit, local-only heuristic opt-in and must
+not be presented as authoritative meeting state. Upgrading from a legacy API
+setting does not grant consent to local monitoring. Recorder microphone mute is
+always independent: the app neither reads nor guesses Teams mute and never
+changes Teams mute. Exact Teams-window video capture is available as a Draft
+feature, but real Teams hardware acceptance remains a release gate. A virtual
+microphone driver remains preview-only.
 
 The AI workflow never uploads media automatically: each ASR request requires
 the user to select a completed managed M4A and confirm the upload, and each

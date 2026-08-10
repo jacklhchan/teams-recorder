@@ -145,15 +145,97 @@ void VideoPtsUsesTheAudioQpcOriginAndDropsUnsafeFrames() {
     Expect(mapper.rejected_non_monotonic() == 2 && mapper.rejected_too_far_ahead() == 1,
            "video PTS rejection counters were incomplete");
 }
+
+void TimestampErrorsPreserveContinuousDuration() {
+    CanonicalTimeline timeline;
+    (void)timeline.Place(Source::Render, 0, 0, 48'000, 960, false);
+    const auto unreliable = timeline.Place(
+        Source::Render, 90'000'000, 900'000, 48'000, 960, false, false);
+    Expect(unreliable.frame == 960 && unreliable.silence_before_frames == 0 &&
+               unreliable.late_frames_dropped == 0,
+           "timestamp error manufactured a gap or drop");
+    Expect(timeline.counters(Source::Render).timestamp_errors == 1,
+           "timestamp error was not counted");
+}
+
+void LateSourceWithInitialTimestampErrorUsesSharedWatermarkAndReanchors() {
+    CanonicalTimeline timeline;
+    // Render has already committed the block covering [5.000, 5.020) s.
+    (void)timeline.Place(Source::Render, 50'000'000, 240'000, 48'000, 960, false);
+    const auto render_end = timeline.end_frame(Source::Render);
+
+    // The microphone joins at the same point but its first QPC is unusable.
+    // It must never be placed at zero or turn that bogus value into baseline.
+    const auto unreliable = timeline.Place(
+        Source::Microphone, 900'000'000, 7'000'000, 48'000, 960, false, false);
+    Expect(unreliable.frame == render_end && unreliable.frame != 0,
+           "late source with a timestamp error was not anchored at the shared watermark");
+
+    // The next reliable packet is the successor of the untrusted PCM. It is
+    // accepted at the source cursor, and following QPC packets remain there
+    // rather than drifting or being discarded as late.
+    const auto first_reliable = timeline.Place(
+        Source::Microphone, 50'200'000, 7'000'960, 48'000, 960, false);
+    Expect(first_reliable.frame == render_end + 960 &&
+               first_reliable.late_frames_dropped == 0,
+           "first reliable packet after timestamp error drifted or was dropped");
+    const auto second_reliable = timeline.Place(
+        Source::Microphone, 50'400'000, 7'001'920, 48'000, 960, false);
+    Expect(second_reliable.frame == render_end + 1'920 &&
+               second_reliable.late_frames_dropped == 0,
+           "reanchored source did not remain monotonic after recovery");
+}
+
+void DeviceConfirmedQpcJitterDoesNotDeleteAudio() {
+    CanonicalTimeline timeline;
+    constexpr std::uint64_t packet_frames = 480;
+    constexpr std::uint64_t packet_qpc = 100'000;
+    constexpr std::uint64_t one_frame_qpc = 208;
+    for (std::uint64_t packet = 0; packet < 312; ++packet) {
+        const std::int64_t jitter = packet == 0 ? 0 :
+            (packet % 4U == 0U ? -2 : packet % 4U == 1U ? -1 :
+             packet % 4U == 2U ? 1 : 2);
+        const auto placement = timeline.Place(
+            Source::Render,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(packet * packet_qpc) +
+                                       jitter * static_cast<std::int64_t>(one_frame_qpc)),
+            packet * packet_frames, 48'000, packet_frames, false);
+        Expect(placement.frame == packet * packet_frames &&
+                   placement.silence_before_frames == 0 &&
+                   placement.late_frames_dropped == 0,
+               "device-confirmed QPC jitter changed the timeline");
+    }
+    Expect(timeline.counters(Source::Render).late_packets == 0,
+           "small QPC jitter was reported as late audio");
+}
+
+void RealGapsAndDiscontinuitiesBypassJitterSnap() {
+    CanonicalTimeline gap_timeline;
+    (void)gap_timeline.Place(Source::Render, 0, 0, 48'000, 480, false);
+    const auto gap = gap_timeline.Place(Source::Render, 101'250, 486, 48'000, 480, false);
+    Expect(gap.frame == 486 && gap.silence_before_frames == 6,
+           "real device gap was hidden by jitter snap");
+
+    CanonicalTimeline discontinuity_timeline;
+    (void)discontinuity_timeline.Place(Source::Render, 0, 0, 48'000, 480, false);
+    const auto discontinuity = discontinuity_timeline.Place(
+        Source::Render, 99'792, 480, 48'000, 480, true);
+    Expect(discontinuity.late_frames_dropped == 1,
+           "explicit discontinuity was hidden by jitter snap");
+}
 }  // namespace
 
 int main() {
-    const std::array<void (*)(), 11> tests = {LongDurationHasNoTimelineCompression,
+    const std::array<void (*)(), 15> tests = {LongDurationHasNoTimelineCompression,
         SilenceGapsArePreserved, ExplicitSessionOriginPreservesInitialSilence,
         SessionClockAdvancesAcrossPacketlessSilence, MicrophoneMuteGapMapsToSilence,
         LateJoiningMicrophoneKeepsTheSharedClock, MixerIntegrationRetainsGapAsSilence,
         SourceWatermarksRequireBothInputsBeforeMixCommit, DriftLateAndFaultCountersAreBounded,
-        SelectedProcessUsesCanonicalGapsAndCounters, VideoPtsUsesTheAudioQpcOriginAndDropsUnsafeFrames};
+        SelectedProcessUsesCanonicalGapsAndCounters, VideoPtsUsesTheAudioQpcOriginAndDropsUnsafeFrames,
+        TimestampErrorsPreserveContinuousDuration,
+        LateSourceWithInitialTimestampErrorUsesSharedWatermarkAndReanchors,
+        DeviceConfirmedQpcJitterDoesNotDeleteAudio,
+        RealGapsAndDiscontinuitiesBypassJitterSnap};
     try { for (const auto test : tests) test(); }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
     std::cout << "PASS canonical timeline\n";

@@ -20,6 +20,7 @@ public sealed partial class MainPage : Page
         viewModel.RecordingOverlayStateChanged += OnRecordingOverlayStateChanged;
         recordingOverlayPresenter.CancelRequested += OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested += OnRecordingOverlayStopRequested;
+        recordingOverlayPresenter.TeamsWindowCaptureToggleRequested += OnTeamsWindowCaptureToggleRequested;
         viewModel.InitializePlayer();
         PlaybackVideoStage.SetMediaPlayer(viewModel.PlaybackMediaPlayer!);
         DataContext = viewModel;
@@ -37,6 +38,7 @@ public sealed partial class MainPage : Page
         viewModel.RecordingOverlayStateChanged -= OnRecordingOverlayStateChanged;
         recordingOverlayPresenter.CancelRequested -= OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested -= OnRecordingOverlayStopRequested;
+        recordingOverlayPresenter.TeamsWindowCaptureToggleRequested -= OnTeamsWindowCaptureToggleRequested;
         recordingOverlayPresenter.Hide();
         await viewModel.ShutdownAsync();
         recordingOverlayPresenter.Dispose();
@@ -161,7 +163,10 @@ public sealed partial class MainPage : Page
         else if (state.IsRecording)
         {
             recordingOverlayPresenter.ShowRecording(
-                viewModel.ActiveRecordingOverlayKind ?? RecordingOverlayRecordingKind.Manual);
+                viewModel.ActiveRecordingOverlayKind ?? RecordingOverlayRecordingKind.Manual,
+                state.CanToggleTeamsWindowCapture,
+                state.IsTeamsWindowCaptureEnabled,
+                state.TeamsWindowCaptureStatus);
         }
         else
         {
@@ -183,5 +188,17 @@ public sealed partial class MainPage : Page
         {
             viewModel.StopRecordingFromOverlayCommand.Execute(null);
         }
+    }
+
+    private async void OnTeamsWindowCaptureToggleRequested(
+        object? sender,
+        TeamsWindowCaptureToggleRequestedEventArgs args)
+    {
+        if (isShutdown)
+        {
+            return;
+        }
+
+        await viewModel.SetTeamsWindowCaptureDuringRecordingAsync(args.Enabled);
     }
 }

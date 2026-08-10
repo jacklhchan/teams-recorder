@@ -26,7 +26,9 @@
     <!-- Built as a self-contained single executable below.  The project
          reference makes standalone restore/build include its assets without
          loading the helper assembly into the WinUI process. -->
-    <ProjectReference Include="..\Recorder.AsrWorker\Recorder.AsrWorker.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\Recorder.AsrWorker\Recorder.AsrWorker.csproj"
+                      ReferenceOutputAssembly="false"
+                      AdditionalProperties="RuntimeIdentifier=win-x64;SelfContained=true" />
 
     <Content Include="Assets\SplashScreen.scale-200.png" />
     <Content Include="Assets\LockScreenLogo.scale-200.png" />

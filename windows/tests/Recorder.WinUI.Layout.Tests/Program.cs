@@ -5,6 +5,8 @@ var page = XDocument.Load(Path.Combine(fixtureRoot, "MainPage.xaml"));
 var codeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "MainPage.xaml.cs"));
 var windowCodeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "MainWindow.xaml.cs"));
 var viewModelCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingViewModel.cs"));
+var overlay = XDocument.Load(Path.Combine(fixtureRoot, "RecordingOverlayWindow.xaml"));
+var overlayCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingOverlayWindow.xaml.cs"));
 var controlAdapterCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecorderControlLifecycleOwnerAdapter.cs"));
 var xaml = (XNamespace)"http://schemas.microsoft.com/winfx/2006/xaml/presentation";
 var x = (XNamespace)"http://schemas.microsoft.com/winfx/2006/xaml";
@@ -20,6 +22,7 @@ var tests = new (string Name, Action Run)[]
     ("automation identifiers are unique and stable", AutomationIdentifiersAreUnique),
     ("English and Traditional Chinese resources stay in sync", LocaleResourcesStayInSync),
     ("Teams runtime uses local monitoring and retires WebSocket construction", TeamsRuntimeUsesLocalMonitoring),
+    ("recording overlay owns a safe dynamic Teams video toggle", OverlayVideoToggleIsSafe),
     ("pipe control joins the UI lifecycle and stops before finalization", ControlRuntimeLifecycleIsBounded),
     ("pipe status remains a bounded privacy-safe projection", ControlStatusIsPrivate),
 };
@@ -115,8 +118,6 @@ void ExistingCommandsRemainWired()
         "RequestRecycleLibraryCommand",
         "ConfirmRecycleLibraryCommand",
         "CancelRecycleLibraryCommand",
-        "EnableTeamsMuteSyncCommand",
-        "DisableTeamsMuteSyncCommand",
         "EnableTeamsAutomaticRecordingCommand",
         "DisableTeamsAutomaticRecordingCommand",
         "ToggleLocalMicrophoneMuteCommand",
@@ -135,14 +136,26 @@ void ExistingCommandsRemainWired()
 
 void TeamsRuntimeUsesLocalMonitoring()
 {
-    DoesNotContain("new TeamsThirdPartyApiClient", viewModelCode,
+    var start = viewModelCode.IndexOf("private async Task InitializeLocalTeamsAutomationAsync()", StringComparison.Ordinal);
+    var end = viewModelCode.IndexOf("private async Task DisposeLocalTeamsAutomationAsync()", start + 1, StringComparison.Ordinal);
+    if (start < 0 || end <= start)
+    {
+        throw new InvalidOperationException("The local Teams automation startup boundary is missing.");
+    }
+    var runtimeStartup = viewModelCode[start..end];
+
+    DoesNotContain("new TeamsThirdPartyApiClient", runtimeStartup,
         "The retired Teams WebSocket client must not be constructed by WinUI.");
-    DoesNotContain("new TeamsMuteSyncCoordinator", viewModelCode,
+    DoesNotContain("new TeamsMuteSyncCoordinator", runtimeStartup,
         "The retired Teams mute coordinator must not be constructed by WinUI.");
-    Contains("new TeamsLocalMeetingMonitor", viewModelCode,
-        "WinUI must create the local Teams meeting monitor.");
-    Contains("new TeamsLocalIntegrationCoordinator", viewModelCode,
-        "WinUI must drive automatic recording through the local coordinator.");
+    Contains("new TeamsLocalHeuristicAutoStartHost", runtimeStartup,
+        "WinUI must create the local WASAPI Teams heuristic host.");
+    Contains("RevokeLocalTeamsAutomationConsentAsync", viewModelCode,
+        "Withdrawing local monitoring consent must disable the automatic recorder.");
+    DoesNotContain("new TeamsLocalMeetingMonitor", runtimeStartup,
+        "The disabled UI Automation meeting monitor must not drive the product runtime.");
+    DoesNotContain("new TeamsLocalIntegrationCoordinator", runtimeStartup,
+        "The retired Teams mute integration must not drive the product runtime.");
     Contains("ClearRetiredTeamsPairingCredentialAsync", viewModelCode,
         "Startup must clear the retired pairing credential without reading it.");
     var pageText = page.ToString(SaveOptions.DisableFormatting);
@@ -150,6 +163,24 @@ void TeamsRuntimeUsesLocalMonitoring()
         "Settings must not instruct users to complete the retired pairing flow.");
     DoesNotContain("已配對的真實 Teams 會議", pageText,
         "Teams preview guidance must describe local meeting-surface validation.");
+}
+
+void OverlayVideoToggleIsSafe()
+{
+    var toggle = overlay.Descendants(xaml + "ToggleSwitch").Single(element =>
+        element.Attribute("AutomationProperties.AutomationId")?.Value == "TeamsWindowCaptureToggle");
+    Equal("OnTeamsWindowCaptureToggleToggled", toggle.Attribute("Toggled")?.Value,
+        "The overlay toggle must route through its guarded handler.");
+    Contains("isApplyingPresentation", overlayCode,
+        "Programmatic overlay refresh must not trigger a native video transition.");
+    Contains("TeamsWindowCaptureToggleRequested", codeBehind,
+        "The page must subscribe to the overlay video request.");
+    Contains("SetTeamsWindowCaptureDuringRecordingAsync", viewModelCode,
+        "The overlay must use the recording-lifecycle dynamic video API.");
+    Contains("videoToggleRequestGate.WaitAsync(0)", viewModelCode,
+        "Repeated overlay clicks must be coalesced before waiting for the lifecycle gate.");
+    Contains("DisableVideoTargetAsync", viewModelCode,
+        "Disabling pixels must keep the existing audio/MP4 session alive.");
 }
 
 void ControlRuntimeLifecycleIsBounded()
@@ -196,7 +227,7 @@ void ControlsAreRoutedToTheirWorkspace()
     AssertInsideWorkspace("RecordingLibraryList", "RecordingsWorkspace");
     AssertInsideWorkspace("PlaybackSlider", "RecordingsWorkspace");
     AssertInsideWorkspace("StartTranscriptionButton", "RecordingsWorkspace");
-    AssertInsideWorkspace("EnableTeamsMuteSyncButton", "SettingsWorkspace");
+    AssertInsideWorkspace("EnableLocalTeamsHeuristicCheckBox", "SettingsWorkspace");
     AssertInsideWorkspace("OpenAiApiKeyPasswordBox", "SettingsWorkspace");
     AssertInsideWorkspace("SaveDiagnosticsButton", "SettingsWorkspace");
 }

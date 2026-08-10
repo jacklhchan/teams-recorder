@@ -16,8 +16,7 @@ internal static class RecorderAppSettingsTests
             MicrophoneEndpointId = "mic-id",
             CaptureSource = RecorderPersistedCaptureSource.SelectedApplication,
             SelectedApplicationExecutable = "custom-recorder-target",
-            TeamsMuteSyncEnabled = true,
-            TeamsAutomaticRecordingEnabled = true,
+            LocalTeamsHeuristicAutoStartEnabled = true,
         }).GetAwaiter().GetResult();
 
         var loaded = store.LoadAsync().GetAwaiter().GetResult()
@@ -27,7 +26,8 @@ internal static class RecorderAppSettingsTests
             loaded.RenderEndpointId != "render-id" || loaded.MicrophoneEndpointId != "mic-id" ||
             loaded.CaptureSource != RecorderPersistedCaptureSource.SelectedApplication ||
             loaded.SelectedApplicationExecutable != "custom-recorder-target.exe" ||
-            !loaded.TeamsMuteSyncEnabled || !loaded.TeamsAutomaticRecordingEnabled)
+            loaded.TeamsMuteSyncEnabled || !loaded.TeamsAutomaticRecordingEnabled ||
+            !loaded.LocalTeamsHeuristicAutoStartEnabled)
             throw new InvalidOperationException("Public app settings did not round trip.");
 
         var json = File.ReadAllText(path);
@@ -49,23 +49,24 @@ internal static class RecorderAppSettingsTests
         if (noMicrophone.MicrophoneEndpointId is not null)
             throw new InvalidOperationException("Explicit no-microphone choice was not preserved.");
 
-        var automaticWithoutTeams = RecorderAppSettings.Validate(new RecorderAppSettings
+        var retiredAutomaticFlag = RecorderAppSettings.Validate(new RecorderAppSettings
         {
-            TeamsMuteSyncEnabled = false,
             TeamsAutomaticRecordingEnabled = true,
         });
-        if (automaticWithoutTeams.TeamsAutomaticRecordingEnabled)
-            throw new InvalidOperationException("Automatic recording must require the Teams opt-in.");
+        if (retiredAutomaticFlag.TeamsAutomaticRecordingEnabled ||
+            retiredAutomaticFlag.LocalTeamsHeuristicAutoStartEnabled)
+            throw new InvalidOperationException("The retired Teams API flag must not grant local monitoring consent.");
 
         using var root = new TestRoot();
         var legacyPath = Path.Combine(root.Path, "legacy-app-settings.json");
-        File.WriteAllText(legacyPath, "{\"schemaVersion\":1,\"recordMicrophone\":true}");
+        File.WriteAllText(legacyPath, "{\"schemaVersion\":2,\"recordMicrophone\":true,\"teamsMuteSyncEnabled\":true,\"teamsAutomaticRecordingEnabled\":true}");
         var legacy = new JsonRecorderAppSettingsStore(legacyPath).LoadAsync().GetAwaiter().GetResult()
             ?? throw new InvalidOperationException("Expected legacy settings.");
-        if (legacy.TeamsMuteSyncEnabled || legacy.TeamsAutomaticRecordingEnabled)
-            throw new InvalidOperationException("Legacy settings must default Teams opt-ins to disabled.");
+        if (legacy.TeamsMuteSyncEnabled || legacy.TeamsAutomaticRecordingEnabled ||
+            legacy.LocalTeamsHeuristicAutoStartEnabled)
+            throw new InvalidOperationException("Legacy settings must require fresh local-monitoring consent.");
 
-        Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { SchemaVersion = 3 }));
+        Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { SchemaVersion = 4 }));
         Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { RenderEndpointId = "unsafe\u0001id" }));
         Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings
         {

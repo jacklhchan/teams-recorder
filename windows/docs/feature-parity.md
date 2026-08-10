@@ -1,5 +1,24 @@
 # Windows 功能對等狀態矩陣
 
+## PR #11 integration update
+
+- Teams Third-party App API pairing, token consumption, and product commands
+  are retired. The Windows runtime uses only an explicit local WASAPI
+  render-session heuristic for automatic-recording candidates.
+- The local heuristic requires three healthy active observations to propose a
+  start. Render silence and probe failure never stop capture; only three
+  healthy observations with no Teams process can propose a stop.
+- Recorder microphone mute is recorder-only. It never reads, guesses, or
+  changes Teams mute.
+- Exact Teams-window WGC uses one crash-safe fragmented MP4. The floating
+  overlay can enable/disable pixels while audio continues; disabled, missing,
+  and transition intervals are privacy-black and never fall back to another
+  window or the desktop.
+- System loopback includes linear headroom, explicit-discontinuity smoothing,
+  conservative isolated-impulse repair, and device-confirmed QPC jitter
+  handling. Real Teams call/noise and physical-microphone evidence remain
+  manual release gates.
+
 此表是 Windows 發行判斷的唯一 live status matrix；「已實作」只表示程式及自動化證據存在，**不**表示硬體驗收、一般可用或 Teams-only 隔離已通過。macOS 行為的來源是根目錄 `README.md` 與 `Sources/RecorderApp/**`。
 
 | 能力 | macOS 行為 | Windows 實作狀態 | 自動化證據 | 人工證據 | 發行 gate | 目前 PR |
@@ -10,9 +29,9 @@
 | canonical 48 kHz timeline | Timestamped mixer 保持時序 | 已實作 QPC/device-position mapping、silence gaps、mic mute、late/overflow/disconnect counters | deterministic long/silence timeline tests | 長時錄音比對 duration、silence 與健康摘要 | PTS 單調、沒有壓縮 loopback silence | PR #1 基礎；本 branch 延伸 selected source |
 | M4A session、library、播放與復原 | MP4 primary，必要時 M4A audio fallback；library/playback | 已實作 AAC/M4A、library、播放、bounded recovery、partial retention | M4A writer fault/recovery tests、storage/recovery tests | 可重開啟播放、來源/寫檔失敗後重啟復原 | 實機 playback 與 fault-recovery smoke 記錄 | PR #1 基礎；本 branch 使用同一 publication path |
 | recording-session metadata | 共享 root session contract | 已使用 root Draft 2020-12 contract；selected capture 只寫 `audioSource`、安全 `processName`、`includedProcessTree`，不寫 PID、路徑、命令列、token | schema validation、cross-platform fixture 與 privacy round-trip tests | 檢查產生的 session metadata 不含敏感欄位 | 真實錄製 metadata 通過 schema 且 privacy review | PR #1 contract；本 branch 加 selected metadata |
-| 手動／10 秒測試／Teams 自動擁有權 | manual 不被 auto stop；Teams 自動有 countdown/debounce | manual、test、Teams-automatic 皆進 application lifecycle；10 秒 selected test 可取消且只 stop 一次 | coordinator/lifecycle/Teams state-machine tests | 手動開始、10 秒取消、Teams Preview pairing 狀態 | 記錄 ownership 與取消 smoke；Teams 仍不是 Selected App 的隔離證據 | PR #1 基礎；本 branch 追加 selected path |
-| Teams API／mute／自動錄製 | macOS Third-party App API 功能 | Windows 僅 Preview，非本 PR 交付或 release 主張 | protocol/transport state tests | per-tenant pairing 與 meeting-state probe | 另立 Teams API gate；不可作為 Teams-only isolation 或 GA 證明 | PR #1 Preview，非本 branch scope |
-| 視訊、WGC product capture、虛擬麥克風、轉錄、signed distribution | macOS 有較完整的對應功能 | Deferred／非目標 | 僅有各自的 probe 或 feature gate | 不適用 | 不可標示 feature complete | 不在本 branch |
+| 手動／10 秒測試／Teams 自動擁有權 | manual 不被 auto stop；Teams 自動有 countdown/debounce | manual、test、Teams-automatic 皆進 application lifecycle；自動模式使用明確 opt-in 的本機 WASAPI heuristic，無 Teams API | coordinator/lifecycle/heuristic tests：3 次 active start、silence/probe fault 不 stop、Teams process 3 次不存在才 stop | 真實 Teams 會議開始、沉默、離開與手動停止 smoke | heuristic 不得聲稱 authoritative meeting state；升級後需重新同意 | Draft PR #11 |
+| Teams API／mute | macOS 曾使用 Third-party App API | Windows 產品路徑已退役 pairing/token/WebSocket；Recorder 麥克風只由使用者獨立控制，不讀取、猜測或改變 Teams mute | runtime reachability、settings migration、recorder-only mute tests | 確認 UI/CLI 無 pairing，Teams mute 不改 Recorder mic | 不得重新引入 API/token 或隱式 mute routing | Draft PR #11 |
+| Teams 視窗 WGC／動態畫面 | macOS 有 ScreenCaptureKit 視窗 capture | exact HWND/PID/start-time WGC；同一 crash-safe fMP4 可從浮動窗開關，關閉／失去 target 時寫 privacy-black，音訊不中斷且不 fallback | dynamic route、stale callback、delayed-first-frame、off-on-off-on single-writer tests | 真實 Teams 分享畫面、toggle、target close、crash recovery | 可播放單一 MP4、黑畫面隱私間隙、音訊連續 | Draft PR #11 |
 
 ## Selected App 的範圍與隱私界線
 
@@ -29,4 +48,4 @@
 
 ## 明確非目標
 
-本 Draft 不包含 waveform UI、ASR/轉錄、video/WGC product capture、virtual microphone driver、signed distribution，或任何「一般可用 Teams-only isolation」主張。Teams pairing、mute sync 與自動錄製仍然是獨立 Preview，不能取代 selected-app dual-tone gate。
+本 Draft 不宣稱一般可用 Teams-only isolation、可靠的 Teams meeting-state API 或 Teams mute sync。WGC、ASR 與 virtual-microphone preview 各自保留獨立 release gate；signed distribution 仍未完成。

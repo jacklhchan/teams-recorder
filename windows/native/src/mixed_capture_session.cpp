@@ -4,10 +4,13 @@
 #include "m4a_writer.h"
 #include "mp4_mux_writer.h"
 #include "mix_format_decoder.h"
+#include "short_impulse_repair.h"
+#include "system_render_headroom.h"
 #include "process_loopback.h"
 #include "selected_audio_session_facade.h"
 #include "wasapi_capture.h"
 #include "canonical_timeline.h"
+#include "discontinuity_fade.h"
 #include "dynamic_video_route.h"
 #include "session_duration_clock.h"
 #include "video_pts_mapper.h"
@@ -112,6 +115,10 @@ struct Source {
     float level_peak = 0.0F;
     float level_rms = 0.0F;
     std::uint64_t generation = 0;
+    recorder::audio::ShortImpulseRepair impulse_repair;
+    bool has_last_frame = false;
+    float last_left = 0.0F;
+    float last_right = 0.0F;
     selected_audio::MixedSourceRole role = selected_audio::MixedSourceRole::Primary;
     recorder::timeline::Source timeline_source = recorder::timeline::Source::Render;
 };
@@ -124,13 +131,14 @@ struct RawAudioBlock {
     std::uint64_t qpc_position = 0;
     bool silent = false;
     bool discontinuity = false;
+    bool timestamp_error = false;
     bool event_driven = true;
 };
 
 RawAudioBlock ToRaw(recorder::audio::AudioBlock&& block) {
     return {std::move(block.bytes), std::move(block.mix_format_bytes), block.frame_count,
             block.device_position_frames, block.qpc_position, block.silent,
-            block.discontinuity, block.event_driven};
+            block.discontinuity, block.timestamp_error, block.event_driven};
 }
 
 std::string HresultText(HRESULT value) {
@@ -177,7 +185,7 @@ std::string CaptureSourceType(const selected_audio::MixedSourceRole role) {
 RawAudioBlock ToRaw(teams_recorder::process_loopback::ProcessLoopbackAudioBlock&& block) {
     return {std::move(block.bytes), std::move(block.mix_format_bytes), block.frame_count,
             block.device_position_frames, block.qpc_position, block.silent,
-            block.discontinuity, block.event_driven};
+            block.discontinuity, false, block.event_driven};
 }
 
 }  // namespace
@@ -698,6 +706,14 @@ private:
             }
 
             if (!normalized.empty()) {
+                const bool is_system_output =
+                    &source == &render_ && config_.target_process_id == 0;
+                if (is_system_output) {
+                    recorder::audio::ApplySystemRenderHeadroom(
+                        normalized.data(), normalized.size());
+                    source.impulse_repair.Process(
+                        normalized.data(), normalized.size() / 2U, block.discontinuity);
+                }
                 double sum_of_squares = 0.0;
                 source.level_peak = 0.0F;
                 for (const float sample : normalized) {
@@ -714,7 +730,8 @@ private:
                     block.device_position_frames,
                     source.format->sample_rate,
                     frame_count,
-                    block.discontinuity);
+                    block.discontinuity,
+                    !block.timestamp_error);
                 if (placement.late_frames_dropped >= frame_count) {
                     // This packet belongs wholly to media already emitted.
                     // Never move it forward: doing so would duplicate audio.
@@ -727,6 +744,14 @@ private:
                         normalized.begin() + static_cast<std::ptrdiff_t>(
                             placement.late_frames_dropped * 2U));
                 }
+                const auto discontinuity_edge = block.discontinuity
+                    ? recorder::timeline::DiscontinuityEdge::SourceDiscontinuity
+                    : recorder::timeline::DiscontinuityEdge::None;
+                const bool has_continuous_previous =
+                    source.has_last_frame && placement.silence_before_frames == 0;
+                recorder::timeline::ApplyCrossfadeAtDiscontinuity(
+                    normalized.data(), normalized.size() / 2U, discontinuity_edge,
+                    source.last_left, source.last_right, has_continuous_previous);
                 const std::size_t accepted_frame_count = normalized.size() / 2U;
                 while (source.queued_frames + accepted_frame_count > kMaxQueuedFrames &&
                        !source.queue.empty()) {
@@ -747,6 +772,9 @@ private:
                 }
 
                 if (accepted_frame_count > 0) {
+                    source.last_left = normalized[normalized.size() - 2U];
+                    source.last_right = normalized[normalized.size() - 1U];
+                    source.has_last_frame = true;
                     source.queued_frames += accepted_frame_count;
                     source.queue.push_back({std::move(normalized), placement.frame, 0});
                     source.received_audio = true;

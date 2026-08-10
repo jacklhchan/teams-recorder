@@ -11,7 +11,7 @@ namespace TeamsRecorder.Windows.Application.Settings;
 /// </summary>
 public sealed record RecorderAppSettings
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 
     [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; init; } = CurrentSchemaVersion;
     [JsonPropertyName("outputFolder")] public string? OutputFolder { get; init; }
@@ -25,9 +25,11 @@ public sealed record RecorderAppSettings
     /// and window titles are intentionally never persisted.
     /// </summary>
     [JsonPropertyName("selectedApplicationExecutable")] public string? SelectedApplicationExecutable { get; init; }
-    // These are local opt-ins only. Pairing material remains in the separate DPAPI store.
+    // Legacy migration input only. It is never written by current builds and
+    // has no runtime effect; the Teams API integration was retired.
     [JsonPropertyName("teamsMuteSyncEnabled")] public bool TeamsMuteSyncEnabled { get; init; }
     [JsonPropertyName("teamsAutomaticRecordingEnabled")] public bool TeamsAutomaticRecordingEnabled { get; init; }
+    [JsonPropertyName("localTeamsHeuristicAutoStartEnabled")] public bool LocalTeamsHeuristicAutoStartEnabled { get; init; }
 
     public static RecorderAppSettings Validate(RecorderAppSettings value)
     {
@@ -46,8 +48,14 @@ public sealed record RecorderAppSettings
             SelectedApplicationExecutable = value.CaptureSource == RecorderPersistedCaptureSource.SelectedApplication
                 ? NormalizeExecutable(value.SelectedApplicationExecutable)
                 : null,
-            // Automatic recording has no meaning without its separately opted-in Teams connection.
-            TeamsAutomaticRecordingEnabled = value.TeamsMuteSyncEnabled && value.TeamsAutomaticRecordingEnabled,
+            // Retired Teams API flags never grant consent to the replacement
+            // local heuristic. Upgrades must be explicitly enabled again in a
+            // schema-v3 build.
+            TeamsMuteSyncEnabled = false,
+            LocalTeamsHeuristicAutoStartEnabled = value.SchemaVersion == CurrentSchemaVersion &&
+                value.LocalTeamsHeuristicAutoStartEnabled,
+            TeamsAutomaticRecordingEnabled = value.SchemaVersion == CurrentSchemaVersion &&
+                value.LocalTeamsHeuristicAutoStartEnabled,
         };
     }
 

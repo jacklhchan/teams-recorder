@@ -67,6 +67,66 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
         Equal(1, bridge.AudioPackets);
     }
 
+    // The native writer is created when the audio-first A/V session starts,
+    // not by the first WGC callback. A delayed first real frame must therefore
+    // leave an explicit black prefix while the audio timeline keeps advancing.
+    public static void DelayedFirstRealFrameKeepsOneWriterBlackPrefixAndAudio()
+    {
+        var bridge = new DynamicBridge();
+        Equal(NativeRecorderResult.Ok, bridge.StartSelectedWindowAv(new(
+            NativeSelectedAudioSource.SystemLoopback,
+            "C:\\recordings\\audio-safety.partial.mp4",
+            "C:\\recordings\\recording.partial.mp4")).Result);
+
+        for (var i = 0; i < 3; i++)
+        {
+            bridge.EmitAudio();
+            Equal(FrameKind.Black, bridge.EmitFrame(Target(0x100, 42, 10), callbackGeneration: 0));
+        }
+
+        var teams = Target(0x100, 42, 10);
+        Equal(NativeRecorderResult.Ok, bridge.SetVideoTarget(teams).Result);
+        bridge.EmitAudio();
+        Equal(FrameKind.Target, bridge.EmitFrame(teams, bridge.CurrentGeneration));
+
+        Equal(1, bridge.WriterInstances);
+        Equal(4, bridge.AudioPackets);
+        EqualFrames([FrameKind.Black, FrameKind.Black, FrameKind.Black, FrameKind.Target], bridge.Frames);
+    }
+
+    // Enabling and disabling capture routes frames within the one A/V writer.
+    // It must never recreate the writer, leak old pixels during an off gap, or
+    // pause the independent audio timeline.
+    public static void OffOnOffOnUsesOneWriterBlackGapsAndContinuousAudio()
+    {
+        var bridge = new DynamicBridge();
+        Equal(NativeRecorderResult.Ok, bridge.StartSelectedWindowAv(new(
+            NativeSelectedAudioSource.SystemLoopback,
+            "C:\\recordings\\audio-safety.partial.mp4",
+            "C:\\recordings\\recording.partial.mp4")).Result);
+
+        var first = Target(0x100, 42, 10);
+        var second = Target(0x200, 43, 20);
+        bridge.EmitAudio();
+        Equal(FrameKind.Black, bridge.EmitFrame(first, callbackGeneration: 0));
+
+        Equal(NativeRecorderResult.Ok, bridge.SetVideoTarget(first).Result);
+        bridge.EmitAudio();
+        Equal(FrameKind.Target, bridge.EmitFrame(first, bridge.CurrentGeneration));
+
+        Equal(NativeRecorderResult.Ok, bridge.DisableVideoTarget().Result);
+        bridge.EmitAudio();
+        Equal(FrameKind.Black, bridge.EmitFrame(first, bridge.CurrentGeneration - 1));
+
+        Equal(NativeRecorderResult.Ok, bridge.SetVideoTarget(second).Result);
+        bridge.EmitAudio();
+        Equal(FrameKind.Target, bridge.EmitFrame(second, bridge.CurrentGeneration));
+
+        Equal(1, bridge.WriterInstances);
+        Equal(4, bridge.AudioPackets);
+        EqualFrames([FrameKind.Black, FrameKind.Target, FrameKind.Black, FrameKind.Target], bridge.Frames);
+    }
+
     public static void NeverEnabledTargetPublishesAudioOnlySafetyMp4()
     {
         using var root = new TemporaryRoot();
@@ -129,6 +189,12 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
             throw new InvalidOperationException($"Expected {expected}; got {actual}.");
     }
 
+    private static void EqualFrames(IReadOnlyList<FrameKind> expected, IReadOnlyList<FrameKind> actual)
+    {
+        if (!expected.SequenceEqual(actual))
+            throw new InvalidOperationException($"Expected [{string.Join(',', expected)}]; got [{string.Join(',', actual)}].");
+    }
+
     private enum FrameKind { Black, Target }
 
     private sealed class DynamicBridge : INativeRecorderBridge,
@@ -139,9 +205,12 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
         private long generation;
         private VideoCaptureTarget? target;
         private bool resizeTransition;
+        private readonly List<FrameKind> frames = [];
 
         public int AudioPackets { get; private set; }
+        public int WriterInstances { get; private set; }
         public long CurrentGeneration => generation;
+        public IReadOnlyList<FrameKind> Frames => frames;
 
         public NativeOperationResult Start(NativeRecordingRequest request) =>
             NativeOperationResult.Failure(NativeRecorderResult.NotImplemented, "Not used.");
@@ -154,6 +223,7 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
             request.Validate();
             state = NativeRecorderState.Recording;
             target = request.WindowTarget;
+            WriterInstances++;
             generation++;
             return NativeOperationResult.Success();
         }
@@ -198,13 +268,17 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
 
         public void EmitAudio() => AudioPackets++;
 
-        public FrameKind EmitFrame(VideoCaptureTarget callbackTarget, long callbackGeneration) =>
-            state == NativeRecorderState.Recording && !resizeTransition &&
-            target is { } active && callbackGeneration == generation &&
-            active.ProcessId == callbackTarget.ProcessId &&
-            active.WindowHandle == callbackTarget.WindowHandle &&
-            active.ProcessCreationTimeFileTimeUtc == callbackTarget.ProcessCreationTimeFileTimeUtc
-                ? FrameKind.Target : FrameKind.Black;
+        public FrameKind EmitFrame(VideoCaptureTarget callbackTarget, long callbackGeneration)
+        {
+            var frame = state == NativeRecorderState.Recording && !resizeTransition &&
+                target is { } active && callbackGeneration == generation &&
+                active.ProcessId == callbackTarget.ProcessId &&
+                active.WindowHandle == callbackTarget.WindowHandle &&
+                active.ProcessCreationTimeFileTimeUtc == callbackTarget.ProcessCreationTimeFileTimeUtc
+                    ? FrameKind.Target : FrameKind.Black;
+            frames.Add(frame);
+            return frame;
+        }
 
         public NativeOperationResult Stop()
         {

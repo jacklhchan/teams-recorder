@@ -10,7 +10,7 @@ namespace TeamsRecorder.Windows.Application;
 /// request operations concurrently (for example manual and Teams automation),
 /// but this service makes each transition atomic at the application boundary.
 /// </summary>
-public sealed class RecordingLifecycleService : IDisposable
+public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderEndpointProbe
 {
     private readonly INativeRecorderBridge nativeBridge;
     private readonly RecordingCoordinator coordinator;

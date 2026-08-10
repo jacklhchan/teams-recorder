@@ -368,7 +368,7 @@
                                         <ComboBox
                                             AutomationProperties.AutomationId="TeamsCaptureWindowPicker"
                                             DisplayMemberPath="DisplayName"
-                                            IsEnabled="{Binding IsDeviceSelectionEnabled}"
+                                            IsEnabled="{Binding IsTeamsWindowSelectionEnabled}"
                                             ItemsSource="{Binding TeamsCaptureWindows}"
                                             SelectedItem="{Binding SelectedVideoCaptureWindow, Mode=TwoWay}" />
                                         <TextBlock
@@ -763,20 +763,17 @@
                                     <TextBlock x:Uid="TeamsSettingsTitle" Style="{StaticResource SubtitleTextBlockStyle}" Text="Teams 整合" />
                                     <TextBlock
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        Text="啟用後，應用程式只會在本機監看已驗證的 Teams 視窗；不會連線至 Teams Third-party API，也不會使用配對或 WebSocket 權杖。Teams UI 自動化綁定尚未驗證時，靜音同步會安全地維持停用。"
+                                        Text="啟用後，應用程式只會在本機觀察 Teams 程序的 WASAPI 播放工作階段；不會連線至 Teams Third-party API，也不會使用配對、WebSocket 權杖或 Teams UI 自動化。Recorder 麥克風靜音永遠由使用者獨立控制。"
                                         TextWrapping="Wrap" />
-                                    <TextBlock Text="{Binding TeamsLocalStatusText}" TextWrapping="Wrap" />
-                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding TeamsLocalRoutingText}" TextWrapping="Wrap" />
-                                    <StackPanel Orientation="Horizontal" Spacing="10">
-                                        <Button AutomationProperties.AutomationId="EnableTeamsMuteSyncButton" Command="{Binding EnableTeamsMuteSyncCommand}" Content="啟用 Teams 本機監看" />
-                                        <Button AutomationProperties.AutomationId="DisableTeamsMuteSyncButton" Command="{Binding DisableTeamsMuteSyncCommand}" Content="停用 Teams 本機監看" />
-                                    </StackPanel>
                                     <Border Padding="12" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" CornerRadius="8">
-                                        <StackPanel Spacing="8">
-                                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Teams 自動錄音（選用）" />
+                                    <StackPanel Spacing="8">
+                                        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Teams 自動錄音（選用）" />
+                                        <CheckBox AutomationProperties.AutomationId="EnableLocalTeamsHeuristicCheckBox"
+                                                  Content="啟用本機 Teams 自動錄音推測"
+                                                  IsChecked="{Binding IsLocalHeuristicAutoStartEnabled, Mode=TwoWay}" />
                                             <TextBlock
                                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                Text="預設關閉。只有在本機 Teams 會議視窗通過程序身分與穩定 UI Automation 證據驗證後，才能由使用者明確啟用；此功能只控制本機工作階段。"
+                                                Text="預設關閉並需要重新同意。連續三次觀察到 Teams 播放才會提出開始；會議沉默或探測失敗不會停止錄音，只有 Teams 程序連續三次不存在才會提出停止。"
                                                 TextWrapping="Wrap" />
                                             <InfoBar
                                                 IsClosable="False"

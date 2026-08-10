@@ -132,19 +132,18 @@ public sealed class RecorderControlServerRuntime : IAsyncDisposable, IDisposable
 public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
 {
     public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(5);
-    private const int MaximumServerInstances = 8;
+    private const int MaximumConcurrentClients = 1;
 
     private readonly RecorderControlEndpoint endpoint;
     private readonly RecorderControlRequestDispatcher dispatcher;
     private readonly TimeSpan requestTimeout;
     private readonly IRecorderControlPeerIdentityVerifier peerIdentityVerifier;
     private readonly SecurityIdentifier currentUserSid;
-    private readonly PipeSecurity pipeSecurity;
     private readonly object lifecycleLock = new();
     private readonly ConcurrentDictionary<int, NamedPipeServerStream> connectedClients = new();
-    // One of the eight kernel pipe instances is always reserved for the next
-    // listener. At most seven accepted clients may be dispatched concurrently.
-    private readonly SemaphoreSlim connectedClientCapacity = new(MaximumServerInstances - 1, MaximumServerInstances - 1);
+    // One same-user request is dispatched at a time through the reusable,
+    // protected server instance. Every request also has a bounded deadline.
+    private readonly SemaphoreSlim connectedClientCapacity = new(MaximumConcurrentClients, MaximumConcurrentClients);
 
     private CancellationTokenSource? lifetime;
     private Task? acceptTask;
@@ -189,7 +188,6 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
         this.peerIdentityVerifier = peerIdentityVerifier ?? new WindowsRecorderControlPeerIdentityVerifier();
         currentUserSid = WindowsIdentity.GetCurrent().User
             ?? throw new InvalidOperationException("The current Windows user SID is unavailable.");
-        pipeSecurity = RecorderControlPipeSecurityPolicy.CreateForCurrentUser(currentUserSid);
     }
 
     public bool IsRunning
@@ -313,6 +311,33 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
                 var capacityReserved = false;
                 try
                 {
+                    if (pipe is null)
+                    {
+                        try
+                        {
+                            // Create one protected listener and reuse it across
+                            // sequential connections. A replacement created
+                            // before the prior client handle disappeared could
+                            // inherit an unusable Windows ACL.
+                            pipe = CreateServerPipe(firstInstance: true);
+                            lock (lifecycleLock)
+                            {
+                                if (!cancellationToken.IsCancellationRequested)
+                                {
+                                    pendingAccept = pipe;
+                                }
+                            }
+                        }
+                        catch (IOException)
+                        {
+                            // A just-disconnected kernel handle may remain in
+                            // teardown briefly. Do not turn that transient slot
+                            // pressure into a permanently dead control service.
+                            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
+                    }
+
                     await connectedClientCapacity.WaitAsync(cancellationToken).ConfigureAwait(false);
                     capacityReserved = true;
                     await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
@@ -326,22 +351,15 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
                     }
 
                     var connectedPipe = pipe;
-                    pipe = null;
                     var clientId = Interlocked.Increment(ref clientSequence);
                     connectedClients.TryAdd(clientId, connectedPipe);
-                    _ = ProcessClientAndDisposeAsync(clientId, connectedPipe, cancellationToken);
-                    // ProcessClientAndDisposeAsync now owns this reservation and
-                    // releases it only after the accepted instance is closed.
+                    await ProcessClientAndDisposeAsync(clientId, connectedPipe, cancellationToken)
+                        .ConfigureAwait(false);
+                    // Reuse this exact protected server instance. Recreating
+                    // the named pipe before the client process had released
+                    // its final handle left the replacement namespace with an
+                    // ACL that rejected every later desktop client.
                     capacityReserved = false;
-
-                    pipe = CreateServerPipe(firstInstance: false);
-                    lock (lifecycleLock)
-                    {
-                        if (!cancellationToken.IsCancellationRequested)
-                        {
-                            pendingAccept = pipe;
-                        }
-                    }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -365,11 +383,8 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
                         }
                     }
                     pipe?.Dispose();
-                    pipe = CreateServerPipe(firstInstance: false);
-                    lock (lifecycleLock)
-                    {
-                        pendingAccept = pipe;
-                    }
+                    pipe = null;
+                    await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -380,11 +395,12 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
                 }
             }
         }
-        catch
+        catch (Exception exception)
         {
             // No exception text is retained or sent through the control protocol.
             // Mark the lifetime faulted so IsRunning is truthful and Start may
             // retry after all old instances have been synchronously closed.
+            RecorderControlHealthLog.WriteAcceptFault(exception);
             acceptFaulted = !cancellationToken.IsCancellationRequested;
         }
         finally
@@ -419,6 +435,7 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
             // never get an oracle response, even for a syntactically valid frame.
             if (!peerIdentityVerifier.IsAuthorized(pipe, currentUserSid))
             {
+                RecorderControlHealthLog.WriteEvent("peer-rejected");
                 return;
             }
 
@@ -448,10 +465,12 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
             }
             catch (OperationCanceledException)
             {
+                RecorderControlHealthLog.WriteEvent("request-read-timeout");
                 return;
             }
             catch (IOException)
             {
+                RecorderControlHealthLog.WriteEvent("request-read-io");
                 return;
             }
 
@@ -469,6 +488,7 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
         catch (IOException)
         {
             // A client disconnect is expected and has no side effects.
+            RecorderControlHealthLog.WriteEvent("client-io");
         }
         catch (RecorderControlProtocolException)
         {
@@ -488,7 +508,6 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
             {
                 // Closing a failed/remote connection has no recovery path.
             }
-            pipe.Dispose();
             connectedClientCapacity.Release();
         }
     }
@@ -534,12 +553,15 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
         return NamedPipeServerStreamAcl.Create(
             endpoint.PipeName,
             PipeDirection.InOut,
-            MaximumServerInstances,
+            // The application-level semaphore remains the authoritative bound.
+            // MaxAllowed avoids a framework-level instance-count conflict while
+            // this exact server stream is disconnected and reused.
+            NamedPipeServerStream.MaxAllowedServerInstances,
             PipeTransmissionMode.Byte,
             options,
             RecorderControlProtocol.MaximumFrameBytes,
             RecorderControlProtocol.MaximumFrameBytes,
-            pipeSecurity,
+            RecorderControlPipeSecurityPolicy.CreateForCurrentUser(currentUserSid),
             HandleInheritability.None,
             (PipeAccessRights)0);
     }
@@ -549,6 +571,41 @@ public sealed class RecorderControlPipeServer : IAsyncDisposable, IDisposable
         if (disposed)
         {
             throw new ObjectDisposedException(nameof(RecorderControlPipeServer));
+        }
+    }
+}
+
+internal static class RecorderControlHealthLog
+{
+    private const int MaximumBytes = 16 * 1024;
+
+    public static void WriteAcceptFault(Exception exception)
+        => WriteEvent($"accept-fault-{exception.GetType().Name}");
+
+    public static void WriteEvent(string eventName)
+    {
+        try
+        {
+            var directory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Teams Recorder");
+            Directory.CreateDirectory(directory);
+            var logPath = Path.Combine(directory, "control-health.log");
+            if (File.Exists(logPath) && new FileInfo(logPath).Length >= MaximumBytes)
+            {
+                File.Delete(logPath);
+            }
+
+            // Deliberately retain only a framework exception type and time.
+            // Messages, paths, identities, requests, and command arguments are
+            // excluded from this local bounded health breadcrumb.
+            File.AppendAllText(
+                logPath,
+                $"{DateTimeOffset.UtcNow:O} {eventName}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Diagnostics must never change recorder or pipe lifecycle.
         }
     }
 }
@@ -567,7 +624,11 @@ public static class RecorderControlPipeSecurityPolicy
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new PipeAccessRule(
             currentUserSid,
-            PipeAccessRights.ReadWrite | PipeAccessRights.CreateNewInstance,
+            // Async clients also request Synchronize. FullControl remains
+            // private because the protected DACL contains exactly this one
+            // user SID; granting an incomplete right set made the replacement
+            // listener reject every client after the first connection.
+            PipeAccessRights.FullControl,
             AccessControlType.Allow));
         return security;
     }
@@ -591,10 +652,12 @@ public sealed class WindowsRecorderControlPeerIdentityVerifier : IRecorderContro
         }
 
         // The protected pipe DACL is evaluated by Windows before this point
-        // and contains only expectedCurrentUserSid.  Requesting a client PID
-        // succeeds only for a local client; fail closed for remote clients
-        // rather than trusting a network identity or computer-name string.
-        return NativePipeIdentity.TryGetLocalClientProcessId(pipe, out _);
+        // and contains only expectedCurrentUserSid. Prefer the local PID proof;
+        // Windows can transiently refuse that query after reconnecting the
+        // same server instance, so accept only a client in this exact local
+        // Windows logon session as the bounded fallback.
+        return NativePipeIdentity.TryGetLocalClientProcessId(pipe, out _) ||
+            NativePipeIdentity.IsSameLocalSession(pipe);
     }
 }
 
@@ -617,11 +680,28 @@ internal static partial class NativePipeIdentity
         }
     }
 
+    public static bool IsSameLocalSession(NamedPipeServerStream pipe)
+    {
+        return GetNamedPipeClientSessionId(pipe.SafePipeHandle, out var clientSessionId) &&
+            ProcessIdToSessionId((uint)Environment.ProcessId, out var serverSessionId) &&
+            clientSessionId == serverSessionId;
+    }
+
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool GetNamedPipeClientProcessId(
         Microsoft.Win32.SafeHandles.SafePipeHandle pipe,
         out uint clientProcessId);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetNamedPipeClientSessionId(
+        Microsoft.Win32.SafeHandles.SafePipeHandle pipe,
+        out uint clientSessionId);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ProcessIdToSessionId(uint processId, out uint sessionId);
 }
 
 /// <summary>All public requests enter one bounded, serialized lifecycle gate.</summary>
@@ -900,26 +980,45 @@ public sealed class RecorderControlPipeClient
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(effectiveTimeout);
-        await using var pipe = new NamedPipeClientStream(
-            ".",
-            endpoint.PipeName,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        try
+        const int maximumConnectAttempts = 20;
+        for (var attempt = 0; attempt < maximumConnectAttempts; attempt++)
         {
-            await pipe.ConnectAsync(deadline.Token).ConfigureAwait(false);
-            await RecorderControlPipeFrame.WriteAsync(
-                    pipe,
-                    RecorderControlProtocol.SerializeRequest(request),
-                    deadline.Token)
-                .ConfigureAwait(false);
-            var frame = await RecorderControlPipeFrame.ReadAsync(pipe, deadline.Token).ConfigureAwait(false);
-            return RecorderControlProtocol.DeserializeResponse(frame);
+            await using var pipe = new NamedPipeClientStream(
+                ".",
+                endpoint.PipeName,
+                PipeDirection.InOut,
+                // The server already enforces a protected exact-user DACL,
+                // FirstPipeInstance ownership, and same-session peer proof.
+                // .NET's redundant client-side CurrentUserOnly check rejects
+                // every external-process reconnect after the first use of a
+                // reusable server stream on Windows.
+                PipeOptions.Asynchronous);
+            try
+            {
+                await pipe.ConnectAsync(deadline.Token).ConfigureAwait(false);
+                await RecorderControlPipeFrame.WriteAsync(
+                        pipe,
+                        RecorderControlProtocol.SerializeRequest(request),
+                        deadline.Token)
+                    .ConfigureAwait(false);
+                var frame = await RecorderControlPipeFrame.ReadAsync(pipe, deadline.Token).ConfigureAwait(false);
+                return RecorderControlProtocol.DeserializeResponse(frame);
+            }
+            catch (IOException) when (attempt < maximumConnectAttempts - 1 && !deadline.IsCancellationRequested)
+            {
+                // A listener can retire an abandoned kernel instance exactly
+                // as this client connects. All protocol commands are absolute
+                // or idempotent (start/stop included), so retrying the same
+                // bounded request is safe and avoids exposing that pipe race.
+                await Task.Delay(TimeSpan.FromMilliseconds(25), deadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+            {
+                throw new RecorderControlProtocolException(RecorderControlProtocolError.TimedOut);
+            }
         }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
-        {
-            throw new RecorderControlProtocolException(RecorderControlProtocolError.TimedOut);
-        }
+
+        throw new RecorderControlProtocolException(RecorderControlProtocolError.TimedOut);
     }
 }
 

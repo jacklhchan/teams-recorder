@@ -47,8 +47,16 @@ internal sealed class RecorderControlLifecycleOwnerAdapter : IRecorderControlLif
         this.lifecycle = lifecycle ?? throw new ArgumentNullException(nameof(lifecycle));
     }
 
-    public Task<RecorderControlStatus> GetStatusAsync(CancellationToken cancellationToken) =>
-        InvokeAsync(lifecycle.GetRecorderControlStatusAsync, cancellationToken);
+    public Task<RecorderControlStatus> GetStatusAsync(CancellationToken cancellationToken)
+    {
+        // Status is an immutable, privacy-safe projection of fields that the
+        // view model publishes atomically. Do not marshal this read through
+        // the WinUI dispatcher: native discovery or startup recovery may keep
+        // that dispatcher busy, and health checks must still distinguish
+        // "initializing" from a dead application.
+        ThrowIfDisposed();
+        return lifecycle.GetRecorderControlStatusAsync(cancellationToken);
+    }
 
     public Task<RecorderControlActionResult> StartAsync(CancellationToken cancellationToken) =>
         InvokeAsync(lifecycle.StartRecorderControlAsync, cancellationToken);

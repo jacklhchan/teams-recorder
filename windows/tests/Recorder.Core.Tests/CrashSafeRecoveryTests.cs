@@ -231,6 +231,64 @@ internal static class CrashSafeRecoveryTests
         }
     }
 
+    public static void FailedEvidenceIsNotDecodedAgainWithoutNewDurableState()
+    {
+        using var root = new RecoveryTestRoot();
+        var storage = NewStorage(root.Path);
+        var plan = storage.CreateSessionPlan(RecordingSessionKind.Manual);
+        var evidence = new byte[] { 1, 2, 3, 4, 5 };
+        File.WriteAllBytes(plan.PartialAudioPath, evidence);
+
+        var first = new SessionRecoveryService(storage, new RejectingAudioValidator())
+            .RecoverAsync().GetAwaiter().GetResult().Single();
+        if (first.RecoveryState != RecordingRecoveryState.FailedEvidenceRetained)
+        {
+            throw new InvalidOperationException("Initial invalid audio evidence was not retained fail-closed.");
+        }
+
+        var second = new SessionRecoveryService(storage, new ThrowingAudioValidator())
+            .RecoverAsync().GetAwaiter().GetResult().Single();
+        if (second.Recovered || second.RecoveryState != RecordingRecoveryState.FailedEvidenceRetained ||
+            !File.ReadAllBytes(plan.PartialAudioPath).SequenceEqual(evidence))
+        {
+            throw new InvalidOperationException("Terminal failed evidence was retried, altered, or published.");
+        }
+    }
+
+    public static void PublishedSessionWithoutRecoveryEvidenceSkipsFullDecode()
+    {
+        using var root = new RecoveryTestRoot();
+        var storage = new SessionStorageService(
+            root.Path,
+            videoValidator: new ThrowingVideoValidator(),
+            audioValidator: new ThrowingAudioValidator());
+        var plan = storage.CreateSessionPlan(RecordingSessionKind.Manual);
+        var published = new byte[] { 9, 8, 7, 6 };
+        File.WriteAllBytes(plan.FinalVideoPath, published);
+        var metadata = RecordingInfoJson.CreateAudioOnly(
+            null,
+            null,
+            RecordingRecoveryState.None,
+            RecordingSessionKind.Manual);
+        File.WriteAllText(plan.MetadataPath, metadata.Document.ToJsonString());
+        storage.WriteRecoveryJournalAsync(
+            plan,
+            new RecordingRecoveryJournal(
+                SchemaVersion: 1,
+                Sequence: 1,
+                AudioVideo: null,
+                AudioSafety: new RecordingRecoveryCheckpoint(4, 10_000_000),
+                UpdatedUtc: DateTimeOffset.UtcNow)).GetAwaiter().GetResult();
+
+        var result = new SessionRecoveryService(storage, new ThrowingAudioValidator())
+            .RecoverAsync().GetAwaiter().GetResult().Single();
+        if (result.Recovered || result.RecoveryState != RecordingRecoveryState.None ||
+            !File.ReadAllBytes(plan.FinalVideoPath).SequenceEqual(published))
+        {
+            throw new InvalidOperationException("A completed published session was decoded again or altered at startup.");
+        }
+    }
+
     private static SessionStorageService NewStorage(string root) => new(
         root,
         videoValidator: new CompleteFmp4VideoValidator(),
@@ -335,6 +393,23 @@ internal static class CrashSafeRecoveryTests
     private sealed class AlwaysAudioValidator : IAudioBackupValidator
     {
         public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
+    }
+
+    private sealed class RejectingAudioValidator : IAudioBackupValidator
+    {
+        public bool IsValidNonEmptyAudio(string path) => false;
+    }
+
+    private sealed class ThrowingAudioValidator : IAudioBackupValidator
+    {
+        public bool IsValidNonEmptyAudio(string path) =>
+            throw new InvalidOperationException("Terminal evidence must not be decoded again.");
+    }
+
+    private sealed class ThrowingVideoValidator : IVideoMediaValidator
+    {
+        public bool IsValidNonEmptyVideo(string path) =>
+            throw new InvalidOperationException("Published media without recovery evidence must not be decoded again.");
     }
 
     private sealed class RecoveryTestRoot : IDisposable

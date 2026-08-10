@@ -43,9 +43,18 @@ public sealed class RecordingLibraryService
     public async Task<RecordingLibraryStartupResult> RecoverAtStartupAsync(
         CancellationToken cancellationToken = default)
     {
-        var recoveryResults = await recovery.RecoverAsync(cancellationToken).ConfigureAwait(false);
+        var recoveryResults = await RecoverEvidenceAtStartupAsync(cancellationToken).ConfigureAwait(false);
         return new RecordingLibraryStartupResult(recoveryResults, storage.ListSessions());
     }
+
+    /// <summary>
+    /// Completes only the safety-critical evidence pass. UI startup can become
+    /// recording-ready after this returns and load the decode-validated library
+    /// projection separately in the background.
+    /// </summary>
+    public Task<IReadOnlyList<SessionRecoveryResult>> RecoverEvidenceAtStartupAsync(
+        CancellationToken cancellationToken = default) =>
+        recovery.RecoverAsync(cancellationToken);
 
     public Task<RecordingInfo> UpdateMetadataAsync(
         string folderPath,

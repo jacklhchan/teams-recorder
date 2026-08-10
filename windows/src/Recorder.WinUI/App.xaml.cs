@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.Windows.AppLifecycle;
 using TeamsRecorder.Windows.Application.Diagnostics;
 using WinUiApplication = Microsoft.UI.Xaml.Application;
 
@@ -9,7 +10,9 @@ namespace TeamsRecorder.Windows.WinUI;
 /// </summary>
 public partial class App : WinUiApplication
 {
+    private const string MainInstanceKey = "TeamsRecorder.Main";
     private Window? window;
+    private AppInstance? mainInstance;
     private readonly IRecorderCrashMarkerStore crashMarkers = new RecorderCrashMarkerStore();
 
     public App()
@@ -19,10 +22,30 @@ public partial class App : WinUiApplication
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
     }
 
-    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        mainInstance = AppInstance.FindOrRegisterForKey(MainInstanceKey);
+        if (!mainInstance.IsCurrent)
+        {
+            var activation = AppInstance.GetCurrent().GetActivatedEventArgs();
+            await mainInstance.RedirectActivationToAsync(activation);
+            Exit();
+            return;
+        }
+
+        mainInstance.Activated += OnMainInstanceActivated;
         window = new MainWindow();
         window.Activate();
+    }
+
+    private void OnMainInstanceActivated(object? sender, AppActivationArguments args)
+    {
+        if (window is not MainWindow main)
+        {
+            return;
+        }
+
+        _ = main.DispatcherQueue.TryEnqueue(main.ShowAndActivate);
     }
 
     private void OnXamlUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs args) =>

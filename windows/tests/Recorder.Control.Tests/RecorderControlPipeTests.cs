@@ -24,8 +24,9 @@ internal static class RecorderControlPipeTests
             ("unauthorised peer is rejected before dispatch", UnauthorizedPeerIsRejectedAsync),
             ("oversized, unknown-version, and unknown-command requests fail closed", InvalidRequestsFailClosedAsync),
             ("repeated stop is idempotent", RepeatedStopIsIdempotentAsync),
-            ("concurrent start has exactly one successful operation", ConcurrentStartHasOneSuccessAsync),
-            ("idle-client saturation preserves and recovers the accept loop", IdleClientSaturationRecoversAsync),
+            ("concurrent start is serialized into one lifecycle operation", ConcurrentStartHasOneSuccessAsync),
+            ("an idle client is bounded and the listener recovers", IdleClientSaturationRecoversAsync),
+            ("sequential status polling keeps the accept loop alive", SequentialStatusPollingKeepsListenerAliveAsync),
             ("control responses contain no sensitive runtime identity", ResponseHasNoSensitiveRuntimeIdentityAsync),
         };
 
@@ -143,10 +144,8 @@ internal static class RecorderControlPipeTests
         owner.ReleaseFirstStart();
 
         var responses = await Task.WhenAll(first, second).ConfigureAwait(false);
-        Assert(responses.Count(response => response.Ok) == 1,
-            "Only one concurrent start request may succeed; the competing request must be busy.");
-        Assert(responses.Any(response => !response.Ok && response.Error?.Code == "busy"),
-            "The competing concurrent start must fail closed as busy.");
+        Assert(responses.All(response => response.Ok),
+            "The serialized duplicate start must resolve as an idempotent success.");
         Assert(owner.StartOperationInvocations == 1, "Only one lifecycle start operation may be invoked.");
     }
 
@@ -166,28 +165,42 @@ internal static class RecorderControlPipeTests
         }
     }
 
+    private static async Task SequentialStatusPollingKeepsListenerAliveAsync()
+    {
+        var owner = new FakeLifecycleOwner();
+        await using var server = StartServer(owner, timeout: TimeSpan.FromSeconds(2));
+        var client = new RecorderControlPipeClient(server.Endpoint);
+
+        for (var index = 0; index < 100; index++)
+        {
+            RecorderControlResponse response;
+            try
+            {
+                response = await client.SendAsync(
+                    RecorderControlCommand.Status,
+                    timeout: TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                throw new TestFailureException(
+                    $"Status poll {index + 1} failed while listener running={server.IsRunning}: {exception.Message}");
+            }
+            Assert(response.Ok && response.Status?.AppRunning == true,
+                $"Status poll {index + 1} did not receive the live app projection.");
+            Assert(server.IsRunning, $"The listener stopped after status poll {index + 1}.");
+        }
+    }
+
     private static async Task IdleClientSaturationRecoversAsync()
     {
         var owner = new FakeLifecycleOwner();
         await using var server = StartServer(owner, timeout: TimeSpan.FromSeconds(4));
-        var idleClients = new List<NamedPipeClientStream>();
-        try
+        // The production listener deliberately admits one same-user request at
+        // a time. An idle client is bounded by the request deadline and must
+        // not poison the next freshly protected FirstPipeInstance.
+        await using (var idle = await ConnectRawAsync(server.Endpoint).ConfigureAwait(false))
         {
-            // Eight connected instances previously caused the ninth server
-            // instance creation to fail and silently killed the accept loop.
-            for (var index = 0; index < 8; index++)
-            {
-                idleClients.Add(await ConnectRawAsync(server.Endpoint).ConfigureAwait(false));
-            }
-
-            Assert(server.IsRunning, "Saturating the current-user client capacity must not fault the listener.");
-        }
-        finally
-        {
-            foreach (var idle in idleClients)
-            {
-                await idle.DisposeAsync().ConfigureAwait(false);
-            }
+            Assert(server.IsRunning, "An idle current-user client must not fault the listener.");
         }
 
         var response = await new RecorderControlPipeClient(server.Endpoint)

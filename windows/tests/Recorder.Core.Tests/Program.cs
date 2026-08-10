@@ -85,6 +85,8 @@ var tests = new (string Name, Action Run)[]
     ,("fMP4 recovery copies evidence, validates to EOF, and is idempotent", CrashSafeRecoveryTests.RecoveryCopiesPrefixValidatesToEndAndIsIdempotent)
     ,("fMP4 recovery preserves audio safety when video is lost", CrashSafeRecoveryTests.AudioSafetyFallbackRetainsVideoEvidence)
     ,("crash recovery never overwrites or publishes invalid evidence", CrashSafeRecoveryTests.InvalidEvidenceNeverOverwritesOrPublishes)
+    ,("failed recovery evidence is not decoded again without new durable state", CrashSafeRecoveryTests.FailedEvidenceIsNotDecodedAgainWithoutNewDurableState)
+    ,("published sessions without recovery evidence skip full startup decode", CrashSafeRecoveryTests.PublishedSessionWithoutRecoveryEvidenceSkipsFullDecode)
     ,("crash recovery retains legacy double-partial MP4 and M4A support", CrashSafeRecoveryTests.LegacyDoublePartialAndM4aArtifactsRemainRecoverable)
     ,("recording lifecycle holds its lock and journals only native durable checkpoints", RecoveryJournalLifecycleTests.LifecycleHoldsLockAndPersistsOnlyNativeDurableCheckpoints)
     ,("session storage blocks unavailable capacity", SessionStorageTests.CapacityUnavailableBlocksStart)

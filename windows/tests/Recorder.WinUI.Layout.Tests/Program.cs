@@ -3,6 +3,7 @@ using System.Xml.Linq;
 var fixtureRoot = Path.Combine(AppContext.BaseDirectory, "Fixtures");
 var page = XDocument.Load(Path.Combine(fixtureRoot, "MainPage.xaml"));
 var codeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "MainPage.xaml.cs"));
+var appCodeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "App.xaml.cs"));
 var windowCodeBehind = File.ReadAllText(Path.Combine(fixtureRoot, "MainWindow.xaml.cs"));
 var viewModelCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingViewModel.cs"));
 var overlay = XDocument.Load(Path.Combine(fixtureRoot, "RecordingOverlayWindow.xaml"));
@@ -19,6 +20,7 @@ var tests = new (string Name, Action Run)[]
     ("primary recording state and actions stay above the record scroller", PrimaryControlsStayAboveTheFold),
     ("source and device controls occupy two explicit rows", SourceDeviceGridHasRows),
     ("main window is DPI-aware and enforces the dashboard minimum", MainWindowEnforcesMinimumSize),
+    ("second launch redirects to the one primary window", AppEnforcesSingleInstance),
     ("existing view-model command surface remains wired", ExistingCommandsRemainWired),
     ("each workspace owns its controls", ControlsAreRoutedToTheirWorkspace),
     ("automation identifiers are unique and stable", AutomationIdentifiersAreUnique),
@@ -99,6 +101,20 @@ void MainWindowEnforcesMinimumSize()
     Contains("RasterizationScale", windowCodeBehind, "Main window size must account for Windows display scaling.");
     Contains("DisplayArea.GetFromWindowId", windowCodeBehind, "Main window must stay inside the working area.");
     Contains("Activated += OnFirstActivated", windowCodeBehind, "DPI sizing must wait until XamlRoot has a real scale.");
+}
+
+void AppEnforcesSingleInstance()
+{
+    Contains("AppInstance.FindOrRegisterForKey", appCodeBehind,
+        "Startup must register one stable Windows App SDK instance key.");
+    Contains("RedirectActivationToAsync", appCodeBehind,
+        "A secondary process must redirect activation instead of creating another recorder.");
+    Contains("if (!mainInstance.IsCurrent)", appCodeBehind,
+        "Only the process that owns the registered key may create the main window.");
+    Contains("main.ShowAndActivate", appCodeBehind,
+        "Redirected activation must restore the existing tray window.");
+    Contains("internal void ShowAndActivate()", windowCodeBehind,
+        "The primary window must expose a dispatcher-safe restore action.");
 }
 
 void ExistingCommandsRemainWired()
@@ -189,14 +205,35 @@ void ControlRuntimeLifecycleIsBounded()
 {
     Contains("new RecorderControlServerRuntime", viewModelCode,
         "Application startup must create the local control runtime.");
-    Contains("StartRecorderControlRuntime();", viewModelCode,
-        "Application initialization must start the local control runtime.");
+    var constructorStart = viewModelCode.IndexOf("public RecordingViewModel()", StringComparison.Ordinal);
+    var initializationStart = viewModelCode.IndexOf("public async Task InitializeAsync()", StringComparison.Ordinal);
+    var controlStart = viewModelCode.IndexOf("StartRecorderControlRuntime();", constructorStart, StringComparison.Ordinal);
+    if (constructorStart < 0 || initializationStart < 0 || controlStart < constructorStart || controlStart > initializationStart)
+    {
+        throw new InvalidOperationException("The local control runtime must start before asynchronous initialization.");
+    }
+    Contains("AppRunning: !isShuttingDown", viewModelCode,
+        "Status must report the live process during bounded initialization.");
+    Contains("WaitAsync(TeamsPlaybackEndpointProbeTimeout)", viewModelCode,
+        "The advisory Teams endpoint probe must not block recorder readiness indefinitely.");
+    Contains("teamsPlaybackEndpointProbeTask ??=", viewModelCode,
+        "A timed-out advisory probe must be reused rather than leaking repeated blocked workers.");
+    Contains("await RecoverAtStartupAsync();", viewModelCode,
+        "Safety-critical evidence recovery must complete before recorder readiness.");
+    Contains("_ = RefreshLibraryAfterInitializationAsync();", viewModelCode,
+        "Decode-validated library projection must load without blocking recorder readiness.");
+    Contains("StopRecorderControlInBackgroundAsync", viewModelCode,
+        "A pipe Stop must queue durable finalization without holding the request open past its deadline.");
+    Contains("recorderControlStopTask is { IsCompleted: false }", viewModelCode,
+        "Status must remain available and report the asynchronous stop operation.");
     Contains("await StopRecorderControlRuntimeAsync();", viewModelCode,
         "Application shutdown must stop the local control runtime.");
     Contains("RunRecordingLifecycleActionAsync", viewModelCode,
         "UI and pipe actions must share a lifecycle gate.");
     Contains("DispatcherQueue", controlAdapterCode,
         "The pipe owner adapter must marshal work to the WinUI dispatcher.");
+    Contains("return lifecycle.GetRecorderControlStatusAsync(cancellationToken);", controlAdapterCode,
+        "Read-only status must bypass a busy UI dispatcher during initialization.");
     Contains("requestGate", controlAdapterCode,
         "The pipe owner adapter must serialize dispatched requests.");
 

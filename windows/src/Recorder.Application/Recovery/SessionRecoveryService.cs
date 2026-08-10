@@ -69,9 +69,47 @@ public sealed class SessionRecoveryService
         foreach (var (folder, kind) in storage.EnumerateOwnedFolders())
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (CanSkipCompletedPublishedFolder(folder, kind))
+            {
+                results.Add(new SessionRecoveryResult(folder, false, "Completed session already published."));
+                continue;
+            }
             results.Add(await RecoverFolderAsync(folder, kind, cancellationToken).ConfigureAwait(false));
         }
         return results;
+    }
+
+    private bool CanSkipCompletedPublishedFolder(string folder, RecordingSessionKind kind)
+    {
+        try
+        {
+            var metadataPath = Path.Combine(folder, RecordingSessionLayout.MetadataFileName);
+            if (!storage.IsSafeFile(metadataPath)) return false;
+            var current = storage.ReadMetadata(metadataPath);
+            if (current.RecoveryState != RecordingRecoveryState.None) return false;
+
+            var hasRecoveryMediaEvidence =
+                File.Exists(Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName)) ||
+                File.Exists(Path.Combine(folder, RecordingSessionLayout.PartialAudioFileName)) ||
+                File.Exists(Path.Combine(folder, RecordingSessionLayout.PartialVideoFileName)) ||
+                File.Exists(Path.Combine(folder, RecordingSessionLayout.LegacyDoublePartialVideoFileName)) ||
+                File.Exists(Path.Combine(folder, RecordingSessionLayout.AudioSafetyPartialFileName));
+            if (hasRecoveryMediaEvidence) return false;
+
+            var canonical = current.MediaKind == "video"
+                ? RecordingInfoJson.CreateVideo(current.Document, current.Title, RecordingRecoveryState.None, kind)
+                : RecordingInfoJson.CreateAudioOnly(current.Document, current.Title, RecordingRecoveryState.None, kind);
+            if (!System.Text.Json.Nodes.JsonNode.DeepEquals(canonical.Document, current.Document)) return false;
+
+            var finalVideo = Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName);
+            var declaredFinal = current.MediaKind == "video" || File.Exists(finalVideo)
+                ? finalVideo
+                : Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
+            return storage.IsSafeNonEmptyFile(declaredFinal);
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (ArgumentException) { return false; }
     }
 
     private async Task<SessionRecoveryResult> RecoverFolderAsync(
@@ -108,6 +146,51 @@ public sealed class SessionRecoveryService
         var current = metadataExists
             ? storage.ReadMetadata(metadataPath)
             : RecordingInfoJson.CreateAudioOnly(null, null, RecordingRecoveryState.None, kind);
+
+        var hasRecoveryMediaEvidence = File.Exists(backupAudio) || File.Exists(partialAudio) ||
+            File.Exists(partialVideo) || File.Exists(legacyDoublePartialVideo) || File.Exists(audioSafety);
+        var declaredFinalPath = current.MediaKind == "video"
+            ? finalVideo
+            : File.Exists(finalVideo)
+                ? finalVideo
+                : finalAudio;
+        var canonicalPublishedMetadata = current.MediaKind == "video"
+            ? RecordingInfoJson.CreateVideo(current.Document, current.Title, RecordingRecoveryState.None, kind)
+            : RecordingInfoJson.CreateAudioOnly(current.Document, current.Title, RecordingRecoveryState.None, kind);
+        var publishedMetadataIsCanonical = System.Text.Json.Nodes.JsonNode.DeepEquals(
+            canonicalPublishedMetadata.Document,
+            current.Document);
+        if (metadataExists && current.RecoveryState == RecordingRecoveryState.None &&
+            !hasRecoveryMediaEvidence && storage.IsSafeNonEmptyFile(declaredFinalPath))
+        {
+            // Atomic publication already validated the completed media before
+            // committing this metadata. Startup recovery must not decode every
+            // multi-minute library item to EOF again when no recovery evidence
+            // exists; doing so blocks recorder readiness for the library's
+            // cumulative duration.
+            if (!publishedMetadataIsCanonical)
+            {
+                try
+                {
+                    await storage.WriteMetadataAsync(
+                        metadataPath,
+                        canonicalPublishedMetadata,
+                        cancellationToken).ConfigureAwait(false);
+                    return new SessionRecoveryResult(folder, false, "Completed session metadata was sanitized.");
+                }
+                catch (IOException)
+                {
+                    return new SessionRecoveryResult(folder, false, "Completed session metadata could not be sanitized yet.");
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    return new SessionRecoveryResult(folder, false, "Completed session metadata could not be sanitized yet.");
+                }
+            }
+
+            return new SessionRecoveryResult(folder, false, "Completed session already published.");
+        }
+
         var hasFinalAudio = storage.IsSafeCompletedAudio(finalAudio);
         var hasFinalVideo = storage.IsSafeCompletedVideo(finalVideo);
         var completedLegacyVideo = storage.IsSafeCompletedVideo(partialVideo)
@@ -119,6 +202,17 @@ public sealed class SessionRecoveryService
         var hasFragmentedVideoEvidence = File.Exists(partialVideo) || File.Exists(legacyDoublePartialVideo) ||
             journal?.AudioVideo is not null;
         var hasVideoEvidence = current.MediaKind == "video" || File.Exists(finalVideo) || hasFragmentedVideoEvidence;
+
+        // FailedEvidenceRetained is a terminal, fail-closed result for the
+        // exact evidence already present. Re-running a synchronous decoder on
+        // the same malformed partial at every startup can indefinitely block
+        // recorder readiness. Preserve it byte-for-byte and retry only if a
+        // new journal or a completed media artifact appears later.
+        if (metadataExists && current.RecoveryState == RecordingRecoveryState.FailedEvidenceRetained &&
+            !hasFinalAudio && !hasFinalVideo && journal is null)
+        {
+            return FailedEvidence(folder, "Previously rejected recovery evidence remains retained for diagnostics.");
+        }
 
         // A second process must be able to finish a publication interrupted
         // after the no-overwrite rename but before metadata commit.

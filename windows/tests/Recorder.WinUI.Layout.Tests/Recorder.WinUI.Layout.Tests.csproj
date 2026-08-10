@@ -8,6 +8,7 @@
   <ItemGroup>
     <None Include="../../src/Recorder.WinUI/MainPage.xaml" Link="Fixtures/MainPage.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/MainPage.xaml.cs" Link="Fixtures/MainPage.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/Recorder.WinUI/App.xaml.cs" Link="Fixtures/App.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/MainWindow.xaml.cs" Link="Fixtures/MainWindow.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/RecordingViewModel.cs" Link="Fixtures/RecordingViewModel.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/Recorder.WinUI/RecordingOverlayWindow.xaml" Link="Fixtures/RecordingOverlayWindow.xaml" CopyToOutputDirectory="PreserveNewest" />

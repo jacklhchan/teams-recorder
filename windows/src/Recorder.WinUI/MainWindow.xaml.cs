@@ -91,6 +91,12 @@ public sealed partial class MainWindow : Window
 
     private void ShowFromTray() => trayIcon.ShowWindow();
 
+    internal void ShowAndActivate()
+    {
+        trayIcon.ShowWindow();
+        Activate();
+    }
+
     private void HideToTray() => trayIcon.HideWindow();
 
     private void RequestExitFromTray()

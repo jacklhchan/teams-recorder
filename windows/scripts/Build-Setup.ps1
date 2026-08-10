@@ -8,6 +8,8 @@ $ErrorActionPreference = "Stop"
 if ($Version -notmatch "^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$") {
     throw "-Version must begin with a three-part version such as 1.0.0."
 }
+$numericVersion = [regex]::Match($Version, "^(\d+)\.(\d+)\.(\d+)")
+$assemblyVersion = "$($numericVersion.Groups[1].Value).$($numericVersion.Groups[2].Value).$($numericVersion.Groups[3].Value).0"
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 $windowsRoot = Join-Path $repoRoot "windows"
@@ -60,6 +62,10 @@ New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
     --self-contained true `
     --no-restore `
     --property:Platform=x64 `
+    --property:Version=$Version `
+    --property:AssemblyVersion=$assemblyVersion `
+    --property:FileVersion=$assemblyVersion `
+    --property:InformationalVersion=$Version `
     --property:WindowsPackageType=None `
     --property:PublishSingleFile=false `
     --property:PublishTrimmed=false `
@@ -84,6 +90,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.AsrWorke
     --runtime win-x64 `
     --self-contained true `
     --no-restore `
+    --property:Version=$Version `
+    --property:AssemblyVersion=$assemblyVersion `
+    --property:FileVersion=$assemblyVersion `
+    --property:InformationalVersion=$Version `
     --property:PublishSingleFile=true `
     --property:PublishTrimmed=false `
     --output $controlPublishDirectory `

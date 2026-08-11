@@ -218,6 +218,10 @@ esac
                 OWNER_MARKER_VALUE if name == ".lmr-build-owner" else name,
                 encoding="utf-8",
             )
+        shutil.copyfile(
+            ROOT / "Config/PrivacyInfo.xcprivacy",
+            resources / "PrivacyInfo.xcprivacy",
+        )
         return app
 
     def run_verify(
@@ -488,6 +492,7 @@ esac
             "AppIcon.icns",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md",
+            "PrivacyInfo.xcprivacy",
             ".lmr-build-owner",
         )
         legacy_helpers = (

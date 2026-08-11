@@ -44,7 +44,7 @@ struct SelectedVolumeCapacityProvider: VolumeCapacityProviding {
     private let capacityLookup: @Sendable (URL) throws -> Int64?
 
     init(capacityLookup: @escaping @Sendable (URL) throws -> Int64? = { url in
-        try Self.importantUsageCapacity(for: url)
+        try Self.availableCapacity(for: url)
     }) {
         self.capacityLookup = capacityLookup
     }
@@ -56,8 +56,21 @@ struct SelectedVolumeCapacityProvider: VolumeCapacityProviding {
         return availableBytes
     }
 
-    private static func importantUsageCapacity(for url: URL) throws -> Int64? {
-        let values = try url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        return values.volumeAvailableCapacityForImportantUsage.map { Int64($0) }
+    static func preferredAvailableBytes(importantUsage: Int64?, ordinary: Int64?) -> Int64? {
+        if let importantUsage, importantUsage > 0 {
+            return importantUsage
+        }
+        return ordinary ?? importantUsage
+    }
+
+    private static func availableCapacity(for url: URL) throws -> Int64? {
+        let values = try url.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey,
+        ])
+        return preferredAvailableBytes(
+            importantUsage: values.volumeAvailableCapacityForImportantUsage.map { Int64($0) },
+            ordinary: values.volumeAvailableCapacity.map { Int64($0) }
+        )
     }
 }

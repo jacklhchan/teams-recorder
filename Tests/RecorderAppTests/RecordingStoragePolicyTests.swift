@@ -57,4 +57,26 @@ final class RecordingStoragePolicyTests: XCTestCase {
             XCTAssertTrue(error is ExpectedError)
         }
     }
+
+    func testProviderFallsBackToOrdinaryCapacityWhenImportantUsageReportsZero() {
+        let ordinaryCapacity: Int64 = 177_213_702_144
+
+        XCTAssertEqual(
+            SelectedVolumeCapacityProvider.preferredAvailableBytes(
+                importantUsage: 0,
+                ordinary: ordinaryCapacity
+            ),
+            ordinaryCapacity
+        )
+    }
+
+    func testProviderPreservesRealZeroWhenBothCapacityValuesAreZero() {
+        XCTAssertEqual(
+            SelectedVolumeCapacityProvider.preferredAvailableBytes(
+                importantUsage: 0,
+                ordinary: 0
+            ),
+            0
+        )
+    }
 }

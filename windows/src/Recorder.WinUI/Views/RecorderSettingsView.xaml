@@ -138,8 +138,10 @@
                     <StackPanel MaxWidth="720" Spacing="12">
                         <StackPanel Spacing="2">
                             <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="AI 轉錄與摘要" />
-                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="設定 OpenAI 相容服務。送出音訊或逐字稿前，應用程式會另外要求確認。" TextWrapping="Wrap" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="設定 OpenAI 相容或 HKT GenAI 服務。送出音訊與後續逐字稿處理前，應用程式會要求確認。" TextWrapping="Wrap" />
                         </StackPanel>
+                        <ComboBox AutomationProperties.AutomationId="SettingsAiProviderKindComboBox" DisplayMemberPath="DisplayName" Header="AI Provider" IsEnabled="{Binding IsOpenAiProviderAvailable}" ItemsSource="{Binding OpenAiProviderKinds}" SelectedItem="{Binding SelectedOpenAiProviderKind, Mode=TwoWay}" />
+                        <TextBox AutomationProperties.AutomationId="SettingsHktGroupIdTextBox" Header="HKT Group ID（只在 HKT GenAI 使用）" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="1–32 位數字" Text="{Binding OpenAiHktGroupId, Mode=TwoWay}" />
                         <TextBox AutomationProperties.AutomationId="SettingsOpenAiBaseUrlTextBox" Header="API Base URL" IsEnabled="{Binding IsOpenAiProviderAvailable}" Text="{Binding OpenAiApiBaseUrl, Mode=TwoWay}" />
                         <PasswordBox x:Name="OpenAiApiKeyPasswordBox" AutomationProperties.AutomationId="SettingsOpenAiApiKeyPasswordBox" Header="{Binding OpenAiApiKeyFieldLabel}" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="留空會保留已儲存的 API Key" />
                         <Grid ColumnSpacing="16">
@@ -147,8 +149,9 @@
                             <ComboBox AutomationProperties.AutomationId="SettingsOpenAiAsrModelComboBox" Header="ASR Model" IsEditable="True" IsEnabled="{Binding IsOpenAiProviderAvailable}" ItemsSource="{Binding OpenAiDiscoveredModels}" Text="{Binding OpenAiAsrModel, Mode=TwoWay}" />
                             <ComboBox Grid.Column="1" AutomationProperties.AutomationId="SettingsOpenAiLlmModelComboBox" Header="LLM Model" IsEditable="True" IsEnabled="{Binding IsOpenAiProviderAvailable}" ItemsSource="{Binding OpenAiDiscoveredModels}" Text="{Binding OpenAiLlmModel, Mode=TwoWay}" />
                         </Grid>
-                        <TextBox AutomationProperties.AutomationId="SettingsOpenAiLanguageTextBox" Header="語言（選填）" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="例如：zh 或 en" Text="{Binding OpenAiLanguage, Mode=TwoWay}" />
+                        <ComboBox AutomationProperties.AutomationId="SettingsOpenAiLanguageComboBox" Header="語言" IsEditable="True" IsEnabled="{Binding IsOpenAiProviderAvailable}" ItemsSource="{Binding OpenAiLanguages}" Text="{Binding OpenAiLanguage, Mode=TwoWay}" />
                         <TextBox AutomationProperties.AutomationId="SettingsOpenAiPromptTextBox" AcceptsReturn="True" Header="轉錄提示（選填）" Height="76" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="提供專有名詞或轉錄偏好" Text="{Binding OpenAiPrompt, Mode=TwoWay}" TextWrapping="Wrap" />
+                        <TextBox AutomationProperties.AutomationId="SettingsMeetingIntelligencePromptTextBox" AcceptsReturn="True" Header="Meeting Intelligence 提示（選填）" Height="96" IsEnabled="{Binding IsOpenAiProviderAvailable}" PlaceholderText="提供摘要格式、關注事項或標題偏好；固定安全與 JSON 規則不會被覆寫" Text="{Binding OpenAiMeetingIntelligencePrompt, Mode=TwoWay}" TextWrapping="Wrap" />
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <Button AutomationProperties.AutomationId="SettingsSaveOpenAiSettingsButton" Click="OnSaveOpenAiProviderSettingsClick" Content="儲存" IsEnabled="{Binding CanSaveOpenAiProvider}" />
                             <Button AutomationProperties.AutomationId="SettingsTestOpenAiConnectionButton" Command="{Binding TestOpenAiProviderConnectionCommand}" Content="測試連線" />

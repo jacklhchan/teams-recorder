@@ -150,6 +150,7 @@ var tests = new (string Name, Action Run)[]
     ,("OpenAI-compatible provider defaults and normalizes its profile", OpenAICompatibleProviderTests.DefaultsMatchOpenAiAndNormalizeVersionedBaseUrl)
     ,("OpenAI-compatible provider rejects unsafe URLs and future schemas", OpenAICompatibleProviderTests.ProfileRejectsInsecureOrSensitiveUrlsAndFutureSchema)
     ,("OpenAI-compatible provider keeps API key out of profile JSON", OpenAICompatibleProviderTests.RepositoryKeepsKeyOutOfProfileJsonAndSnapshotsItSeparately)
+    ,("HKT provider derives its endpoint and X-API-KEY authentication", OpenAICompatibleProviderTests.HktProfileDerivesEndpointAndUsesApiKeyHeader)
     ,("OpenAI-compatible provider discovers models with a request-scoped key", OpenAICompatibleProviderConnectionTests.DiscoversModelsAndKeepsAuthenticationRequestScoped)
     ,("OpenAI-compatible provider allows manual models and rejects unsafe failures", OpenAICompatibleProviderConnectionTests.AcceptsManualModelProvidersAndRejectsUnsafeFailures)
     ,("transcription artifacts publish atomically with bounded prior copies", TranscriptionArtifactTests.PublishesAtomicallyWithBoundedPreviousArtifacts)

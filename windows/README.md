@@ -18,16 +18,21 @@ The repository now contains:
 - a WinUI 3 desktop shell in `src/Recorder.WinUI` for **system render-loopback
   recording, optionally mixed with one explicitly selected microphone**. It
   lists render and capture devices, starts/stops a recording, provides a
-  10-second test, displays aggregate peak/packet/discontinuity health, and
+  10-second test with automatic in-app playback, displays aggregate
+  peak/packet/discontinuity health, and
   stops native capture on window close;
 - an AAC-in-M4A mixed-capture path. The native writer produces an M4A output;
   the application storage services define a separately test-covered session
   layout with a backup M4A, no-replace promotion, library discovery, capacity
   decisions, and conservative interrupted-session recovery;
-- local M4A library discovery and playback controls in the WinUI shell.
-- an explicit OpenAI-compatible ASR workflow for one selected, completed M4A
-  session at a time, plus a separately confirmed transcript-only LLM meeting
-  summary. The API key is held only in the current Windows user's DPAPI store;
+- local MP4/M4A library discovery and in-app audio/video playback controls in
+  the WinUI shell;
+- an explicit OpenAI-compatible or HKT GenAI ASR workflow, followed by bounded
+  automatic Meeting Intelligence after the combined user confirmation. The AI
+  workspace can edit, copy, export, and safely version transcripts; generate,
+  regenerate, cancel, and edit summaries and suggested titles; and apply a
+  suggested title without overwriting an existing user title. The API key is
+  held only in the current Windows user's DPAPI store;
   it is not written to recording metadata, diagnostics, or logs;
 - a notification-area icon: closing the main window hides it to the tray;
   use the tray icon's right-click **Exit Teams Recorder** command to close it
@@ -45,6 +50,10 @@ The repository now contains:
 - a floating recording window that can enable or disable exact Teams-window
   pixels during a recording. The session remains one MP4 and audio continues
   while disabled; disabled intervals contain privacy-black video;
+- Windows input-endpoint mute monitoring that combines hardware/device mute
+  with Recorder-local mute, so both the recording and virtual-microphone PCM
+  publication remain muted; and live low-storage degradation that disables
+  video below 1 GiB while preserving the audio recording;
 - system-loopback headroom, explicit-discontinuity fades, conservative
   single-frame impulse repair, and device-confirmed QPC jitter handling.
 
@@ -58,13 +67,13 @@ changes Teams mute. Exact Teams-window video capture is available as a Draft
 feature, but real Teams hardware acceptance remains a release gate. A virtual
 microphone driver remains preview-only.
 
-The AI workflow never uploads media automatically: each ASR request requires
-the user to select a completed managed M4A and confirm the upload, and each
-summary request separately confirms its transcript upload. This first Windows
-slice accepts completed M4A files up to 32 MiB; it deliberately refuses larger
-files rather than byte-splitting an M4A container into invalid audio. Recording
-and upload behaviour with the intended provider, real credentials, long
-recordings, and real meeting content remain manual release gates.
+The AI workflow never starts without an explicit user action. The ASR dialog
+describes and confirms both the selected-media upload and the automatic
+transcript-only Meeting Intelligence step; manual regeneration asks again.
+Managed MP4/M4A media is decoded and exported into bounded chronological ASR
+chunks rather than byte-splitting a media container. Recording and upload
+behaviour with the intended provider, real credentials, long recordings, and
+real meeting content remain manual release gates.
 
 The app also restores non-secret local choices after restart: the output folder,
 explicit render and microphone selection, microphone on/off choice, and capture

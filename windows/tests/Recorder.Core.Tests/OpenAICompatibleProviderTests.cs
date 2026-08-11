@@ -21,8 +21,21 @@ internal static class OpenAICompatibleProviderTests
         Reject("https://example.test/v1#fragment", ProviderProfileValidationError.UnsupportedUrlComponents);
         var loopback = OpenAICompatibleProviderProfile.Validated("http://127.0.0.1:8080", "asr", "llm", "", "");
         Equal("http://127.0.0.1:8080/v1", loopback.BaseUrl);
-        try { OpenAICompatibleProviderProfile.ValidateStored(loopback with { SchemaVersion = 2 }); throw new InvalidOperationException("Future schema was accepted."); }
+        try { OpenAICompatibleProviderProfile.ValidateStored(loopback with { SchemaVersion = OpenAICompatibleProviderProfile.CurrentSchemaVersion + 1 }); throw new InvalidOperationException("Future schema was accepted."); }
         catch (ProviderProfileException error) when (error.Reason == ProviderProfileValidationError.UnsupportedSchemaVersion) { }
+    }
+
+    public static void HktProfileDerivesEndpointAndUsesApiKeyHeader()
+    {
+        var profile = OpenAICompatibleProviderProfile.HktValidated("12345", "asr", "llm", "yue", "names", "focus on decisions");
+        Equal("https://api.uat.bot-builder.pccw.com/v1/groups/12345/openai", profile.BaseUrl);
+        Equal("12345", profile.GroupId!);
+        if (profile.ProviderKind != AIProviderKind.HktGenAI) throw new InvalidOperationException("HKT provider kind was not retained.");
+        var header = ProviderRequestAuthentication.Header(profile, "secret")
+            ?? throw new InvalidOperationException("HKT authentication header was not created.");
+        Equal("X-API-KEY", header.Key); Equal("secret", header.Value);
+        try { _ = OpenAICompatibleProviderProfile.HktValidated("group-a", "asr", "llm", "", ""); throw new InvalidOperationException("Invalid HKT group ID was accepted."); }
+        catch (ProviderProfileException error) when (error.Reason == ProviderProfileValidationError.InvalidHktGroupId) { }
     }
 
     public static void RepositoryKeepsKeyOutOfProfileJsonAndSnapshotsItSeparately()

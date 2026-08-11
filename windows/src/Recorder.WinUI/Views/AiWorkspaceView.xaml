@@ -14,7 +14,7 @@
             <TextBlock Style="{StaticResource TitleTextBlockStyle}" Text="AI 工作區" />
             <TextBlock
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Text="檢視所選錄音的逐字稿與 AI 工作狀態；所有傳送動作均須由您明確確認。"
+                Text="檢視、修改及匯出逐字稿與 Meeting Intelligence；開始 AI 工作前均須由您明確確認。"
                 TextWrapping="Wrap" />
         </StackPanel>
 
@@ -23,7 +23,7 @@
             Margin="28,0,28,16"
             IsClosable="False"
             IsOpen="True"
-            Message="只有您明確開始的工作才會傳送到所選 AI 供應商。轉錄會上傳所選錄音；產生摘要只會傳送已完成的逐字稿文字。"
+            Message="只有您明確開始的工作才會傳送到所選 AI 供應商。確認轉錄時，可同時授權逐字稿完成後自動產生摘要及建議標題；重新產生只會傳送逐字稿。"
             Severity="Informational"
             Title="您的資料與控制權" />
 
@@ -173,20 +173,50 @@
                         BorderThickness="1"
                         CornerRadius="12">
                         <StackPanel Spacing="10">
-                            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="會議摘要" />
-                            <TextBlock
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="完成後，逐字稿與摘要會安全儲存在所選錄音工作階段中；可從錄音庫重新開啟或播放。"
+                            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="逐字稿編輯器" />
+                            <TextBox
+                                AcceptsReturn="True"
+                                AutomationProperties.AutomationId="AiTranscriptEditor"
+                                IsEnabled="{Binding CanSaveTranscript}"
+                                MinHeight="220"
+                                Text="{Binding TranscriptText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                 TextWrapping="Wrap" />
-                            <Border
-                                Padding="12"
-                                Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}"
-                                CornerRadius="8">
-                                <TextBlock
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="尚未選取可處理的錄音。請先在左側選擇已完成的錄音，然後由您決定是否開始 AI 處理。"
-                                    TextWrapping="Wrap" />
-                            </Border>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Click="OnSaveTranscriptClick" Content="儲存逐字稿" IsEnabled="{Binding CanSaveTranscript}" />
+                                <Button Click="OnCopyTranscriptClick" Content="複製" IsEnabled="{Binding CanSaveTranscript}" />
+                                <Button Click="OnExportTranscriptClick" Content="匯出" IsEnabled="{Binding CanSaveTranscript}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <Border
+                        Padding="18"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="12">
+                        <StackPanel Spacing="10">
+                            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="Meeting Intelligence" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding MeetingIntelligenceStatus}" TextWrapping="Wrap" />
+                            <TextBox
+                                AcceptsReturn="True"
+                                AutomationProperties.AutomationId="AiMeetingSummaryEditor"
+                                Header="摘要"
+                                IsEnabled="{Binding CanSaveMeetingIntelligence}"
+                                MinHeight="150"
+                                Text="{Binding MeetingIntelligenceSummary, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                TextWrapping="Wrap" />
+                            <TextBox
+                                AutomationProperties.AutomationId="AiSuggestedTitleEditor"
+                                Header="建議標題"
+                                IsEnabled="{Binding CanSaveMeetingIntelligence}"
+                                Text="{Binding MeetingIntelligenceSuggestedTitle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Click="OnGenerateSummaryClick" Content="產生／重新產生" IsEnabled="{Binding CanGenerateOpenAiSummary}" />
+                                <Button Click="OnCancelMeetingIntelligenceClick" Content="取消" IsEnabled="{Binding CanCancelMeetingIntelligence}" />
+                                <Button Click="OnSaveMeetingIntelligenceClick" Content="儲存修改" IsEnabled="{Binding CanSaveMeetingIntelligence}" />
+                                <Button Click="OnApplySuggestedTitleClick" Content="套用建議標題" IsEnabled="{Binding CanSaveMeetingIntelligence}" />
+                            </StackPanel>
                         </StackPanel>
                     </Border>
                 </StackPanel>

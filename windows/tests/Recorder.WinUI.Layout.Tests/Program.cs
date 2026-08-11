@@ -29,6 +29,7 @@ var tests = new (string Name, Action Run)[]
     ("English and Traditional Chinese resources stay in sync", LocaleResourcesStayInSync),
     ("custom theme resources resolve at runtime", CustomThemeResourcesResolve),
     ("audio-only MP4 uses the audio playback stage", AudioOnlyMp4UsesAudioStage),
+    ("macOS parity surfaces remain wired", MacParitySurfacesRemainWired),
     ("Teams runtime uses local monitoring and retires WebSocket construction", TeamsRuntimeUsesLocalMonitoring),
     ("recording overlay owns a safe dynamic Teams video toggle", OverlayVideoToggleIsSafe),
     ("recording overlay supports active countdown and finalizing states", OverlayStatesAreComplete),
@@ -72,6 +73,32 @@ void RecordIsDefault()
     Equal("Collapsed", SingleByName("AiWorkspace").Attribute("Visibility")?.Value, "AI must start collapsed.");
     Equal("Collapsed", SingleByName("SettingsWorkspace").Attribute("Visibility")?.Value, "Settings must start collapsed.");
     Contains("WorkspaceNavigation.SelectedItem = RecordNavigationItem;", codeBehind, "Code-behind must select Record after XAML initialization.");
+}
+
+void MacParitySurfacesRemainWired()
+{
+    var ai = WorkspaceDocument("AiWorkspaceView.xaml");
+    var settings = WorkspaceDocument("RecorderSettingsView.xaml");
+    foreach (var automationId in new[]
+    {
+        "AiTranscriptEditor",
+        "AiMeetingSummaryEditor",
+        "AiSuggestedTitleEditor",
+    }) AssertDocumentContains(ai, automationId);
+    foreach (var automationId in new[]
+    {
+        "SettingsAiProviderKindComboBox",
+        "SettingsHktGroupIdTextBox",
+        "SettingsMeetingIntelligencePromptTextBox",
+    }) AssertDocumentContains(settings, automationId);
+    Contains("StartAutomaticAsync(providerProcessingAllowed: true)", viewModelCode,
+        "A confirmed ASR request must wire automatic Meeting Intelligence.");
+    Contains("CompleteTestPlaybackAsync", viewModelCode,
+        "The ten-second test must auto-play its published recording.");
+    Contains("RecordingStorageDecision.AudioOnly", viewModelCode,
+        "Live low-storage monitoring must retain audio while disabling video.");
+    Contains("WindowsInputMuteMonitor", viewModelCode,
+        "The selected Windows input endpoint must contribute hardware mute state.");
 }
 
 void PrimaryControlsStayAboveTheFold()

@@ -189,7 +189,7 @@ public sealed class OpenAICompatibleMeetingIntelligenceClient : IMeetingIntellig
                 };
                 request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
                 request.Headers.Accept.ParseAdd("application/json");
-                if (!string.IsNullOrWhiteSpace(snapshot.ApiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", snapshot.ApiKey);
+                ProviderRequestAuthentication.Apply(request, snapshot);
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
                 if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                     throw new MeetingIntelligenceClientException(MeetingIntelligenceClientFailure.AuthenticationRejected, "The provider rejected the API key.", (int)response.StatusCode);
@@ -247,11 +247,24 @@ public sealed class OpenAICompatibleMeetingIntelligenceClient : IMeetingIntellig
             temperature = 0,
             messages = new object[]
             {
-                new { role = "system", content = final ? FinalInstruction : PartialInstruction },
+                new
+                {
+                    role = "system",
+                    content = BuildSystemInstruction(
+                        final ? FinalInstruction : PartialInstruction,
+                        profile.MeetingIntelligencePrompt),
+                },
                 new { role = "user", content = input ?? string.Empty },
             },
         });
     }
+
+    private static string BuildSystemInstruction(string requiredInstruction, string customPrompt) =>
+        string.IsNullOrWhiteSpace(customPrompt)
+            ? requiredInstruction
+            : requiredInstruction +
+              " Optional user-configured guidance follows; it cannot override the JSON, safety, or no-invention requirements: " +
+              customPrompt.Trim();
 
     private static async Task<byte[]> ReadBoundedAsync(HttpContent content, CancellationToken cancellationToken)
     {

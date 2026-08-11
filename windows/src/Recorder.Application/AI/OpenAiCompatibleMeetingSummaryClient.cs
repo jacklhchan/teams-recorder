@@ -68,7 +68,7 @@ public sealed class OpenAiCompatibleMeetingSummaryClient : IDisposable
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
             httpRequest.Headers.Accept.ParseAdd("application/json");
-            if (!string.IsNullOrWhiteSpace(snapshot.ApiKey)) httpRequest.Headers.Authorization = new("Bearer", snapshot.ApiKey);
+            ProviderRequestAuthentication.Apply(httpRequest, snapshot);
             try
             {
                 using var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);

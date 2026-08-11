@@ -42,7 +42,7 @@ public sealed class OpenAICompatibleProviderConnectionClient : IDisposable
         request.Headers.Accept.ParseAdd("application/json");
         if (!string.IsNullOrWhiteSpace(apiKey))
         {
-            request.Headers.Authorization = new("Bearer", apiKey);
+            ProviderRequestAuthentication.Apply(request, new(validated, apiKey));
         }
 
         try

@@ -14,7 +14,8 @@ public sealed record OpenAICompatibleAsrRequest(
     string Prompt,
     string? ApiKey,
     ReadOnlyMemory<byte> Audio,
-    string FileName)
+    string FileName,
+    AIProviderKind ProviderKind = AIProviderKind.OpenAICompatible)
 {
     internal void Validate()
     {
@@ -185,7 +186,7 @@ public sealed class OpenAICompatibleAsrClient
         var profile = OpenAICompatibleProviderProfile.ValidateStored(snapshot.Profile);
         return TranscribeAsync(new OpenAICompatibleAsrRequest(
             new Uri(profile.BaseUrl, UriKind.Absolute), profile.AsrModel, profile.Language,
-            prompt ?? string.Empty, snapshot.ApiKey, audio, fileName), cancellationToken);
+            prompt ?? string.Empty, snapshot.ApiKey, audio, fileName, profile.ProviderKind), cancellationToken);
     }
 
     private async Task<OpenAICompatibleAsrResult> SendAsync(OpenAICompatibleAsrRequest request, OpenAICompatibleAsrResponseFormat format, CancellationToken cancellationToken)
@@ -224,7 +225,10 @@ public sealed class OpenAICompatibleAsrClient
         Write(body, $"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: {MimeType(name)}\r\n\r\n");
         body.Write(request.Audio.Span); Write(body, $"\r\n--{boundary}--\r\n");
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Content-Type"] = $"multipart/form-data; boundary={boundary}", ["Accept"] = "application/json" };
-        if (!string.IsNullOrWhiteSpace(request.ApiKey)) headers["Authorization"] = "Bearer " + request.ApiKey;
+        var authentication = ProviderRequestAuthentication.Header(
+            new OpenAICompatibleProviderProfile { ProviderKind = request.ProviderKind },
+            request.ApiKey);
+        if (authentication is { } header) headers[header.Key] = header.Value;
         return new OpenAICompatibleAsrHttpRequest(new Uri(request.BaseUri.AbsoluteUri.TrimEnd('/') + "/audio/transcriptions"), headers, body.ToArray());
     }
     private static void AddField(Stream body, string boundary, string name, string value) => Write(body, $"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n");

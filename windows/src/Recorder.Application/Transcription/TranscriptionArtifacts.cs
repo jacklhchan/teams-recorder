@@ -126,6 +126,42 @@ public sealed class TranscriptionArtifactPublisher
         return new(Path.Combine(folder, TranscriptFileName), Path.Combine(folder, RawTranscriptFileName), Path.Combine(folder, ManifestFileName), Path.Combine(folder, LogFileName));
     }
 
+    /// <summary>
+    /// Replaces only the user-editable canonical transcript while retaining a
+    /// bounded backup. Provider provenance files remain untouched and meeting
+    /// intelligence detects the new transcript revision independently.
+    /// </summary>
+    public async Task<string> SaveEditedTranscriptAsync(
+        RecordingSessionPlan plan,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        var folder = ValidatePlan(plan);
+        var normalized = (text ?? string.Empty).Normalize(NormalizationForm.FormC)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+        if (normalized.Contains('\0'))
+            throw new IOException("The transcript contains an invalid null character.");
+        var bytes = Encoding.UTF8.GetBytes(normalized);
+        if (bytes.Length > MeetingIntelligencePipeline.MaximumSourceBytes)
+            throw new IOException("The transcript exceeds the 4 MiB edit limit.");
+
+        var destination = Path.Combine(folder, TranscriptFileName);
+        if (File.Exists(destination))
+        {
+            EnsureSafeRegularFile(destination, TranscriptFileName);
+            var stamp = DateTimeOffset.UtcNow.ToString(
+                "yyyyMMddHHmmssfff",
+                System.Globalization.CultureInfo.InvariantCulture);
+            File.Copy(destination,
+                Path.Combine(folder, $"{TranscriptFileName}.previous-{stamp}-{Guid.NewGuid():N}"),
+                overwrite: false);
+        }
+        await AtomicWriteAsync(destination, bytes, cancellationToken).ConfigureAwait(false);
+        PruneBackups(folder, TranscriptFileName);
+        return destination;
+    }
+
     public async Task<TranscriptionState?> MarkInterruptedIfNeededAsync(RecordingSessionPlan plan, DateTimeOffset? now = null, CancellationToken cancellationToken = default)
     {
         var state = LoadState(plan);

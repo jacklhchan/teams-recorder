@@ -19,6 +19,7 @@ using TeamsRecorder.Windows.Application.Transcription;
 using TeamsRecorder.Windows.Application.VirtualMic;
 using Windows.Media.Core;
 using Windows.Media.Playback;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace TeamsRecorder.Windows.WinUI;
 
@@ -39,6 +40,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private readonly DispatcherQueueTimer telemetryTimer;
     private readonly DispatcherQueueTimer playbackTimer;
     private readonly DispatcherQueueTimer teamsLocalHeuristicTimer;
+    private readonly DispatcherQueueTimer inputMuteTimer;
     // RecordingLifecycleService keeps native capture, the temporary session plan,
     // and final publication in the Application layer.  This VM only maps that
     // state to WinUI properties and commands.
@@ -65,8 +67,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private OpenAICompatibleAsrHttpTransport? openAiAsrTransport;
     private OpenAICompatibleProviderConnectionClient? openAiProviderConnectionClient;
     private RecordingSessionAsrJobCoordinator? transcriptionCoordinator;
-    private OpenAiCompatibleMeetingSummaryClient? meetingSummaryClient;
-    private MeetingSummaryCoordinator? meetingSummaryCoordinator;
+    private OpenAICompatibleMeetingIntelligenceClient? meetingIntelligenceClient;
+    private MeetingIntelligenceSessionCoordinator? meetingIntelligenceCoordinator;
+    private long aiWorkspaceLoadGeneration;
+    private string transcriptText = string.Empty;
+    private string meetingIntelligenceSummary = string.Empty;
+    private string meetingIntelligenceSuggestedTitle = string.Empty;
+    private string meetingIntelligenceStatus = "請選取有逐字稿的錄音。";
+    private bool hasLoadedTranscript;
     private RecordingCoordinatorSnapshot snapshot = RecordingCoordinatorSnapshot.Initial;
     private MediaPlayer? mediaPlayer;
     private EndpointChoice? selectedRenderEndpoint;
@@ -100,6 +108,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private bool isShuttingDown;
     private bool isTelemetryRefreshInProgress;
     private bool isLowStorageStopInProgress;
+    private bool isLowStorageVideoDowngradeInProgress;
     private DateTimeOffset nextStorageCapacityCheckUtc;
     private bool isFaultFinalizationInProgress;
     private bool isUpdatingPlaybackPosition;
@@ -116,6 +125,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private bool isLibraryFavorite;
     private bool isRecycleConfirmationVisible;
     private readonly InputMuteCoordinator recorderMicrophoneMute = new();
+    private readonly WindowsInputMuteMonitor inputMuteMonitor = new();
+    private bool isInputMuteRefreshInProgress;
+    private string? monitoredInputEndpointId;
     private TeamsAutomaticRecordingController? teamsAutomaticRecorder;
     private TeamsLocalHeuristicAutoStartHost? teamsLocalHeuristicHost;
     private TeamsLocalMeetingSnapshot? teamsLocalHeuristicSnapshot;
@@ -137,10 +149,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private string diagnosticsExportStatusText = "診斷報告會儲存在本機的 Teams Recorder\\Diagnostics 資料夾。";
     private string virtualMicrophoneStatusText = "虛擬麥克風預覽尚未初始化。";
     private string openAiApiBaseUrl = "https://api.openai.com/v1";
+    private AIProviderKindChoice selectedOpenAiProviderKind = AIProviderKindChoice.OpenAICompatible;
+    private string openAiHktGroupId = string.Empty;
     private string openAiAsrModel = "gpt-4o-transcribe";
     private string openAiLlmModel = "gpt-5.6-terra";
     private string openAiLanguage = "zh";
     private string openAiPrompt = "";
+    private string openAiMeetingIntelligencePrompt = "";
     private bool isOpenAiProviderInitialized;
     private bool hasOpenAiApiKey;
     private bool isTestingOpenAiProvider;
@@ -150,6 +165,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private TeamsPlaybackEndpointObservation teamsPlaybackEndpointObservation = TeamsPlaybackEndpointObservation.Unknown;
     private Task<NativeTeamsRenderEndpointProbeResult>? teamsPlaybackEndpointProbeTask;
     private string? windowsConsoleDefaultRenderEndpointId;
+    private long? pendingTestPlaybackGeneration;
 
     public RecordingViewModel()
     {
@@ -167,6 +183,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         teamsLocalHeuristicTimer = dispatcherQueue.CreateTimer();
         teamsLocalHeuristicTimer.Interval = TimeSpan.FromSeconds(2);
         teamsLocalHeuristicTimer.Tick += OnTeamsLocalHeuristicTimerTick;
+        inputMuteTimer = dispatcherQueue.CreateTimer();
+        inputMuteTimer.Interval = TimeSpan.FromMilliseconds(500);
+        inputMuteTimer.Tick += OnInputMuteTimerTick;
 
         outputFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -242,6 +261,11 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     /// <summary>Model IDs discovered by the explicitly requested provider connection test.</summary>
     public ObservableCollection<string> OpenAiDiscoveredModels { get; } = [];
 
+    public IReadOnlyList<AIProviderKindChoice> OpenAiProviderKinds { get; } =
+        [AIProviderKindChoice.HktGenAI, AIProviderKindChoice.OpenAICompatible];
+
+    public IReadOnlyList<string> OpenAiLanguages { get; } = ["yue", "en", "zh"];
+
     /// <summary>Recent post-normalization Teams/system output peaks, oldest first.</summary>
     public ObservableCollection<WaveformBar> OutputWaveformBars { get; } = [];
 
@@ -306,6 +330,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public string RecordingMicrophoneMuteText => SelectedMicrophoneEndpoint?.EndpointId is null
         ? "未選取錄音麥克風；靜音設定會在下一次選取麥克風後套用。"
+        : recorderMicrophoneMute.IsInputMuted
+            ? "Windows 輸入裝置目前為靜音；錄音與虛擬麥克風都保持靜音。"
         : IsRecordingMicrophoneMuted
             ? "錄音中的麥克風已靜音；系統輸出錄音不受影響。"
             : "錄音中的麥克風未靜音。";
@@ -390,7 +416,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public bool CanToggleTeamsWindowCapture =>
         snapshot.State == RecordingCoordinatorState.Recording &&
         !isTeamsWindowCaptureToggleInProgress &&
-        (isTeamsWindowCaptureEnabled || SelectedVideoCaptureWindow is not null);
+        (isTeamsWindowCaptureEnabled ||
+            storageCapacity?.Decision is not RecordingStorageDecision.AudioOnly and
+                not RecordingStorageDecision.Stop &&
+            SelectedVideoCaptureWindow is not null);
 
     public async Task SetTeamsWindowCaptureDuringRecordingAsync(bool enabled)
     {
@@ -407,6 +436,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         {
             if (snapshot.State != RecordingCoordinatorState.Recording)
             {
+                return;
+            }
+
+            if (enabled &&
+                storageCapacity?.Decision is RecordingStorageDecision.AudioOnly or RecordingStorageDecision.Stop)
+            {
+                teamsWindowCaptureStatus = "可用空間不足 1 GiB；音訊繼續錄製，但畫面錄製暫時不可啟用。";
                 return;
             }
 
@@ -649,6 +685,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 OnPropertyChanged(nameof(PlaybackMediaKindText));
                 OnPropertyChanged(nameof(PlaybackRecoveryText));
                 OnPropertyChanged(nameof(PlaybackAiChipText));
+                var aiGeneration = Interlocked.Increment(ref aiWorkspaceLoadGeneration);
+                _ = LoadAiWorkspaceAsync(value, aiGeneration);
                 UpdateCommandStates();
             }
         }
@@ -830,6 +868,30 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         set => SetProperty(ref openAiPrompt, value ?? string.Empty);
     }
 
+    public AIProviderKindChoice SelectedOpenAiProviderKind
+    {
+        get => selectedOpenAiProviderKind;
+        set
+        {
+            if (SetProperty(ref selectedOpenAiProviderKind, value ?? AIProviderKindChoice.OpenAICompatible))
+                OnPropertyChanged(nameof(IsHktOpenAiProvider));
+        }
+    }
+
+    public bool IsHktOpenAiProvider => SelectedOpenAiProviderKind.Kind == AIProviderKind.HktGenAI;
+
+    public string OpenAiHktGroupId
+    {
+        get => openAiHktGroupId;
+        set => SetProperty(ref openAiHktGroupId, value ?? string.Empty);
+    }
+
+    public string OpenAiMeetingIntelligencePrompt
+    {
+        get => openAiMeetingIntelligencePrompt;
+        set => SetProperty(ref openAiMeetingIntelligencePrompt, value ?? string.Empty);
+    }
+
     /// <summary>Settings are available only after the local DPAPI-backed repository is ready.</summary>
     public bool IsOpenAiProviderAvailable => isOpenAiProviderInitialized && !isShuttingDown;
 
@@ -852,7 +914,44 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     public bool CanStartOpenAiTranscription =>
         IsOpenAiProviderAvailable && !IsBusy && SelectedLibraryItem is { IsManaged: true, IsPlayable: true };
 
-    public bool CanGenerateOpenAiSummary => CanStartOpenAiTranscription;
+    public bool CanGenerateOpenAiSummary =>
+        CanStartOpenAiTranscription && hasLoadedTranscript && !string.IsNullOrWhiteSpace(TranscriptText);
+
+    public bool CanCancelMeetingIntelligence =>
+        meetingIntelligenceCoordinator?.Snapshot.State is
+            MeetingIntelligenceSessionState.Checking or MeetingIntelligenceSessionState.Generating;
+
+    public bool CanSaveTranscript =>
+        SelectedLibraryItem is { IsManaged: true } && hasLoadedTranscript && !IsBusy;
+
+    public bool CanSaveMeetingIntelligence =>
+        meetingIntelligenceCoordinator?.Snapshot.State is
+            MeetingIntelligenceSessionState.Ready or MeetingIntelligenceSessionState.Stale &&
+        !IsBusy;
+
+    public string TranscriptText
+    {
+        get => transcriptText;
+        set => SetProperty(ref transcriptText, value ?? string.Empty);
+    }
+
+    public string MeetingIntelligenceSummary
+    {
+        get => meetingIntelligenceSummary;
+        set => SetProperty(ref meetingIntelligenceSummary, value ?? string.Empty);
+    }
+
+    public string MeetingIntelligenceSuggestedTitle
+    {
+        get => meetingIntelligenceSuggestedTitle;
+        set => SetProperty(ref meetingIntelligenceSuggestedTitle, value ?? string.Empty);
+    }
+
+    public string MeetingIntelligenceStatus
+    {
+        get => meetingIntelligenceStatus;
+        private set => SetProperty(ref meetingIntelligenceStatus, value ?? string.Empty);
+    }
 
     public string OpenAiProviderIntegrationStatus
     {
@@ -1158,8 +1257,6 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         transcriptionCoordinator = RecordingSessionAsrJobCoordinator.CreateOpenAiCompatible(
             openAiProviderRepository,
             new OpenAICompatibleAsrClient(openAiAsrTransport));
-        meetingSummaryClient = new OpenAiCompatibleMeetingSummaryClient();
-        meetingSummaryCoordinator = new MeetingSummaryCoordinator(meetingSummaryClient);
 
         try
         {
@@ -1167,12 +1264,15 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             hasOpenAiApiKey = await openAiProviderRepository.HasApiKeyAsync();
             if (profile is not null)
             {
+                SelectedOpenAiProviderKind = AIProviderKindChoice.From(profile.ProviderKind);
                 OpenAiApiBaseUrl = profile.BaseUrl;
+                OpenAiHktGroupId = profile.GroupId ?? string.Empty;
                 OpenAiAsrModel = profile.AsrModel;
                 OpenAiLlmModel = profile.LlmModel;
                 OpenAiLanguage = profile.Language;
                 OpenAiPrompt = profile.Prompt;
-                OpenAiProviderIntegrationStatus = "已載入本機 AI 供應商設定。按下 ASR 或摘要前仍會逐次要求確認。";
+                OpenAiMeetingIntelligencePrompt = profile.MeetingIntelligencePrompt;
+                OpenAiProviderIntegrationStatus = "已載入本機 AI 供應商設定。開始 ASR／Meeting Intelligence 前仍會要求確認。";
             }
             else
             {
@@ -1203,14 +1303,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     {
         var providers = openAiProviderRepository
             ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
-        var profile = OpenAICompatibleProviderProfile.Validated(
-            OpenAiApiBaseUrl, OpenAiAsrModel, OpenAiLlmModel, OpenAiLanguage, OpenAiPrompt);
+        var profile = CreateOpenAiProviderProfileFromEditor();
         await providers.SaveAsync(profile, replacementApiKey);
         OpenAiApiBaseUrl = profile.BaseUrl;
         OpenAiAsrModel = profile.AsrModel;
         OpenAiLlmModel = profile.LlmModel;
         OpenAiLanguage = profile.Language;
         OpenAiPrompt = profile.Prompt;
+        OpenAiMeetingIntelligencePrompt = profile.MeetingIntelligencePrompt;
         hasOpenAiApiKey = await providers.HasApiKeyAsync();
         OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
         OpenAiProviderIntegrationStatus = string.IsNullOrWhiteSpace(replacementApiKey)
@@ -1238,8 +1338,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
         var connection = openAiProviderConnectionClient
             ?? throw new InvalidOperationException("AI 供應商連線檢查尚未準備完成。");
-        var profile = OpenAICompatibleProviderProfile.Validated(
-            OpenAiApiBaseUrl, OpenAiAsrModel, OpenAiLlmModel, OpenAiLanguage, OpenAiPrompt);
+        var profile = CreateOpenAiProviderProfileFromEditor();
 
         IsTestingOpenAiProvider = true;
         try
@@ -1282,6 +1381,22 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             await job.Completion;
             OpenAiProviderIntegrationStatus = "逐字稿已完成並安全儲存在此錄音工作階段。";
             await RefreshLibraryCoreAsync();
+            if (SelectedLibraryItem is { } selected)
+            {
+                var generation = Interlocked.Increment(ref aiWorkspaceLoadGeneration);
+                await LoadAiWorkspaceAsync(selected, generation);
+                if (meetingIntelligenceCoordinator is { } intelligence)
+                {
+                    OpenAiProviderIntegrationStatus = "逐字稿已完成；正在自動產生摘要及建議標題。";
+                    var intelligenceJob = await intelligence.StartAutomaticAsync(providerProcessingAllowed: true);
+                    await intelligenceJob.Completion;
+                    ApplyMeetingIntelligenceSnapshot(intelligence.Snapshot);
+                    OpenAiProviderIntegrationStatus = intelligence.Snapshot.State == MeetingIntelligenceSessionState.Ready
+                        ? "逐字稿、摘要及建議標題已完成。"
+                        : intelligence.Snapshot.StatusMessage;
+                    await RefreshLibraryCoreAsync();
+                }
+            }
         }
         catch
         {
@@ -1290,20 +1405,27 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     });
 
-    /// <summary>Starts a separately user-confirmed meeting-summary request from an owned transcript.</summary>
+    /// <summary>Generates or regenerates bounded meeting intelligence from the canonical transcript.</summary>
     public Task GenerateOpenAiSummaryAsync() => RunOperationAsync(async () =>
     {
-        var providers = openAiProviderRepository
-            ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
-        var coordinator = meetingSummaryCoordinator
-            ?? throw new InvalidOperationException("AI 摘要服務尚未準備完成。");
-        var plan = await GetSelectedManagedSessionPlanAsync();
-        var snapshot = await providers.SnapshotAsync();
-        OpenAiProviderIntegrationStatus = "正在傳送已完成逐字稿以產生摘要。音訊不會再次上傳。";
+        var coordinator = meetingIntelligenceCoordinator
+            ?? throw new InvalidOperationException("請先選取有逐字稿的受管理錄音。");
+        var intent = coordinator.Snapshot.State is MeetingIntelligenceSessionState.Ready or
+            MeetingIntelligenceSessionState.Stale
+            ? MeetingIntelligenceGenerationIntent.Regenerate
+            : MeetingIntelligenceGenerationIntent.Generate;
+        OpenAiProviderIntegrationStatus = "正在傳送已完成逐字稿以產生摘要及建議標題。音訊不會再次上傳。";
         try
         {
-            await coordinator.SummarizeAndPublishAsync(plan, snapshot, userConsentGranted: true);
-            OpenAiProviderIntegrationStatus = "摘要已完成並安全儲存在此錄音工作階段。";
+            var job = await coordinator.GenerateAsync(intent);
+            await job.Completion;
+            ApplyMeetingIntelligenceSnapshot(coordinator.Snapshot);
+            OpenAiProviderIntegrationStatus = "摘要及建議標題已完成並安全儲存在此錄音工作階段。";
+            await RefreshLibraryCoreAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            OpenAiProviderIntegrationStatus = "Meeting Intelligence 已取消。";
         }
         catch
         {
@@ -1312,10 +1434,123 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     });
 
+    private OpenAICompatibleProviderProfile CreateOpenAiProviderProfileFromEditor() =>
+        SelectedOpenAiProviderKind.Kind == AIProviderKind.HktGenAI
+            ? OpenAICompatibleProviderProfile.HktValidated(
+                OpenAiHktGroupId,
+                OpenAiAsrModel,
+                OpenAiLlmModel,
+                OpenAiLanguage,
+                OpenAiPrompt,
+                OpenAiMeetingIntelligencePrompt)
+            : OpenAICompatibleProviderProfile.Validated(
+                OpenAiApiBaseUrl,
+                OpenAiAsrModel,
+                OpenAiLlmModel,
+                OpenAiLanguage,
+                OpenAiPrompt,
+                OpenAiMeetingIntelligencePrompt);
+
+    public async Task CancelMeetingIntelligenceAsync()
+    {
+        if (meetingIntelligenceCoordinator is not { } coordinator)
+        {
+            return;
+        }
+        await coordinator.CancelAsync();
+        ApplyMeetingIntelligenceSnapshot(coordinator.Snapshot);
+    }
+
+    public Task SaveTranscriptAsync() => RunOperationAsync(async () =>
+    {
+        var plan = await GetSelectedManagedSessionPlanAsync();
+        await new TranscriptionArtifactPublisher().SaveEditedTranscriptAsync(plan, TranscriptText);
+        hasLoadedTranscript = true;
+        if (meetingIntelligenceCoordinator is { } coordinator)
+        {
+            await coordinator.NotifyTranscriptSavedAsync();
+            ApplyMeetingIntelligenceSnapshot(coordinator.Snapshot);
+        }
+        MeetingIntelligenceStatus = "逐字稿已儲存；既有摘要已依新的逐字稿版本標示為需要重新產生。";
+        await RefreshLibraryCoreAsync();
+    });
+
+    public Task CopyTranscriptAsync() => RunOperationAsync(() =>
+    {
+        var package = new DataPackage();
+        package.SetText(TranscriptText);
+        Clipboard.SetContent(package);
+        MeetingIntelligenceStatus = "逐字稿已複製到剪貼簿。";
+        return Task.CompletedTask;
+    });
+
+    public Task ExportTranscriptAsync() => RunOperationAsync(async () =>
+    {
+        var item = SelectedLibraryItem
+            ?? throw new InvalidOperationException("請先選取錄音。");
+        var exportFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "Teams Recorder Exports");
+        Directory.CreateDirectory(exportFolder);
+        var invalid = Path.GetInvalidFileNameChars();
+        var safeName = new string(item.DisplayName.Select(character => invalid.Contains(character) ? '_' : character).ToArray()).Trim();
+        if (safeName.Length == 0) safeName = "transcript";
+        var stamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmssfff", CultureInfo.InvariantCulture);
+        var path = Path.Combine(exportFolder, $"{safeName}-{stamp}.txt");
+        if (File.Exists(path))
+            path = Path.Combine(exportFolder, $"{safeName}-{stamp}-{Guid.NewGuid():N}.txt");
+        await File.WriteAllTextAsync(path, TranscriptText, new System.Text.UTF8Encoding(false));
+        MeetingIntelligenceStatus = $"逐字稿已匯出：{path}";
+    });
+
+    public Task SaveMeetingIntelligenceEditsAsync() => RunOperationAsync(async () =>
+    {
+        var plan = await GetSelectedManagedSessionPlanAsync();
+        var publisher = new MeetingIntelligenceArtifactPublisher();
+        var artifact = await publisher.LoadArtifactAsync(plan)
+            ?? throw new InvalidOperationException("尚未產生可編輯的 Meeting Intelligence。");
+        var edited = artifact with
+        {
+            SchemaVersion = MeetingIntelligenceArtifact.CurrentSchemaVersion,
+            Summary = MeetingIntelligenceOutputValidator.ValidateSummary(MeetingIntelligenceSummary),
+            SuggestedTitle = MeetingIntelligenceOutputValidator.ValidateTitle(MeetingIntelligenceSuggestedTitle),
+            ContentOrigin = MeetingIntelligenceContentOrigin.Edited,
+            EditedAt = DateTimeOffset.UtcNow,
+        };
+        await publisher.PublishAsync(plan, edited);
+        if (meetingIntelligenceCoordinator is { } coordinator)
+        {
+            await coordinator.InitializeAsync();
+            ApplyMeetingIntelligenceSnapshot(coordinator.Snapshot);
+        }
+        MeetingIntelligenceStatus = "摘要及建議標題已儲存。";
+    });
+
+    public Task ApplySuggestedTitleAsync() => RunOperationAsync(async () =>
+    {
+        if (string.IsNullOrWhiteSpace(MeetingIntelligenceSuggestedTitle))
+            throw new InvalidOperationException("沒有可套用的建議標題。");
+        var target = CaptureLibraryActionTarget(requireManaged: true);
+        await ResolveCanonicalLibraryActionAsync(target);
+        await Task.Run(async () => await GetLibraryService().UpdateMetadataAsync(
+            target.Identity,
+            MeetingIntelligenceSuggestedTitle,
+            LibraryTagsText.Split([',', ';', '\r', '\n'],
+                StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries),
+            IsLibraryFavorite));
+        await RefreshLibraryCoreAsync();
+        MeetingIntelligenceStatus = "已套用建議標題。";
+    });
+
     private async Task<RecordingSessionPlan> GetSelectedManagedSessionPlanAsync()
     {
         var target = CaptureLibraryActionTarget(requireManaged: true);
         var item = await ResolveCanonicalLibraryActionAsync(target);
+        return CreateManagedSessionPlan(item);
+    }
+
+    private static RecordingSessionPlan CreateManagedSessionPlan(LibraryRecording item)
+    {
         var folder = Path.GetFullPath(item.SessionPath);
         var provisionalPlan = new RecordingSessionPlan(
             item.Kind,
@@ -1335,6 +1570,110 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
 
         return provisionalPlan with { FinalAudioPath = media.Path };
+    }
+
+    private async Task LoadAiWorkspaceAsync(LibraryRecording? item, long generation)
+    {
+        if (generation != aiWorkspaceLoadGeneration || isShuttingDown) return;
+
+        DisposeMeetingIntelligenceCoordinator();
+        hasLoadedTranscript = false;
+        TranscriptText = string.Empty;
+        MeetingIntelligenceSummary = string.Empty;
+        MeetingIntelligenceSuggestedTitle = string.Empty;
+        MeetingIntelligenceStatus = item is null
+            ? "請選取有逐字稿的錄音。"
+            : "正在載入逐字稿與 Meeting Intelligence…";
+        NotifyAiWorkspaceStateChanged();
+        if (item is not { IsManaged: true }) return;
+
+        try
+        {
+            var plan = CreateManagedSessionPlan(item);
+            var transcript = await new MeetingIntelligenceCanonicalTranscriptReader().ReadAsync(plan);
+            var client = new OpenAICompatibleMeetingIntelligenceClient();
+            var coordinator = new MeetingIntelligenceSessionCoordinator(
+                plan,
+                cancellationToken => (openAiProviderRepository
+                    ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。"))
+                    .SnapshotAsync(cancellationToken: cancellationToken),
+                new OpenAICompatibleMeetingIntelligenceAvailabilityChecker(
+                    openAiProviderConnectionClient
+                        ?? throw new InvalidOperationException("AI 供應商連線服務尚未準備完成。")),
+                new MeetingIntelligencePipeline(client),
+                titlePublisher: new WindowsMeetingIntelligenceTitlePublisher(GetLibraryService()));
+            var intelligence = await coordinator.InitializeAsync();
+            if (generation != aiWorkspaceLoadGeneration ||
+                SelectedLibraryItem?.Identity != item.Identity || isShuttingDown)
+            {
+                coordinator.Dispose();
+                client.Dispose();
+                return;
+            }
+
+            meetingIntelligenceClient = client;
+            meetingIntelligenceCoordinator = coordinator;
+            coordinator.SnapshotChanged += OnMeetingIntelligenceSnapshotChanged;
+            TranscriptText = transcript.Text;
+            hasLoadedTranscript = true;
+            ApplyMeetingIntelligenceSnapshot(intelligence);
+        }
+        catch (FileNotFoundException)
+        {
+            MeetingIntelligenceStatus = "此錄音尚未建立逐字稿。";
+        }
+        catch (IOException exception)
+        {
+            MeetingIntelligenceStatus = $"無法載入逐字稿：{exception.Message}";
+        }
+        catch (Exception exception)
+        {
+            MeetingIntelligenceStatus = $"無法準備 AI 工作區：{exception.Message}";
+        }
+        finally
+        {
+            NotifyAiWorkspaceStateChanged();
+        }
+    }
+
+    private void OnMeetingIntelligenceSnapshotChanged(object? sender, MeetingIntelligenceSessionSnapshot changed)
+    {
+        if (!ReferenceEquals(sender, meetingIntelligenceCoordinator) || isShuttingDown) return;
+        if (dispatcherQueue.HasThreadAccess) ApplyMeetingIntelligenceSnapshot(changed);
+        else _ = dispatcherQueue.TryEnqueue(() =>
+        {
+            if (ReferenceEquals(sender, meetingIntelligenceCoordinator))
+                ApplyMeetingIntelligenceSnapshot(changed);
+        });
+    }
+
+    private void ApplyMeetingIntelligenceSnapshot(MeetingIntelligenceSessionSnapshot changed)
+    {
+        MeetingIntelligenceStatus = changed.StatusMessage;
+        MeetingIntelligenceSummary = changed.Summary ?? string.Empty;
+        MeetingIntelligenceSuggestedTitle = changed.SuggestedTitle ?? string.Empty;
+        NotifyAiWorkspaceStateChanged();
+    }
+
+    private void DisposeMeetingIntelligenceCoordinator()
+    {
+        if (meetingIntelligenceCoordinator is { } coordinator)
+        {
+            coordinator.SnapshotChanged -= OnMeetingIntelligenceSnapshotChanged;
+            coordinator.Dispose();
+        }
+        meetingIntelligenceCoordinator = null;
+        meetingIntelligenceClient?.Dispose();
+        meetingIntelligenceClient = null;
+    }
+
+    private void NotifyAiWorkspaceStateChanged()
+    {
+        OnPropertyChanged(nameof(CanStartOpenAiTranscription));
+        OnPropertyChanged(nameof(CanGenerateOpenAiSummary));
+        OnPropertyChanged(nameof(CanCancelMeetingIntelligence));
+        OnPropertyChanged(nameof(CanSaveTranscript));
+        OnPropertyChanged(nameof(CanSaveMeetingIntelligence));
     }
 
     private async Task RestoreAppSettingsAsync()
@@ -1580,6 +1919,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             StatusText = "正在啟動本機 Teams 會議偵測…";
             await InitializeLocalTeamsAutomationAsync();
             ApplySnapshot(recordingLifecycle.Snapshot);
+            inputMuteTimer.Start();
             _ = RefreshLibraryAfterInitializationAsync();
             StatusText = "錄音器已就緒。";
         }
@@ -1618,6 +1958,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         telemetryTimer.Stop();
         playbackTimer.Stop();
         teamsLocalHeuristicTimer.Stop();
+        inputMuteTimer.Stop();
         UpdateCommandStates();
 
         // Close the local control endpoint before finalization.  A pipe request
@@ -1682,8 +2023,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OnPropertyChanged(nameof(PlaybackMediaPlayer));
         transcriptionCoordinator?.Dispose();
         transcriptionCoordinator = null;
-        meetingSummaryClient?.Dispose();
-        meetingSummaryClient = null;
+        DisposeMeetingIntelligenceCoordinator();
         openAiAsrTransport?.Dispose();
         openAiAsrTransport = null;
         openAiProviderConnectionClient?.Dispose();
@@ -2154,6 +2494,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 cancellationToken);
             if (result.State == RecordingCoordinatorState.Recording)
             {
+                pendingTestPlaybackGeneration = result.Generation;
                 await NotifyManualRecordingStartedAsync();
             }
             return true;
@@ -2169,6 +2510,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private async Task StopRecordingCoreAsync(bool suppressAutomaticRestart, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        pendingTestPlaybackGeneration = null;
         var automatic = teamsAutomaticRecorder;
         if (suppressAutomaticRestart && automatic?.Snapshot.RecordingOwner == RecordingOwner.TeamsAutomatic)
         {
@@ -3121,12 +3463,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         librarySelectionGeneration == target.SelectionGeneration &&
         SelectedLibraryItem?.Identity == target.Identity;
 
-    private async Task EnsureSessionPublishedAsync()
+    private async Task<RecordingSessionPublicationResult> EnsureSessionPublishedAsync()
     {
         var result = await GetRecordingLifecycle().PublishCompletedAsync();
         if (result.Session is null)
         {
-            return;
+            return result;
         }
 
         if (result.Published)
@@ -3144,6 +3486,44 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         OnPropertyChanged(nameof(ResultText));
         UpdateCommandStates();
+        return result;
+    }
+
+    private async Task CompleteTestPlaybackAsync(long generation)
+    {
+        if (pendingTestPlaybackGeneration != generation || isShuttingDown)
+        {
+            return;
+        }
+
+        pendingTestPlaybackGeneration = null;
+        try
+        {
+            var publication = await EnsureSessionPublishedAsync();
+            if (!publication.Published || publication.Session is null || mediaPlayer is null)
+            {
+                return;
+            }
+
+            await RefreshLibraryCoreAsync();
+            var publishedPath = Path.GetFullPath(publication.Session.FinalVideoPath);
+            var item = allLibraryItems.FirstOrDefault(candidate =>
+                PathEquals(candidate.MediaPath, publishedPath));
+            if (item is null)
+            {
+                return;
+            }
+
+            LibrarySearchText = string.Empty;
+            LibraryFavoritesOnly = false;
+            SelectedLibraryItem = item;
+            await PlayAsync();
+            PlaybackText = $"測試錄音已儲存並正在播放：{item.DisplayName}";
+        }
+        catch (Exception exception)
+        {
+            ErrorText = $"測試錄音已儲存，但無法自動播放：{exception.Message}";
+        }
     }
 
     private void RefreshStorageReadiness()
@@ -3239,6 +3619,53 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private async void OnTelemetryTimerTick(DispatcherQueueTimer _, object __) =>
         await RefreshTelemetryAsync();
 
+    private async void OnInputMuteTimerTick(DispatcherQueueTimer _, object __)
+    {
+        if (isShuttingDown || isInputMuteRefreshInProgress)
+        {
+            return;
+        }
+
+        var endpointId = SelectedMicrophoneEndpoint?.EndpointId;
+        if (string.IsNullOrWhiteSpace(endpointId))
+        {
+            monitoredInputEndpointId = null;
+            recorderMicrophoneMute.SetInputMuted(false);
+            return;
+        }
+
+        isInputMuteRefreshInProgress = true;
+        try
+        {
+            var observed = await Task.Run(() =>
+            {
+                var available = inputMuteMonitor.TryRead(endpointId, out var muted);
+                return (available, muted);
+            });
+            if (isShuttingDown || !string.Equals(endpointId, SelectedMicrophoneEndpoint?.EndpointId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (observed.available)
+            {
+                monitoredInputEndpointId = endpointId;
+                recorderMicrophoneMute.SetInputMuted(observed.muted);
+            }
+            else if (!string.Equals(monitoredInputEndpointId, endpointId, StringComparison.Ordinal))
+            {
+                // A newly selected endpoint has no trustworthy observation yet.
+                // Never carry a mute bit from the previously selected device.
+                monitoredInputEndpointId = null;
+                recorderMicrophoneMute.SetInputMuted(false);
+            }
+        }
+        finally
+        {
+            isInputMuteRefreshInProgress = false;
+        }
+    }
+
     private async Task RefreshTelemetryAsync()
     {
         if (isShuttingDown ||
@@ -3260,6 +3687,25 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 nextStorageCapacityCheckUtc = now.AddSeconds(2);
                 storageCapacity = recordingLifecycle.GetCapacityStatus();
                 OnPropertyChanged(nameof(StorageReadinessText));
+                if (storageCapacity.Decision == RecordingStorageDecision.AudioOnly &&
+                    isTeamsWindowCaptureEnabled &&
+                    !isLowStorageVideoDowngradeInProgress)
+                {
+                    isLowStorageVideoDowngradeInProgress = true;
+                    try
+                    {
+                        await SetTeamsWindowCaptureDuringRecordingAsync(false);
+                        if (!isTeamsWindowCaptureEnabled)
+                        {
+                            teamsWindowCaptureStatus = "可用空間不足 1 GiB；畫面錄製已停止，音訊繼續錄製。";
+                            NotifyRecordingOverlayStateChanged();
+                        }
+                    }
+                    finally
+                    {
+                        isLowStorageVideoDowngradeInProgress = false;
+                    }
+                }
                 if (storageCapacity.Decision == RecordingStorageDecision.Stop)
                 {
                     isLowStorageStopInProgress = true;
@@ -3347,7 +3793,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         if (changed.State == RecordingCoordinatorState.Stopped && !changed.HasRecoverableFault)
         {
-            _ = EnsureSessionPublishedAsync();
+            if (pendingTestPlaybackGeneration == changed.Generation)
+            {
+                _ = CompleteTestPlaybackAsync(changed.Generation);
+            }
+            else
+            {
+                _ = EnsureSessionPublishedAsync();
+            }
         }
         else if (changed.State == RecordingCoordinatorState.Faulted && !isFaultFinalizationInProgress)
         {
@@ -3673,6 +4126,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
         OnPropertyChanged(nameof(CanStartOpenAiTranscription));
         OnPropertyChanged(nameof(CanGenerateOpenAiSummary));
+        OnPropertyChanged(nameof(CanCancelMeetingIntelligence));
+        OnPropertyChanged(nameof(CanSaveTranscript));
+        OnPropertyChanged(nameof(CanSaveMeetingIntelligence));
     }
 
     private static string GetStatusText(RecordingCoordinatorSnapshot snapshot) => snapshot.State switch
@@ -3755,6 +4211,15 @@ public sealed record EndpointChoice(
         EndpointId: null,
         DisplayName: "不錄製麥克風",
         DefaultRoles: EndpointDefaultRole.None);
+}
+
+public sealed record AIProviderKindChoice(AIProviderKind Kind, string DisplayName)
+{
+    public static AIProviderKindChoice HktGenAI { get; } = new(AIProviderKind.HktGenAI, "HKT GenAI Platform");
+    public static AIProviderKindChoice OpenAICompatible { get; } = new(AIProviderKind.OpenAICompatible, "OpenAI 相容");
+
+    public static AIProviderKindChoice From(AIProviderKind kind) =>
+        kind == AIProviderKind.HktGenAI ? HktGenAI : OpenAICompatible;
 }
 
 public sealed record LibraryRecording(

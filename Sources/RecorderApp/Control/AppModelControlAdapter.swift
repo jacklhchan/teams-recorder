@@ -117,7 +117,7 @@ final class AppModelControlAdapter {
                 ?? model.selectedMicrophoneUID,
             localMicMuted: snapshot.localMuted,
             nativeInputMicMuted: snapshot.nativeInputMuted,
-            teamsMicState: teamsMicState(),
+            teamsMicState: "notMonitored",
             effectiveMicMuted: snapshot.effectiveMuted,
             virtualMicState: virtualMicState(),
             virtualMicPublisherState: virtualMicPublisherState(),
@@ -198,14 +198,6 @@ final class AppModelControlAdapter {
         case .installedNeedsReboot: "installedNeedsReboot"
         case .ready: "ready"
         case .removalNeedsReboot: "removalNeedsReboot"
-        }
-    }
-
-    private func teamsMicState() -> String {
-        switch model.teamsMicMuteState {
-        case .muted: "muted"
-        case .unmuted: "unmuted"
-        case .unknown: "unknown"
         }
     }
 

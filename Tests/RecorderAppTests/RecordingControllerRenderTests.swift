@@ -5,6 +5,31 @@ import XCTest
 
 @MainActor
 final class RecordingControllerRenderTests: XCTestCase {
+    func testProductionMicrophoneButtonMutesThenUnmutesRecorderLocally() async throws {
+        let model = AppModel(
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false
+        )
+        model.resolvedCaptureSelection = .application(.init(
+            processID: 42,
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        ))
+        let host = PanelRenderHost(
+            rootView: RecordingControllerView(model: model),
+            size: .init(width: 390, height: 180)
+        )
+        defer { host.close() }
+
+        try host.click(RecordingControllerAccessibility.microphoneMuteID)
+        await waitUntil { model.localMicMuted }
+        try host.click(RecordingControllerAccessibility.microphoneMuteID)
+        await waitUntil { !model.localMicMuted }
+
+        XCTAssertFalse(model.localMicMuted)
+    }
+
     func testActiveControllerRendersFixedBoundsAndInvokesStopOnce() throws {
         var stops = 0
         var microphoneMuteToggles = 0
@@ -122,6 +147,18 @@ final class RecordingControllerRenderTests: XCTestCase {
                 }
             } else { baseline = frames }
         }
+    }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(1),
+        condition: @escaping @MainActor () -> Bool
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition(), clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(condition())
     }
 }
 

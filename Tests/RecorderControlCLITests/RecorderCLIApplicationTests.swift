@@ -125,6 +125,9 @@ final class RecorderCLIApplicationTests: XCTestCase {
         XCTAssertTrue(output.lines.contains("Auto meeting countdown seconds: 5"))
         XCTAssertTrue(output.lines.contains("Recorder mic muted: no"))
         XCTAssertTrue(output.lines.contains("Virtual Mic publisher: unavailable"))
+        XCTAssertFalse(
+            output.lines.contains { $0.hasPrefix("Teams mic state:") }
+        )
         XCTAssertEqual(output.lines.last, "Output folder: /tmp/Recordings")
     }
 
@@ -356,7 +359,7 @@ private func makeStatus(
         selectedMicrophoneUID: "mic-1",
         localMicMuted: false,
         nativeInputMicMuted: false,
-        teamsMicState: "unknown",
+        teamsMicState: "notMonitored",
         effectiveMicMuted: false,
         virtualMicState: "ready",
         virtualMicPublisherState: virtualMicPublisherState,

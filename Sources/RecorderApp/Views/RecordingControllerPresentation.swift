@@ -7,45 +7,6 @@ enum RecordingControllerTone: Equatable {
     case warning
 }
 
-struct RecordingControllerMicrophonePresentation: Equatable {
-    let recorderStatusText: String
-    let teamsStatusText: String
-    let hasMismatch: Bool
-    let showsEnableAccessibilityAction: Bool
-
-    static func make(
-        recorderMuted: Bool,
-        teamsState: TeamsMicMuteState
-    ) -> Self {
-        let teamsStatusText: String
-        let teamsMuted: Bool?
-        let showsEnableAccessibilityAction: Bool
-        switch teamsState {
-        case .muted:
-            teamsStatusText = "Teams muted"
-            teamsMuted = true
-            showsEnableAccessibilityAction = false
-        case .unmuted:
-            teamsStatusText = "Teams live"
-            teamsMuted = false
-            showsEnableAccessibilityAction = false
-        case .unknown(let reason):
-            teamsStatusText = "Teams status unknown"
-            teamsMuted = nil
-            showsEnableAccessibilityAction =
-                reason == .accessibilityPermissionRequired
-        }
-        return Self(
-            recorderStatusText: recorderMuted
-                ? "Recorder muted"
-                : "Recorder live",
-            teamsStatusText: teamsStatusText,
-            hasMismatch: teamsMuted.map { $0 != recorderMuted } ?? false,
-            showsEnableAccessibilityAction: showsEnableAccessibilityAction
-        )
-    }
-}
-
 struct RecordingControllerSnapshot: Equatable {
     let isRecording: Bool
     let isFinalizing: Bool

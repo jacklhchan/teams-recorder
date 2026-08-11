@@ -44,6 +44,26 @@ test ! -e "$APP/Contents/Resources/transcribe-qwen-asr.sh"
 test ! -e "$APP/Contents/Resources/openai_asr_longform.py"
 test -f "$APP/Contents/Resources/LICENSE"
 test -f "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
+PRIVACY_MANIFEST="$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+plutil -lint "$PRIVACY_MANIFEST" >&2
+if ! /usr/bin/python3 - "$PRIVACY_MANIFEST" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open("rb") as stream:
+    manifest = plistlib.load(stream)
+disk_space_entry = {
+    "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
+    "NSPrivacyAccessedAPITypeReasons": ["E174.1"],
+}
+if disk_space_entry not in manifest.get("NSPrivacyAccessedAPITypes", []):
+    raise SystemExit(1)
+PY
+then
+  echo "Privacy manifest must declare disk-space reason E174.1." >&2
+  exit 70
+fi
 test ! -e "$APP/Contents/Resources/release-manifest.json"
 test "$(<"$APP/Contents/Resources/.lmr-build-owner")" = "local.meeting.recorder.build-app.v1"
 

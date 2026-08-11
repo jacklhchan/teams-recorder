@@ -132,6 +132,7 @@ fi
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 cp "$ROOT_DIR/LICENSE" "$RESOURCES_DIR/LICENSE"
 cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
+cp "$ROOT_DIR/Config/PrivacyInfo.xcprivacy" "$RESOURCES_DIR/PrivacyInfo.xcprivacy"
 
 PLIST="$CONTENTS_DIR/Info.plist"
 /usr/bin/python3 - "$PLIST" "$BUNDLE_ID" "$BUNDLE_NAME" "$VERSION" "$BUILD_NUMBER" <<'PY'

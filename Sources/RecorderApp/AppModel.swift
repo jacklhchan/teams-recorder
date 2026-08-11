@@ -50,8 +50,6 @@ final class AppModel: ObservableObject {
         TeamsLocalMeetingDetectionState = .waiting
     @Published private(set) var localMicMuted = false
     @Published private(set) var nativeInputMicMuted = false
-    @Published private(set) var teamsMicMuteState: TeamsMicMuteState =
-        .unknown(.inactive)
     @Published private(set) var isScreenCaptureAllowedByStorage = true
     @Published private(set) var screenCaptureStorageRestrictionReason: String?
     @Published private(set) var storageWarningMessage: String?
@@ -142,7 +140,6 @@ final class AppModel: ObservableObject {
     private let defaultInputDeviceID: () -> AudioDeviceID?
     private let inputMuteController: InputMuteControlling
     private let microphoneMuteGate: MicrophoneMuteGate
-    private let teamsMuteSyncCoordinator: TeamsMuteSyncCoordinator
     private let teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator
     private let virtualMicStateProvider: () -> VirtualMicInstallationState
     private let permissionRequestHandler: (@MainActor (Bool, Bool) async -> Void)?
@@ -199,7 +196,6 @@ final class AppModel: ObservableObject {
     private var teamsScreenRefreshGeneration: UInt64 = 0
     private var teamsScreenCaptureIntentGeneration: UInt64 = 0
     private var teamsLocalMeetingDetector = TeamsLocalMeetingDetector()
-    private var isFloatingRecordingPanelActive = false
     private var workspacePublicationFence: WorkspacePublicationFence = .initial
     private var isShutDown = false
 
@@ -281,12 +277,7 @@ final class AppModel: ObservableObject {
                 try RecordingSessionMetadataStore.save(metadata, in: folder)
             }
         },
-        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
-        teamsMuteController: any TeamsMuteControlling =
-            TeamsMuteAccessibilityAdapter(),
-        teamsMuteTick: @escaping @Sendable () async -> Void = {
-            try? await Task.sleep(for: .seconds(1))
-        }
+        teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
     ) {
         if let initialOutputFolder {
             outputFolder = initialOutputFolder
@@ -429,12 +420,6 @@ final class AppModel: ObservableObject {
             activeRecorder?.applyInputMuteToAudioPaths(muted)
         }
         self.microphoneMuteGate = microphoneMuteGate
-        let teamsMuteSyncCoordinator = TeamsMuteSyncCoordinator(
-            controller: teamsMuteController,
-            microphoneMuteGate: microphoneMuteGate,
-            tick: teamsMuteTick
-        )
-        self.teamsMuteSyncCoordinator = teamsMuteSyncCoordinator
         let applyMuteToAudioPaths: (Bool) -> Void = { muted in
             microphoneMuteGate.setNativeInputMuted(
                 muted,
@@ -499,12 +484,6 @@ final class AppModel: ObservableObject {
         bridge.start()
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
-        }
-        teamsMuteSyncCoordinator.onStateChange = { [weak self] state in
-            self?.teamsMicMuteState = state
-        }
-        teamsMuteSyncCoordinator.onMuteSnapshotChange = { [weak self] snapshot in
-            self?.publishMicrophoneMuteSnapshot(snapshot)
         }
         autoCoordinator.onCommand = { [weak self] command in
             guard let self else { return }
@@ -679,7 +658,6 @@ final class AppModel: ObservableObject {
         guard !isShutDown else { return }
         isShutDown = true
         invalidateTeamsScreenRefresh()
-        teamsMuteSyncCoordinator.resetTeamsSource()
         teamsApplicationLifecycleCancellables.removeAll()
         prbFeatureBridge?.shutdown()
         playbackFeature.shutdown()
@@ -948,7 +926,6 @@ final class AppModel: ObservableObject {
             teamsAutoMeetingCoordinator.handleMeetingState(isInMeeting: true)
             suppressAutomationForActiveManualRecording()
         } else {
-            teamsMuteSyncCoordinator.resetTeamsSource()
             teamsAutoMeetingCoordinator.handleConfirmedMeetingEnd()
         }
     }
@@ -966,7 +943,6 @@ final class AppModel: ObservableObject {
     }
 
     private func handleTeamsScreenSourceChange() {
-        teamsMuteSyncCoordinator.resetTeamsSource()
         invalidateTeamsScreenRefresh()
         invalidateTeamsScreenCaptureIntent()
         isTeamsScreenCaptureRequested = false
@@ -974,7 +950,6 @@ final class AppModel: ObservableObject {
         teamsManualWindowIdentity = nil
         teamsScreenCaptureCandidates = []
         recorder.resetTeamsWindowResolution()
-        refreshTeamsMutePolling()
         guard selectedTeamsApplication != nil else { return }
         restartTeamsScreenRefreshIfNeeded()
         Task { @MainActor [weak self] in
@@ -1043,7 +1018,6 @@ final class AppModel: ObservableObject {
     ) {
         if isTerminated,
            selectedTeamsApplication?.processID == processID {
-            teamsMuteSyncCoordinator.resetTeamsSource()
             teamsAutoMeetingCoordinator.handleConfirmedMeetingEnd()
         }
         refreshCaptureApplications()
@@ -1630,50 +1604,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func toggleTeamsAndRecorderMicMute() {
-        let wantsMute = !microphoneMuteGate.snapshot.localMuted
-        Task { @MainActor [weak self] in
-            await self?.setTeamsAndRecorderMicMuted(wantsMute)
-        }
-    }
-
-    func setTeamsAndRecorderMicMuted(_ muted: Bool) async {
-        let processID = selectedTeamsApplication?.processID
-        let result = await teamsMuteSyncCoordinator.setMuted(
-            muted,
-            processID: processID
-        )
-
-        guard processID != nil else {
-            statusMessage = "Floating panel: recorder mic \(muted ? "muted" : "active")"
-            return
-        }
-        switch (muted, result) {
-        case (true, .muted):
-            statusMessage = "Recorder and Teams muted"
-        case (true, .unmuted):
-            statusMessage = "Recorder muted; Teams remains live"
-        case (true, .unknown):
-            statusMessage = "Recorder muted; Teams status unknown"
-        case (false, .unmuted):
-            statusMessage = "Recorder and Teams live"
-        case (false, .muted):
-            statusMessage = "Recorder remains muted; Teams remains muted"
-        case (false, .unknown):
-            statusMessage = "Recorder remains muted; Teams status unknown"
-        }
-    }
-
-    func requestTeamsAccessibilityPermission() {
-        teamsMuteSyncCoordinator.requestPermission()
-    }
-
-    func setFloatingRecordingPanelActive(_ active: Bool) {
-        guard isFloatingRecordingPanelActive != active else { return }
-        isFloatingRecordingPanelActive = active
-        refreshTeamsMutePolling()
-    }
-
     func setRecorderMicMuted(
         _ muted: Bool,
         source: String = "Control"
@@ -1685,14 +1615,6 @@ final class AppModel: ObservableObject {
 
     var recorderMicMuteSnapshot: MicrophoneMuteSnapshot {
         microphoneMuteGate.snapshot
-    }
-
-    private func refreshTeamsMutePolling() {
-        teamsMuteSyncCoordinator.updatePolling(
-            isPanelActive: isFloatingRecordingPanelActive,
-            isRecording: recorder.isRecording,
-            processID: selectedTeamsApplication?.processID
-        )
     }
 
     func installInputMuteHandling() {
@@ -2134,10 +2056,6 @@ final class AppModel: ObservableObject {
             .dropFirst()
             .sink { [weak self] isRecording in
                 guard let self else { return }
-                if !isRecording {
-                    self.teamsMuteSyncCoordinator.resetTeamsSource()
-                }
-                self.refreshTeamsMutePolling()
                 guard !isRecording else { return }
                 self.invalidateStorageMonitoring()
                 self.invalidateTeamsScreenRefresh()

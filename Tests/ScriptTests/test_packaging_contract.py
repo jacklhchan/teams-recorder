@@ -49,6 +49,36 @@ Mentioning compatibility does not change or grant those licenses.
 
 
 class PackagingContractTests(unittest.TestCase):
+    def test_disk_space_privacy_manifest_is_packaged_and_verified(self):
+        manifest_path = ROOT / "Config/PrivacyInfo.xcprivacy"
+        with manifest_path.open("rb") as manifest_file:
+            manifest = plistlib.load(manifest_file)
+
+        disk_space_entry = {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
+            "NSPrivacyAccessedAPITypeReasons": ["E174.1"],
+        }
+        self.assertIn(
+            disk_space_entry,
+            manifest.get("NSPrivacyAccessedAPITypes", []),
+        )
+
+        build = (ROOT / "scripts/build-app.sh").read_text(encoding="utf-8")
+        verify = (ROOT / "scripts/verify-app-bundle.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'cp "$ROOT_DIR/Config/PrivacyInfo.xcprivacy" '
+            '"$RESOURCES_DIR/PrivacyInfo.xcprivacy"',
+            build,
+        )
+        self.assertIn(
+            'PRIVACY_MANIFEST="$APP/Contents/Resources/PrivacyInfo.xcprivacy"',
+            verify,
+        )
+        self.assertIn('NSPrivacyAccessedAPICategoryDiskSpace', verify)
+        self.assertIn('E174.1', verify)
+
     def test_cli_helper_packaging_and_verification_contract(self):
         package = (ROOT / "Package.swift").read_text(encoding="utf-8")
         build = (ROOT / "scripts/build-app.sh").read_text(encoding="utf-8")

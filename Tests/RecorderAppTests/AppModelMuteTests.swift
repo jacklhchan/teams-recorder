@@ -407,24 +407,6 @@ final class AppModelMuteTests: XCTestCase {
         )
     }
 
-    func testTeamsToggleWithoutSelectedTeamsRemainsLocalOnly() async {
-        let teamsController = AppModelMuteTeamsControllerFake()
-        let model = AppModel(
-            inputDevices: { [] },
-            defaultInputDeviceID: { nil },
-            performStartupWork: false,
-            teamsMuteController: teamsController
-        )
-
-        model.toggleTeamsAndRecorderMicMute()
-        await waitUntil { model.localMicMuted }
-        XCTAssertTrue(teamsController.setMutedCalls.isEmpty)
-
-        model.toggleTeamsAndRecorderMicMute()
-        await waitUntil { !model.localMicMuted }
-        XCTAssertTrue(teamsController.setMutedCalls.isEmpty)
-    }
-
     private func makeModel(
         recorder: RecordingEngine,
         inputMuteControllerFactory: @escaping (
@@ -558,32 +540,4 @@ private final class AppModelMuteFakePublisher: VirtualMicPublishing {
     func stop() {
         state = .stopped
     }
-}
-
-private final class AppModelMuteTeamsControllerFake: TeamsMuteControlling,
-    @unchecked Sendable
-{
-    private let lock = NSLock()
-    private var storedSetMutedCalls: [Bool] = []
-
-    var setMutedCalls: [Bool] {
-        lock.withLock { storedSetMutedCalls }
-    }
-
-    func readState(processID _: pid_t) async -> TeamsMicMuteState {
-        .unknown(.inactive)
-    }
-
-    func setMuted(
-        _ muted: Bool,
-        processID _: pid_t
-    ) async -> TeamsMicMuteState {
-        lock.withLock {
-            storedSetMutedCalls.append(muted)
-        }
-        return muted ? .muted : .unmuted
-    }
-
-    @MainActor
-    func requestPermission() {}
 }

@@ -58,59 +58,6 @@ final class RecordingControllerPanelTests: XCTestCase {
         )
     }
 
-    func testRecorderAndTeamsMutedLiveUnknownAndMismatchRemainDistinct() {
-        let muted = RecordingControllerMicrophonePresentation.make(
-            recorderMuted: true,
-            teamsState: .muted
-        )
-        XCTAssertEqual(muted.recorderStatusText, "Recorder muted")
-        XCTAssertEqual(muted.teamsStatusText, "Teams muted")
-        XCTAssertFalse(muted.hasMismatch)
-
-        let live = RecordingControllerMicrophonePresentation.make(
-            recorderMuted: false,
-            teamsState: .unmuted
-        )
-        XCTAssertEqual(live.recorderStatusText, "Recorder live")
-        XCTAssertEqual(live.teamsStatusText, "Teams live")
-        XCTAssertFalse(live.hasMismatch)
-
-        let unknown = RecordingControllerMicrophonePresentation.make(
-            recorderMuted: true,
-            teamsState: .unknown(.controlNotFound)
-        )
-        XCTAssertEqual(unknown.teamsStatusText, "Teams status unknown")
-        XCTAssertFalse(unknown.hasMismatch)
-
-        let mismatch = RecordingControllerMicrophonePresentation.make(
-            recorderMuted: true,
-            teamsState: .unmuted
-        )
-        XCTAssertTrue(mismatch.hasMismatch)
-        XCTAssertNotEqual(mismatch.recorderStatusText, mismatch.teamsStatusText)
-    }
-
-    func testAccessibilityActionAppearsOnlyForPermissionRequiredUnknown() {
-        XCTAssertTrue(
-            RecordingControllerMicrophonePresentation.make(
-                recorderMuted: false,
-                teamsState: .unknown(.accessibilityPermissionRequired)
-            ).showsEnableAccessibilityAction
-        )
-        XCTAssertFalse(
-            RecordingControllerMicrophonePresentation.make(
-                recorderMuted: false,
-                teamsState: .unknown(.controlNotFound)
-            ).showsEnableAccessibilityAction
-        )
-        XCTAssertFalse(
-            RecordingControllerMicrophonePresentation.make(
-                recorderMuted: false,
-                teamsState: .muted
-            ).showsEnableAccessibilityAction
-        )
-    }
-
     func testEpisodeEmitsOneCommandPerRecordingTransition() {
         var episode = RecordingControllerPanelEpisode()
 

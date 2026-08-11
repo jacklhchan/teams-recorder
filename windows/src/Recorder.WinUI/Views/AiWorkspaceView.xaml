@@ -81,6 +81,12 @@
                             </ListView.ItemTemplate>
                         </ListView>
                         <StackPanel Grid.Row="3" Spacing="8">
+                            <Button
+                                AutomationProperties.AutomationId="AiImportAudioButton"
+                                Click="OnImportAudioClick"
+                                Content="匯入音訊以轉錄"
+                                HorizontalAlignment="Left"
+                                IsEnabled="{Binding CanImportAudioForTranscription}" />
                             <TextBlock
                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                 Text="{Binding SelectedLibraryDetails}"

@@ -52,6 +52,39 @@ internal static class OpenAICompatibleProviderTests
         Equal("secret-api-key", snapshot.ApiKey!); Equal("https://provider.example/v1", snapshot.Profile.BaseUrl);
     }
 
+    public static void ProviderProfilesAndKeysRemainIndependent()
+    {
+        using var root = new TestRoot();
+        var profilePath = Path.Combine(root.Path, "profile.json");
+        var keys = new FakeKeyStore();
+        var repository = new OpenAICompatibleProviderRepository(
+            new JsonOpenAICompatibleProviderProfileStore(profilePath),
+            keys);
+        var generic = OpenAICompatibleProviderProfile.Validated(
+            "https://generic.example", "generic-asr", "generic-llm", "yue", "generic prompt", "generic MI");
+        var hkt = OpenAICompatibleProviderProfile.HktValidated(
+            "42", "hkt-asr", "hkt-llm", "en", "hkt prompt", "hkt MI");
+
+        repository.SaveAsync(generic, "generic-key").GetAwaiter().GetResult();
+        repository.SaveAsync(hkt, "hkt-key").GetAwaiter().GetResult();
+
+        Equal("generic-asr", repository.LoadProfileAsync(AIProviderKind.OpenAICompatible).GetAwaiter().GetResult()!.AsrModel);
+        Equal("hkt-asr", repository.LoadProfileAsync(AIProviderKind.HktGenAI).GetAwaiter().GetResult()!.AsrModel);
+        if (repository.LoadProfileAsync().GetAwaiter().GetResult()!.ProviderKind != AIProviderKind.HktGenAI)
+            throw new InvalidOperationException("The last saved provider was not retained as active.");
+        Equal("generic-key", repository.SnapshotAsync(generic).GetAwaiter().GetResult().ApiKey!);
+        Equal("hkt-key", repository.SnapshotAsync(hkt).GetAwaiter().GetResult().ApiKey!);
+
+        repository.ClearApiKeyAsync(AIProviderKind.HktGenAI).GetAwaiter().GetResult();
+        if (repository.HasApiKeyAsync(AIProviderKind.HktGenAI).GetAwaiter().GetResult())
+            throw new InvalidOperationException("The HKT key was not removed.");
+        if (!repository.HasApiKeyAsync(AIProviderKind.OpenAICompatible).GetAwaiter().GetResult())
+            throw new InvalidOperationException("Removing the HKT key also removed the generic key.");
+        if (File.ReadAllText(profilePath).Contains("hkt-asr", StringComparison.Ordinal) ||
+            !File.Exists(Path.Combine(root.Path, "profile.hkt.json")))
+            throw new InvalidOperationException("Provider profiles did not remain in independent files.");
+    }
+
     private static void Reject(string baseUrl, ProviderProfileValidationError expected)
     {
         try { _ = OpenAICompatibleProviderProfile.Validated(baseUrl, "asr", "llm", "", ""); throw new InvalidOperationException($"{baseUrl} was accepted."); }
@@ -60,10 +93,25 @@ internal static class OpenAICompatibleProviderTests
     private static void Equal(string expected, string actual) { if (!string.Equals(expected, actual, StringComparison.Ordinal)) throw new InvalidOperationException($"Expected '{expected}', got '{actual}'."); }
     private sealed class FakeKeyStore : IOpenAICompatibleApiKeyStore
     {
-        private string? key;
-        public Task<string?> ReadAsync(CancellationToken cancellationToken = default) => Task.FromResult(key);
-        public Task WriteAsync(string apiKey, CancellationToken cancellationToken = default) { key = apiKey; return Task.CompletedTask; }
-        public Task ClearAsync(CancellationToken cancellationToken = default) { key = null; return Task.CompletedTask; }
+        private readonly Dictionary<AIProviderKind, string> keys = [];
+        public Task<string?> ReadAsync(CancellationToken cancellationToken = default) =>
+            ReadAsync(AIProviderKind.OpenAICompatible, cancellationToken);
+        public Task<string?> ReadAsync(AIProviderKind kind, CancellationToken cancellationToken = default) =>
+            Task.FromResult(keys.GetValueOrDefault(kind));
+        public Task WriteAsync(string apiKey, CancellationToken cancellationToken = default) =>
+            WriteAsync(AIProviderKind.OpenAICompatible, apiKey, cancellationToken);
+        public Task WriteAsync(AIProviderKind kind, string apiKey, CancellationToken cancellationToken = default)
+        {
+            keys[kind] = apiKey;
+            return Task.CompletedTask;
+        }
+        public Task ClearAsync(CancellationToken cancellationToken = default) =>
+            ClearAsync(AIProviderKind.OpenAICompatible, cancellationToken);
+        public Task ClearAsync(AIProviderKind kind, CancellationToken cancellationToken = default)
+        {
+            keys.Remove(kind);
+            return Task.CompletedTask;
+        }
     }
     private sealed class TestRoot : IDisposable
     {

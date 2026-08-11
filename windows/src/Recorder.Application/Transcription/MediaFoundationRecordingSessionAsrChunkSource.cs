@@ -441,11 +441,19 @@ public static class RecordingSessionAsrMediaResolver
 
         // The new Windows publication name is recording.mp4.  Keep m4a only as
         // a legacy input so an older session never causes a whole-file upload.
-        var candidates = new[]
+        var candidates = new List<string>
         {
             Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName),
             Path.Combine(folder, LegacyM4aFileName),
         };
+        var metadataPath = Path.Combine(folder, RecordingSessionLayout.MetadataFileName);
+        var metadata = ReadSafeMetadata(metadataPath);
+        if (string.Equals(metadata.Source, "imported", StringComparison.Ordinal))
+        {
+            candidates.AddRange(RecordingSessionLayout.ImportedAudioExtensions
+                .Where(extension => !string.Equals(extension, "m4a", StringComparison.OrdinalIgnoreCase))
+                .Select(extension => Path.Combine(folder, $"recording.{extension}")));
+        }
         foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!File.Exists(candidate)) continue;
@@ -455,10 +463,24 @@ public static class RecordingSessionAsrMediaResolver
             return new ResolvedRecordingSessionMedia(folder, candidate, Path.GetFileName(candidate));
         }
 
-        throw new IOException("Transcription requires a completed recording.mp4 or legacy recording.m4a.");
+        throw new IOException("Transcription requires completed managed media or an explicitly imported supported audio file.");
     }
 
     private static bool IsReparsePoint(string path) => (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+
+    private static RecordingInfo ReadSafeMetadata(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return RecordingInfoJson.Parse(null);
+            var attributes = File.GetAttributes(path);
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                return RecordingInfoJson.Parse(null);
+            return RecordingInfoJson.Parse(File.ReadAllText(path));
+        }
+        catch (IOException) { return RecordingInfoJson.Parse(null); }
+        catch (UnauthorizedAccessException) { return RecordingInfoJson.Parse(null); }
+    }
 }
 
 internal readonly record struct PcmAudioFormat(int SampleRate, int Channels, int BitsPerSample)

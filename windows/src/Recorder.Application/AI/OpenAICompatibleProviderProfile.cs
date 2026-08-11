@@ -16,6 +16,8 @@ public sealed record OpenAICompatibleProviderProfile
     public const string DefaultBaseUrl = "https://api.openai.com/v1";
     public const string DefaultAsrModel = "gpt-4o-transcribe";
     public const string DefaultLlmModel = "gpt-5.6-terra";
+    public const string HktDefaultAsrModel = "private-ai/whisper-large-v3-cantonese-v2";
+    public const string HktDefaultLlmModel = "gpt-5.5";
 
     [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; init; }
     [JsonPropertyName("providerKind")] public AIProviderKind ProviderKind { get; init; } = AIProviderKind.OpenAICompatible;

@@ -95,6 +95,18 @@ public static class RecordingSessionLayout
     public const string LegacyDoublePartialVideoFileName = "recording.partial.mp4.partial";
     public const string MetadataFileName = "recording-info.json";
 
+    /// <summary>
+    /// Audio containers accepted by the explicit user-driven transcription import flow.
+    /// The fixed set mirrors macOS and prevents an arbitrary extension from becoming
+    /// managed library media.
+    /// </summary>
+    public static IReadOnlyList<string> ImportedAudioExtensions { get; } =
+        ["m4a", "mp3", "wav", "flac", "aac", "aiff", "aif", "caf"];
+
+    public static bool IsSupportedImportedAudioExtension(string? extension) =>
+        !string.IsNullOrWhiteSpace(extension) &&
+        ImportedAudioExtensions.Contains(extension.TrimStart('.'), StringComparer.OrdinalIgnoreCase);
+
     public static string Prefix(RecordingSessionKind kind) => kind switch
     {
         RecordingSessionKind.Meeting => "meeting-",

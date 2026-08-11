@@ -81,6 +81,7 @@ void MacParitySurfacesRemainWired()
     var settings = WorkspaceDocument("RecorderSettingsView.xaml");
     foreach (var automationId in new[]
     {
+        "AiImportAudioButton",
         "AiTranscriptEditor",
         "AiMeetingSummaryEditor",
         "AiSuggestedTitleEditor",
@@ -89,6 +90,7 @@ void MacParitySurfacesRemainWired()
     {
         "SettingsAiProviderKindComboBox",
         "SettingsHktGroupIdTextBox",
+        "SettingsHktResolvedUrlTextBox",
         "SettingsMeetingIntelligencePromptTextBox",
     }) AssertDocumentContains(settings, automationId);
     Contains("StartAutomaticAsync(providerProcessingAllowed: true)", viewModelCode,
@@ -99,6 +101,10 @@ void MacParitySurfacesRemainWired()
         "Live low-storage monitoring must retain audio while disabling video.");
     Contains("WindowsInputMuteMonitor", viewModelCode,
         "The selected Windows input endpoint must contribute hardware mute state.");
+    Contains("CaptureOpenAiProviderDraft", viewModelCode,
+        "Switching provider must preserve independent unsaved drafts.");
+    Contains("OpenAiApiKeyReplacement", settings.ToString(),
+        "Provider-specific replacement keys must remain bound to their draft.");
 }
 
 void PrimaryControlsStayAboveTheFold()

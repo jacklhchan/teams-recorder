@@ -1,6 +1,7 @@
 using Recorder.Core;
 using TeamsRecorder.Windows.Application.Recovery;
 using TeamsRecorder.Windows.Application.Storage;
+using TeamsRecorder.Windows.Application.Transcription;
 
 namespace TeamsRecorder.Windows.Application.Library;
 
@@ -23,6 +24,12 @@ public sealed class RecordingLibraryService
     }
 
     public IReadOnlyList<RecordingSessionLibraryItem> ListSessions() => storage.ListSessions();
+
+    /// <summary>Imports a user-selected audio file without modifying the source.</summary>
+    public Task<ManualTranscriptionImportResult> ImportAudioForTranscriptionAsync(
+        string sourcePath,
+        CancellationToken cancellationToken = default) =>
+        new ManualTranscriptionImporter().ImportAsync(storage, sourcePath, cancellationToken);
 
     /// <summary>
     /// Re-enumerates the library and returns a session only when its current

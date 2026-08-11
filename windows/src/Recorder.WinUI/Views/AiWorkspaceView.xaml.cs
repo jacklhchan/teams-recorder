@@ -1,5 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Windows.Storage.Pickers;
+using WinRT.Interop;
 
 namespace TeamsRecorder.Windows.WinUI.Views;
 
@@ -48,6 +50,33 @@ public sealed partial class AiWorkspaceView : UserControl
         }
 
         await viewModel.GenerateOpenAiSummaryAsync();
+    }
+
+    private async void OnImportAudioClick(object sender, RoutedEventArgs args)
+    {
+        if (DataContext is not RecordingViewModel viewModel ||
+            !viewModel.CanImportAudioForTranscription ||
+            Microsoft.UI.Xaml.Application.Current is not App app ||
+            app.MainWindow is null)
+        {
+            return;
+        }
+
+        var picker = new FileOpenPicker
+        {
+            SuggestedStartLocation = PickerLocationId.MusicLibrary,
+            ViewMode = PickerViewMode.List,
+        };
+        foreach (var extension in Recorder.Core.RecordingSessionLayout.ImportedAudioExtensions)
+        {
+            picker.FileTypeFilter.Add($".{extension}");
+        }
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(app.MainWindow));
+        var file = await picker.PickSingleFileAsync();
+        if (file is not null)
+        {
+            await viewModel.ImportAudioForTranscriptionAsync(file.Path);
+        }
     }
 
     private async void OnSaveTranscriptClick(object sender, RoutedEventArgs args)

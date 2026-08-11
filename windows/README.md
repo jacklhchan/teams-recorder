@@ -29,10 +29,12 @@ The repository now contains:
   the WinUI shell;
 - an explicit OpenAI-compatible or HKT GenAI ASR workflow, followed by bounded
   automatic Meeting Intelligence after the combined user confirmation. The AI
-  workspace can edit, copy, export, and safely version transcripts; generate,
+  workspace can import M4A, MP3, WAV, FLAC, AAC, AIFF/AIF, or CAF audio into an
+  owned, non-overwriting session; edit, copy, export, and safely version transcripts; generate,
   regenerate, cancel, and edit summaries and suggested titles; and apply a
   suggested title without overwriting an existing user title. The API key is
-  held only in the current Windows user's DPAPI store;
+  held only in the current Windows user's DPAPI store; Generic and HKT providers
+  keep independent profiles, keys, and unsaved editor drafts;
   it is not written to recording metadata, diagnostics, or logs;
 - a notification-area icon: closing the main window hides it to the tray;
   use the tray icon's right-click **Exit Teams Recorder** command to close it

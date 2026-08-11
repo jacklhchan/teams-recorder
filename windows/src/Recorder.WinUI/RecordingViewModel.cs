@@ -156,6 +156,18 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private string openAiLanguage = "zh";
     private string openAiPrompt = "";
     private string openAiMeetingIntelligencePrompt = "";
+    private string openAiApiKeyReplacement = "";
+    private readonly Dictionary<AIProviderKind, AiProviderEditorDraft> openAiProviderDrafts = new()
+    {
+        [AIProviderKind.OpenAICompatible] = AiProviderEditorDraft.GenericDefault,
+        [AIProviderKind.HktGenAI] = AiProviderEditorDraft.HktDefault,
+    };
+    private readonly Dictionary<AIProviderKind, bool> openAiProviderApiKeyPresence = new()
+    {
+        [AIProviderKind.OpenAICompatible] = false,
+        [AIProviderKind.HktGenAI] = false,
+    };
+    private bool isApplyingOpenAiProviderDraft;
     private bool isOpenAiProviderInitialized;
     private bool hasOpenAiApiKey;
     private bool isTestingOpenAiProvider;
@@ -873,23 +885,52 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         get => selectedOpenAiProviderKind;
         set
         {
-            if (SetProperty(ref selectedOpenAiProviderKind, value ?? AIProviderKindChoice.OpenAICompatible))
+            var next = value ?? AIProviderKindChoice.OpenAICompatible;
+            if (selectedOpenAiProviderKind.Kind == next.Kind) return;
+            if (!isApplyingOpenAiProviderDraft) CaptureOpenAiProviderDraft(selectedOpenAiProviderKind.Kind);
+            if (SetProperty(ref selectedOpenAiProviderKind, next))
+            {
+                ApplyOpenAiProviderDraft(next.Kind);
+                hasOpenAiApiKey = openAiProviderApiKeyPresence.GetValueOrDefault(next.Kind);
                 OnPropertyChanged(nameof(IsHktOpenAiProvider));
+                OnPropertyChanged(nameof(HktOpenAiProviderVisibility));
+                OnPropertyChanged(nameof(GenericOpenAiProviderVisibility));
+                OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
+                OnPropertyChanged(nameof(CanRemoveOpenAiApiKey));
+            }
         }
     }
 
     public bool IsHktOpenAiProvider => SelectedOpenAiProviderKind.Kind == AIProviderKind.HktGenAI;
 
+    public Visibility HktOpenAiProviderVisibility => IsHktOpenAiProvider ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility GenericOpenAiProviderVisibility => IsHktOpenAiProvider ? Visibility.Collapsed : Visibility.Visible;
+
     public string OpenAiHktGroupId
     {
         get => openAiHktGroupId;
-        set => SetProperty(ref openAiHktGroupId, value ?? string.Empty);
+        set
+        {
+            if (SetProperty(ref openAiHktGroupId, value ?? string.Empty))
+                OnPropertyChanged(nameof(OpenAiResolvedHktUrl));
+        }
     }
+
+    public string OpenAiResolvedHktUrl =>
+        OpenAICompatibleProviderProfile.HktBaseUrlPrefix + OpenAiHktGroupId.Trim() + "/openai";
 
     public string OpenAiMeetingIntelligencePrompt
     {
         get => openAiMeetingIntelligencePrompt;
         set => SetProperty(ref openAiMeetingIntelligencePrompt, value ?? string.Empty);
+    }
+
+    /// <summary>Ephemeral per-provider replacement; it is never persisted until Save.</summary>
+    public string OpenAiApiKeyReplacement
+    {
+        get => openAiApiKeyReplacement;
+        set => SetProperty(ref openAiApiKeyReplacement, value ?? string.Empty);
     }
 
     /// <summary>Settings are available only after the local DPAPI-backed repository is ready.</summary>
@@ -913,6 +954,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public bool CanStartOpenAiTranscription =>
         IsOpenAiProviderAvailable && !IsBusy && SelectedLibraryItem is { IsManaged: true, IsPlayable: true };
+
+    public bool CanImportAudioForTranscription =>
+        !IsBusy && !isShuttingDown && !string.IsNullOrWhiteSpace(OutputFolder);
 
     public bool CanGenerateOpenAiSummary =>
         CanStartOpenAiTranscription && hasLoadedTranscript && !string.IsNullOrWhiteSpace(TranscriptText);
@@ -1260,18 +1304,25 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         try
         {
+            foreach (var kind in new[] { AIProviderKind.OpenAICompatible, AIProviderKind.HktGenAI })
+            {
+                var saved = await openAiProviderRepository.LoadProfileAsync(kind);
+                if (saved is not null) openAiProviderDrafts[kind] = AiProviderEditorDraft.FromProfile(saved);
+                openAiProviderApiKeyPresence[kind] = await openAiProviderRepository.HasApiKeyAsync(kind);
+            }
+
             var profile = await openAiProviderRepository.LoadProfileAsync();
-            hasOpenAiApiKey = await openAiProviderRepository.HasApiKeyAsync();
+            var activeKind = profile?.ProviderKind ?? AIProviderKind.OpenAICompatible;
+            isApplyingOpenAiProviderDraft = true;
+            try
+            {
+                SelectedOpenAiProviderKind = AIProviderKindChoice.From(activeKind);
+                ApplyOpenAiProviderDraft(activeKind);
+            }
+            finally { isApplyingOpenAiProviderDraft = false; }
+            hasOpenAiApiKey = openAiProviderApiKeyPresence.GetValueOrDefault(activeKind);
             if (profile is not null)
             {
-                SelectedOpenAiProviderKind = AIProviderKindChoice.From(profile.ProviderKind);
-                OpenAiApiBaseUrl = profile.BaseUrl;
-                OpenAiHktGroupId = profile.GroupId ?? string.Empty;
-                OpenAiAsrModel = profile.AsrModel;
-                OpenAiLlmModel = profile.LlmModel;
-                OpenAiLanguage = profile.Language;
-                OpenAiPrompt = profile.Prompt;
-                OpenAiMeetingIntelligencePrompt = profile.MeetingIntelligencePrompt;
                 OpenAiProviderIntegrationStatus = "已載入本機 AI 供應商設定。開始 ASR／Meeting Intelligence 前仍會要求確認。";
             }
             else
@@ -1311,7 +1362,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OpenAiLanguage = profile.Language;
         OpenAiPrompt = profile.Prompt;
         OpenAiMeetingIntelligencePrompt = profile.MeetingIntelligencePrompt;
-        hasOpenAiApiKey = await providers.HasApiKeyAsync();
+        OpenAiApiKeyReplacement = string.Empty;
+        openAiProviderDrafts[profile.ProviderKind] = AiProviderEditorDraft.FromProfile(profile);
+        openAiProviderApiKeyPresence[profile.ProviderKind] = await providers.HasApiKeyAsync(profile.ProviderKind);
+        hasOpenAiApiKey = openAiProviderApiKeyPresence[profile.ProviderKind];
         OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
         OpenAiProviderIntegrationStatus = string.IsNullOrWhiteSpace(replacementApiKey)
             ? "已儲存 AI 供應商設定；既有 API 金鑰保持不變。"
@@ -1322,7 +1376,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     {
         var providers = openAiProviderRepository
             ?? throw new InvalidOperationException("AI 供應商設定尚未準備完成。");
-        await providers.ClearApiKeyAsync();
+        var kind = SelectedOpenAiProviderKind.Kind;
+        await providers.ClearApiKeyAsync(kind);
+        openAiProviderApiKeyPresence[kind] = false;
         hasOpenAiApiKey = false;
         OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
         OpenAiProviderIntegrationStatus = "已移除目前 Windows 使用者的本機 API 金鑰；供應商設定仍保留。";
@@ -1434,6 +1490,27 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     });
 
+    /// <summary>
+    /// Mirrors macOS manual transcription import. The source remains untouched;
+    /// the library receives an owned copy which can be played and transcribed.
+    /// </summary>
+    public Task ImportAudioForTranscriptionAsync(string sourcePath) => RunOperationAsync(async () =>
+    {
+        var library = GetLibraryService();
+        var imported = await Task.Run(() => library.ImportAudioForTranscriptionAsync(sourcePath));
+        LibrarySearchText = string.Empty;
+        LibraryFavoritesOnly = false;
+        await RefreshLibraryCoreAsync();
+        var item = allLibraryItems.FirstOrDefault(candidate =>
+            PathEquals(candidate.SessionPath, imported.Session.FolderPath));
+        if (item is not null)
+        {
+            ApplyLibraryQuery(item.Identity);
+            SelectedLibraryItem = LibraryItems.FirstOrDefault(candidate => candidate.Identity == item.Identity) ?? item;
+        }
+        StatusText = $"已匯入「{imported.DisplayName}」；可在 AI 工作區開始轉錄。";
+    });
+
     private OpenAICompatibleProviderProfile CreateOpenAiProviderProfileFromEditor() =>
         SelectedOpenAiProviderKind.Kind == AIProviderKind.HktGenAI
             ? OpenAICompatibleProviderProfile.HktValidated(
@@ -1450,6 +1527,39 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 OpenAiLanguage,
                 OpenAiPrompt,
                 OpenAiMeetingIntelligencePrompt);
+
+    private void CaptureOpenAiProviderDraft(AIProviderKind kind) =>
+        openAiProviderDrafts[kind] = new AiProviderEditorDraft(
+            OpenAiApiBaseUrl,
+            OpenAiHktGroupId,
+            OpenAiAsrModel,
+            OpenAiLlmModel,
+            OpenAiLanguage,
+            OpenAiPrompt,
+            OpenAiMeetingIntelligencePrompt,
+            OpenAiApiKeyReplacement);
+
+    private void ApplyOpenAiProviderDraft(AIProviderKind kind)
+    {
+        if (!openAiProviderDrafts.TryGetValue(kind, out var draft))
+            draft = kind == AIProviderKind.HktGenAI
+                ? AiProviderEditorDraft.HktDefault
+                : AiProviderEditorDraft.GenericDefault;
+        var wasApplying = isApplyingOpenAiProviderDraft;
+        isApplyingOpenAiProviderDraft = true;
+        try
+        {
+            OpenAiApiBaseUrl = draft.BaseUrl;
+            OpenAiHktGroupId = draft.GroupId;
+            OpenAiAsrModel = draft.AsrModel;
+            OpenAiLlmModel = draft.LlmModel;
+            OpenAiLanguage = draft.Language;
+            OpenAiPrompt = draft.Prompt;
+            OpenAiMeetingIntelligencePrompt = draft.MeetingIntelligencePrompt;
+            OpenAiApiKeyReplacement = draft.ApiKeyReplacement;
+        }
+        finally { isApplyingOpenAiProviderDraft = wasApplying; }
+    }
 
     public async Task CancelMeetingIntelligenceAsync()
     {
@@ -1670,6 +1780,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private void NotifyAiWorkspaceStateChanged()
     {
         OnPropertyChanged(nameof(CanStartOpenAiTranscription));
+        OnPropertyChanged(nameof(CanImportAudioForTranscription));
         OnPropertyChanged(nameof(CanGenerateOpenAiSummary));
         OnPropertyChanged(nameof(CanCancelMeetingIntelligence));
         OnPropertyChanged(nameof(CanSaveTranscript));
@@ -4125,6 +4236,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OnPropertyChanged(nameof(CanRemoveOpenAiApiKey));
         OnPropertyChanged(nameof(OpenAiApiKeyFieldLabel));
         OnPropertyChanged(nameof(CanStartOpenAiTranscription));
+        OnPropertyChanged(nameof(CanImportAudioForTranscription));
         OnPropertyChanged(nameof(CanGenerateOpenAiSummary));
         OnPropertyChanged(nameof(CanCancelMeetingIntelligence));
         OnPropertyChanged(nameof(CanSaveTranscript));
@@ -4211,6 +4323,47 @@ public sealed record EndpointChoice(
         EndpointId: null,
         DisplayName: "不錄製麥克風",
         DefaultRoles: EndpointDefaultRole.None);
+}
+
+internal sealed record AiProviderEditorDraft(
+    string BaseUrl,
+    string GroupId,
+    string AsrModel,
+    string LlmModel,
+    string Language,
+    string Prompt,
+    string MeetingIntelligencePrompt,
+    string ApiKeyReplacement)
+{
+    public static AiProviderEditorDraft GenericDefault { get; } = new(
+        OpenAICompatibleProviderProfile.DefaultBaseUrl,
+        string.Empty,
+        OpenAICompatibleProviderProfile.DefaultAsrModel,
+        OpenAICompatibleProviderProfile.DefaultLlmModel,
+        "yue",
+        string.Empty,
+        string.Empty,
+        string.Empty);
+
+    public static AiProviderEditorDraft HktDefault { get; } = new(
+        string.Empty,
+        string.Empty,
+        OpenAICompatibleProviderProfile.HktDefaultAsrModel,
+        OpenAICompatibleProviderProfile.HktDefaultLlmModel,
+        "yue",
+        string.Empty,
+        string.Empty,
+        string.Empty);
+
+    public static AiProviderEditorDraft FromProfile(OpenAICompatibleProviderProfile profile) => new(
+        profile.BaseUrl,
+        profile.GroupId ?? string.Empty,
+        profile.AsrModel,
+        profile.LlmModel,
+        profile.Language,
+        profile.Prompt,
+        profile.MeetingIntelligencePrompt,
+        string.Empty);
 }
 
 public sealed record AIProviderKindChoice(AIProviderKind Kind, string DisplayName)

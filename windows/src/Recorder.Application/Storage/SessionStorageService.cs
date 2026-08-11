@@ -1086,6 +1086,32 @@ public sealed class SessionStorageService
             return true;
         }
 
+        // Explicit imports retain their original audio container so no lossy
+        // transcode is required before transcription. Only the fixed macOS-
+        // compatible extension set, imported metadata, and a safe regular file
+        // in the owned session folder can reach the library.
+        if (string.Equals(metadata.Source, "imported", StringComparison.Ordinal) &&
+            TryGetImportedAudioPath(folder, out var importedAudio))
+        {
+            mediaPath = importedAudio;
+            return true;
+        }
+
+        mediaPath = string.Empty;
+        return false;
+    }
+
+    private bool TryGetImportedAudioPath(string folder, out string mediaPath)
+    {
+        foreach (var extension in RecordingSessionLayout.ImportedAudioExtensions)
+        {
+            if (string.Equals(extension, "m4a", StringComparison.OrdinalIgnoreCase)) continue;
+            var candidate = Path.Combine(folder, $"recording.{extension}");
+            if (!IsSafeNonEmptyFile(candidate)) continue;
+            mediaPath = candidate;
+            return true;
+        }
+
         mediaPath = string.Empty;
         return false;
     }

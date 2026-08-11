@@ -15,6 +15,8 @@ public partial class App : WinUiApplication
     private AppInstance? mainInstance;
     private readonly IRecorderCrashMarkerStore crashMarkers = new RecorderCrashMarkerStore();
 
+    internal Window? MainWindow => window;
+
     public App()
     {
         InitializeComponent();

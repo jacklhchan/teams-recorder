@@ -473,6 +473,18 @@ public:
         return RECORDER_NATIVE_OK;
     }
 
+    RecorderNativeResult SetMicrophonePcmCallback(
+        RecorderNativeMicrophonePcmCallback callback,
+        void* context) {
+        if (callback == nullptr && context != nullptr) {
+            return RECORDER_NATIVE_INVALID_ARGUMENT;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        microphone_pcm_callback_ = callback;
+        microphone_pcm_context_ = context;
+        return RECORDER_NATIVE_OK;
+    }
+
     RecorderNativeResult health_result() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return failure_;
@@ -1028,8 +1040,13 @@ private:
         std::uint64_t next_checkpoint_100ns = kFirstDurableCheckpoint100ns;
         bool wrote_block = false;
         std::vector<float> block(kFramesPerBlock * 2U, 0.0F);
+        std::vector<float> microphone_block(kFramesPerBlock * 2U, 0.0F);
         for (;;) {
             std::fill(block.begin(), block.end(), 0.0F);
+            std::fill(microphone_block.begin(), microphone_block.end(), 0.0F);
+            RecorderNativeMicrophonePcmCallback microphone_callback = nullptr;
+            void* microphone_context = nullptr;
+            bool publish_microphone = false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 cv_.wait_for(lock, kSourceSkewWait, [this] {
@@ -1049,7 +1066,24 @@ private:
                     next_output_frame_, block.data(), kFramesPerBlock);
                 recorder::timeline::MixFrames(
                     &microphone_.queue, &microphone_.queued_frames,
-                    next_output_frame_, block.data(), kFramesPerBlock);
+                    next_output_frame_, microphone_block.data(), kFramesPerBlock);
+                for (std::size_t index = 0; index < block.size(); ++index) {
+                    block[index] += microphone_block[index];
+                }
+                microphone_callback = microphone_pcm_callback_;
+                microphone_context = microphone_pcm_context_;
+                publish_microphone = microphone_.capture != nullptr;
+            }
+
+            // The tap is deliberately outside the session lock. Managed code
+            // may only copy/enqueue here; a slow consumer cannot hold capture
+            // ingress or the canonical timeline mutex.
+            if (publish_microphone && microphone_callback != nullptr) {
+                microphone_callback(
+                    microphone_block.data(),
+                    kFramesPerBlock,
+                    48'000,
+                    microphone_context);
             }
 
             for (float& sample : block) sample = std::tanh(sample);
@@ -1254,6 +1288,8 @@ private:
     bool stop_requested_ = false;
     bool writer_ready_ = false;
     bool microphone_muted_ = false;
+    RecorderNativeMicrophonePcmCallback microphone_pcm_callback_ = nullptr;
+    void* microphone_pcm_context_ = nullptr;
 };
 
 MixedCaptureSession::MixedCaptureSession()
@@ -1271,6 +1307,12 @@ RecorderNativeResult MixedCaptureSession::Stop() {
 
 RecorderNativeResult MixedCaptureSession::SetMicrophoneMuted(bool muted) {
     return impl_->SetMicrophoneMuted(muted);
+}
+
+RecorderNativeResult MixedCaptureSession::SetMicrophonePcmCallback(
+    RecorderNativeMicrophonePcmCallback callback,
+    void* context) {
+    return impl_->SetMicrophonePcmCallback(callback, context);
 }
 
 RecorderNativeResult MixedCaptureSession::SetVideoTarget(

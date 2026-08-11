@@ -70,6 +70,8 @@ struct RecorderNativeBridge {
     RecorderNativeState state = RECORDER_NATIVE_STATE_READY;
     RecorderNativeStats last_stats{};
     mutable std::string last_error;
+    RecorderNativeMicrophonePcmCallback microphone_pcm_callback = nullptr;
+    void* microphone_pcm_context = nullptr;
 #if defined(_WIN32)
     MediaFoundationRuntime media_foundation;
     std::unique_ptr<recorder::bridge::CaptureSession> session;
@@ -177,7 +179,7 @@ struct RecorderNativeEndpointList {
 
 namespace {
 
-constexpr char kVersion[] = "0.9.0";
+constexpr char kVersion[] = "0.10.0";
 constexpr char kInvalidHandleError[] = "RecorderNativeBridge handle is null.";
 
 RecorderNativeStats EmptyStats(RecorderNativeCaptureMode mode) {
@@ -414,6 +416,9 @@ extern "C" RecorderNativeResult recorder_native_start_mixed(
     }
     try {
         auto session = std::make_unique<recorder::bridge::MixedCaptureSession>();
+        (void)session->SetMicrophonePcmCallback(
+            bridge->microphone_pcm_callback,
+            bridge->microphone_pcm_context);
         const RecorderNativeResult result = session->Start(std::move(config));
         std::lock_guard<std::mutex> lock(bridge->mutex);
         bridge->last_stats = session->stats();
@@ -535,6 +540,9 @@ extern "C" RecorderNativeResult recorder_native_start_selected_audio(
     }
     try {
         auto session = std::make_unique<recorder::bridge::MixedCaptureSession>();
+        (void)session->SetMicrophonePcmCallback(
+            bridge->microphone_pcm_callback,
+            bridge->microphone_pcm_context);
         const RecorderNativeResult result = session->Start(std::move(config));
         std::lock_guard<std::mutex> lock(bridge->mutex);
         bridge->last_stats = session->stats();
@@ -649,6 +657,9 @@ extern "C" RecorderNativeResult recorder_native_start_selected_window_av(
     }
     try {
         auto session = std::make_unique<recorder::bridge::MixedCaptureSession>();
+        (void)session->SetMicrophonePcmCallback(
+            bridge->microphone_pcm_callback,
+            bridge->microphone_pcm_context);
         const RecorderNativeResult result = session->Start(std::move(config));
         std::lock_guard<std::mutex> lock(bridge->mutex);
         bridge->last_stats = session->stats();
@@ -819,6 +830,23 @@ extern "C" RecorderNativeResult recorder_native_set_microphone_muted(
     }
     return result;
 #endif
+}
+
+extern "C" RecorderNativeResult recorder_native_set_microphone_pcm_callback(
+    RecorderNativeBridge* bridge,
+    RecorderNativeMicrophonePcmCallback callback,
+    void* context) {
+    if (bridge == nullptr || (callback == nullptr && context != nullptr)) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+
+    std::lock_guard<std::mutex> lock(bridge->mutex);
+    bridge->microphone_pcm_callback = callback;
+    bridge->microphone_pcm_context = context;
+    if (bridge->mixed_session) {
+        return bridge->mixed_session->SetMicrophonePcmCallback(callback, context);
+    }
+    return RECORDER_NATIVE_OK;
 }
 
 extern "C" RecorderNativeResult recorder_native_start(

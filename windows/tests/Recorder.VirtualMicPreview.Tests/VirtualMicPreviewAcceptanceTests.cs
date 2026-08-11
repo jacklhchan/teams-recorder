@@ -15,6 +15,10 @@ internal static class VirtualMicPreviewAcceptanceTests
             ("identity spoof is rejected", IdentitySpoofIsRejectedAsync),
             ("absent endpoint fails closed", AbsentEndpointFailsClosedAsync),
             ("PCM protocol is bounded and strict", PcmProtocolIsBoundedAndStrictAsync),
+            ("float microphone PCM converts exactly", FloatPcmConversionIsExactAsync),
+            ("broker bootstrap round trips privately", BrokerBootstrapRoundTripsAsync),
+            ("kernel sink preserves sequence and PCM", KernelSinkPreservesFrameAsync),
+            ("trusted endpoint pairing persists exactly", TrustedEndpointPairingPersistsAsync),
             ("release build cannot enable test driver", ReleaseBuildCannotEnableTestDriverAsync),
             ("test build broker handshakes and routes bounded PCM", TestBuildBrokerRoundTripAsync),
         };
@@ -84,6 +88,63 @@ internal static class VirtualMicPreviewAcceptanceTests
             checked((uint)(sizeof(ulong) + VirtualMicPcmProtocol.BlockAlign + 1)));
         ThrowsProtocol(VirtualMicPcmProtocolError.MalformedFrame, () => VirtualMicPcmProtocol.Deserialize(malformedPcm));
         return Task.CompletedTask;
+    }
+
+    private static Task FloatPcmConversionIsExactAsync()
+    {
+        var pcm = VirtualMicPublisherRuntime.ConvertFloatStereoToPcm16(
+            [-2f, -1f, -0.5f, 0f, 0.5f, 1f, 2f, float.NaN]);
+        var expected = new short[]
+        {
+            short.MinValue, short.MinValue, -16384, 0,
+            16384, short.MaxValue, short.MaxValue, 0,
+        };
+        for (var index = 0; index < expected.Length; ++index)
+        {
+            var actual = BinaryPrimitives.ReadInt16LittleEndian(
+                pcm.AsSpan(index * sizeof(short), sizeof(short)));
+            Assert(actual == expected[index], $"PCM sample {index} did not clamp/round deterministically.");
+        }
+        return Task.CompletedTask;
+    }
+
+    private static Task BrokerBootstrapRoundTripsAsync()
+    {
+        var session = VirtualMicPcmBrokerSession.Create(TrustedIdentity());
+        var serialized = VirtualMicBrokerLaunchEnvelope.Create(session).Serialize();
+        var imported = VirtualMicBrokerLaunchEnvelope.Parse(serialized).ToSession();
+        Assert(imported.PipeName == session.PipeName && imported.Identity == session.Identity,
+            "The stdin bootstrap must preserve the exact session and trusted endpoint identity.");
+        Assert(!serialized.Contains("--", StringComparison.Ordinal),
+            "The bootstrap is data for redirected stdin, not a command-line fragment.");
+        return Task.CompletedTask;
+    }
+
+    private static async Task KernelSinkPreservesFrameAsync()
+    {
+        var transport = new RecordingKernelTransport();
+        using var sink = new VirtualMicKernelPcmSink(transport);
+        var pcm = new byte[VirtualMicPcmProtocol.BlockAlign * 480];
+        await sink.WriteAsync(new VirtualMicPcmFrame(7, pcm), CancellationToken.None);
+        Assert(transport.Sequence == 7 && transport.Pcm is not null &&
+            transport.Pcm.AsSpan().SequenceEqual(pcm),
+            "The isolated broker sink must preserve sequence and bounded PCM bytes.");
+    }
+
+    private static async Task TrustedEndpointPairingPersistsAsync()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"teams-recorder-vmic-{Guid.NewGuid():N}.json");
+        try
+        {
+            var store = new VirtualMicTrustedEndpointStore(path);
+            await store.SaveAsync(TrustedIdentity());
+            Assert(await store.LoadAsync() == TrustedIdentity(),
+                "Pairing storage must preserve the exact endpoint ID and static driver identity.");
+        }
+        finally
+        {
+            try { File.Delete(path); } catch (IOException) { }
+        }
     }
 
     private static Task ReleaseBuildCannotEnableTestDriverAsync()
@@ -182,5 +243,17 @@ internal static class VirtualMicPreviewAcceptanceTests
             firstFrame.TrySetResult(frame);
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class RecordingKernelTransport : IVirtualMicKernelTransport
+    {
+        public ulong Sequence { get; private set; }
+        public byte[]? Pcm { get; private set; }
+        public void Write(ulong sequence, ReadOnlySpan<byte> pcm16LeStereo)
+        {
+            Sequence = sequence;
+            Pcm = pcm16LeStereo.ToArray();
+        }
+        public void Dispose() { }
     }
 }

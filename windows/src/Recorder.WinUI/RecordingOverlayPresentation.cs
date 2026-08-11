@@ -18,7 +18,11 @@ public sealed record RecordingOverlayState(
     TimeSpan? Elapsed = null,
     RecordingOverlayInputStatus SystemAudioStatus = RecordingOverlayInputStatus.Signal,
     RecordingOverlayInputStatus MicrophoneStatus = RecordingOverlayInputStatus.Quiet,
-    bool IsRecorderMicrophoneMuted = false);
+    bool IsRecorderMicrophoneMuted = false,
+    double SystemAudioLevelPercent = 0,
+    double MicrophoneLevelPercent = 0,
+    bool IsVirtualMicrophoneReady = false,
+    string? VirtualMicrophoneStatus = null);
 
 /// <summary>
 /// Optional adapter boundary for a ViewModel. The overlay itself needs no
@@ -78,6 +82,10 @@ public sealed record RecordingOverlayPresentation(
     RecordingOverlayInputStatus SystemAudioStatus = RecordingOverlayInputStatus.Signal,
     RecordingOverlayInputStatus MicrophoneStatus = RecordingOverlayInputStatus.Quiet,
     bool IsRecorderMicrophoneMuted = false,
+    double SystemAudioLevelPercent = 0,
+    double MicrophoneLevelPercent = 0,
+    bool IsVirtualMicrophoneReady = false,
+    string? VirtualMicrophoneStatus = null,
     string? FinalizingStatus = null)
 {
     public static RecordingOverlayPresentation Countdown(int remainingSeconds) =>
@@ -216,7 +224,11 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRec
         TimeSpan? elapsed,
         RecordingOverlayInputStatus systemAudioStatus,
         RecordingOverlayInputStatus microphoneStatus,
-        bool isRecorderMicrophoneMuted) =>
+        bool isRecorderMicrophoneMuted,
+        double systemAudioLevelPercent,
+        double microphoneLevelPercent,
+        bool isVirtualMicrophoneReady,
+        string? virtualMicrophoneStatus) =>
         Update(RecordingOverlayPresentation.Recording(
             kind,
             canToggleTeamsWindowCapture,
@@ -227,6 +239,10 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRec
             SystemAudioStatus = systemAudioStatus,
             MicrophoneStatus = microphoneStatus,
             IsRecorderMicrophoneMuted = isRecorderMicrophoneMuted,
+            SystemAudioLevelPercent = Math.Clamp(systemAudioLevelPercent, 0, 100),
+            MicrophoneLevelPercent = Math.Clamp(microphoneLevelPercent, 0, 100),
+            IsVirtualMicrophoneReady = isVirtualMicrophoneReady,
+            VirtualMicrophoneStatus = virtualMicrophoneStatus,
         });
 
     public void ShowFinalizing(string? status = null) =>

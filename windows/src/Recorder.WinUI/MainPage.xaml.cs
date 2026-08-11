@@ -104,7 +104,11 @@ public sealed partial class MainPage : Page
                     state.Elapsed,
                     state.SystemAudioStatus,
                     state.MicrophoneStatus,
-                    state.IsRecorderMicrophoneMuted);
+                    state.IsRecorderMicrophoneMuted,
+                    state.SystemAudioLevelPercent,
+                    state.MicrophoneLevelPercent,
+                    state.IsVirtualMicrophoneReady,
+                    state.VirtualMicrophoneStatus);
             }
             else
             {

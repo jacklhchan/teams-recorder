@@ -44,6 +44,9 @@ public:
     RecorderNativeResult Start(MixedCaptureSessionConfig config);
     RecorderNativeResult Stop();
     RecorderNativeResult SetMicrophoneMuted(bool muted);
+    RecorderNativeResult SetMicrophonePcmCallback(
+        RecorderNativeMicrophonePcmCallback callback,
+        void* context);
     RecorderNativeResult SetVideoTarget(
         std::uintptr_t window_handle,
         std::uint32_t process_id,

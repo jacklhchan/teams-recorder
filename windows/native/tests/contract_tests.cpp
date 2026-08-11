@@ -87,7 +87,7 @@ int main() {
     uint32_t endpoint_count = 0;
     recorder_native_endpoint_list_destroy(nullptr);
 
-    if (!Expect(std::strcmp(recorder_native_version(), "0.9.0") == 0) ||
+    if (!Expect(std::strcmp(recorder_native_version(), "0.10.0") == 0) ||
         !Expect(recorder_native_start(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_with_options(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_selected_audio(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
@@ -156,6 +156,9 @@ int main() {
                 recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_start_mixed(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_set_microphone_muted(nullptr, 0U) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_pcm_callback(nullptr, nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_pcm_callback(bridge, nullptr, bridge) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_pcm_callback(bridge, nullptr, nullptr) == RECORDER_NATIVE_OK) &&
         Expect(recorder_native_set_microphone_muted(bridge, 2U) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
         Expect(recorder_native_set_microphone_muted(bridge, 0U) == RECORDER_NATIVE_INVALID_STATE) &&
         Expect(recorder_native_set_microphone_muted(bridge, 1U) == RECORDER_NATIVE_INVALID_STATE) &&

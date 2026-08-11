@@ -24,6 +24,18 @@ extern "C" {
 typedef struct RecorderNativeBridge RecorderNativeBridge;
 typedef struct RecorderNativeEndpointList RecorderNativeEndpointList;
 
+/*
+ * Realtime microphone-only PCM tap used by the optional virtual microphone
+ * publisher. Samples are interleaved float32 stereo at 48 kHz and remain
+ * valid only for the duration of the callback. Implementations must copy or
+ * enqueue without blocking the native mixer thread.
+ */
+typedef void (*RecorderNativeMicrophonePcmCallback)(
+    const float* interleaved_stereo,
+    uint32_t frame_count,
+    uint32_t sample_rate,
+    void* context);
+
 typedef enum RecorderNativeResult {
     RECORDER_NATIVE_OK = 0,
     RECORDER_NATIVE_INVALID_ARGUMENT = 1,
@@ -331,6 +343,16 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_validate_aac_m4a(
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_set_microphone_muted(
     RecorderNativeBridge* bridge,
     uint32_t muted);
+
+/*
+ * Installs or clears the microphone-only PCM tap. A NULL callback clears the
+ * tap and requires a NULL context. The callback is never invoked after
+ * recorder_native_destroy returns.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_set_microphone_pcm_callback(
+    RecorderNativeBridge* bridge,
+    RecorderNativeMicrophonePcmCallback callback,
+    void* context);
 
 /* Stops capture, drains the source, flushes 48 kHz stereo output, and finalizes once. */
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_stop(RecorderNativeBridge* bridge);

@@ -11,6 +11,7 @@ var overlay = XDocument.Load(Path.Combine(fixtureRoot, "RecordingOverlayWindow.x
 var overlayCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingOverlayWindow.xaml.cs"));
 var overlayPresentationCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecordingOverlayPresentation.cs"));
 var controlAdapterCode = File.ReadAllText(Path.Combine(fixtureRoot, "RecorderControlLifecycleOwnerAdapter.cs"));
+var recordingLibraryCode = File.ReadAllText(Path.Combine(fixtureRoot, "Views", "RecordingLibraryView.xaml.cs"));
 var xaml = (XNamespace)"http://schemas.microsoft.com/winfx/2006/xaml/presentation";
 var x = (XNamespace)"http://schemas.microsoft.com/winfx/2006/xaml";
 
@@ -271,8 +272,11 @@ void ControlStatusIsPrivate()
 void ControlsAreRoutedToTheirWorkspace()
 {
     var recordings = WorkspaceDocument("RecordingLibraryView.xaml");
-    foreach (var binding in new[] { "PlayCommand", "PauseCommand", "StopPlaybackCommand", "SkipBackward15Command", "SkipForward15Command", "PlaybackPositionSeconds, Mode=TwoWay", "PlaybackVolume, Mode=TwoWay", "SelectedPlaybackRate, Mode=TwoWay" })
+    foreach (var binding in new[] { "PlayCommand", "PauseCommand", "StopPlaybackCommand", "SkipBackward15Command", "SkipForward15Command", "PlaybackPositionSeconds, Mode=TwoWay", "PlaybackVolume, Mode=TwoWay", "SelectedPlaybackRate, Mode=TwoWay", "IsVideoPlaybackStageVisible", "IsAudioPlaybackStageVisible" })
         AssertDocumentContains(recordings, binding);
+    _ = recordings.Descendants().Single(element => element.Name.LocalName == "MediaPlayerElement");
+    Contains("PlaybackVideoStage.SetMediaPlayer(player)", recordingLibraryCode,
+        "Audio and video playback must use the in-app shared media player.");
 
     var ai = WorkspaceDocument("AiWorkspaceView.xaml");
     foreach (var required in new[] { "CanStartOpenAiTranscription", "CanGenerateOpenAiSummary", "OnStartTranscriptionClick", "OnGenerateSummaryClick" })
@@ -382,6 +386,12 @@ void OverlayStatesAreComplete()
     }
 
     Contains("RecorderMicrophoneMuteToggleRequested", overlayPresentationCode, "Overlay microphone mute must be recorder-local.");
+    Contains("SystemAudioLevelPercent", overlayPresentationCode, "Overlay must carry the measured system-audio level.");
+    Contains("MicrophoneLevelPercent", overlayPresentationCode, "Overlay must carry the measured microphone level.");
+    Contains("IsVirtualMicrophoneReady", overlayPresentationCode, "Overlay must expose virtual-microphone readiness.");
+    Contains("presentation.MicrophoneLevelPercent", overlayCode, "Overlay waveform must use the measured microphone level.");
+    Contains("Recorder 與虛擬麥克風", overlayCode, "The mute control must describe both affected microphone paths.");
+    DoesNotContain("WaveformValue(", overlayCode, "Overlay must not render a synthetic fixed waveform.");
     DoesNotContain("TeamsMute", overlayCode, "Overlay must not synchronize Teams mute.");
     Contains("IsAlwaysOnTop = true", overlayCode, "Overlay must stay on top.");
     Contains("WsExNoActivate", overlayCode, "Overlay must not activate.");

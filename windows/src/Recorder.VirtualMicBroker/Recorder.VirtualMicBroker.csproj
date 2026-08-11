@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <SelfContained>true</SelfContained>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <EnableTestSignedVirtualMicPreview Condition="'$(EnableTestSignedVirtualMicPreview)' == ''">false</EnableTestSignedVirtualMicPreview>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' and '$(EnableTestSignedVirtualMicPreview)' == 'true'">
+    <DefineConstants>$(DefineConstants);TEAMSRECORDER_TESTSIGNED_VIRTUAL_MIC</DefineConstants>
+  </PropertyGroup>
+  <Target Name="RejectTestSignedVirtualMicPreviewInRelease" BeforeTargets="CoreCompile" Condition="'$(Configuration)' == 'Release' and '$(EnableTestSignedVirtualMicPreview)' == 'true'">
+    <Error Text="EnableTestSignedVirtualMicPreview is permitted only in Debug builds; Release builds always disable the test-signed virtual microphone broker." />
+  </Target>
+  <ItemGroup>
+    <ProjectReference Include="..\Recorder.Application\Recorder.Application.csproj" />
+  </ItemGroup>
+</Project>

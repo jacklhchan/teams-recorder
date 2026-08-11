@@ -10,8 +10,9 @@ namespace TeamsRecorder.Windows.Application.VirtualMic;
 #pragma warning disable CA1416
 
 /// <summary>
-/// Per-run broker address and unguessable proof. The proof never has a string
-/// representation, is not persisted, and is discarded when the broker stops.
+/// Per-run broker address and unguessable proof. The proof is never persisted
+/// and is transferred to the child broker only through redirected standard
+/// input, never through command-line arguments or logs.
 /// </summary>
 public sealed class VirtualMicPcmBrokerSession
 {
@@ -29,6 +30,8 @@ public sealed class VirtualMicPcmBrokerSession
 
     internal ReadOnlySpan<byte> CapabilityToken => capabilityToken;
 
+    internal byte[] ExportCapabilityToken() => capabilityToken.ToArray();
+
     public static VirtualMicPcmBrokerSession Create(VirtualMicTrustedEndpointIdentity identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
@@ -42,6 +45,22 @@ public sealed class VirtualMicPcmBrokerSession
             $"TeamsRecorder.VirtualMic.Pcm.v1.{Guid.NewGuid():N}",
             identity,
             token);
+    }
+
+    internal static VirtualMicPcmBrokerSession Import(
+        string pipeName,
+        VirtualMicTrustedEndpointIdentity identity,
+        ReadOnlySpan<byte> capabilityToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
+        ArgumentNullException.ThrowIfNull(identity);
+        if (pipeName.Length > 200 || pipeName.Any(char.IsControl) || !identity.IsWellFormed ||
+            capabilityToken.Length != VirtualMicPcmProtocol.CapabilityTokenBytes)
+        {
+            throw new ArgumentException("The broker session transport is malformed.");
+        }
+
+        return new(pipeName, identity, capabilityToken.ToArray());
     }
 }
 
@@ -101,7 +120,8 @@ public sealed class VirtualMicPcmBroker : IAsyncDisposable, IDisposable
         {
             lock (gate)
             {
-                return lifetime is not null && !lifetime.IsCancellationRequested;
+                return lifetime is not null && !lifetime.IsCancellationRequested &&
+                    worker is { IsCompleted: false };
             }
         }
     }

@@ -30,6 +30,9 @@
     <ProjectReference Include="..\Recorder.AsrWorker\Recorder.AsrWorker.csproj"
                       ReferenceOutputAssembly="false"
                       AdditionalProperties="RuntimeIdentifier=win-x64;SelfContained=true" />
+    <ProjectReference Include="..\Recorder.VirtualMicBroker\Recorder.VirtualMicBroker.csproj"
+                      ReferenceOutputAssembly="false"
+                      AdditionalProperties="RuntimeIdentifier=win-x64;SelfContained=true;EnableTestSignedVirtualMicPreview=$(EnableTestSignedVirtualMicPreview)" />
 
     <Content Include="Assets\SplashScreen.scale-200.png" />
     <Content Include="Assets\LockScreenLogo.scale-200.png" />
@@ -51,6 +54,8 @@
     <!-- Must be absolute because this value is passed into the worker project
          through MSBuild, whose project directory is different from WinUI's. -->
     <AsrWorkerPublishDirectory>$(MSBuildProjectDirectory)\obj\asr-worker\$(Configuration)\</AsrWorkerPublishDirectory>
+    <VirtualMicBrokerProjectPath>$(MSBuildThisFileDirectory)..\Recorder.VirtualMicBroker\Recorder.VirtualMicBroker.csproj</VirtualMicBrokerProjectPath>
+    <VirtualMicBrokerPublishDirectory>$(MSBuildProjectDirectory)\obj\virtual-mic-broker\$(Configuration)\</VirtualMicBrokerPublishDirectory>
   </PropertyGroup>
 
   <ItemGroup>
@@ -85,6 +90,34 @@
   <Target Name="RequireNativeBridge" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
     <Error Condition="!Exists('$(NativeBridgePath)')"
            Text="Recorder.NativeBridge.dll is missing for $(Configuration). Build windows/native with the matching x64 preset before building Recorder.WinUI." />
+  </Target>
+
+  <Target Name="PublishVirtualMicBroker"
+          BeforeTargets="CopyFilesToOutputDirectory;CopyFilesToPublishDirectory"
+          Condition="'$(Configuration)' == 'Debug' and '$(EnableTestSignedVirtualMicPreview)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+    <MSBuild Projects="$(VirtualMicBrokerProjectPath)"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true;PublishTrimmed=false;PublishReadyToRun=false;EnableTestSignedVirtualMicPreview=true;PublishDir=$(VirtualMicBrokerPublishDirectory);RestoreIgnoreFailedSources=true" />
+    <Error Condition="!Exists('$(VirtualMicBrokerPublishDirectory)Recorder.VirtualMicBroker.exe')"
+           Text="Recorder.VirtualMicBroker.exe was not produced for the explicit test-signed preview." />
+  </Target>
+
+  <Target Name="CopyVirtualMicBrokerToOutput"
+          AfterTargets="CopyFilesToOutputDirectory"
+          DependsOnTargets="PublishVirtualMicBroker"
+          Condition="'$(Configuration)' == 'Debug' and '$(EnableTestSignedVirtualMicPreview)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+    <Copy SourceFiles="$(VirtualMicBrokerPublishDirectory)Recorder.VirtualMicBroker.exe"
+          DestinationFiles="$(OutDir)Recorder.VirtualMicBroker.exe"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyVirtualMicBrokerToPublish"
+          AfterTargets="CopyFilesToPublishDirectory"
+          DependsOnTargets="PublishVirtualMicBroker"
+          Condition="'$(Configuration)' == 'Debug' and '$(EnableTestSignedVirtualMicPreview)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+    <Copy SourceFiles="$(VirtualMicBrokerPublishDirectory)Recorder.VirtualMicBroker.exe"
+          DestinationFiles="$(PublishDir)Recorder.VirtualMicBroker.exe"
+          SkipUnchangedFiles="true" />
   </Target>
 
   <!-- Media Foundation's synchronous source-reader calls are intentionally

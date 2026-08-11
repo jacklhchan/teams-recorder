@@ -13,12 +13,16 @@ public sealed class NativeRecorderInteropException : Exception
     }
 }
 
-public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeSelectedAudioRecorderBridge, INativeSelectedWindowAvRecorderBridge, INativeDynamicWindowVideoRecorderBridge, INativeTeamsRenderEndpointProbe
+public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeMicrophonePcmSource, INativeSelectedAudioRecorderBridge, INativeSelectedWindowAvRecorderBridge, INativeDynamicWindowVideoRecorderBridge, INativeTeamsRenderEndpointProbe
 {
-    private const string RequiredAbiVersion = "0.9.0";
+    private const string RequiredAbiVersion = "0.10.0";
     private readonly object gate = new();
     private readonly NativeBridgeHandle handle;
+    private readonly NativeMicrophonePcmCallback nativeMicrophonePcmCallback;
+    private GCHandle nativeMicrophonePcmContext;
     private bool disposed;
+
+    public event EventHandler<NativeMicrophonePcmFrameEventArgs>? MicrophonePcmFrameAvailable;
 
     public NativeRecorderBridge()
     {
@@ -39,6 +43,19 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         }
 
         handle = NativeBridgeHandle.FromOwned(nativeHandle);
+        nativeMicrophonePcmCallback = OnNativeMicrophonePcm;
+        nativeMicrophonePcmContext = GCHandle.Alloc(this, GCHandleType.Normal);
+        var callbackResult = NativeMethods.SetMicrophonePcmCallback(
+            handle,
+            Marshal.GetFunctionPointerForDelegate(nativeMicrophonePcmCallback),
+            GCHandle.ToIntPtr(nativeMicrophonePcmContext));
+        if (callbackResult != NativeRecorderResult.Ok)
+        {
+            handle.Dispose();
+            nativeMicrophonePcmContext.Free();
+            throw new NativeRecorderInteropException(
+                "Registering the native microphone PCM callback failed.");
+        }
     }
 
     public NativeOperationResult Start(NativeRecordingRequest request)
@@ -393,6 +410,43 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
 
             disposed = true;
             handle.Dispose();
+            if (nativeMicrophonePcmContext.IsAllocated)
+            {
+                nativeMicrophonePcmContext.Free();
+            }
+        }
+    }
+
+    private static void OnNativeMicrophonePcm(
+        IntPtr interleavedStereo,
+        uint frameCount,
+        uint sampleRate,
+        IntPtr context)
+    {
+        try
+        {
+            if (interleavedStereo == IntPtr.Zero || context == IntPtr.Zero ||
+                frameCount is 0 or > 4_800 || sampleRate != 48_000)
+            {
+                return;
+            }
+
+            if (GCHandle.FromIntPtr(context).Target is not NativeRecorderBridge bridge ||
+                bridge.disposed)
+            {
+                return;
+            }
+
+            var samples = new float[checked((int)frameCount * 2)];
+            Marshal.Copy(interleavedStereo, samples, 0, samples.Length);
+            bridge.MicrophonePcmFrameAvailable?.Invoke(
+                bridge,
+                new NativeMicrophonePcmFrameEventArgs(samples, sampleRate));
+        }
+        catch
+        {
+            // No exception may cross the native callback boundary. The
+            // recording path remains authoritative when the optional tap fails.
         }
     }
 
@@ -416,7 +470,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         if (!Version.TryParse(version, out var parsedVersion) ||
             parsedVersion is null ||
             parsedVersion.Major != 0 ||
-            parsedVersion.CompareTo(new Version(0, 9)) < 0)
+            parsedVersion.CompareTo(new Version(0, 10)) < 0)
         {
             throw new NativeRecorderInteropException(
                 $"Recorder.NativeBridge {RequiredAbiVersion} or newer is required.");
@@ -804,6 +858,13 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
             NativeBridgeHandle bridge,
             uint muted);
 
+        [LibraryImport(LibraryName, EntryPoint = "recorder_native_set_microphone_pcm_callback")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial NativeRecorderResult SetMicrophonePcmCallback(
+            NativeBridgeHandle bridge,
+            IntPtr callback,
+            IntPtr context);
+
         [LibraryImport(LibraryName, EntryPoint = "recorder_native_stop")]
         [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
         internal static partial NativeRecorderResult Stop(NativeBridgeHandle bridge);
@@ -858,4 +919,11 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
             out IntPtr endpointIdUtf8,
             out IntPtr friendlyNameUtf8);
     }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void NativeMicrophonePcmCallback(
+        IntPtr interleavedStereo,
+        uint frameCount,
+        uint sampleRate,
+        IntPtr context);
 }

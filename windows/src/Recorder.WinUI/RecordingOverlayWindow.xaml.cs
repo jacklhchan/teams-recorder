@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
 using Windows.Graphics;
 using WinRT.Interop;
 
@@ -81,17 +82,22 @@ public sealed partial class RecordingOverlayWindow : Window
             SourcesPanel.Visibility = isRecording || isFinalizing ? Visibility.Visible : Visibility.Collapsed;
             SystemAudioStatusText.Text = InputStatusText(presentation.SystemAudioStatus);
             MicrophoneScopeText.Text = presentation.IsRecorderMicrophoneMuted
-                ? "Recorder 麥克風已靜音；不會同步 Teams"
-                : "僅影響 Recorder，不會同步 Teams";
+                ? "Recorder 與虛擬麥克風已靜音"
+                : presentation.IsVirtualMicrophoneReady
+                    ? "同步輸入 Recorder 與虛擬麥克風"
+                    : "輸入 Recorder；虛擬麥克風未就緒";
             MicrophoneIcon.Glyph = presentation.IsRecorderMicrophoneMuted ? "\uE74F" : "\uE720";
-            SystemWaveform.Value = WaveformValue(presentation.SystemAudioStatus);
-            MicrophoneWaveform.Value = presentation.IsRecorderMicrophoneMuted ? 0 : WaveformValue(presentation.MicrophoneStatus);
+            SystemWaveform.Value = presentation.SystemAudioLevelPercent;
+            MicrophoneWaveform.Value = presentation.IsRecorderMicrophoneMuted ? 0 : presentation.MicrophoneLevelPercent;
+            ToolTipService.SetToolTip(MicrophoneScopeText, presentation.VirtualMicrophoneStatus);
             MicrophoneMuteButton.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
             MicrophoneMuteButton.IsEnabled = isRecording && presentation.MicrophoneStatus != RecordingOverlayInputStatus.Disconnected;
             MicrophoneMuteButton.Content = presentation.IsRecorderMicrophoneMuted ? "取消靜音" : "靜音";
             AutomationProperties.SetName(
                 MicrophoneMuteButton,
-                presentation.IsRecorderMicrophoneMuted ? "取消 Recorder 麥克風靜音" : "將 Recorder 麥克風靜音");
+                presentation.IsRecorderMicrophoneMuted
+                    ? "取消 Recorder 與虛擬麥克風靜音"
+                    : "將 Recorder 與虛擬麥克風靜音");
 
             // Finalizing is deliberately inert: it is neither dismissible nor
             // able to change the active A/V target while the file is written.
@@ -208,13 +214,6 @@ public sealed partial class RecordingOverlayWindow : Window
         RecordingOverlayInputStatus.Muted => "已靜音",
         RecordingOverlayInputStatus.Disconnected => "已中斷",
         _ => "未知",
-    };
-
-    private static double WaveformValue(RecordingOverlayInputStatus status) => status switch
-    {
-        RecordingOverlayInputStatus.Signal => 62,
-        RecordingOverlayInputStatus.Quiet => 12,
-        _ => 0,
     };
 
     private void ApplyNoActivateStyle()

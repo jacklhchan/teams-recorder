@@ -18,7 +18,7 @@ if ([string]::IsNullOrWhiteSpace($Destination)) {
     $Destination = Join-Path $cacheRoot "Windows-driver-samples"
 }
 
-$resolvedDriverRoot = [IO.Path]::GetFullPath($driverRoot).TrimEnd('\\') + '\\'
+$resolvedDriverRoot = [IO.Path]::GetFullPath($driverRoot).TrimEnd('\') + '\'
 $resolvedDestination = [IO.Path]::GetFullPath($Destination)
 if (-not $resolvedDestination.StartsWith($resolvedDriverRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "-Destination must remain below '$driverRoot'; bootstrap never writes an arbitrary directory."

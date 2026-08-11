@@ -80,6 +80,13 @@
                                 <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding RecordingMicrophoneMuteText}" TextWrapping="Wrap" />
                             </StackPanel>
                         </Grid>
+                        <InfoBar
+                            AutomationProperties.AutomationId="SettingsVirtualMicrophoneStatus"
+                            IsClosable="False"
+                            IsOpen="True"
+                            Message="{Binding VirtualMicrophoneStatusText}"
+                            Severity="Informational"
+                            Title="虛擬麥克風預覽" />
                         <StackPanel Spacing="6">
                             <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="錄製來源" />
                             <ComboBox

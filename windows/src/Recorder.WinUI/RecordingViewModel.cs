@@ -16,6 +16,7 @@ using TeamsRecorder.Windows.Application.Library;
 using TeamsRecorder.Windows.Application.Settings;
 using TeamsRecorder.Windows.Application.Storage;
 using TeamsRecorder.Windows.Application.Transcription;
+using TeamsRecorder.Windows.Application.VirtualMic;
 using Windows.Media.Core;
 using Windows.Media.Playback;
 
@@ -42,6 +43,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     // and final publication in the Application layer.  This VM only maps that
     // state to WinUI properties and commands.
     private RecordingLifecycleService? recordingLifecycle;
+    private NativeRecorderBridge? nativeRecorderBridge;
+    private VirtualMicPublisherRuntime? virtualMicPublisher;
     private readonly IProcessCatalog processCatalog = new ProcessCatalog();
     private readonly IVideoCaptureTargetCatalog videoTargetCatalog = new WindowsVideoCaptureTargetCatalog();
     private RecordingLibraryService? libraryService;
@@ -132,6 +135,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         "Teams Recorder",
         "Diagnostics");
     private string diagnosticsExportStatusText = "診斷報告會儲存在本機的 Teams Recorder\\Diagnostics 資料夾。";
+    private string virtualMicrophoneStatusText = "虛擬麥克風預覽尚未初始化。";
     private string openAiApiBaseUrl = "https://api.openai.com/v1";
     private string openAiAsrModel = "gpt-4o-transcribe";
     private string openAiLlmModel = "gpt-5.6-terra";
@@ -375,7 +379,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             _ when snapshot.Stats.MicrophoneLevelRms > 0.0001f => RecordingOverlayInputStatus.Signal,
             _ => RecordingOverlayInputStatus.Quiet,
         },
-        IsRecorderMicrophoneMuted: IsRecordingMicrophoneMuted);
+        IsRecorderMicrophoneMuted: IsRecordingMicrophoneMuted,
+        SystemAudioLevelPercent: AudioLevelPercent(snapshot.Stats.PrimaryLevelRms),
+        MicrophoneLevelPercent: IsRecordingMicrophoneMuted
+            ? 0
+            : AudioLevelPercent(snapshot.Stats.MicrophoneLevelRms),
+        IsVirtualMicrophoneReady: virtualMicPublisher?.State == VirtualMicPublisherRuntimeState.Ready,
+        VirtualMicrophoneStatus: VirtualMicrophoneStatusText);
 
     public bool CanToggleTeamsWindowCapture =>
         snapshot.State == RecordingCoordinatorState.Recording &&
@@ -772,6 +782,18 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     {
         get => diagnosticsExportStatusText;
         private set => SetProperty(ref diagnosticsExportStatusText, value);
+    }
+
+    public string VirtualMicrophoneStatusText
+    {
+        get => virtualMicrophoneStatusText;
+        private set
+        {
+            if (SetProperty(ref virtualMicrophoneStatusText, value))
+            {
+                NotifyRecordingOverlayStateChanged();
+            }
+        }
     }
 
     /// <summary>
@@ -1540,12 +1562,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             StatusText = "正在初始化 AI 與播放服務…";
             await InitializeOpenAiProviderAsync();
             StatusText = "正在載入原生錄音 bridge…";
-            recordingLifecycle = new RecordingLifecycleService(new NativeRecorderBridge(), OutputFolder);
+            nativeRecorderBridge = new NativeRecorderBridge();
+            recordingLifecycle = new RecordingLifecycleService(nativeRecorderBridge, OutputFolder);
             recordingLifecycle.SnapshotChanged += OnSnapshotChanged;
             InitializeGlobalMuteHotKey();
             SetRecorderAvailable(true);
             StatusText = "正在整理 Windows 音訊裝置…";
             await RefreshEndpointsCoreAsync(announce: false);
+            await InitializeVirtualMicrophonePreviewAsync();
             if (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication)
             {
                 await RefreshProcessCatalogCoreAsync();
@@ -1567,6 +1591,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 recordingLifecycle.SnapshotChanged -= OnSnapshotChanged;
                 recordingLifecycle.Dispose();
                 recordingLifecycle = null;
+                nativeRecorderBridge = null;
             }
             DisposeGlobalMuteHotKey();
             SetRecorderAvailable(false);
@@ -1641,8 +1666,14 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             }
         }
 
+        if (virtualMicPublisher is not null)
+        {
+            await virtualMicPublisher.DisposeAsync();
+            virtualMicPublisher = null;
+        }
         recordingLifecycle = null;
         activeLifecycle?.Dispose();
+        nativeRecorderBridge = null;
         await DisposeLocalTeamsAutomationAsync();
         DisposeGlobalMuteHotKey();
         recorderMicrophoneMute.Changed -= OnInputMuteChanged;
@@ -1660,6 +1691,43 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         openAiProviderRepository = null;
         isOpenAiProviderInitialized = false;
         SetRecorderAvailable(false);
+    }
+
+    private async Task InitializeVirtualMicrophonePreviewAsync()
+    {
+        if (!VirtualMicPreviewBuildPolicy.IsTestSignedPreviewCompiled)
+        {
+            VirtualMicrophoneStatusText = "正式版本已安全停用 test-signed 虛擬麥克風。";
+            return;
+        }
+
+        var bridge = nativeRecorderBridge;
+        var lifecycle = recordingLifecycle;
+        if (bridge is null || lifecycle is null)
+        {
+            VirtualMicrophoneStatusText = "原生麥克風 PCM 來源尚未就緒。";
+            return;
+        }
+
+        try
+        {
+            var identity = await new VirtualMicTrustedEndpointStore().LoadAsync();
+            if (identity is null)
+            {
+                VirtualMicrophoneStatusText = "尚未配對 test-signed 虛擬麥克風端點。";
+                return;
+            }
+            var endpoints = await lifecycle.RefreshEndpointsAsync();
+            if (!endpoints.IsSuccess)
+                throw new InvalidOperationException(endpoints.Operation.Error ?? "無法列舉音訊端點。");
+            virtualMicPublisher = await VirtualMicPublisherRuntime.StartAsync(
+                bridge, identity, endpoints.Endpoints);
+            VirtualMicrophoneStatusText = "虛擬麥克風預覽已就緒；選取實體麥克風開始錄音後會即時發佈。";
+        }
+        catch (Exception error)
+        {
+            VirtualMicrophoneStatusText = $"虛擬麥克風不可用：{error.Message}";
+        }
     }
 
     private async Task InitializeLocalTeamsAutomationAsync()
@@ -3237,6 +3305,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
 
         snapshot = changed;
+        if (virtualMicPublisher is { State: VirtualMicPublisherRuntimeState.Unavailable } failedPublisher)
+        {
+            VirtualMicrophoneStatusText = string.IsNullOrWhiteSpace(failedPublisher.FailureReason)
+                ? "虛擬麥克風在錄音期間中斷；本機錄音會繼續。"
+                : $"虛擬麥克風在錄音期間中斷：{failedPublisher.FailureReason}";
+        }
         NotifyRecordingOverlayStateChanged();
         RefreshElapsed();
         if (changed.State == RecordingCoordinatorState.Recording)
@@ -3315,6 +3389,19 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         LiveAudioHealthStatus.Recovered => "\uE73E",
         _ => "\uE946",
     };
+
+    private static double AudioLevelPercent(float rms)
+    {
+        if (!float.IsFinite(rms) || rms <= 0.000001f)
+        {
+            return 0;
+        }
+
+        // A logarithmic meter keeps normal speech visible while preserving a
+        // true zero for silence. The overlay covers the useful -60..0 dBFS range.
+        var decibels = 20d * Math.Log10(rms);
+        return Math.Clamp((decibels + 60d) / 60d * 100d, 0d, 100d);
+    }
 
     private static Brush HealthBrush(LiveAudioHealthStatus status) => status switch
     {

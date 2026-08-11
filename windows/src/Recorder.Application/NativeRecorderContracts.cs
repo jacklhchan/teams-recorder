@@ -475,6 +475,26 @@ public interface INativeRecorderMicrophoneMuteControl
     NativeOperationResult SetMicrophoneMuted(bool muted);
 }
 
+public sealed class NativeMicrophonePcmFrameEventArgs(
+    float[] interleavedStereo,
+    uint sampleRate) : EventArgs
+{
+    public float[] InterleavedStereo { get; } = interleavedStereo ??
+        throw new ArgumentNullException(nameof(interleavedStereo));
+    public uint SampleRate { get; } = sampleRate;
+    public int FrameCount => InterleavedStereo.Length / 2;
+}
+
+/// <summary>
+/// Optional realtime tap for the selected physical microphone after native
+/// format normalization, timeline placement and recorder-local mute. Event
+/// handlers must only copy or enqueue; they run on the native mixer thread.
+/// </summary>
+public interface INativeMicrophonePcmSource
+{
+    event EventHandler<NativeMicrophonePcmFrameEventArgs>? MicrophonePcmFrameAvailable;
+}
+
 /// <summary>
 /// Optional additive capability for bridges that expose the selected-process
 /// M4A ABI. Callers that depend only on the original bridge remain source

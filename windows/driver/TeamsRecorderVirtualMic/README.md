@@ -1,10 +1,10 @@
 # Teams Recorder Virtual Microphone — test-signed preview scaffold
 
-This folder deliberately does **not** contain a kernel driver binary or a
-pretend WaveRT miniport. It defines the narrow, reviewable path for an
-opt-in, test-signed preview only. Release builds compile the application-side
-feature gate as disabled, and the normal installer must not include this
-package.
+This folder contains the reviewable kernel producer-ring source and a
+reproducible patch over a pinned Microsoft SysVAD commit. It deliberately does
+**not** contain a prebuilt or trusted kernel binary. The result remains an
+opt-in, test-signed preview only: Release builds compile the application-side
+feature gate as disabled, and the normal installer must not include it.
 
 ## Identity contract
 
@@ -25,7 +25,7 @@ installation. The application accepts a preview only when all of these hold:
 A display-name match by itself is explicitly insufficient, so a friendly-name
 spoof cannot enable audio routing.
 
-## Why this is a contract instead of a driver
+## Reproducible driver overlay
 
 The development environment currently has Windows SDK 10.0.26100 but not the
 Windows Driver Kit (WDK); in particular,
@@ -38,6 +38,12 @@ The pinned upstream source and the required patch/verification steps are recorde
 
 Run `scripts/Test-DriverPreflight.ps1` before attempting any driver build. It
 fails with a specific WDK error instead of falling back to the Windows SDK.
+
+On a WDK-equipped x64 test machine, `scripts/Build-TestSignedPreview.ps1`
+bootstraps the locked source, applies the capture-only endpoint/PCM/control
+overlay, and creates an unsigned package below `out/package`. Review the
+generated SysVAD diff and then use the separate signing script; the build
+script never trusts or installs the result.
 
 ## Test-signing safety boundary
 
@@ -75,6 +81,28 @@ The companion app code and its independent tests live under
 - a successful test-only current-user broker round trip;
 - Release compilation has the test driver disabled; and
 - missing WDK emits the deliberate preflight error.
+
+After a test-signed endpoint has been installed, pair the exact Core Audio
+capture endpoint ID for the current user (never copy only the friendly name):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\Pair-TestSignedPreview.ps1 `
+  -EndpointId '{0.0.1.00000000}.{WINDOWS-ALLOCATED-GUID}'
+```
+
+Build the app and its isolated broker only as the explicit Debug preview:
+
+```powershell
+dotnet build ..\..\src\Recorder.WinUI\Recorder.WinUI.csproj `
+  -c Debug -p:EnableTestSignedVirtualMicPreview=true
+```
+
+At runtime the native mixer publishes microphone-only 48 kHz stereo PCM after
+recorder-local mute. A bounded app queue sends it over a current-user pipe to
+`Recorder.VirtualMicBroker.exe`; only that process opens
+`\\.\TeamsRecorderVirtualMicControl`. Virtual-microphone failure never stops or
+changes the authoritative local recording.
 
 No result from those tests means a kernel driver was built, signed, trusted, or
 installed. Those claims require the WDK build and the hardware/HLK checks in

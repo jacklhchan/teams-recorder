@@ -12,6 +12,17 @@ enum RetentionPolicy: Equatable, Sendable {
     case enabled(eligibleClasses: Set<RetainableArtifactClass>, olderThanDays: Int)
 }
 
+private extension RetentionPolicy {
+    var isValid: Bool {
+        switch self {
+        case .disabled:
+            return true
+        case let .enabled(eligibleClasses, olderThanDays):
+            return !eligibleClasses.isEmpty && olderThanDays > 0
+        }
+    }
+}
+
 extension RetentionPolicy: Codable {
     private enum CodingKeys: String, CodingKey {
         case kind
@@ -106,7 +117,7 @@ struct RecordingDataLifecyclePolicyStore {
     }
 
     func save(_ policy: RecordingDataLifecyclePolicy) throws {
-        guard policy.isSupported else {
+        guard policy.isSupported, policy.retention.isValid else {
             throw RecordingDataLifecyclePolicyStoreError.unsupportedPolicy
         }
         defaults.set(try JSONEncoder().encode(policy), forKey: Self.defaultsKey)

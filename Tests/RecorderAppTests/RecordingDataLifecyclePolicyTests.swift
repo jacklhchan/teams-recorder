@@ -56,6 +56,26 @@ final class RecordingDataLifecyclePolicyTests: XCTestCase {
         XCTAssertEqual(store.load(), expected)
     }
 
+    func testSaveRejectsInvalidEnabledRetentionWithoutPersistingIt() {
+        let defaults = makeDefaults()
+        defer { clear(defaults) }
+        let store = RecordingDataLifecyclePolicyStore(defaults: defaults)
+        XCTAssertNoThrow(try store.save(.safeDefault))
+        let persistedBefore = defaults.data(forKey: RecordingDataLifecyclePolicyStore.defaultsKey)
+        let invalid = RecordingDataLifecyclePolicy(
+            retention: .enabled(eligibleClasses: [], olderThanDays: 0)
+        )
+
+        XCTAssertThrowsError(try store.save(invalid)) { error in
+            XCTAssertEqual(error as? RecordingDataLifecyclePolicyStoreError, .unsupportedPolicy)
+        }
+        XCTAssertEqual(
+            defaults.data(forKey: RecordingDataLifecyclePolicyStore.defaultsKey),
+            persistedBefore
+        )
+        XCTAssertEqual(store.load(), .safeDefault)
+    }
+
     private func makeDefaults() -> UserDefaults {
         UserDefaults(suiteName: "RecordingDataLifecyclePolicyTests.\(UUID().uuidString)")!
     }

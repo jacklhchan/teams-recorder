@@ -64,7 +64,7 @@ struct SafeRecordingDiagnostic: Codable, Equatable, Sendable {
     let errorCode: RecordingDiagnosticErrorCode
     let httpStatus: Int?
     let attemptCount: Int
-    let timestamp: Date
+    let timestamp: String
     let artifactClass: RecordingDiagnosticArtifactClass
     let byteCount: Int
 }
@@ -80,7 +80,7 @@ enum RecordingDiagnosticRedactor {
             errorCode: input.errorCode,
             httpStatus: input.httpStatus.flatMap { (100...599).contains($0) ? $0 : nil },
             attemptCount: min(max(0, input.attemptCount), SafeRecordingDiagnostic.maximumAttemptCount),
-            timestamp: input.timestamp,
+            timestamp: ISO8601DateFormatter().string(from: input.timestamp),
             artifactClass: input.artifactClass,
             byteCount: min(max(0, input.byteCount), SafeRecordingDiagnostic.maximumByteCount)
         )

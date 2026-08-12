@@ -29,6 +29,7 @@ final class RecordingDiagnosticRedactorTests: XCTestCase {
         XCTAssertEqual(object["httpStatus"] as? Int, 429)
         XCTAssertEqual(object["attemptCount"] as? Int, 2)
         XCTAssertEqual(object["byteCount"] as? Int, 1_024)
+        XCTAssertEqual(object["timestamp"] as? String, "2023-11-14T22:13:20Z")
     }
 
     func testRedactorDropsOutOfRangeOptionalValues() throws {
@@ -54,7 +55,7 @@ final class RecordingDiagnosticRedactorTests: XCTestCase {
         XCTAssertEqual(object["byteCount"] as? Int, 0)
     }
 
-    func testEncodedDiagnosticCannotContainSensitiveUnstructuredValues() throws {
+    func testEncodedDiagnosticSchemaHasNoUnstructuredStringOrBinaryFields() throws {
         let diagnostic = RecordingDiagnosticRedactor.redact(
             .init(
                 event: .transcriptionFailure,
@@ -70,12 +71,16 @@ final class RecordingDiagnosticRedactorTests: XCTestCase {
             )
         )
 
-        let encoded = String(data: try JSONEncoder().encode(diagnostic), encoding: .utf8)!
-
-        XCTAssertFalse(encoded.contains("sk-secret"))
-        XCTAssertFalse(encoded.contains("provider.example"))
-        XCTAssertFalse(encoded.contains("/Users/a"))
-        XCTAssertFalse(encoded.contains("private"))
+        let mirror = Mirror(reflecting: diagnostic)
+        let labels = Set(mirror.children.compactMap(\.label))
+        XCTAssertEqual(labels, [
+            "event", "schemaVersion", "component", "stage", "outcome",
+            "errorCode", "httpStatus", "attemptCount", "timestamp",
+            "artifactClass", "byteCount"
+        ])
+        XCTAssertFalse(mirror.children.contains { child in
+            child.value is Data || child.value is URL || child.value is Error
+        })
     }
 
     private func jsonObject(_ diagnostic: SafeRecordingDiagnostic) throws -> [String: Any] {

@@ -10,12 +10,39 @@ typealias RecordingMediaCoordinatorFactory = (
 ) throws -> RecordingMediaCoordinating
 typealias RecordingMetadataWriter = (RecordingSessionMetadata, RecordingPendingSession) throws -> Void
 
+enum MicrophoneSwitchOutcome: Equatable, Sendable {
+    case unchanged(currentUID: String?)
+    case switched(previousUID: String?, currentUID: String?)
+    case unavailable(requestedUID: String?, reason: MicrophoneSwitchUnavailableReason)
+    case failed(requestedUID: String?, message: String)
+    case superseded(requestedUID: String?)
+}
+
+enum MicrophoneSwitchUnavailableReason: Equatable, Sendable {
+    case unsupported
+    case notRecording
+    case deviceMissing
+    case firstFrameTimeout
+    case streamStopped
+}
+
+struct MicrophoneSwitchLifecycleToken: Equatable, Sendable {
+    let sourceSessionID: UUID
+    let recordingEpoch: UInt64
+    let generation: UInt64
+}
+
 protocol CaptureSourceProtocol: AnyObject {
     var screenVideoFormat: ScreenVideoFormat { get }
+    var supportsLiveMicrophoneSwitch: Bool { get }
     func refreshContent() async throws -> [CaptureApplication]
     func refreshTeamsWindows() async throws -> [TeamsWindowSnapshot]
     func reconnect(selection: ResolvedCaptureSelection) async throws
     func updateVideoTarget(_ target: TeamsWindowIdentity?) async throws -> CaptureFilterRevision
+    func switchMicrophone(
+        to microphoneUID: String?,
+        lifecycle: MicrophoneSwitchLifecycleToken
+    ) async -> MicrophoneSwitchOutcome
     func start(
         selection: ResolvedCaptureSelection,
         microphoneUID: String?,
@@ -24,6 +51,17 @@ protocol CaptureSourceProtocol: AnyObject {
         onEvent: @escaping (CaptureEvent) -> Void
     ) async throws
     func stop() async
+}
+
+extension CaptureSourceProtocol {
+    var supportsLiveMicrophoneSwitch: Bool { false }
+
+    func switchMicrophone(
+        to microphoneUID: String?,
+        lifecycle: MicrophoneSwitchLifecycleToken
+    ) async -> MicrophoneSwitchOutcome {
+        .unavailable(requestedUID: microphoneUID, reason: .unsupported)
+    }
 }
 
 extension ScreenCaptureSource: CaptureSourceProtocol {}
@@ -100,6 +138,7 @@ final class RecordingEngine: ObservableObject {
     private var sourceSessionID: UUID?
     private var recordingEpoch: UInt64?
     private var nextRecordingEpoch: UInt64 = 0
+    private var microphoneSwitchGeneration: UInt64 = 0
     private var activeSelection: ResolvedCaptureSelection?
     private var activeMicrophoneUID: String?
     private var isStopping = false
@@ -180,6 +219,42 @@ final class RecordingEngine: ObservableObject {
             startedAt: startedAt,
             microphoneUID: activeMicrophoneUID
         )
+    }
+
+    func switchMicrophone(to microphoneUID: String?) async -> MicrophoneSwitchOutcome {
+        if activeMicrophoneUID == microphoneUID {
+            return .unchanged(currentUID: activeMicrophoneUID)
+        }
+        guard isRecording,
+              !isStopping,
+              let sourceSessionID,
+              let recordingEpoch else {
+            return .unavailable(requestedUID: microphoneUID, reason: .notRecording)
+        }
+        guard captureSource.supportsLiveMicrophoneSwitch else {
+            return .unavailable(requestedUID: microphoneUID, reason: .unsupported)
+        }
+
+        microphoneSwitchGeneration &+= 1
+        let token = MicrophoneSwitchLifecycleToken(
+            sourceSessionID: sourceSessionID,
+            recordingEpoch: recordingEpoch,
+            generation: microphoneSwitchGeneration
+        )
+        let outcome = await captureSource.switchMicrophone(to: microphoneUID, lifecycle: token)
+        guard token.generation == microphoneSwitchGeneration,
+              self.sourceSessionID == token.sourceSessionID,
+              self.recordingEpoch == token.recordingEpoch,
+              isRecording,
+              !isStopping else {
+            return .superseded(requestedUID: microphoneUID)
+        }
+        if case .switched = outcome {
+            let previousUID = activeMicrophoneUID
+            activeMicrophoneUID = microphoneUID
+            return .switched(previousUID: previousUID, currentUID: microphoneUID)
+        }
+        return outcome
     }
 
     func startMonitoring(
@@ -490,6 +565,7 @@ final class RecordingEngine: ObservableObject {
             return nil
         }
         isStopping = true
+        microphoneSwitchGeneration &+= 1
         screenToggleGeneration &+= 1
         let recordingFolder = outputFolder
         let recordingSession = admittedPendingSession

@@ -5,6 +5,84 @@ import XCTest
 
 @MainActor
 final class RecordingEngineStateTests: XCTestCase {
+    func testLiveMicrophoneSwitchSuccessPreservesRecordingContinuityAndDoesNotRestartSource() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: "A", baseFolder: temporaryFolder())
+        let before = engine.continuitySnapshot
+        engine.toggleMicMute()
+
+        let outcome = await engine.switchMicrophone(to: "B")
+
+        XCTAssertEqual(outcome, .switched(previousUID: "A", currentUID: "B"))
+        XCTAssertEqual(engine.continuitySnapshot.sourceSessionID, before.sourceSessionID)
+        XCTAssertEqual(engine.continuitySnapshot.recordingEpoch, before.recordingEpoch)
+        XCTAssertEqual(engine.continuitySnapshot.recordingURL, before.recordingURL)
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(source.stopCount, 0)
+        XCTAssertEqual(coordinator.finishCount, 0)
+        XCTAssertTrue(engine.micMuted)
+        XCTAssertEqual(engine.continuitySnapshot.microphoneUID, "B")
+        _ = await engine.stop()
+    }
+
+    func testLiveMicrophoneSwitchFailureLeavesOldActiveUIDAndRecordingRunning() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: "A", baseFolder: temporaryFolder())
+        source.microphoneSwitchOutcome = .failed(requestedUID: "B", message: "configuration failed")
+
+        let outcome = await engine.switchMicrophone(to: "B")
+
+        XCTAssertEqual(outcome, .failed(requestedUID: "B", message: "configuration failed"))
+        XCTAssertEqual(engine.continuitySnapshot.microphoneUID, "A")
+        XCTAssertTrue(engine.isRecording)
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(source.stopCount, 0)
+        XCTAssertEqual(coordinator.finishCount, 0)
+        _ = await engine.stop()
+    }
+
+    func testOverlappingLiveMicrophoneSwitchAcceptsOnlyLatestGeneration() async throws {
+        let (engine, _, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: "A", baseFolder: temporaryFolder())
+        source.pauseMicrophoneSwitch = true
+
+        let first = Task { await engine.switchMicrophone(to: "B") }
+        await settle()
+        let second = Task { await engine.switchMicrophone(to: "C") }
+        await settle()
+        source.completeNextMicrophoneSwitch(with: .switched(previousUID: "A", currentUID: "B"))
+        await settle()
+        source.completeNextMicrophoneSwitch(with: .switched(previousUID: "A", currentUID: "C"))
+
+        let firstOutcome = await first.value
+        let secondOutcome = await second.value
+        XCTAssertEqual(firstOutcome, .superseded(requestedUID: "B"))
+        XCTAssertEqual(secondOutcome, .switched(previousUID: "A", currentUID: "C"))
+        XCTAssertEqual(engine.continuitySnapshot.microphoneUID, "C")
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(source.stopCount, 0)
+        _ = await engine.stop()
+    }
+
+    func testStopWinsOverLateLiveMicrophoneSwitchCompletion() async throws {
+        let (engine, coordinator, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: "A", baseFolder: temporaryFolder())
+        source.pauseMicrophoneSwitch = true
+        let switchTask = Task { await engine.switchMicrophone(to: "B") }
+        await settle()
+
+        let stopTask = Task { await engine.stop() }
+        await settle()
+        source.completeNextMicrophoneSwitch(with: .switched(previousUID: "A", currentUID: "B"))
+        _ = await stopTask.value
+
+        let switchOutcome = await switchTask.value
+        XCTAssertEqual(switchOutcome, .superseded(requestedUID: "B"))
+        XCTAssertFalse(engine.isRecording)
+        XCTAssertNil(engine.continuitySnapshot.microphoneUID)
+        XCTAssertEqual(coordinator.finishCount, 1)
+    }
+
     // Coordinator-path regression matrix. Every test emits a real frame or event.
     func testNewRecordingSessionFolderIsOwnerOnly() async throws {
         let (engine, _, _) = coordinatorEngine()
@@ -1931,6 +2009,7 @@ private final class RecordingResultCapture: @unchecked Sendable {
 
 private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendable {
     let screenVideoFormat = ScreenVideoFormat(width: 1_600, height: 900, pixelFormat: kCVPixelFormatType_32BGRA)
+    var supportsLiveMicrophoneSwitch = true
     private let streamIdentity = UUID()
     private let callbackLock = NSLock()
     private var onAudio: ((AudioFrameBlock) -> Void)?
@@ -1958,6 +2037,8 @@ private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendabl
     var reconnectError: Error?
     var pauseStop = false
     var pauseVideoTargetUpdates = false
+    var pauseMicrophoneSwitch = false
+    var microphoneSwitchOutcome: MicrophoneSwitchOutcome?
     var windows: [TeamsWindowSnapshot] = []
     var teamsWindowRefreshError: Error?
     var videoTargetErrors: [Int: Error] = [:]
@@ -1965,6 +2046,7 @@ private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendabl
     private var reconnectContinuations: [CheckedContinuation<Void, Never>] = []
     private var stopContinuation: CheckedContinuation<Void, Never>?
     private var videoTargetContinuations: [CheckedContinuation<CaptureFilterRevision, Error>] = []
+    private var microphoneSwitchContinuations: [CheckedContinuation<MicrophoneSwitchOutcome, Never>] = []
 
     func refreshContent() async throws -> [CaptureApplication] { [] }
 
@@ -1984,6 +2066,26 @@ private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendabl
         }
         if let error = videoTargetErrors[videoTargets.count] { throw error }
         return revision
+    }
+
+    func switchMicrophone(
+        to microphoneUID: String?,
+        lifecycle: MicrophoneSwitchLifecycleToken
+    ) async -> MicrophoneSwitchOutcome {
+        if pauseMicrophoneSwitch {
+            return await withCheckedContinuation { continuation in
+                microphoneSwitchContinuations.append(continuation)
+            }
+        }
+        return microphoneSwitchOutcome ?? .switched(
+            previousUID: startedMicrophoneUID,
+            currentUID: microphoneUID
+        )
+    }
+
+    func completeNextMicrophoneSwitch(with outcome: MicrophoneSwitchOutcome) {
+        guard !microphoneSwitchContinuations.isEmpty else { return }
+        microphoneSwitchContinuations.removeFirst().resume(returning: outcome)
     }
 
     func reconnect(selection: ResolvedCaptureSelection) async throws {

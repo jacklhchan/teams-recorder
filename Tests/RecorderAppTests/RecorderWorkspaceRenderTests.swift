@@ -714,6 +714,44 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.settings"))
     }
 
+    func testHealthDestinationRendersEmptyThenExistingLastHealthReport() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.health)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier("recorder.destination.health")
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.destination.health"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.health.empty"))
+        XCTAssertTrue(host.containsText("No completed recording health report yet."))
+        XCTAssertTrue(host.containsText("Finish a recording to review capture results."))
+
+        fixture.model.lastHealthReport = .init(
+            systemSignalSeen: true,
+            micSignalSeen: true,
+            droppedBuffers: 2
+        )
+        host.render()
+
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier("recorder.health.status")
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.health.status"))
+        XCTAssertTrue(host.containsText("Capture needs attention"))
+        XCTAssertTrue(host.containsText("System audio captured"))
+        XCTAssertTrue(host.containsText("Mic captured"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(
+            "recorder.health.counter.dropped-buffers"
+        ))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.health.empty"))
+        XCTAssertEqual(host.navigationState.selection, .health)
+    }
+
     func testMinimumWorkspaceRepeatsEveryDestinationWithoutPendingRoute() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(

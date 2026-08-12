@@ -9,6 +9,13 @@ final class RecorderNavigationTests: XCTestCase {
         XCTAssertNil(state.pendingDestination)
     }
 
+    func testCleanNavigationSelectsHealthAndClearsPending() {
+        var state = RecorderNavigationState(selection: .record)
+        state.select(.health, hasUnsavedChanges: false)
+        XCTAssertEqual(state.selection, .health)
+        XCTAssertNil(state.pendingDestination)
+    }
+
     func testDirtyNavigationRequestsConfirmationWithoutChangingSelection() {
         var state = RecorderNavigationState(selection: .recordings)
         state.select(.settings, hasUnsavedChanges: true)

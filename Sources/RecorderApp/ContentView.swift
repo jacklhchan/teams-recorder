@@ -139,6 +139,8 @@ struct RecorderWorkspaceContent: View {
             }
         case .recordings:
             RecordingsLibraryView(model: model)
+        case .health:
+            RecordingHealthView(model: model)
         case .settings:
             RecorderSettingsView(model: model)
         }

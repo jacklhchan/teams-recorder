@@ -4,6 +4,7 @@ import SwiftUI
 enum RecorderDestination: String, CaseIterable, Identifiable, Hashable {
     case record
     case recordings
+    case health
     case settings
 
     var id: Self { self }
@@ -14,6 +15,7 @@ enum RecorderDestination: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .record: "record.circle"
         case .recordings: "list.bullet.rectangle"
+        case .health: "waveform.path.ecg"
         case .settings: "gearshape"
         }
     }

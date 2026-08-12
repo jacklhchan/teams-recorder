@@ -420,6 +420,7 @@ void OverlayStatesAreComplete()
     {
         "ElapsedText", "SystemWaveform", "MicrophoneWaveform",
         "RecorderMicrophoneMuteButton", "TeamsWindowCaptureToggle", "StatusDetailText",
+        "RecordingOverlayLifecycleActionButton",
     })
     {
         _ = SingleByAutomationIdOrName(overlay, automationId);
@@ -439,6 +440,10 @@ void OverlayStatesAreComplete()
     Contains("SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false)", overlayCode, "Overlay must not expose a standard close title bar.");
     Contains("args.Cancel = true", overlayCode, "Overlay close must be rejected until controlled shutdown.");
     Contains("ActionButton.IsEnabled = !isFinalizing", overlayCode, "Finalizing must lock the overlay action.");
+    Contains("ActionButton.Content = isRecording ? \"停止錄音\"", overlayCode,
+        "The active overlay must expose an explicit stop-recording action.");
+    Contains("presentation.Mode == RecordingOverlayMode.Recording", overlayCode,
+        "The lifecycle action must route by state rather than localized button text.");
     Contains("TeamsWindowCaptureToggle.IsEnabled = isRecording", overlayCode, "Capture toggle must be editable only while active.");
 }
 

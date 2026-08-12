@@ -110,7 +110,7 @@
                             AutomationProperties.AutomationId="SettingsEnableLocalTeamsHeuristicCheckBox"
                             Content="啟用本機 Teams 自動錄音推測"
                             IsChecked="{Binding IsLocalHeuristicAutoStartEnabled, Mode=TwoWay}" />
-                        <InfoBar IsClosable="False" IsOpen="True" Message="必須在真實 Teams 會議中驗證。偵測失敗或會議靜音不會自動停止錄音。" Severity="Informational" Title="Preview 限制" />
+                        <InfoBar IsClosable="False" IsOpen="True" Message="必須在真實 Teams 會議中驗證。離會後會以連續 3 次健康的會議控制缺失判定停止；偵測失敗或單純靜音不會停止。" Severity="Informational" Title="Preview 限制" />
                         <TextBlock Text="{Binding TeamsLocalAutomaticRecordingStatusText}" TextWrapping="Wrap" />
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <Button AutomationProperties.AutomationId="SettingsEnableTeamsAutomaticRecordingButton" Command="{Binding EnableTeamsAutomaticRecordingCommand}" Content="啟用自動錄音" />

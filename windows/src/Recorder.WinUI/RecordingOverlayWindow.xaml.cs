@@ -28,6 +28,7 @@ public sealed partial class RecordingOverlayWindow : Window
     private bool indicatorVisible = true;
     private bool isClosing;
     private bool isApplyingPresentation;
+    private RecordingOverlayMode currentMode = RecordingOverlayMode.Countdown;
 
     public RecordingOverlayWindow()
     {
@@ -60,6 +61,7 @@ public sealed partial class RecordingOverlayWindow : Window
 
     internal void ApplyPresentation(RecordingOverlayPresentation presentation)
     {
+        currentMode = presentation.Mode;
         var isRecording = presentation.Mode == RecordingOverlayMode.Recording;
         var isFinalizing = presentation.Mode == RecordingOverlayMode.Finalizing;
         isApplyingPresentation = true;
@@ -75,7 +77,7 @@ public sealed partial class RecordingOverlayWindow : Window
             ElapsedText.Text = presentation.Elapsed is { } elapsed ? elapsed.ToString(@"hh\:mm\:ss") : string.Empty;
             ActionButton.Visibility = isFinalizing ? Visibility.Collapsed : Visibility.Visible;
             ActionButton.IsEnabled = !isFinalizing;
-            ActionButton.Content = isRecording ? "停止" : "取消";
+            ActionButton.Content = isRecording ? "停止錄音" : "取消";
             ActionButton.AccessKey = isRecording ? "停止錄音" : "取消自動錄音";
             AutomationProperties.SetName(ActionButton, isRecording ? "停止錄音" : "取消自動錄音");
 
@@ -159,13 +161,20 @@ public sealed partial class RecordingOverlayWindow : Window
 
     private void OnActionButtonClick(object sender, RoutedEventArgs e)
     {
-        if (ActionButton.Content is string action && action == "停止")
+        if (currentMode == RecordingOverlayMode.Recording)
         {
+            // Disable synchronously so a double click cannot enqueue two safe
+            // finalization requests before the ViewModel reaches Stopping.
+            ActionButton.IsEnabled = false;
             StopRequested?.Invoke(this, EventArgs.Empty);
             return;
         }
 
-        CancelRequested?.Invoke(this, EventArgs.Empty);
+        if (currentMode == RecordingOverlayMode.Countdown)
+        {
+            ActionButton.IsEnabled = false;
+            CancelRequested?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     private void OnMicrophoneMuteButtonClick(object sender, RoutedEventArgs e)

@@ -607,7 +607,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 TeamsAutoMeetingState.StartCountdown(var seconds) => $"偵測到可能的 Teams 會議；{seconds} 秒後開始錄音。",
                 TeamsAutoMeetingState.Starting => "正在建立 crash-safe MP4 工作階段。",
                 TeamsAutoMeetingState.AutomaticRecording => "自動錄音進行中；會議沉默不會令錄音停止。",
-                TeamsAutoMeetingState.StopCountdown(var seconds) => $"Teams 程序持續不存在；{seconds} 秒後停止自動錄音。",
+                TeamsAutoMeetingState.StopCountdown(var seconds) => $"已持續確認 Teams 會議控制消失；{seconds} 秒後停止自動錄音。",
                 TeamsAutoMeetingState.Stopping => "正在停止並保存自動錄音。",
                 TeamsAutoMeetingState.SuppressedUntilMeetingEnd => "本次會議已由使用者停止；重新偵測會議前不會再開始。",
                 TeamsAutoMeetingState.StartBlocked(var reason) => $"自動錄音未開始：{reason}",

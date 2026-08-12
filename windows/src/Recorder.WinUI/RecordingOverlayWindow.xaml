@@ -35,7 +35,12 @@
                 </StackPanel>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                     <TextBlock x:Name="ElapsedText" AutomationProperties.AutomationId="ElapsedText" FontFamily="Consolas" FontSize="13" VerticalAlignment="Center" Visibility="Collapsed" />
-                    <Button x:Name="ActionButton" MinWidth="76" Click="OnActionButtonClick" Content="取消" />
+                    <Button
+                        x:Name="ActionButton"
+                        MinWidth="96"
+                        AutomationProperties.AutomationId="RecordingOverlayLifecycleActionButton"
+                        Click="OnActionButtonClick"
+                        Content="取消" />
                 </StackPanel>
             </Grid>
 

@@ -26,6 +26,8 @@ var tests = new (string Name, Action Run)[]
     ("test recording stops exactly once after its scheduled delay", TestRecordingStopsExactlyOnce)
     ,("local Teams heuristic starts after bounded audio evidence and ignores silence/probe faults", TeamsLocalHeuristicTests.StartsAfterThreeActiveSamplesAndNeverStopsForSilenceOrProbeFailure)
     ,("local Teams heuristic stops only after bounded missing-process evidence", TeamsLocalHeuristicTests.StopsOnlyAfterThreeHealthyMissingTeamsProcessSamples)
+    ,("local Teams heuristic stops after confirmed meeting UI disappears", TeamsLocalHeuristicTests.StopsAfterThreeConfirmedMeetingSurfaceAbsences)
+    ,("local Teams meeting UI stop is armed and fail-closed", TeamsLocalHeuristicTests.MeetingSurfaceStopRequiresPriorPresenceAndHealthyConsecutiveAbsence)
     ,("recording start request validates sources and optional microphone endpoints", RecordingStartRequestTests.ValidatesSystemAndSelectedProcessWithOptionalMicrophone)
     ,("recording start request rejects ambiguous source selections", RecordingStartRequestTests.RejectsAmbiguousOrIncompatibleSelections)
     ,("process capture selection requires its full current identity", RecordingStartRequestTests.SelectsProcessOnlyWhenItsFullIdentityIsCurrent)

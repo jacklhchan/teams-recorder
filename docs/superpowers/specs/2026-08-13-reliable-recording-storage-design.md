@@ -119,11 +119,19 @@ Every new recording is written beneath:
 The root and newly created session content use owner-only permissions. A
 `RecordingPendingStore` owns this root and opens direct session directories
 relative to a trusted root descriptor with `O_DIRECTORY | O_NOFOLLOW`. It
-returns a retained directory handle; publishers enumerate, recover, read, and
-hash source content relative to that descriptor rather than reopening a path.
-Symbolic links, aliases that resolve outside the root, unexpected file types,
-path traversal, and replacement of the visible directory name after admission
-are rejected or remain unable to redirect the retained handle.
+returns a retained directory handle. After a session is finalized, admission,
+recovery, publication, and cleanup enumerate, read, hash, and remove source
+content relative to that descriptor rather than reopening a path. Symbolic
+links, aliases that resolve outside the root, unexpected file types, path
+traversal, and replacement of the visible directory name after admission are
+rejected or remain unable to redirect that retained-handle work.
+
+The active capture writer and its finalizer remain the existing URL-based
+AVFoundation pipeline. The pending root is therefore a local, app-owned,
+non-synchronized directory and must not be renamed, replaced, or mutated by
+another same-UID process while capture is active. Hostile same-UID mutation is
+outside this design's threat model; the descriptor guarantee starts with the
+finalized-session operations above.
 
 `AppModel` continues to expose the selected destination as `outputFolder` for
 the workspace and UI, but passes the pending root to `RecordingEngine.start`.
@@ -316,6 +324,10 @@ cloud or device matrix.
 12. A stale workspace fence does not publish obsolete Library state.
 13. Existing incomplete-session recovery, low-storage behavior, and Library
     mutation-gate tests remain green.
+14. A OneDrive destination outage does not affect active capture; it retains
+    the finalized local session for later publication. Focused acceptance does
+    not inject a same-UID pathname-replacement race against the active
+    URL-based AVFoundation writer.
 
 ### Manual staging acceptance
 

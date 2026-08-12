@@ -262,7 +262,14 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
     private func loadIfNeeded() -> Bool { guard !loaded else { return true }; do { items = try manifestStore.loadOrRebuild(from: pendingStore); loaded = true; persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }
     private func persist() -> Bool { do { try manifestStore.save(items); persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }
     private func current(_ candidate: UInt64) -> Bool { generation == candidate && !Task.isCancelled }
-    private func presentation(for items: [RecordingPublicationItem]) -> RecordingPublicationPresentation { let pending = items.filter { $0.state == .pending || $0.state == .publishing || ($0.state == .published && $0.failureCategory != "destinationUnavailable") }.count; let waiting = items.filter { $0.state == .waitingForDestination || ($0.state == .published && $0.failureCategory == "destinationUnavailable") }.count; let attention = items.filter { $0.state == .needsAttention }.count; let text = persistenceFailed ? "Publish failed" : attention > 0 ? "Needs attention" : waiting > 0 ? "Waiting for destination" : pending > 0 ? "Publishing" : "Up to date"; return .init(stateText: text, pendingCount: pending, waitingCount: waiting, needsAttentionCount: attention) }
+    private func presentation(for items: [RecordingPublicationItem]) -> RecordingPublicationPresentation {
+        let states = items.map { recoveryCenterItem(for: $0).state }
+        let pending = states.filter { $0 == .publishingOrPending }.count
+        let waiting = states.filter { $0 == .waitingForDestination }.count
+        let attention = states.filter { $0 == .needsAttention }.count
+        let text = persistenceFailed ? "Publish failed" : attention > 0 ? "Needs attention" : waiting > 0 ? "Waiting for destination" : pending > 0 ? "Publishing" : "Up to date"
+        return .init(stateText: text, pendingCount: pending, waitingCount: waiting, needsAttentionCount: attention)
+    }
     private func recoveryCenterItem(for item: RecordingPublicationItem) -> RecoveryCenterItem {
         let needsAttention = item.sourceIdentity == nil || item.sourceRootIdentity == nil || item.state == .needsAttention
         if needsAttention {

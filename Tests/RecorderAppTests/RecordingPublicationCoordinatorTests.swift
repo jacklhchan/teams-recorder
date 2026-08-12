@@ -50,10 +50,16 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
 
         coordinator.resume()
 
-        let item = try XCTUnwrap(coordinator.recoveryCenterSnapshot.items.first)
+        let snapshot = coordinator.recoveryCenterSnapshot
+        let item = try XCTUnwrap(snapshot.items.first)
         XCTAssertEqual(item.state, .needsAttention)
         XCTAssertEqual(item.safeStatusText, "This local recording needs attention before it can be published.")
         XCTAssertFalse(item.canRetry)
+        XCTAssertEqual(snapshot.presentation.pendingCount, 0)
+        XCTAssertEqual(snapshot.presentation.waitingCount, 0)
+        XCTAssertEqual(snapshot.presentation.needsAttentionCount, 1)
+        XCTAssertEqual(snapshot.presentation.stateText, "Needs attention")
+        XCTAssertEqual(coordinator.presentation, snapshot.presentation)
         XCTAssertTrue(fixture.sourceExists)
     }
 

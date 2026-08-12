@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.0.0",
+    [switch]$SkipNuGetAudit
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,9 +86,19 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.AsrWorke
     throw "Self-contained publish did not include Recorder.AsrWorker.exe."
 }
 
-& $dotnet restore $controlProject `
-    --runtime win-x64 `
-    --tl:off
+$restoreArguments = @(
+    "restore",
+    $controlProject,
+    "--runtime", "win-x64",
+    "--tl:off"
+)
+if ($SkipNuGetAudit) {
+    # Explicit offline escape hatch only. CI and normal setup builds retain
+    # NuGet's vulnerability audit; this flag prevents an unavailable advisory
+    # endpoint from blocking a build whose packages are already cached.
+    $restoreArguments += "--property:NuGetAudit=false"
+}
+& $dotnet @restoreArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Self-contained recorderctl restore failed with exit code $LASTEXITCODE."
 }

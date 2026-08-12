@@ -20,7 +20,7 @@ var tests = new (string Name, Action Run)[]
     ("shell exposes exactly four stable workspace routes", WorkspaceRoutesAreStable),
     ("record is the default workspace", RecordIsDefault),
     ("primary recording state and actions stay above the record scroller", PrimaryControlsStayAboveTheFold),
-    ("source and device controls occupy two explicit rows", SourceDeviceGridHasRows),
+    ("source, device, and screen controls occupy three explicit rows", SourceDeviceGridHasRows),
     ("main window is DPI-aware and enforces the dashboard minimum", MainWindowEnforcesMinimumSize),
     ("second launch redirects to the one primary window", AppEnforcesSingleInstance),
     ("existing view-model command surface remains wired", ExistingCommandsRemainWired),
@@ -131,7 +131,7 @@ void SourceDeviceGridHasRows()
     var grid = dashboard.Descendants(xaml + "Grid").Single(element =>
         element.Attribute(x + "Name")?.Value == "SourceDeviceGrid");
     var rows = grid.Element(xaml + "Grid.RowDefinitions")?.Elements(xaml + "RowDefinition").Count() ?? 0;
-    Equal(2, rows, "Source and device controls require two real rows to prevent overlap.");
+    Equal(3, rows, "Source, device, and screen controls require three real rows to prevent overlap.");
 }
 
 void MainWindowEnforcesMinimumSize()
@@ -311,12 +311,18 @@ void ControlStatusIsPrivate()
 
 void ControlsAreRoutedToTheirWorkspace()
 {
+    var record = WorkspaceDocument("RecordDashboardView.xaml");
+    foreach (var required in new[] { "RefreshTeamsWindowsCommand", "TeamsCaptureWindows", "SelectedVideoCaptureWindow", "ScreenCaptureTargetSelector", "ScreenCaptureRefreshButton" })
+        AssertDocumentContains(record, required);
+
     var recordings = WorkspaceDocument("RecordingLibraryView.xaml");
-    foreach (var binding in new[] { "PlayCommand", "PauseCommand", "StopPlaybackCommand", "SkipBackward15Command", "SkipForward15Command", "PlaybackPositionSeconds, Mode=TwoWay", "PlaybackVolume, Mode=TwoWay", "SelectedPlaybackRate, Mode=TwoWay", "IsVideoPlaybackStageVisible", "IsAudioPlaybackStageVisible" })
+    foreach (var binding in new[] { "PlayCommand", "PauseCommand", "StopPlaybackCommand", "SkipBackward15Command", "SkipForward15Command", "PlaybackPositionSeconds, Mode=TwoWay", "PlaybackVolume, Mode=TwoWay", "SelectedPlaybackRate, Mode=TwoWay", "IsVideoPlaybackStageVisible", "IsAudioPlaybackStageVisible", "PlaybackPlayButton", "PlaybackPauseButton", "PlaybackStopButton", "LibraryLoadingText" })
         AssertDocumentContains(recordings, binding);
     _ = recordings.Descendants().Single(element => element.Name.LocalName == "MediaPlayerElement");
     Contains("PlaybackVideoStage.SetMediaPlayer(player)", recordingLibraryCode,
         "Audio and video playback must use the in-app shared media player.");
+    Contains("verifiedVideoCapturePipeline: true", viewModelCode,
+        "The production Windows shell must opt into its bundled exact-window WGC pipeline.");
 
     var ai = WorkspaceDocument("AiWorkspaceView.xaml");
     foreach (var required in new[] { "CanStartOpenAiTranscription", "CanGenerateOpenAiSummary", "OnStartTranscriptionClick", "OnGenerateSummaryClick" })

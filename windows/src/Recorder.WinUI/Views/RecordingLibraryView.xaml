@@ -46,6 +46,10 @@
             <StackPanel Spacing="4">
                 <TextBlock Style="{StaticResource TitleTextBlockStyle}" Text="錄音庫" />
                 <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding LibrarySummaryText}" />
+                <TextBlock
+                    AutomationProperties.AutomationId="LibraryLoadingText"
+                    Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                    Text="{Binding LibraryLoadingText}" />
             </StackPanel>
             <CommandBar Grid.Column="1" Background="Transparent" ClosedDisplayMode="Compact" DefaultLabelPosition="Collapsed">
                 <AppBarButton AutomationProperties.Name="重新整理錄音庫" Command="{Binding RefreshLibraryCommand}" Icon="Refresh" Label="重新整理" />
@@ -177,9 +181,9 @@
                             </Grid>
                             <StackPanel HorizontalAlignment="Center" Orientation="Horizontal" Spacing="8">
                                 <Button Command="{Binding SkipBackward15Command}" Content="−15 秒" />
-                                <Button Command="{Binding PlayCommand}" Style="{StaticResource AccentButtonStyle}"><SymbolIcon Symbol="Play" /></Button>
-                                <Button Command="{Binding PauseCommand}"><SymbolIcon Symbol="Pause" /></Button>
-                                <Button Command="{Binding StopPlaybackCommand}"><SymbolIcon Symbol="Stop" /></Button>
+                                <Button AutomationProperties.AutomationId="PlaybackPlayButton" AutomationProperties.Name="播放" Command="{Binding PlayCommand}" Style="{StaticResource AccentButtonStyle}"><SymbolIcon Symbol="Play" /></Button>
+                                <Button AutomationProperties.AutomationId="PlaybackPauseButton" AutomationProperties.Name="暫停" Command="{Binding PauseCommand}"><SymbolIcon Symbol="Pause" /></Button>
+                                <Button AutomationProperties.AutomationId="PlaybackStopButton" AutomationProperties.Name="停止播放" Command="{Binding StopPlaybackCommand}"><SymbolIcon Symbol="Stop" /></Button>
                                 <Button Command="{Binding SkipForward15Command}" Content="+15 秒" />
                             </StackPanel>
                             <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding PlaybackText}" TextAlignment="Center" TextWrapping="Wrap" />

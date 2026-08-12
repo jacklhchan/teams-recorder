@@ -103,6 +103,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private StorageCapacityStatus? storageCapacity;
     private bool storageCanStart;
     private bool isBusy;
+    private bool isLibraryLoading;
     private bool isInitialized;
     private bool isInitializing;
     private bool isRecorderAvailable;
@@ -1209,9 +1210,29 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public string ResultText => lastResultText;
 
-    public string LibrarySummaryText => LibraryItems.Count == allLibraryItems.Count
-        ? $"{LibraryItems.Count} 個可播放工作階段 · {LibraryItems.Count(item => item.IsFavorite)} 個最愛"
-        : $"顯示 {LibraryItems.Count} / {allLibraryItems.Count} 個工作階段 · {LibraryItems.Count(item => item.IsFavorite)} 個最愛";
+    public string LibrarySummaryText => IsLibraryLoading
+        ? "正在掃描錄音庫…"
+        : LibraryItems.Count == allLibraryItems.Count
+            ? $"{LibraryItems.Count} 個可播放工作階段 · {LibraryItems.Count(item => item.IsFavorite)} 個最愛"
+            : $"顯示 {LibraryItems.Count} / {allLibraryItems.Count} 個工作階段 · {LibraryItems.Count(item => item.IsFavorite)} 個最愛";
+
+    public bool IsLibraryLoading
+    {
+        get => isLibraryLoading;
+        private set
+        {
+            if (SetProperty(ref isLibraryLoading, value))
+            {
+                OnPropertyChanged(nameof(LibraryLoadingText));
+                OnPropertyChanged(nameof(LibrarySummaryText));
+                UpdateCommandStates();
+            }
+        }
+    }
+
+    public string LibraryLoadingText => IsLibraryLoading
+        ? "錄音較多時可能需要數十秒；完成前播放會暫時停用。"
+        : string.Empty;
 
     public string PlaybackText
     {
@@ -2079,12 +2100,16 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             await InitializeOpenAiProviderAsync();
             StatusText = "正在載入原生錄音 bridge…";
             nativeRecorderBridge = new NativeRecorderBridge();
-            recordingLifecycle = new RecordingLifecycleService(nativeRecorderBridge, OutputFolder);
+            recordingLifecycle = new RecordingLifecycleService(
+                nativeRecorderBridge,
+                OutputFolder,
+                verifiedVideoCapturePipeline: true);
             recordingLifecycle.SnapshotChanged += OnSnapshotChanged;
             InitializeGlobalMuteHotKey();
             SetRecorderAvailable(true);
             StatusText = "正在整理 Windows 音訊裝置…";
             await RefreshEndpointsCoreAsync(announce: false);
+            await RefreshTeamsWindowsCoreAsync();
             await InitializeVirtualMicrophonePreviewAsync();
             if (SelectedCaptureSource?.Kind == CaptureSourceKind.SelectedApplication)
             {
@@ -2639,9 +2664,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     private bool CanRefreshTeamsWindows => IsTeamsWindowSelectionEnabled;
 
-    private bool CanRefreshLibrary => !IsBusy && !isShuttingDown;
+    private bool CanRefreshLibrary => !IsBusy && !IsLibraryLoading && !isShuttingDown;
 
-    private bool CanPlay => mediaPlayer is not null && SelectedLibraryItem is { IsPlayable: true } && !isShuttingDown;
+    private bool CanPlay => mediaPlayer is not null && SelectedLibraryItem is { IsPlayable: true } &&
+                            !IsBusy && !IsLibraryLoading && !isShuttingDown;
 
     private bool CanPause =>
         mediaPlayer?.PlaybackSession.PlaybackState == MediaPlaybackState.Playing &&
@@ -3522,8 +3548,18 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     }
 
-    private async Task RefreshLibraryAfterInitializationAsync() =>
-        await RefreshLibraryCoreAsync();
+    private async Task RefreshLibraryAfterInitializationAsync()
+    {
+        IsLibraryLoading = true;
+        try
+        {
+            await RefreshLibraryCoreAsync();
+        }
+        finally
+        {
+            IsLibraryLoading = false;
+        }
+    }
 
     private async Task RefreshLibraryCoreAsync()
     {

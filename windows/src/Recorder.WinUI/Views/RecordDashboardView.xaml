@@ -104,12 +104,33 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                 <StackPanel Spacing="6"><TextBlock Text="錄製來源" /><ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding CaptureSources}" SelectedItem="{Binding SelectedCaptureSource, Mode=TwoWay}" /><TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding SelectedCaptureSourceDescription}" TextWrapping="Wrap" /></StackPanel>
                                 <StackPanel Grid.Column="1" Spacing="6"><TextBlock Text="系統輸出" /><ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding RenderEndpoints}" SelectedItem="{Binding SelectedRenderEndpoint, Mode=TwoWay}" /><TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding SelectedRenderDescription}" TextWrapping="Wrap" /></StackPanel>
                                 <StackPanel Grid.Row="1" Spacing="6"><TextBlock Text="麥克風（可選）" /><ComboBox DisplayMemberPath="DisplayName" IsEnabled="{Binding IsDeviceSelectionEnabled}" ItemsSource="{Binding CaptureEndpoints}" SelectedItem="{Binding SelectedMicrophoneEndpoint, Mode=TwoWay}" /><TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding SelectedMicrophoneDescription}" TextWrapping="Wrap" /></StackPanel>
                                 <StackPanel Grid.Row="1" Grid.Column="1" Spacing="6"><TextBlock Text="儲存位置" /><TextBox IsEnabled="{Binding IsDeviceSelectionEnabled}" Text="{Binding OutputFolder, Mode=TwoWay}" /><TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{Binding StorageReadinessText}" TextWrapping="Wrap" /></StackPanel>
+                                <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Spacing="6">
+                                    <TextBlock Text="Teams 畫面（可選）" />
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <ComboBox
+                                            AutomationProperties.AutomationId="ScreenCaptureTargetSelector"
+                                            DisplayMemberPath="DisplayName"
+                                            IsEnabled="{Binding IsTeamsWindowSelectionEnabled}"
+                                            ItemsSource="{Binding TeamsCaptureWindows}"
+                                            PlaceholderText="未找到可錄製的 Teams 視窗"
+                                            SelectedItem="{Binding SelectedVideoCaptureWindow, Mode=TwoWay}" />
+                                        <Button
+                                            Grid.Column="1"
+                                            AutomationProperties.AutomationId="ScreenCaptureRefreshButton"
+                                            AutomationProperties.Name="重新整理 Teams 視窗"
+                                            Command="{Binding RefreshTeamsWindowsCommand}"
+                                            Content="重新整理" />
+                                    </Grid>
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="錄音開始後，可在浮動視窗隨時開啟或停止畫面錄製；音訊不會中斷。" TextWrapping="Wrap" />
+                                </StackPanel>
                             </Grid>
                         </StackPanel>
                     </Border>

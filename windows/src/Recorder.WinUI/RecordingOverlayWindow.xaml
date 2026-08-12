@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="TeamsRecorder.Windows.WinUI.RecordingOverlayWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="錄音控制器"
+    mc:Ignorable="d">
+    <Border
+        x:Name="OverlayRoot"
+        Padding="14,12"
+        Background="{ThemeResource AcrylicInAppFillColorDefaultBrush}"
+        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+        BorderThickness="1"
+        CornerRadius="16">
+        <Grid MinWidth="392" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Ellipse x:Name="RecordingIndicator" Width="10" Height="10" VerticalAlignment="Center" Fill="{ThemeResource SystemFillColorCriticalBrush}" />
+                <StackPanel Grid.Column="1" Spacing="1">
+                    <TextBlock x:Name="StatusText" FontSize="16" FontWeight="SemiBold" Text="自動錄音即將開始" />
+                    <TextBlock x:Name="StatusDetailText" AutomationProperties.AutomationId="StatusDetailText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12" Text="錄音控制器不會取得 Teams 焦點" />
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <TextBlock x:Name="ElapsedText" AutomationProperties.AutomationId="ElapsedText" FontFamily="Consolas" FontSize="13" VerticalAlignment="Center" Visibility="Collapsed" />
+                    <Button
+                        x:Name="ActionButton"
+                        MinWidth="96"
+                        AutomationProperties.AutomationId="RecordingOverlayLifecycleActionButton"
+                        Click="OnActionButtonClick"
+                        Content="取消" />
+                </StackPanel>
+            </Grid>
+
+            <Border Grid.Row="1" x:Name="CountdownCard" Padding="10,7" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}">
+                <TextBlock x:Name="CountdownText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="倒數 0 秒" />
+            </Border>
+
+            <StackPanel Grid.Row="2" x:Name="SourcesPanel" Spacing="6" Visibility="Collapsed">
+                <Border Padding="10,7" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}">
+                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="108" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <FontIcon Glyph="&#xE767;" Foreground="{ThemeResource SystemFillColorAttentionBrush}" />
+                        <TextBlock Grid.Column="1" Text="Teams／系統輸出" VerticalAlignment="Center" FontSize="12" />
+                        <ProgressBar x:Name="SystemWaveform" Grid.Column="2" Height="6" VerticalAlignment="Center" Value="0" Maximum="100" AutomationProperties.AutomationId="SystemWaveform" AutomationProperties.Name="Teams／系統輸出即時音量" />
+                        <TextBlock x:Name="SystemAudioStatusText" Grid.Column="3" VerticalAlignment="Center" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </Grid>
+                </Border>
+                <Border Padding="10,7" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}">
+                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="108" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <FontIcon x:Name="MicrophoneIcon" Glyph="&#xE720;" Foreground="{ThemeResource SystemFillColorSuccessBrush}" />
+                        <StackPanel Grid.Column="1" Spacing="1"><TextBlock Text="麥克風" FontSize="12" /><TextBlock x:Name="MicrophoneScopeText" Text="僅影響 Recorder，不會同步 Teams" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>
+                        <ProgressBar x:Name="MicrophoneWaveform" Grid.Column="2" Height="6" VerticalAlignment="Center" Value="0" Maximum="100" AutomationProperties.AutomationId="MicrophoneWaveform" AutomationProperties.Name="麥克風即時輸入音量" />
+                        <Button
+                            x:Name="MicrophoneMuteButton"
+                            Grid.Column="3"
+                            MinWidth="62"
+                            Padding="8,3"
+                            AutomationProperties.AutomationId="RecorderMicrophoneMuteButton"
+                            Click="OnMicrophoneMuteButtonClick"
+                            Content="靜音" />
+                    </Grid>
+                </Border>
+            </StackPanel>
+
+            <Border Grid.Row="3" x:Name="ScreenCaptureCard" Padding="10,5" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Visibility="Collapsed">
+                <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <FontIcon Glyph="&#xE7F4;" Foreground="{ThemeResource SystemFillColorAttentionBrush}" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Spacing="1"><TextBlock Text="錄製 Teams 畫面" FontSize="12" /><TextBlock x:Name="TeamsWindowCaptureStatusText" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="可在錄音期間切換" /></StackPanel>
+                    <ToggleSwitch x:Name="TeamsWindowCaptureToggle" Grid.Column="2" AutomationProperties.AutomationId="TeamsWindowCaptureToggle" OffContent="關" OnContent="開" Toggled="OnTeamsWindowCaptureToggleToggled" />
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

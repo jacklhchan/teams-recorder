@@ -227,11 +227,13 @@ final class AppModelPlaybackTests: XCTestCase {
         )
         let countdownFactory = CountdownPresenterFactorySpy()
         let playbackFactory = PlaybackPresenterFactorySpy()
+        let notificationCenter = NotificationCenter()
         let hostingView = NSHostingView(
             rootView: ContentView(
                 model: model,
                 autoMeetingPanelFactory: countdownFactory,
-                playbackWindowPresenterFactory: playbackFactory
+                playbackWindowPresenterFactory: playbackFactory,
+                notificationCenter: notificationCenter
             )
         )
         hostingView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 800)
@@ -275,7 +277,7 @@ final class AppModelPlaybackTests: XCTestCase {
             countdownFactory.presenter.presentCount == 2 &&
                 playbackFactory.presenter.presentCount == 2
         }
-        NotificationCenter.default.post(
+        notificationCenter.post(
             name: NSApplication.willTerminateNotification,
             object: nil
         )

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "title": "Unicode selected-process recording",
+  "tags": [],
+  "isFavorite": false,
+  "mediaKind": "audio",
+  "screenIntervals": [],
+  "recoveryState": "none",
+  "source": "manual",
+  "participants": [],
+  "windowsCapture": {
+    "audioSource": "selectedProcessLoopback",
+    "processName": "會議助手.exe",
+    "includedProcessTree": true
+  }
+}

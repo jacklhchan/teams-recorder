@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <data name="WorkspaceNavigation.PaneTitle" xml:space="preserve"><value>Teams Recorder</value></data>
+  <data name="NavigationRecord.Content" xml:space="preserve"><value>錄音</value></data>
+  <data name="NavigationRecordings.Content" xml:space="preserve"><value>錄音庫</value></data>
+  <data name="NavigationSettings.Content" xml:space="preserve"><value>設定</value></data>
+  <data name="RecordTitle.Text" xml:space="preserve"><value>錄音</value></data>
+  <data name="RefreshDevicesButton.Label" xml:space="preserve"><value>重新整理裝置</value></data>
+  <data name="ToggleMuteButton.Label" xml:space="preserve"><value>切換麥克風靜音</value></data>
+  <data name="TestRecordingButton.Label" xml:space="preserve"><value>10 秒測試</value></data>
+  <data name="StartRecordingButton.Content" xml:space="preserve"><value>開始錄製</value></data>
+  <data name="StopRecordingButton.Content" xml:space="preserve"><value>停止並儲存</value></data>
+  <data name="CaptureSettingsTitle.Text" xml:space="preserve"><value>擷取設定</value></data>
+  <data name="RecordingsTitle.Text" xml:space="preserve"><value>錄音庫</value></data>
+  <data name="RefreshLibraryButton.Label" xml:space="preserve"><value>重新掃描錄音庫</value></data>
+  <data name="LibrarySearchBox.PlaceholderText" xml:space="preserve"><value>搜尋名稱、標籤與逐字稿</value></data>
+  <data name="LibraryFavoritesOnlyToggle.Header" xml:space="preserve"><value>只顯示最愛</value></data>
+  <data name="PlaybackSectionTitle.Text" xml:space="preserve"><value>播放</value></data>
+  <data name="PlaybackAudioStageText.Text" xml:space="preserve"><value>純音訊錄音</value></data>
+  <data name="PlaybackVolumeLabel.Text" xml:space="preserve"><value>音量</value></data>
+  <data name="PlaybackRateLabel.Text" xml:space="preserve"><value>速度</value></data>
+  <data name="SettingsTitle.Text" xml:space="preserve"><value>設定</value></data>
+  <data name="SettingsSubtitle.Text" xml:space="preserve"><value>Teams、AI 與診斷選項</value></data>
+  <data name="TeamsSettingsTitle.Text" xml:space="preserve"><value>Teams 整合</value></data>
+  <data name="TranscriptionSettingsTitle.Text" xml:space="preserve"><value>轉錄與 AI</value></data>
+  <data name="DiagnosticsSettingsTitle.Text" xml:space="preserve"><value>診斷</value></data>
+  <data name="NavigationAI.Content" xml:space="preserve"><value>AI 工作區</value></data>
+  <data name="AiWorkspaceTitle.Text" xml:space="preserve"><value>AI 工作區</value></data>
+  <data name="AiTranscriptionTitle.Text" xml:space="preserve"><value>逐字稿</value></data>
+  <data name="AiSummaryTitle.Text" xml:space="preserve"><value>會議摘要</value></data>
+</root>

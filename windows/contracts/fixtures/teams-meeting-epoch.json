@@ -1,0 +1,34 @@
+{
+  "description": "A rejoin during the stop debounce must preserve an automatically owned recording.",
+  "events": [
+    {
+      "atSeconds": 0,
+      "kind": "setEnabled",
+      "value": true
+    },
+    {
+      "atSeconds": 1,
+      "kind": "meetingState",
+      "value": true
+    },
+    {
+      "atSeconds": 6,
+      "kind": "startSucceeded"
+    },
+    {
+      "atSeconds": 30,
+      "kind": "meetingState",
+      "value": false
+    },
+    {
+      "atSeconds": 35,
+      "kind": "meetingState",
+      "value": true
+    }
+  ],
+  "expected": {
+    "recordingOwnership": "teamsAutomatic",
+    "state": "automaticRecording",
+    "stopCommandCount": 0
+  }
+}

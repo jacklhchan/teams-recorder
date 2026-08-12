@@ -1,0 +1,33 @@
+name: Windows migration
+
+on:
+  push:
+    paths:
+      - ".github/workflows/windows.yml"
+      - "contracts/**"
+      - "windows/**"
+  pull_request:
+    paths:
+      - ".github/workflows/windows.yml"
+      - "contracts/**"
+      - "windows/**"
+
+jobs:
+  windows-verification:
+    # CMake presets intentionally target the VS 2022 generator. Pin the
+    # runner rather than allowing windows-latest to move to a newer VS image.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Verify native, managed, contracts, and unpackaged publish
+        shell: pwsh
+        run: ./windows/scripts/Verify-Windows.ps1
+      - name: Validate packaging guards
+        shell: pwsh
+        run: ./windows/scripts/Test-Package-Windows.ps1
+      - name: Build unsigned MSIX package
+        shell: pwsh
+        run: ./windows/scripts/Package-Windows.ps1

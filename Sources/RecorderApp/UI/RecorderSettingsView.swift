@@ -378,6 +378,11 @@ private struct CaptureSourceControlsView: View {
             .help("Refresh microphones")
             .accessibilityLabel("Refresh microphones")
             .accessibilityIdentifier("recorder.settings.microphone-refresh")
+            .background(
+                RecorderSettingsAccessibilityMarker(
+                    identifier: "recorder.settings.microphone-refresh"
+                )
+            )
             Text(model.selectedMicDevice?.channelText ?? "Unavailable").foregroundStyle(.secondary)
         }
     }

@@ -1,0 +1,58 @@
+; Teams Recorder Virtual Microphone -- test-signed preview package manifest.
+; This is intentionally an INF/identity contract, not a claim that a .sys
+; binary is present in this repository.  The driver binary must be built from
+; the pinned SysVAD source plus the reviewable patch contract before this INF
+; is staged into windows/driver/TeamsRecorderVirtualMic/out/package.
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=MEDIA
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderName%
+CatalogFile=TeamsRecorderVirtualMic.cat
+DriverVer=08/09/2026,0.1.0.0
+PnpLockDown=1
+
+[Manufacturer]
+%ProviderName%=TeamsRecorder,NTamd64
+
+[TeamsRecorder.NTamd64]
+%DeviceDesc%=TeamsRecorderVirtualMic_Install,ROOT\TeamsRecorderVirtualMic
+
+[TeamsRecorderVirtualMic_Install.NT]
+CopyFiles=TeamsRecorderVirtualMic_CopyFiles
+AddReg=TeamsRecorderVirtualMic_AddReg
+
+[TeamsRecorderVirtualMic_CopyFiles]
+TeamsRecorderVirtualMic.sys
+
+[TeamsRecorderVirtualMic_AddReg]
+; The actual Core Audio capture endpoint name must be emitted by the patched
+; SysVAD KS descriptors too.  This value is only one side of the identity
+; contract; the app requires the exact runtime Core Audio endpoint ID as well.
+HKR,,FriendlyName,0x00000000,%DeviceDesc%
+
+[TeamsRecorderVirtualMic_Install.NT.Services]
+AddService=TeamsRecorderVirtualMic,0x00000002,TeamsRecorderVirtualMic_Service
+
+[TeamsRecorderVirtualMic_Service]
+DisplayName=%DeviceDesc%
+Description=%ServiceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\TeamsRecorderVirtualMic.sys
+
+[SourceDisksNames]
+1="Teams Recorder Virtual Microphone test-signed preview",,,""
+
+[SourceDisksFiles]
+TeamsRecorderVirtualMic.sys=1
+
+[DestinationDirs]
+TeamsRecorderVirtualMic_CopyFiles=12
+
+[Strings]
+ProviderName="Teams Recorder"
+DeviceDesc="Teams Recorder Virtual Microphone"
+ServiceDesc="Teams Recorder Virtual Microphone (test-signed preview)"

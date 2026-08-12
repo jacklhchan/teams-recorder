@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "title": "Teams automatic recording",
+  "tags": [],
+  "isFavorite": false,
+  "mediaKind": "audio",
+  "screenIntervals": [],
+  "recoveryState": "none",
+  "source": "teamsAutomatic",
+  "participants": [],
+  "windowsCapture": {
+    "audioSource": "selectedProcessLoopback",
+    "processName": "ms-teams.exe",
+    "includedProcessTree": true
+  }
+}

@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="TeamsRecorder.Windows.WinUI.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:views="using:TeamsRecorder.Windows.WinUI.Views"
+    Background="{ThemeResource RecorderAppBackgroundBrush}"
+    mc:Ignorable="d">
+
+    <NavigationView
+        x:Name="WorkspaceNavigation"
+        x:Uid="WorkspaceNavigation"
+        AutomationProperties.AutomationId="WorkspaceNavigation"
+        CompactModeThresholdWidth="720"
+        ExpandedModeThresholdWidth="1080"
+        IsBackButtonVisible="Collapsed"
+        IsSettingsVisible="False"
+        OpenPaneLength="224"
+        PaneDisplayMode="Auto"
+        SelectionChanged="OnNavigationSelectionChanged">
+        <NavigationView.MenuItems>
+            <NavigationViewItem
+                x:Name="RecordNavigationItem"
+                x:Uid="NavigationRecord"
+                AutomationProperties.AutomationId="NavigationRecord"
+                Content="錄音"
+                Tag="Record">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE720;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem
+                x:Name="RecordingsNavigationItem"
+                x:Uid="NavigationRecordings"
+                AutomationProperties.AutomationId="NavigationRecordings"
+                Content="錄音庫"
+                Tag="Recordings">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE8F1;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem
+                x:Name="AiNavigationItem"
+                x:Uid="NavigationAI"
+                AutomationProperties.AutomationId="NavigationAI"
+                Content="AI 工作區"
+                Tag="AI">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE945;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem
+                x:Name="SettingsNavigationItem"
+                x:Uid="NavigationSettings"
+                AutomationProperties.AutomationId="NavigationSettings"
+                Content="設定"
+                Tag="Settings">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE713;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+        </NavigationView.MenuItems>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <InfoBar
+                x:Name="GlobalErrorInfoBar"
+                Grid.Row="0"
+                Margin="24,12,24,0"
+                AutomationProperties.AutomationId="GlobalErrorInfoBar"
+                IsClosable="True"
+                IsOpen="{Binding HasError}"
+                Message="{Binding ErrorText}"
+                Severity="Error"
+                Title="需要處理的問題">
+                <InfoBar.ActionButton>
+                    <Button
+                        AutomationProperties.AutomationId="SaveDiagnosticsFromErrorButton"
+                        Command="{Binding SaveDiagnosticsCommand}"
+                        Content="儲存診斷報告" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <Grid Grid.Row="1">
+                <views:RecordDashboardView
+                    x:Name="RecordWorkspace"
+                    AutomationProperties.AutomationId="RecordWorkspace" />
+                <views:RecordingLibraryView
+                    x:Name="RecordingsWorkspace"
+                    AutomationProperties.AutomationId="RecordingsWorkspace"
+                    Visibility="Collapsed" />
+                <views:AiWorkspaceView
+                    x:Name="AiWorkspace"
+                    AutomationProperties.AutomationId="AiWorkspace"
+                    Visibility="Collapsed" />
+                <views:RecorderSettingsView
+                    x:Name="SettingsWorkspace"
+                    AutomationProperties.AutomationId="SettingsWorkspace"
+                    Visibility="Collapsed" />
+            </Grid>
+        </Grid>
+    </NavigationView>
+</Page>

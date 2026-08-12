@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var navigation = RecorderNavigationState(selection: .record)
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     private let navigationOverride: Binding<RecorderNavigationState>?
+    private let notificationCenter: NotificationCenter
 
     @MainActor
     init(
@@ -20,6 +21,7 @@ struct ContentView: View {
         playbackWindowPresenterFactory:
             any PlaybackWindowPresenterFactory =
                 PlaybackWindowControllerFactory(),
+        notificationCenter: NotificationCenter = .default,
         // Internal deterministic presentation-test seam. Production passes nil
         // and ContentView remains the sole owner of its navigation state.
         navigationOverride: Binding<RecorderNavigationState>? = nil
@@ -36,6 +38,7 @@ struct ContentView: View {
                 playbackWindowPresenterFactory.makePresenter()
         )
         self.navigationOverride = navigationOverride
+        self.notificationCenter = notificationCenter
     }
 
     var body: some View {
@@ -81,7 +84,7 @@ struct ContentView: View {
             )
         }
         .onReceive(
-            NotificationCenter.default.publisher(
+            notificationCenter.publisher(
                 for: NSApplication.willTerminateNotification
             )
         ) { _ in

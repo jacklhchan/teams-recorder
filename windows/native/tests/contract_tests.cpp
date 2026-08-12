@@ -1,0 +1,193 @@
+#include "recorder_native_bridge.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <type_traits>
+
+static_assert(std::is_standard_layout<RecorderNativeStartOptions>::value, "start options must remain C ABI safe");
+static_assert(std::is_standard_layout<RecorderNativeMixedStartOptions>::value, "mixed start options must remain C ABI safe");
+static_assert(std::is_standard_layout<RecorderNativeSelectedAudioStartOptions>::value, "selected-audio start options must remain C ABI safe");
+static_assert(std::is_standard_layout<RecorderNativeSelectedWindowAvStartOptions>::value, "selected-window A/V options must remain C ABI safe");
+static_assert(std::is_standard_layout<RecorderNativeVideoTargetOptions>::value, "dynamic video target options must remain C ABI safe");
+static_assert(std::is_standard_layout<RecorderNativeStats>::value, "stats must remain C ABI safe");
+static_assert(sizeof(RecorderNativeStartOptions) == 32U, "x64 start options layout changed");
+static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8U, "output path offset changed");
+static_assert(offsetof(RecorderNativeStartOptions, endpoint_id_utf8) == 16U, "endpoint ID offset changed");
+static_assert(offsetof(RecorderNativeStartOptions, target_process_id) == 24U, "target PID offset changed");
+static_assert(sizeof(RecorderNativeStats) == RECORDER_NATIVE_STATS_V5_SIZE, "x64 stats layout changed");
+static_assert(offsetof(RecorderNativeStats, packets) == 32U, "packet counter offset changed");
+static_assert(offsetof(RecorderNativeStats, peak) == 88U, "peak offset changed");
+static_assert(offsetof(RecorderNativeStats, render_drift_corrections) == 96U, "timeline stats must be additive");
+static_assert(RECORDER_NATIVE_STATS_V1_SIZE == 96U, "v1 stats prefix changed");
+static_assert(RECORDER_NATIVE_STATS_V2_SIZE == 192U, "v2 stats prefix changed");
+static_assert(offsetof(RecorderNativeStats, primary_level_peak) == RECORDER_NATIVE_STATS_V2_SIZE, "live levels must be additive");
+static_assert(offsetof(RecorderNativeStats, audio_durable_checkpoint_sequence) == RECORDER_NATIVE_STATS_V3_SIZE, "durable checkpoints must be additive");
+static_assert(offsetof(RecorderNativeStats, captured_window_frames) == RECORDER_NATIVE_STATS_V4_SIZE, "real video evidence must be additive");
+static_assert(RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK == 0, "capture mode ABI value changed");
+static_assert(RECORDER_NATIVE_CAPTURE_MICROPHONE == 1, "capture mode ABI value changed");
+static_assert(RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK == 2, "capture mode ABI value changed");
+static_assert(RECORDER_NATIVE_CAPTURE_MIXED == 3, "mixed capture mode ABI value changed");
+static_assert(RECORDER_NATIVE_CAPTURE_SELECTED_APP_MIXED == 4, "selected-audio capture mode ABI value changed");
+static_assert(RECORDER_NATIVE_CAPTURE_SELECTED_WINDOW_AV == 5, "selected-window A/V capture mode ABI value changed");
+static_assert(sizeof(RecorderNativeMixedStartOptions) == 40U, "x64 mixed options layout changed");
+static_assert(offsetof(RecorderNativeMixedStartOptions, output_path_utf8) == 8U, "mixed output path offset changed");
+static_assert(offsetof(RecorderNativeMixedStartOptions, microphone_endpoint_id_utf8) == 24U, "mixed microphone offset changed");
+static_assert(sizeof(RecorderNativeSelectedAudioStartOptions) == 56U, "x64 selected-audio options layout changed");
+static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, output_path_utf8) == 8U, "selected-audio output path offset changed");
+static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, render_endpoint_id_utf8) == 16U, "selected-audio render endpoint offset changed");
+static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, microphone_endpoint_id_utf8) == 24U, "selected-audio microphone offset changed");
+static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, target_process_id) == 32U, "selected-audio target PID offset changed");
+static_assert(offsetof(RecorderNativeSelectedAudioStartOptions, expected_process_creation_time_100ns) == 48U, "selected-audio creation time offset changed");
+static_assert(sizeof(RecorderNativeSelectedWindowAvStartOptions) == 104U, "x64 selected-window A/V options layout changed");
+static_assert(offsetof(RecorderNativeSelectedWindowAvStartOptions, audio_output_path_utf8) == 8U, "A/V audio output offset changed");
+static_assert(offsetof(RecorderNativeSelectedWindowAvStartOptions, target_window_handle) == 40U, "A/V HWND offset changed");
+static_assert(offsetof(RecorderNativeSelectedWindowAvStartOptions, target_window_process_creation_time_100ns) == 96U, "A/V target identity offset changed");
+static_assert(sizeof(RecorderNativeVideoTargetOptions) == 32U, "x64 dynamic video target options layout changed");
+static_assert(offsetof(RecorderNativeVideoTargetOptions, target_window_handle) == 8U, "dynamic video HWND offset changed");
+static_assert(offsetof(RecorderNativeVideoTargetOptions, target_window_process_creation_time_100ns) == 24U, "dynamic video target creation time offset changed");
+static_assert(RECORDER_NATIVE_SELECTED_AUDIO_SYSTEM_LOOPBACK == 0, "selected-audio system source ABI value changed");
+static_assert(RECORDER_NATIVE_SELECTED_AUDIO_PROCESS_TREE_LOOPBACK == 1, "selected-audio process-tree source ABI value changed");
+static_assert(RECORDER_NATIVE_STATE_STARTING == 4, "state ABI value changed");
+static_assert(RECORDER_NATIVE_STATE_STOPPING == 5, "state ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_FLOW_RENDER == 0U, "render flow ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_FLOW_CAPTURE == 1U, "capture flow ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_CONSOLE == 1U, "console default ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_MULTIMEDIA == 2U, "multimedia default ABI value changed");
+static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_COMMUNICATIONS == 4U, "communications default ABI value changed");
+
+namespace {
+
+bool Expect(bool condition) { return condition; }
+
+RecorderNativeStartOptions ValidOptions() {
+    RecorderNativeStartOptions options{};
+    options.struct_size = sizeof(options);
+    options.mode = RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK;
+    options.output_path_utf8 = "contract-test-does-not-start.wav";
+    return options;
+}
+
+RecorderNativeSelectedAudioStartOptions ValidSelectedAudioOptions() {
+    RecorderNativeSelectedAudioStartOptions options{};
+    options.struct_size = sizeof(options);
+    options.audio_source = RECORDER_NATIVE_SELECTED_AUDIO_PROCESS_TREE_LOOPBACK;
+    options.output_path_utf8 = "selected-audio-contract-test.m4a";
+    options.target_process_id = 42U;
+    options.included_process_tree = 1U;
+    options.expected_process_creation_time_100ns = 1U;
+    options.aac_bitrate_bps = 128'000U;
+    return options;
+}
+
+}  // namespace
+
+int main() {
+    RecorderNativeEndpointList* endpoint_list =
+        reinterpret_cast<RecorderNativeEndpointList*>(static_cast<std::uintptr_t>(1));
+    uint32_t endpoint_count = 0;
+    recorder_native_endpoint_list_destroy(nullptr);
+
+    if (!Expect(std::strcmp(recorder_native_version(), "0.11.0") == 0) ||
+        !Expect(recorder_native_start(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_start_with_options(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_start_selected_audio(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_start_selected_window_av(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_set_video_target(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_disable_video_target(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_validate_h264_aac_mp4(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_validate_aac_m4a(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_stop(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_get_stats(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_get_state(nullptr) == RECORDER_NATIVE_STATE_FAULTED) ||
+        !Expect(recorder_native_enumerate_endpoints(nullptr, &endpoint_list) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(endpoint_list == nullptr) ||
+        !Expect(recorder_native_probe_teams_render_endpoints(nullptr, &endpoint_list) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(endpoint_list == nullptr) ||
+        !Expect(recorder_native_endpoint_list_get_count(nullptr, &endpoint_count) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(recorder_native_endpoint_list_get(nullptr, 0U, nullptr, nullptr, nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
+        !Expect(std::strstr(recorder_native_get_last_error(nullptr), "null") != nullptr)) {
+        return 1;
+    }
+
+    RecorderNativeBridge* bridge = recorder_native_create();
+    if (!Expect(bridge != nullptr)) { return 1; }
+
+    RecorderNativeStats stats{};
+    stats.struct_size = sizeof(stats);
+    RecorderNativeStats legacy_stats{};
+    legacy_stats.struct_size = RECORDER_NATIVE_STATS_V1_SIZE;
+    RecorderNativeStartOptions options = ValidOptions();
+    RecorderNativeMixedStartOptions mixed{};
+    mixed.struct_size = sizeof(mixed);
+    mixed.output_path_utf8 = "contract-test.m4a";
+    mixed.aac_bitrate_bps = 128000U;
+    RecorderNativeSelectedAudioStartOptions selected = ValidSelectedAudioOptions();
+    const bool passed =
+        Expect(recorder_native_get_state(bridge) == RECORDER_NATIVE_STATE_READY) &&
+        Expect(recorder_native_start(bridge) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_validate_h264_aac_mp4("not-an-mp4.m4a") == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_validate_aac_m4a("not-an-aac-fallback.txt") == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_validate_aac_m4a("not-an-aac-fallback.mp4") == RECORDER_NATIVE_IO_ERROR) &&
+        Expect(recorder_native_start_with_options(bridge, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected.struct_size = 0U, recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.audio_source = static_cast<RecorderNativeSelectedAudioSource>(99),
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.output_path_utf8 = nullptr,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.reserved = 1U,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.aac_bitrate_bps = 63'999U,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.aac_bitrate_bps = 320'001U,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.audio_source = RECORDER_NATIVE_SELECTED_AUDIO_SYSTEM_LOOPBACK,
+                selected.target_process_id = 42U, selected.included_process_tree = 0U,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.audio_source = RECORDER_NATIVE_SELECTED_AUDIO_SYSTEM_LOOPBACK,
+                selected.target_process_id = 0U, selected.included_process_tree = 1U,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.target_process_id = 0U,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.included_process_tree = 0U,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.expected_process_creation_time_100ns = 0U,
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((selected = ValidSelectedAudioOptions(), selected.render_endpoint_id_utf8 = "render-id",
+                recorder_native_start_selected_audio(bridge, &selected)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_start_mixed(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_muted(nullptr, 0U) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_pcm_callback(nullptr, nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_pcm_callback(bridge, nullptr, bridge) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_pcm_callback(bridge, nullptr, nullptr) == RECORDER_NATIVE_OK) &&
+        Expect(recorder_native_set_microphone_muted(bridge, 2U) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_set_microphone_muted(bridge, 0U) == RECORDER_NATIVE_INVALID_STATE) &&
+        Expect(recorder_native_set_microphone_muted(bridge, 1U) == RECORDER_NATIVE_INVALID_STATE) &&
+        Expect((mixed.struct_size = 0U, recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((mixed.struct_size = sizeof(mixed), mixed.output_path_utf8 = "not-m4a.wav", recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((mixed.output_path_utf8 = "contract-test.m4a", mixed.aac_bitrate_bps = 1000U, recorder_native_start_mixed(bridge, &mixed)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_get_stats(bridge, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_get_stats(bridge, &legacy_stats) == RECORDER_NATIVE_OK) &&
+        Expect(legacy_stats.struct_size == RECORDER_NATIVE_STATS_V1_SIZE) &&
+        Expect(recorder_native_get_stats(bridge, &stats) == RECORDER_NATIVE_OK) &&
+        Expect(stats.struct_size == sizeof(stats)) &&
+        Expect(stats.event_driven == 0U) &&
+        Expect(stats.packets == 0U && stats.input_frames == 0U && stats.output_frames == 0U) &&
+        Expect(stats.primary_level_peak == 0.0F && stats.primary_level_rms == 0.0F &&
+               stats.microphone_level_peak == 0.0F && stats.microphone_level_rms == 0.0F) &&
+        Expect((options.struct_size = 0U, recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((options = ValidOptions(), options.output_path_utf8 = nullptr,
+                recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((options = ValidOptions(), options.mode = static_cast<RecorderNativeCaptureMode>(99),
+                recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((options = ValidOptions(), options.mode = RECORDER_NATIVE_CAPTURE_SELECTED_APP_MIXED,
+                recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((options = ValidOptions(), options.target_process_id = 42U,
+                recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect((options = ValidOptions(), options.mode = RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK,
+                options.target_process_id = 42U, options.endpoint_id_utf8 = "endpoint-id",
+                recorder_native_start_with_options(bridge, &options)) == RECORDER_NATIVE_INVALID_ARGUMENT) &&
+        Expect(recorder_native_get_state(bridge) == RECORDER_NATIVE_STATE_READY);
+    recorder_native_destroy(bridge);
+    return passed ? 0 : 1;
+}

@@ -14,6 +14,17 @@ macOS 26.0 or newer SwiftUI app for recording meeting audio locally:
 - Let the recorder app keep an independent local mic mute when needed.
 - Toggle recorder mic mute with `Option + Shift + M`.
 
+## Windows migration
+
+The Windows-native re-platform is under [`windows/`](windows/README.md). It
+now includes the portable recording policy core, cross-platform session
+contracts, a managed native-bridge coordinator, WASAPI system-loopback capture,
+AAC-in-M4A sessions with recovery and library playback, and a WinUI 3 shell.
+The Teams integration remains a Preview: one Windows environment completed
+pairing, received meeting presence, and automatically finalized an M4A session,
+but Teams UI mute/unmute did not reliably push later mute-state updates. Video
+capture, the virtual microphone driver, and ASR remain future Windows work.
+
 ## Run
 
 Open `Package.swift` in Xcode, select the `LocalMeetingRecorder` executable scheme, then Run.

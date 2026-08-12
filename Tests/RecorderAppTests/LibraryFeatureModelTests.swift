@@ -574,12 +574,21 @@ final class LibraryFeatureModelTests: XCTestCase {
         let indexingStarted = expectation(description: "publication indexing started")
         blocker.onFirstBlocked = { indexingStarted.fulfill() }
         let refreshReconciled = expectation(description: "refresh retains current transcript projection while durable indexing completes")
+        let durableRefreshReconciled = expectation(description: "post-commit refresh adopts the durable transcript projection")
         feature.onSessionsLoaded = { snapshot in
             if snapshot.sessions == [session] { refreshReconciled.fulfill() }
+            if snapshot.sessions == [refreshed] { durableRefreshReconciled.fulfill() }
         }
         let committed = expectation(description: "exactly one transcript publication committed")
         var commits = 0
-        feature.onTranscriptPublicationCommitted = { _ in commits += 1; committed.fulfill() }
+        feature.onTranscriptPublicationCommitted = { publication in
+            commits += 1
+            XCTAssertEqual(
+                publication.canonicalSession.searchDocument.transcriptText,
+                "indexed transcript"
+            )
+            committed.fulfill()
+        }
 
         feature.acceptTranscriptPublication(LibraryFeatureFixture.publication(for: session, fence: .initial))
         await fulfillment(of: [indexingStarted], timeout: 1)
@@ -588,8 +597,9 @@ final class LibraryFeatureModelTests: XCTestCase {
         blocker.releaseFirst()
 
         await fulfillment(of: [committed], timeout: 1)
+        await fulfillment(of: [durableRefreshReconciled], timeout: 1)
         XCTAssertEqual(commits, 1)
-        XCTAssertEqual(feature.session(withID: session.id)?.searchDocument.transcriptText, "indexed transcript")
+        XCTAssertEqual(feature.session(withID: session.id)?.searchDocument.transcriptText, "new transcript")
     }
 
     func testTranscriptFailureEmitsNoEditedEventAndReturnsFailure() async {

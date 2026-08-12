@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "previewOnly": true,
+  "hardwareId": "ROOT\\TeamsRecorderVirtualMic",
+  "serviceName": "TeamsRecorderVirtualMic",
+  "coreAudioFriendlyName": "Teams Recorder Virtual Microphone",
+  "endpointFlow": "Capture",
+  "endpointId": {
+    "isStatic": false,
+    "pairingRule": "The Core Audio endpoint ID is allocated by Windows at install time. Pair it explicitly after installation; never infer trust from the friendly name."
+  },
+  "pcmProtocol": {
+    "name": "TRVM",
+    "version": 1,
+    "format": "PCM signed 16-bit little-endian, 48000 Hz, stereo",
+    "maximumFrameDurationMilliseconds": 100,
+    "maximumPcmPayloadBytes": 19200
+  }
+}

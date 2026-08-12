@@ -1,0 +1,152 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Recorder.Core;
+
+namespace TeamsRecorder.Windows.Application.Settings;
+
+/// <summary>
+/// Non-secret, per-user choices restored when the WinUI app starts again.
+/// Device identifiers are retained only to restore an explicit choice; a missing
+/// device remains visibly unavailable and is never replaced with another device.
+/// </summary>
+public sealed record RecorderAppSettings
+{
+    public const int CurrentSchemaVersion = 4;
+
+    [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; init; } = CurrentSchemaVersion;
+    [JsonPropertyName("outputFolder")] public string? OutputFolder { get; init; }
+    [JsonPropertyName("renderEndpointId")] public string? RenderEndpointId { get; init; }
+    [JsonPropertyName("recordMicrophone")] public bool RecordMicrophone { get; init; }
+    [JsonPropertyName("microphoneEndpointId")] public string? MicrophoneEndpointId { get; init; }
+    [JsonPropertyName("captureSource")] public RecorderPersistedCaptureSource CaptureSource { get; init; } = RecorderPersistedCaptureSource.SystemLoopback;
+    /// <summary>
+    /// Stable, non-sensitive identity used to offer an exact application match
+    /// after restart. PIDs, process start times, executable paths, command lines,
+    /// and window titles are intentionally never persisted.
+    /// </summary>
+    [JsonPropertyName("selectedApplicationExecutable")] public string? SelectedApplicationExecutable { get; init; }
+    // Legacy migration input only. It is never written by current builds and
+    // has no runtime effect; the Teams API integration was retired.
+    [JsonPropertyName("teamsMuteSyncEnabled")] public bool TeamsMuteSyncEnabled { get; init; }
+    [JsonPropertyName("teamsAutomaticRecordingEnabled")] public bool TeamsAutomaticRecordingEnabled { get; init; }
+    [JsonPropertyName("localTeamsHeuristicAutoStartEnabled")] public bool LocalTeamsHeuristicAutoStartEnabled { get; init; }
+    [JsonPropertyName("followTeamsMuteEnabled")] public bool FollowTeamsMuteEnabled { get; init; }
+
+    public static RecorderAppSettings Validate(RecorderAppSettings value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.SchemaVersion is < 1 or > CurrentSchemaVersion)
+            throw new RecorderAppSettingsException("The saved app settings version is not supported.");
+        if (!Enum.IsDefined(value.CaptureSource))
+            throw new RecorderAppSettingsException("The saved capture source is not supported.");
+
+        return value with
+        {
+            SchemaVersion = CurrentSchemaVersion,
+            OutputFolder = NormalizeFolder(value.OutputFolder),
+            RenderEndpointId = NormalizeIdentifier(value.RenderEndpointId),
+            MicrophoneEndpointId = value.RecordMicrophone ? NormalizeIdentifier(value.MicrophoneEndpointId) : null,
+            SelectedApplicationExecutable = value.CaptureSource == RecorderPersistedCaptureSource.SelectedApplication
+                ? NormalizeExecutable(value.SelectedApplicationExecutable)
+                : null,
+            // Retired Teams API flags never grant consent to the replacement
+            // local heuristic. Upgrades must be explicitly enabled again in a
+            // schema-v3 build. The separate read-only mute follower requires
+            // fresh consent from a schema-v4 build.
+            TeamsMuteSyncEnabled = false,
+            LocalTeamsHeuristicAutoStartEnabled = value.SchemaVersion >= 3 &&
+                value.LocalTeamsHeuristicAutoStartEnabled,
+            TeamsAutomaticRecordingEnabled = value.SchemaVersion >= 3 &&
+                value.LocalTeamsHeuristicAutoStartEnabled,
+            FollowTeamsMuteEnabled = value.SchemaVersion == CurrentSchemaVersion &&
+                value.FollowTeamsMuteEnabled,
+        };
+    }
+
+    private static string? NormalizeFolder(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        try { return Path.GetFullPath(value.Trim()); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new RecorderAppSettingsException("The saved recording folder is invalid.");
+        }
+    }
+
+    private static string? NormalizeIdentifier(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var normalized = value.Trim();
+        if (normalized.Length > 512 || normalized.Any(char.IsControl))
+            throw new RecorderAppSettingsException("The saved device identifier is invalid.");
+        return normalized;
+    }
+
+    private static string? NormalizeExecutable(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return WindowsExecutableBasename.TryCreateExecutableBasename(value.Trim(), out var executable)
+            ? executable
+            : throw new RecorderAppSettingsException("The saved application identity is invalid.");
+    }
+}
+
+public enum RecorderPersistedCaptureSource { SystemLoopback, SelectedApplication }
+
+public interface IRecorderAppSettingsStore
+{
+    Task<RecorderAppSettings?> LoadAsync(CancellationToken cancellationToken = default);
+    Task SaveAsync(RecorderAppSettings settings, CancellationToken cancellationToken = default);
+}
+
+/// <summary>Atomic JSON store for public app choices. It intentionally has no API key or Teams pairing material.</summary>
+public sealed class JsonRecorderAppSettingsStore(string? path = null) : IRecorderAppSettingsStore
+{
+    private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
+    private readonly string path = path ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Teams Recorder",
+        "app-settings.json");
+
+    public async Task<RecorderAppSettings?> LoadAsync(CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(path)) return null;
+        try
+        {
+            await using var input = File.OpenRead(path);
+            var settings = await JsonSerializer.DeserializeAsync<RecorderAppSettings>(input, Json, cancellationToken).ConfigureAwait(false);
+            return settings is null
+                ? throw new RecorderAppSettingsException("The saved app settings are invalid.")
+                : RecorderAppSettings.Validate(settings);
+        }
+        catch (RecorderAppSettingsException) { throw; }
+        catch (JsonException) { throw new RecorderAppSettingsException("The saved app settings are invalid."); }
+        catch (IOException) { throw new RecorderAppSettingsException("The saved app settings could not be read."); }
+        catch (UnauthorizedAccessException) { throw new RecorderAppSettingsException("The saved app settings could not be read."); }
+    }
+
+    public async Task SaveAsync(RecorderAppSettings settings, CancellationToken cancellationToken = default)
+    {
+        var valid = RecorderAppSettings.Validate(settings);
+        var folder = Path.GetDirectoryName(path) ?? throw new RecorderAppSettingsException("The app settings could not be saved.");
+        var temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            Directory.CreateDirectory(folder);
+            await using (var output = File.Create(temporary))
+                await JsonSerializer.SerializeAsync(output, valid, Json, cancellationToken).ConfigureAwait(false);
+            File.Move(temporary, path, overwrite: true);
+        }
+        catch (RecorderAppSettingsException) { throw; }
+        catch (IOException) { throw new RecorderAppSettingsException("The app settings could not be saved."); }
+        catch (UnauthorizedAccessException) { throw new RecorderAppSettingsException("The app settings could not be saved."); }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+}
+
+public sealed class RecorderAppSettingsException(string message) : InvalidOperationException(message);

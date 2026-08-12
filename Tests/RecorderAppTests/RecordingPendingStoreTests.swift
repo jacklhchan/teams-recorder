@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -20,6 +21,19 @@ final class RecordingPendingStoreTests: XCTestCase {
         XCTAssertEqual(try fixture.store.sessionURL(for: direct.lastPathComponent), direct)
         XCTAssertThrowsError(try fixture.store.sessionURL(for: link.lastPathComponent))
         XCTAssertThrowsError(try fixture.store.sessionURL(for: "../meeting-outside"))
+    }
+
+    func testSessionHandleKeepsOriginalDirectoryAfterNameIsReplacedBySymlink() throws {
+        let fixture = try PendingStoreFixture()
+        let session = try fixture.makeSession(named: "meeting-handle")
+        let outside = try fixture.makeOutsideSession(named: "meeting-outside")
+        let handle = try fixture.store.openSession(for: session.lastPathComponent)
+
+        try FileManager.default.removeItem(at: session)
+        try FileManager.default.createSymbolicLink(at: session, withDestinationURL: outside)
+
+        XCTAssertEqual(try fixture.directoryIdentity(of: handle.fileDescriptor), handle.identity)
+        XCTAssertThrowsError(try fixture.store.openSession(for: session.lastPathComponent))
     }
 
     func testScanSessionsSkipsManifestAndPublisherStagingNames() throws {
@@ -61,6 +75,7 @@ final class RecordingPendingStoreTests: XCTestCase {
         let fixture = try PendingStoreFixture()
         let session = try fixture.makeSession(named: "meeting-recover")
         try Data("broken".utf8).write(to: fixture.manifestURL)
+        XCTAssertEqual(chmod(fixture.manifestURL.path, 0o600), 0)
         let manifest = RecordingPublicationManifestStore(manifestURL: fixture.manifestURL)
 
         let items = try manifest.loadOrRebuild(from: fixture.store)
@@ -68,6 +83,36 @@ final class RecordingPendingStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: session.path))
         XCTAssertEqual(items.map(\.state), [.needsAttention])
         XCTAssertEqual(items.map(\.sessionDirectoryName), [session.lastPathComponent])
+        let relaunched = try manifest.loadOrRebuild(from: fixture.store)
+        XCTAssertEqual(relaunched, items)
+    }
+
+    func testUnsafeManifestModeIsPreservedAndRecoveredWithoutFollowingIt() throws {
+        let fixture = try PendingStoreFixture()
+        _ = try fixture.makeSession(named: "meeting-unsafe-manifest")
+        try Data("broken".utf8).write(to: fixture.manifestURL)
+        XCTAssertEqual(chmod(fixture.manifestURL.path, 0o644), 0)
+
+        let items = try RecordingPublicationManifestStore(manifestURL: fixture.manifestURL)
+            .loadOrRebuild(from: fixture.store)
+
+        XCTAssertEqual(items.map(\.state), [.needsAttention])
+        XCTAssertEqual(try fixture.permissions(of: fixture.manifestURL) & 0o777, 0o644)
+    }
+
+    func testManifestParentSymlinkIsRejectedWithoutFollowingIt() throws {
+        let fixture = try PendingStoreFixture()
+        let outside = fixture.temporaryRoot.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        let linkedRoot = fixture.temporaryRoot.appendingPathComponent("linked-pending", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: linkedRoot, withDestinationURL: outside)
+
+        XCTAssertThrowsError(
+            try RecordingPublicationManifestStore(
+                manifestURL: linkedRoot.appendingPathComponent("publication-queue-v1.json")
+            ).save([])
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("publication-queue-v1.json").path))
     }
 
     func testUnsupportedManifestVersionPreservesSessionsAndRebuildsNeedsAttentionItems() throws {
@@ -117,6 +162,12 @@ private final class PendingStoreFixture {
     func permissions(of url: URL) throws -> UInt16 {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         return try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).uint16Value
+    }
+
+    func directoryIdentity(of descriptor: Int32) throws -> RecordingPendingSessionIdentity {
+        var value = stat()
+        XCTAssertEqual(fstat(descriptor, &value), 0)
+        return RecordingPendingSessionIdentity(device: Int64(value.st_dev), inode: Int64(value.st_ino))
     }
 
     func item(sessionDirectoryName: String, state: RecordingPublicationState) -> RecordingPublicationItem {

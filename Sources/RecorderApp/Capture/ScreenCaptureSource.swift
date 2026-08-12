@@ -303,9 +303,9 @@ enum MicrophoneSwitchConfigurationOperation {
             do {
                 try updater.update(plan.rollbackConfiguration)
             } catch {
-                return .failed(requestedUID: plan.configuration.microphoneUID, message: error.localizedDescription)
+                return .failed(requestedUID: plan.configuration.microphoneUID, message: "Microphone configuration update failed")
             }
-            return .failed(requestedUID: plan.configuration.microphoneUID, message: error.localizedDescription)
+            return .failed(requestedUID: plan.configuration.microphoneUID, message: "Microphone configuration update failed")
         }
     }
 }
@@ -699,6 +699,8 @@ final class ScreenCaptureSource: NSObject {
         let selectedApplication: CaptureApplication?
         var selectedApplicationState: SelectedApplicationSessionState?
         var selectedMicrophoneUID: String?
+        var microphoneSwitchLifecycle = LiveMicrophoneSwitchLifecycle()
+        var microphoneSwitchLineage: (sourceSessionID: UUID, recordingEpoch: UInt64, generation: UInt64)?
         var pendingMicrophoneSwitch: PendingMicrophoneSwitch?
         var eventState = CaptureSessionEventState()
         var livenessTask: Task<Void, Never>?
@@ -794,6 +796,14 @@ final class ScreenCaptureSource: NSObject {
         } catch {
             return .unavailable(requestedUID: microphoneUID, reason: .deviceMissing)
         }
+        let plan = MicrophoneSwitchPlan(
+            previous: LiveMicrophoneConfiguration(
+                sampleRate: Int(SampleBufferConverter.outputSampleRate), channelCount: 2,
+                capturesAudio: true, capturesMicrophone: true,
+                microphoneUID: session.selectedMicrophoneUID, pixelFormat: session.screenPixelFormat
+            ),
+            requestedUID: requestedUID
+        )
         let oldConfiguration = Self.liveConfiguration(
             cadence: session.committedFilterIntent?.cadence ?? .idle,
             microphoneUID: session.selectedMicrophoneUID,
@@ -801,14 +811,15 @@ final class ScreenCaptureSource: NSObject {
         )
         let newConfiguration = Self.liveConfiguration(
             cadence: session.committedFilterIntent?.cadence ?? .idle,
-            microphoneUID: requestedUID,
+            microphoneUID: plan.configuration.microphoneUID,
             pixelFormat: session.screenPixelFormat
         )
         return await withCheckedContinuation { continuation in
             stateLock.lock()
             guard activeSession === session,
                   lifecycle.isActive(session.token),
-                  session.pendingMicrophoneSwitch == nil else {
+                  session.pendingMicrophoneSwitch == nil,
+                  acceptsMicrophoneSwitchToken(token, for: session) else {
                 stateLock.unlock()
                 continuation.resume(returning: .superseded(requestedUID: microphoneUID))
                 return
@@ -820,6 +831,8 @@ final class ScreenCaptureSource: NSObject {
                 continuation: continuation
             )
             session.pendingMicrophoneSwitch = pending
+            session.microphoneSwitchLifecycle.begin(token, requestedUID: requestedUID)
+            session.microphoneSwitchLineage = (token.sourceSessionID, token.recordingEpoch, token.generation)
             stateLock.unlock()
             Task { [weak self, weak session] in
                 guard let self, let session else { return }
@@ -857,6 +870,17 @@ final class ScreenCaptureSource: NSObject {
         }
         pending.configurationApplied = true
         return true
+    }
+
+    /// Called while stateLock is held, before any SCStream configuration update begins.
+    private func acceptsMicrophoneSwitchToken(
+        _ token: MicrophoneSwitchLifecycleToken,
+        for session: ActiveSession
+    ) -> Bool {
+        guard let lineage = session.microphoneSwitchLineage else { return true }
+        return lineage.sourceSessionID == token.sourceSessionID &&
+            lineage.recordingEpoch == token.recordingEpoch &&
+            token.generation > lineage.generation
     }
 
     private func timeoutMicrophoneSwitch(_ session: ActiveSession, pending: ActiveSession.PendingMicrophoneSwitch, rollback: SCStreamConfiguration) async {
@@ -1844,6 +1868,7 @@ final class ScreenCaptureSource: NSObject {
               lifecycle.finishStop(session.token) else {
             return
         }
+        session.microphoneSwitchLineage = nil
         activeSession = nil
     }
 
@@ -2015,6 +2040,10 @@ final class ScreenCaptureSource: NSObject {
         session.eventState.recordMicrophoneAudio()
         guard let pending = session.pendingMicrophoneSwitch,
               pending.configurationApplied else {
+            stateLock.unlock()
+            return
+        }
+        guard session.microphoneSwitchLifecycle.commitFirstFrame(for: pending.lifecycle) == pending.requestedUID else {
             stateLock.unlock()
             return
         }

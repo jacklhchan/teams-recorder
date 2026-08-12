@@ -42,7 +42,7 @@ final class MicrophoneSwitchLifecycleTests: XCTestCase {
 
         let outcome = MicrophoneSwitchConfigurationOperation.apply(plan, updater: updater)
 
-        XCTAssertEqual(outcome, .failed(requestedUID: "B", message: "update failed"))
+        XCTAssertEqual(outcome, .failed(requestedUID: "B", message: "Microphone configuration update failed"))
         XCTAssertEqual(updater.applied, [plan.configuration, original])
     }
 }

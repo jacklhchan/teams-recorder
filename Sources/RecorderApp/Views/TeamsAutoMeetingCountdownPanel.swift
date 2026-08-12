@@ -4,9 +4,25 @@ import SwiftUI
 enum TeamsAutoMeetingCountdownAccessibility {
     static let panelID = "teams-auto-countdown-panel"
     static let secondsID = "teams-auto-countdown-seconds"
+    static let recordingIndicatorID = "teams-auto-countdown-recording-indicator"
+    static let recordingIndicatorToggleID = "teams-auto-countdown-recording-indicator-toggle"
     static let cancelID = "teams-auto-countdown-cancel"
-    static let allIDs = [panelID, secondsID, cancelID]
+    static let allIDs = [
+        panelID,
+        secondsID,
+        recordingIndicatorID,
+        recordingIndicatorToggleID,
+        cancelID
+    ]
     static let cancelLabel = "Cancel automatic recording"
+
+    static func recordingIndicatorLabel(isVisible: Bool) -> String {
+        isVisible ? "Hide recording indicator" : "Show recording indicator"
+    }
+
+    static func recordingIndicatorValue(isVisible: Bool) -> String {
+        isVisible ? "Visible" : "Hidden"
+    }
 }
 
 struct TeamsAutoMeetingPresentation: Equatable {
@@ -159,11 +175,17 @@ final class TeamsAutoMeetingCountdownPanelController:
 {
     private let panel: TeamsAutoMeetingPanel
     private let episode = TeamsAutoMeetingPresentationEpisode()
+    private var showsRecordingIndicator = true
 
     override init() {
         panel = TeamsAutoMeetingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 94),
-            styleMask: [.titled, .closable, .nonactivatingPanel],
+            styleMask: [
+                .titled,
+                .closable,
+                .miniaturizable,
+                .nonactivatingPanel
+            ],
             backing: .buffered,
             defer: false
         )
@@ -188,6 +210,10 @@ final class TeamsAutoMeetingCountdownPanelController:
                 seconds: seconds,
                 cancel: { [weak self] in
                     self?.episode.consumeCancel()
+                },
+                showsRecordingIndicator: showsRecordingIndicator,
+                toggleRecordingIndicator: { [weak self] in
+                    self?.showsRecordingIndicator.toggle()
                 }
             )
         )
@@ -232,12 +258,36 @@ final class TeamsAutoMeetingCountdownPanelController:
 struct TeamsAutoMeetingCountdownView: View {
     let seconds: Int
     let cancel: @MainActor () -> Void
+    let showsRecordingIndicator: Bool
+    let toggleRecordingIndicator: @MainActor () -> Void
+
+    @MainActor
+    init(
+        seconds: Int,
+        cancel: @escaping @MainActor () -> Void,
+        showsRecordingIndicator: Bool = true,
+        toggleRecordingIndicator: @escaping @MainActor () -> Void = {}
+    ) {
+        self.seconds = seconds
+        self.cancel = cancel
+        self.showsRecordingIndicator = showsRecordingIndicator
+        self.toggleRecordingIndicator = toggleRecordingIndicator
+    }
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "record.circle")
-                .font(.title2)
-                .foregroundStyle(.red)
+            if showsRecordingIndicator {
+                Image(systemName: "record.circle")
+                    .font(.title2)
+                    .foregroundStyle(.red)
+                    .accessibilityHidden(true)
+                    .background(
+                        RecorderPanelRenderLocationMarker(
+                            productionIdentifier:
+                                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID
+                        )
+                    )
+            }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Teams meeting detected")
@@ -252,6 +302,39 @@ struct TeamsAutoMeetingCountdownView: View {
             }
 
             Spacer(minLength: 8)
+
+            Button(action: toggleRecordingIndicator) {
+                Image(
+                    systemName: showsRecordingIndicator
+                        ? "eye.slash"
+                        : "eye"
+                )
+            }
+            .buttonStyle(RecorderMotionButtonStyle(prominence: .compact, tint: .secondary))
+            .help(
+                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorLabel(
+                    isVisible: showsRecordingIndicator
+                )
+            )
+            .accessibilityLabel(
+                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorLabel(
+                    isVisible: showsRecordingIndicator
+                )
+            )
+            .accessibilityValue(
+                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorValue(
+                    isVisible: showsRecordingIndicator
+                )
+            )
+            .accessibilityIdentifier(
+                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorToggleID
+            )
+            .background(
+                RecorderPanelRenderLocationMarker(
+                    productionIdentifier:
+                        TeamsAutoMeetingCountdownAccessibility.recordingIndicatorToggleID
+                )
+            )
 
             Button(action: cancel) {
                 Image(systemName: "xmark")

@@ -5,6 +5,36 @@ import XCTest
 
 @MainActor
 final class RecordingControllerRenderTests: XCTestCase {
+    func testRecordingIndicatorButtonHidesAndRestoresTheRedBubble() throws {
+        let host = PanelRenderHost(
+            rootView: RecordingIndicatorHarness(),
+            size: .init(width: 390, height: 180)
+        )
+        defer { host.close() }
+
+        XCTAssertTrue(
+            host.contains(
+                "\(RecordingControllerAccessibility.recordingIndicatorID).marker"
+            )
+        )
+        try host.click(
+            RecordingControllerAccessibility.recordingIndicatorToggleID
+        )
+        XCTAssertFalse(
+            host.contains(
+                "\(RecordingControllerAccessibility.recordingIndicatorID).marker"
+            )
+        )
+        try host.click(
+            RecordingControllerAccessibility.recordingIndicatorToggleID
+        )
+        XCTAssertTrue(
+            host.contains(
+                "\(RecordingControllerAccessibility.recordingIndicatorID).marker"
+            )
+        )
+    }
+
     func testProductionMicrophoneButtonMutesThenUnmutesRecorderLocally() async throws {
         let model = AppModel(
             inputDevices: { [] },
@@ -159,6 +189,41 @@ final class RecordingControllerRenderTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertTrue(condition())
+    }
+}
+
+@MainActor
+private struct RecordingIndicatorHarness: View {
+    @State private var showsRecordingIndicator = true
+
+    var body: some View {
+        RecordingControllerPanelContent(
+            presentation: RecordingControllerPresentation.make(
+                snapshot: .init(
+                    isRecording: true,
+                    isFinalizing: false,
+                    startedAt: Date(),
+                    showsTeamsScreenControl: false,
+                    screenRequested: false,
+                    screenStatusText: TeamsScreenStatusText.off,
+                    screenToggleDisabled: false
+                ),
+                now: Date()
+            ),
+            stop: {},
+            toggleMicrophoneMute: {},
+            setScreenRequested: { _ in },
+            systemLevel: .init(),
+            microphoneLevel: .init(),
+            isSystemConnected: true,
+            isMicrophoneConnected: true,
+            isMicrophoneMuted: false,
+            isLocalMicrophoneMuted: false,
+            showsRecordingIndicator: showsRecordingIndicator,
+            toggleRecordingIndicator: {
+                showsRecordingIndicator.toggle()
+            }
+        )
     }
 }
 

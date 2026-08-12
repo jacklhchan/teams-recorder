@@ -5,6 +5,8 @@ import SwiftUI
 enum RecordingControllerAccessibility {
     static let statusID = "recording-controller-status"
     static let elapsedID = "recording-controller-elapsed"
+    static let recordingIndicatorID = "recording-controller-recording-indicator"
+    static let recordingIndicatorToggleID = "recording-controller-recording-indicator-toggle"
     static let systemWaveformID = "recording-controller-system-waveform"
     static let microphoneWaveformID = "recording-controller-microphone-waveform"
     static let microphoneMuteID = "recording-controller-microphone-mute"
@@ -14,6 +16,8 @@ enum RecordingControllerAccessibility {
     static let allIDs = [
         statusID,
         elapsedID,
+        recordingIndicatorID,
+        recordingIndicatorToggleID,
         systemWaveformID,
         microphoneWaveformID,
         microphoneMuteID,
@@ -23,6 +27,14 @@ enum RecordingControllerAccessibility {
     ]
     static let stopLabel = "Stop recording"
     static let screenCaptureLabel = "Capture Teams screen"
+
+    static func recordingIndicatorLabel(isVisible: Bool) -> String {
+        isVisible ? "Hide recording indicator" : "Show recording indicator"
+    }
+
+    static func recordingIndicatorValue(isVisible: Bool) -> String {
+        isVisible ? "Visible" : "Hidden"
+    }
 
     static func microphoneMuteLabel(isMuted: Bool) -> String {
         isMuted ? "Unmute microphone" : "Mute microphone"
@@ -188,7 +200,7 @@ final class RecordingControllerPanel: NSPanel {
     init() {
         super.init(
             contentRect: NSRect(origin: .zero, size: Self.panelSize),
-            styleMask: [.titled, .nonactivatingPanel],
+            styleMask: [.titled, .miniaturizable, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -222,6 +234,7 @@ final class RecordingControllerPanel: NSPanel {
 struct RecordingControllerView: View {
     @ObservedObject private var model: AppModel
     @ObservedObject private var recorder: RecordingEngine
+    @State private var showsRecordingIndicator = true
 
     init(model: AppModel) {
         self.model = model
@@ -250,7 +263,9 @@ struct RecordingControllerView: View {
                 isSystemConnected: recorder.isSystemCaptureConnected,
                 isMicrophoneConnected: recorder.isMicrophoneCaptureConnected,
                 isMicrophoneMuted: recorder.micMuted,
-                isLocalMicrophoneMuted: model.localMicMuted
+                isLocalMicrophoneMuted: model.localMicMuted,
+                showsRecordingIndicator: showsRecordingIndicator,
+                toggleRecordingIndicator: toggleRecordingIndicator
             )
         }
     }
@@ -268,6 +283,10 @@ struct RecordingControllerView: View {
         )
     }
 
+    private func toggleRecordingIndicator() {
+        showsRecordingIndicator.toggle()
+    }
+
 }
 
 struct RecordingControllerPanelContent: View {
@@ -281,11 +300,84 @@ struct RecordingControllerPanelContent: View {
     let isMicrophoneConnected: Bool
     let isMicrophoneMuted: Bool
     let isLocalMicrophoneMuted: Bool
+    let showsRecordingIndicator: Bool
+    let toggleRecordingIndicator: () -> Void
+
+    init(
+        presentation: RecordingControllerPresentation,
+        stop: @escaping () -> Void,
+        toggleMicrophoneMute: @escaping () -> Void,
+        setScreenRequested: @escaping (Bool) -> Void,
+        systemLevel: LevelSnapshot,
+        microphoneLevel: LevelSnapshot,
+        isSystemConnected: Bool,
+        isMicrophoneConnected: Bool,
+        isMicrophoneMuted: Bool,
+        isLocalMicrophoneMuted: Bool,
+        showsRecordingIndicator: Bool = true,
+        toggleRecordingIndicator: @escaping () -> Void = {}
+    ) {
+        self.presentation = presentation
+        self.stop = stop
+        self.toggleMicrophoneMute = toggleMicrophoneMute
+        self.setScreenRequested = setScreenRequested
+        self.systemLevel = systemLevel
+        self.microphoneLevel = microphoneLevel
+        self.isSystemConnected = isSystemConnected
+        self.isMicrophoneConnected = isMicrophoneConnected
+        self.isMicrophoneMuted = isMicrophoneMuted
+        self.isLocalMicrophoneMuted = isLocalMicrophoneMuted
+        self.showsRecordingIndicator = showsRecordingIndicator
+        self.toggleRecordingIndicator = toggleRecordingIndicator
+    }
 
     var body: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                Circle().fill(.red).frame(width: 10, height: 10)
+                if showsRecordingIndicator {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 10, height: 10)
+                        .accessibilityHidden(true)
+                        .background(
+                            RecorderPanelRenderLocationMarker(
+                                productionIdentifier:
+                                    RecordingControllerAccessibility.recordingIndicatorID
+                            )
+                        )
+                }
+                Button(action: toggleRecordingIndicator) {
+                    Image(
+                        systemName: showsRecordingIndicator
+                            ? "eye.slash"
+                            : "eye"
+                    )
+                }
+                .buttonStyle(.plain)
+                .help(
+                    RecordingControllerAccessibility.recordingIndicatorLabel(
+                        isVisible: showsRecordingIndicator
+                    )
+                )
+                .accessibilityLabel(
+                    RecordingControllerAccessibility.recordingIndicatorLabel(
+                        isVisible: showsRecordingIndicator
+                    )
+                )
+                .accessibilityValue(
+                    RecordingControllerAccessibility.recordingIndicatorValue(
+                        isVisible: showsRecordingIndicator
+                    )
+                )
+                .accessibilityIdentifier(
+                    RecordingControllerAccessibility.recordingIndicatorToggleID
+                )
+                .background(
+                    RecorderPanelRenderLocationMarker(
+                        productionIdentifier:
+                            RecordingControllerAccessibility.recordingIndicatorToggleID
+                    )
+                )
                 Text(presentation.title)
                     .font(.headline)
                     .accessibilityIdentifier(RecordingControllerAccessibility.statusID)

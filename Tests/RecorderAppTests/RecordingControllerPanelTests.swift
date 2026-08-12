@@ -4,6 +4,14 @@ import XCTest
 
 @MainActor
 final class RecordingControllerPanelTests: XCTestCase {
+    func testRecordingFloatingPanelExposesNativeMinimizeButton() {
+        let panel = RecordingControllerPanel()
+        defer { panel.orderOut(nil) }
+
+        XCTAssertTrue(panel.styleMask.contains(.miniaturizable))
+        XCTAssertNotNil(panel.standardWindowButton(.miniaturizeButton))
+    }
+
     func testAccessibilityLabelsAndToggleValuesAreExplicit() {
         XCTAssertEqual(
             RecordingControllerAccessibility.stopLabel,

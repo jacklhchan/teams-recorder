@@ -1,8 +1,21 @@
+import AppKit
 import XCTest
 @testable import RecorderApp
 
 @MainActor
 final class TeamsAutoMeetingPresentationTests: XCTestCase {
+    func testAutoMeetingFloatingPanelExposesNativeMinimizeButton() {
+        let presenter = TeamsAutoMeetingCountdownPanelController()
+        presenter.present(seconds: 5, cancel: {})
+        defer { presenter.dismiss() }
+
+        let panel = NSApp.windows.first {
+            $0.title == "Teams Window Auto Recording"
+        }
+        XCTAssertTrue(panel?.styleMask.contains(.miniaturizable) == true)
+        XCTAssertNotNil(panel?.standardWindowButton(.miniaturizeButton))
+    }
+
     func testCountdownPresentationShowsRemainingSecondsAndCancel() {
         let presentation = TeamsAutoMeetingPresentation.make(
             state: .startCountdown(secondsRemaining: 3)

@@ -5,6 +5,33 @@ import XCTest
 
 @MainActor
 final class TeamsAutoMeetingCountdownRenderTests: XCTestCase {
+    func testCountdownIndicatorButtonHidesAndRestoresTheRedBubble() throws {
+        let host = CountdownRenderHost(rootView: CountdownIndicatorHarness())
+        defer { host.close() }
+
+        XCTAssertTrue(
+            host.contains(
+                "\(TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID).marker"
+            )
+        )
+        try host.click(
+            TeamsAutoMeetingCountdownAccessibility.recordingIndicatorToggleID
+        )
+        XCTAssertFalse(
+            host.contains(
+                "\(TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID).marker"
+            )
+        )
+        try host.click(
+            TeamsAutoMeetingCountdownAccessibility.recordingIndicatorToggleID
+        )
+        XCTAssertTrue(
+            host.contains(
+                "\(TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID).marker"
+            )
+        )
+    }
+
     func testCountdownFixturesHaveFixedBoundsAndCancelOnce() throws {
         for seconds in [8, 7] {
             var cancellations = 0
@@ -43,6 +70,22 @@ final class TeamsAutoMeetingCountdownRenderTests: XCTestCase {
                 }
             } else { baseline = frames }
         }
+    }
+}
+
+@MainActor
+private struct CountdownIndicatorHarness: View {
+    @State private var showsRecordingIndicator = true
+
+    var body: some View {
+        TeamsAutoMeetingCountdownView(
+            seconds: 8,
+            cancel: {},
+            showsRecordingIndicator: showsRecordingIndicator,
+            toggleRecordingIndicator: {
+                showsRecordingIndicator.toggle()
+            }
+        )
     }
 }
 

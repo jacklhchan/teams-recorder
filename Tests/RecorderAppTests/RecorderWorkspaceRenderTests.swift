@@ -1868,6 +1868,54 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.transcription-section"))
     }
 
+    func testPrivacyModeSettingsRendersIdentifiersAndDisabledCopy() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.transcription"))
+
+        XCTAssertTrue(RecorderActionID.all.contains("recorder.settings.privacy-mode-toggle"))
+        XCTAssertTrue(RecorderActionID.all.contains("recorder.settings.privacy-mode-status"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.privacy-mode-toggle"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.privacy-mode-status"))
+        XCTAssertEqual(
+            host.accessibilityLabel(for: "recorder.settings.privacy-mode-toggle"),
+            "Privacy Mode (Local Only)"
+        )
+        XCTAssertEqual(
+            host.accessibilityLabel(for: "recorder.settings.privacy-mode-status"),
+            "AI provider actions can use your saved provider settings."
+        )
+    }
+
+    func testPrivacyModeSettingsToggleChangesPersistsAndProjectsEnabledCopy() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.transcription"))
+        XCTAssertFalse(fixture.model.privacyModeEnabled)
+
+        XCTAssertTrue(host.pressAccessibilityElement("recorder.settings.privacy-mode-toggle"))
+
+        XCTAssertTrue(fixture.model.privacyModeEnabled)
+        XCTAssertTrue(fixture.defaults.bool(forKey: PrivacyModePolicy.defaultsKey))
+        XCTAssertTrue(PrivacyModePolicy(defaults: fixture.defaults).isEnabled)
+        XCTAssertEqual(
+            host.accessibilityLabel(for: "recorder.settings.privacy-mode-status"),
+            "Recording and local files continue normally. Transcription and meeting intelligence will not contact an AI provider."
+        )
+    }
+
     func testMinimumSettingsRendersCaptureAndTeamsControls() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(
@@ -2768,7 +2816,17 @@ final class WorkspaceHost {
     }
 
     func accessibilityLabel(for identifier: String) -> String? {
-        view(forAccessibilityIdentifier: identifier)?.accessibilityLabel()
+        if let label = view(forAccessibilityIdentifier: identifier)?
+            .accessibilityLabel() {
+            return label
+        }
+        guard let element = accessibilityElement(
+            forAccessibilityIdentifier: identifier
+        ) as? NSObject,
+        element.responds(to: NSSelectorFromString("accessibilityLabel")) else {
+            return nil
+        }
+        return element.value(forKey: "accessibilityLabel") as? String
     }
 
     func colorSchemeAppearance(for identifier: String) -> NSAppearance.Name? {
@@ -2879,6 +2937,21 @@ final class WorkspaceHost {
         button.performClick(nil)
         render()
         return true
+    }
+
+    @discardableResult
+    func pressAccessibilityElement(_ identifier: String) -> Bool {
+        let didPress: Bool
+        if let marker = view(forAccessibilityIdentifier: identifier)
+            as? RecorderSettingsAccessibilityMarkerView {
+            didPress = marker.accessibilityPerformPress()
+        } else {
+            didPress = performAccessibilityPress(
+                forAccessibilityIdentifier: identifier
+            )
+        }
+        render()
+        return didPress
     }
 
     func nativeTextFieldColorSchemeAppearance(

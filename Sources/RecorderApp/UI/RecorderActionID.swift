@@ -19,6 +19,8 @@ enum RecorderActionID {
     static let recoveryCenterOpenLocal = "recorder.recovery.open-local"
     static let recoveryCenterRestoreAccess = "recorder.recovery.restore-access"
     static let recoveryCenterNeedsAttention = "recorder.recovery.needs-attention"
+    static let privacyModeToggle = "recorder.settings.privacy-mode-toggle"
+    static let privacyModeStatus = "recorder.settings.privacy-mode-status"
     static let uploadAudio = "recorder.action.upload-audio"
     static let refreshRecordings = "recorder.action.refresh-recordings"
     static let filterFavorites = "recorder.action.filter-favorites"
@@ -92,6 +94,8 @@ enum RecorderActionID {
         recoveryCenterOpenLocal,
         recoveryCenterRestoreAccess,
         recoveryCenterNeedsAttention,
+        privacyModeToggle,
+        privacyModeStatus,
         uploadAudio,
         refreshRecordings,
         filterFavorites,

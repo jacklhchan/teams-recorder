@@ -178,21 +178,58 @@ struct RecorderSettingsView: View {
     }
 
     private var transcriptionSectionContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Transcription Profile", systemImage: "text.bubble")
-                .font(.headline)
-            Text("Transcription uses the provider selected in AI Provider.")
-                .foregroundStyle(.secondary)
-            Text(model.aiProviderSettingsModel.selectedProviderKind == .hktGenAI
-                 ? "HKT GenAI Platform is selected."
-                 : "OpenAI-compatible API is selected.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 20) {
+            Section("Privacy") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(
+                        "Privacy Mode (Local Only)",
+                        isOn: Binding(
+                            get: { model.privacyModeEnabled },
+                            set: { model.setPrivacyModeEnabled($0) }
+                        )
+                    )
+                    .accessibilityIdentifier(RecorderActionID.privacyModeToggle)
+                    .background(RecorderSettingsAccessibilityMarker(
+                        identifier: RecorderActionID.privacyModeToggle,
+                        label: "Privacy Mode (Local Only)",
+                        onPress: {
+                            model.setPrivacyModeEnabled(!model.privacyModeEnabled)
+                        }
+                    ))
+                    Text(privacyModeStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(RecorderActionID.privacyModeStatus)
+                        .background(RecorderSettingsAccessibilityMarker(
+                            identifier: RecorderActionID.privacyModeStatus,
+                            label: privacyModeStatusText
+                        ))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Transcription Profile", systemImage: "text.bubble")
+                    .font(.headline)
+                Text("Transcription uses the provider selected in AI Provider.")
+                    .foregroundStyle(.secondary)
+                Text(model.aiProviderSettingsModel.selectedProviderKind == .hktGenAI
+                     ? "HKT GenAI Platform is selected."
+                     : "OpenAI-compatible API is selected.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityIdentifier("recorder.settings.transcription-profile-status")
+            .background(RecorderSettingsAccessibilityMarker(
+                identifier: "recorder.settings.transcription-profile-status"
+            ))
         }
-        .accessibilityIdentifier("recorder.settings.transcription-profile-status")
-        .background(RecorderSettingsAccessibilityMarker(
-            identifier: "recorder.settings.transcription-profile-status"
-        ))
+    }
+
+    private var privacyModeStatusText: String {
+        if model.privacyModeEnabled {
+            return "Recording and local files continue normally. Transcription and meeting intelligence will not contact an AI provider."
+        }
+        return "AI provider actions can use your saved provider settings."
     }
 
     private var storageAndShortcutsSectionContent: some View {
@@ -598,25 +635,38 @@ extension AudioDevice {
 
 struct RecorderSettingsAccessibilityMarker: NSViewRepresentable {
     let identifier: String
+    var label: String? = nil
+    var onPress: (() -> Void)? = nil
     @Environment(\.isEnabled) private var isEnabled
 
     func makeNSView(context _: Context) -> RecorderSettingsAccessibilityMarkerView {
         let view = RecorderSettingsAccessibilityMarkerView(frame: .zero)
         view.setAccessibilityIdentifier(identifier)
+        view.setAccessibilityLabel(label)
         view.markerEnabled = isEnabled
+        view.onPress = onPress
         return view
     }
 
     func updateNSView(_ nsView: RecorderSettingsAccessibilityMarkerView, context _: Context) {
         nsView.setAccessibilityIdentifier(identifier)
+        nsView.setAccessibilityLabel(label)
         nsView.markerEnabled = isEnabled
+        nsView.onPress = onPress
     }
 }
 
 final class RecorderSettingsAccessibilityMarkerView: NSView {
     var markerEnabled = true
+    var onPress: (() -> Void)?
 
     override func isAccessibilityEnabled() -> Bool {
         markerEnabled
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard markerEnabled, let onPress else { return false }
+        onPress()
+        return true
     }
 }

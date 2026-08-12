@@ -13,6 +13,12 @@ enum RecorderActionID {
     static let storageOpenLocal = "recorder.storage.open-local"
     static let storageDestinationStatus = "recorder.storage.destination-status"
     static let storagePendingStatus = "recorder.storage.pending-status"
+    static let recoveryCenterRoot = "recorder.recovery.root"
+    static let recoveryCenterRetainedCount = "recorder.recovery.retained-count"
+    static let recoveryCenterRetry = "recorder.recovery.retry"
+    static let recoveryCenterOpenLocal = "recorder.recovery.open-local"
+    static let recoveryCenterRestoreAccess = "recorder.recovery.restore-access"
+    static let recoveryCenterNeedsAttention = "recorder.recovery.needs-attention"
     static let uploadAudio = "recorder.action.upload-audio"
     static let refreshRecordings = "recorder.action.refresh-recordings"
     static let filterFavorites = "recorder.action.filter-favorites"
@@ -80,6 +86,12 @@ enum RecorderActionID {
         storageOpenLocal,
         storageDestinationStatus,
         storagePendingStatus,
+        recoveryCenterRoot,
+        recoveryCenterRetainedCount,
+        recoveryCenterRetry,
+        recoveryCenterOpenLocal,
+        recoveryCenterRestoreAccess,
+        recoveryCenterNeedsAttention,
         uploadAudio,
         refreshRecordings,
         filterFavorites,

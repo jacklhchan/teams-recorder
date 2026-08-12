@@ -16,11 +16,28 @@ final class RecorderNavigationTests: XCTestCase {
         XCTAssertNil(state.pendingDestination)
     }
 
+    func testCleanNavigationSelectsRecoveryAndClearsPending() {
+        var state = RecorderNavigationState(selection: .record)
+        state.select(.recovery, hasUnsavedChanges: false)
+        XCTAssertEqual(state.selection, .recovery)
+        XCTAssertNil(state.pendingDestination)
+    }
+
     func testDirtyNavigationRequestsConfirmationWithoutChangingSelection() {
         var state = RecorderNavigationState(selection: .recordings)
         state.select(.settings, hasUnsavedChanges: true)
         XCTAssertEqual(state.selection, .recordings)
         XCTAssertEqual(state.pendingDestination, .settings)
+    }
+
+    func testDirtyNavigationDefersRecoveryUntilDiscard() {
+        var state = RecorderNavigationState(selection: .recordings)
+        state.select(.recovery, hasUnsavedChanges: true)
+        XCTAssertEqual(state.selection, .recordings)
+        XCTAssertEqual(state.pendingDestination, .recovery)
+        state.discardAndNavigate()
+        XCTAssertEqual(state.selection, .recovery)
+        XCTAssertNil(state.pendingDestination)
     }
 
     func testKeepEditingClearsPendingAndRetainsCurrentDestination() {

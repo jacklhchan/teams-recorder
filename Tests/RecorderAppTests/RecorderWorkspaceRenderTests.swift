@@ -14,6 +14,87 @@ private enum RecordingsSurfaceTestMarker {
 
 @MainActor
 final class RecorderWorkspaceRenderTests: XCTestCase {
+    func testRecoveryCenterRendersMixedGroupsAndRetainedCount() throws {
+        let fixture = makeWorkspaceFixture(
+            publication: .init(stateText: "Publish failed", pendingCount: 1, waitingCount: 1, needsAttentionCount: 1),
+            recoverySnapshot: recoverySnapshot()
+        )
+        let host = try makeWorkspaceHost(model: fixture.model, size: .init(width: 860, height: 680))
+        defer { host.close() }
+
+        host.select(.recovery)
+        XCTAssertEqual(host.navigationState.selection, .recovery)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterRoot)
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterRoot))
+        XCTAssertTrue(host.containsText("Publishing / Pending"))
+        XCTAssertTrue(host.containsText("Waiting for destination"))
+        XCTAssertTrue(host.containsText("Needs attention"))
+        XCTAssertTrue(host.containsText("3 recordings retained locally"))
+        XCTAssertTrue(host.containsText("Publishing local copy"))
+        XCTAssertFalse(host.containsText("unsafe-session-name"))
+        XCTAssertFalse(host.containsText(fixture.pendingRoot.path))
+        XCTAssertFalse(host.containsText("rawFailureCategory"))
+    }
+
+    func testRecoveryCenterWaitingItemShowsQueueRetryAndOpenLocalOnly() throws {
+        let fixture = makeWorkspaceFixture(
+            publication: .init(stateText: "Waiting", pendingCount: 0, waitingCount: 1, needsAttentionCount: 0),
+            recoverySnapshot: recoverySnapshot(states: [.waitingForDestination])
+        )
+        let host = try makeWorkspaceHost(model: fixture.model, size: .init(width: 860, height: 680))
+        defer { host.close() }
+
+        host.select(.recovery)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterRetry)
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterRetry))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterOpenLocal))
+        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.recoveryCenterRetry))
+        XCTAssertEqual(fixture.coordinator.retryNowCalls, 1)
+        XCTAssertFalse(host.containsText("Delete"))
+        XCTAssertFalse(host.containsText("Cleanup"))
+    }
+
+    func testRecoveryCenterLegacyNeedsAttentionHasNoRowAction() throws {
+        let fixture = makeWorkspaceFixture(
+            publication: .init(stateText: "Publish failed", pendingCount: 0, waitingCount: 0, needsAttentionCount: 1),
+            recoverySnapshot: recoverySnapshot(states: [.needsAttention])
+        )
+        let host = try makeWorkspaceHost(model: fixture.model, size: .init(width: 860, height: 680))
+        defer { host.close() }
+
+        host.select(.recovery)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterNeedsAttention)
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterNeedsAttention))
+        XCTAssertTrue(host.containsText("This local recording needs attention before it can be published."))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterOpenLocal))
+        XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterRetry))
+        XCTAssertFalse(host.containsText("Cleanup"))
+    }
+
+    func testRecoveryCenterRestoreAccessUsesExistingDestinationActionOnly() throws {
+        let fixture = makeWorkspaceFixture(
+            destinationState: .needsFolderAccess,
+            publication: .emptyReady,
+            recoverySnapshot: .init(presentation: .emptyReady, items: [])
+        )
+        let host = try makeWorkspaceHost(model: fixture.model, size: .init(width: 860, height: 680))
+        defer { host.close() }
+
+        host.select(.recovery)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterRestoreAccess)
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterRestoreAccess))
+        XCTAssertFalse(host.containsText("URL"))
+        XCTAssertFalse(host.containsText("Path"))
+    }
+
     func testRecordWorkspaceShowsPendingPublicationBannerActions() throws {
         let fixture = makeWorkspaceFixture(
             publication: .init(
@@ -1991,7 +2072,8 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 
     private func makeWorkspaceFixture(
         destinationState: RecordingDestinationState = .ready,
-        publication: RecordingPublicationPresentation
+        publication: RecordingPublicationPresentation,
+        recoverySnapshot: RecoveryCenterSnapshot = .init(presentation: .emptyReady, items: [])
     ) -> StoragePresentationFixture {
         let suiteName = "RecorderWorkspaceRenderTests.storage.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -2004,7 +2086,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             url: destination,
             state: destinationState
         )
-        let coordinator = RenderPublicationCoordinator(presentation: publication)
+        let coordinator = RenderPublicationCoordinator(presentation: publication, recoveryCenterSnapshot: recoverySnapshot)
         let testRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
             "recorder-storage-render-paths-\(UUID().uuidString)",
             isDirectory: true
@@ -2027,7 +2109,28 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         return .init(
             model: model,
             defaults: defaults,
-            pendingRoot: appPaths.pendingRecordingsDirectory
+            pendingRoot: appPaths.pendingRecordingsDirectory,
+            coordinator: coordinator
+        )
+    }
+
+    private func recoverySnapshot(
+        states: [RecoveryCenterItemState] = [.publishingOrPending, .waitingForDestination, .needsAttention]
+    ) -> RecoveryCenterSnapshot {
+        let items = states.enumerated().map { index, state in
+            RecoveryCenterItem(
+                id: UUID(), source: index == 1 ? .teamsAutomatic : .manual,
+                createdAt: Date(timeIntervalSince1970: TimeInterval(index + 1)),
+                state: state,
+                safeStatusText: state == .needsAttention
+                    ? "This local recording needs attention before it can be published."
+                    : state == .waitingForDestination ? "Destination access is needed" : "Publishing local copy",
+                canRetry: state == .waitingForDestination
+            )
+        }
+        return .init(
+            presentation: .init(stateText: "Publish failed", pendingCount: states.filter { $0 == .publishingOrPending }.count, waitingCount: states.filter { $0 == .waitingForDestination }.count, needsAttentionCount: states.filter { $0 == .needsAttention }.count),
+            items: items
         )
     }
 
@@ -2154,6 +2257,7 @@ private struct StoragePresentationFixture {
     let model: AppModel
     let defaults: UserDefaults
     let pendingRoot: URL
+    let coordinator: RenderPublicationCoordinator
 }
 
 private extension RecordingPublicationPresentation {
@@ -2169,20 +2273,20 @@ private extension RecordingPublicationPresentation {
 private final class RenderPublicationCoordinator: RecordingPublicationCoordinating {
     var presentation: RecordingPublicationPresentation
     var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
-    var recoveryCenterSnapshot = RecoveryCenterSnapshot(
-        presentation: .init(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0),
-        items: []
-    )
+    var recoveryCenterSnapshot: RecoveryCenterSnapshot
     var onRecoveryCenterSnapshotChange: ((RecoveryCenterSnapshot) -> Void)?
     var onCompleted: ((RecordingPublicationCompleted) -> Void)?
 
-    init(presentation: RecordingPublicationPresentation) {
+    private(set) var retryNowCalls = 0
+
+    init(presentation: RecordingPublicationPresentation, recoveryCenterSnapshot: RecoveryCenterSnapshot) {
         self.presentation = presentation
+        self.recoveryCenterSnapshot = recoveryCenterSnapshot
     }
 
     func enqueue(_: RecordingPublicationRequest) {}
     func resume() {}
-    func retryNow() {}
+    func retryNow() { retryNowCalls += 1 }
     func shutdown() {}
 }
 
@@ -2447,7 +2551,9 @@ final class WorkspaceHost {
     }
 
     func select(_ destination: RecorderDestination) {
-        navigationDriver.navigation.select(destination, hasUnsavedChanges: false)
+        var navigation = navigationDriver.navigation
+        navigation.select(destination, hasUnsavedChanges: false)
+        navigationDriver.navigation = navigation
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         layout()
     }

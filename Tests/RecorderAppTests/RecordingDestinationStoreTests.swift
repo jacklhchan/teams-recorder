@@ -54,6 +54,18 @@ final class RecordingDestinationStoreTests: XCTestCase {
         XCTAssertNotEqual(restored.url, fixture.downloads)
     }
 
+    func testCorruptCurrentIdentityNeedsFolderAccessForOnlyCatalogDestination() throws {
+        let fixture = DestinationStoreFixture()
+        try fixture.store.save(fixture.destination)
+        fixture.defaults.set(Data("corrupt identity".utf8), forKey: "recordingDestinationCurrentIdentityV1")
+
+        let restored = fixture.store.restore(defaultURL: fixture.downloads)
+
+        XCTAssertEqual(restored.url, fixture.destination)
+        XCTAssertEqual(restored.state, .needsFolderAccess)
+        XCTAssertNotEqual(restored.url, fixture.downloads)
+    }
+
     func testAccessBalancesSuccessfulSecurityScope() throws {
         let fixture = DestinationStoreFixture()
         try fixture.store.save(fixture.destination)

@@ -97,6 +97,12 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
         case folderAccessUnavailable
     }
 
+    private enum CurrentIdentityLoadResult {
+        case absent
+        case valid(RecordingDestinationIdentity)
+        case corrupt
+    }
+
     private let defaults: UserDefaults
     private let codec: RecordingDestinationBookmarkCodec
 
@@ -106,8 +112,8 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
     }
 
     var currentIdentity: RecordingDestinationIdentity? {
-        guard let data = defaults.data(forKey: Self.currentIdentityKey) else { return nil }
-        return try? JSONDecoder().decode(RecordingDestinationIdentity.self, from: data)
+        guard case let .valid(identity) = loadCurrentIdentity() else { return nil }
+        return identity
     }
 
     var savedBookmarkKind: RecordingDestinationBookmarkKind? {
@@ -117,9 +123,28 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
     }
 
     func restore(defaultURL: URL) -> RecordingDestinationSelection {
-        guard let identity = currentIdentity else {
+        switch loadCurrentIdentity() {
+        case .absent:
             return RecordingDestinationSelection(identity: nil, url: defaultURL, state: .ready)
+        case .corrupt:
+            guard let catalog = loadCatalog(), catalog.entries.count == 1,
+                  let entry = catalog.entries.first else {
+                return RecordingDestinationSelection(identity: nil, url: defaultURL, state: .unavailable)
+            }
+            return RecordingDestinationSelection(
+                identity: entry.identity,
+                url: URL(fileURLWithPath: entry.path, isDirectory: true),
+                state: .needsFolderAccess
+            )
+        case let .valid(identity):
+            return restore(identity: identity, defaultURL: defaultURL)
         }
+    }
+
+    private func restore(
+        identity: RecordingDestinationIdentity,
+        defaultURL: URL
+    ) -> RecordingDestinationSelection {
         guard let entry = loadCatalog()?.entries.first(where: { $0.identity == identity }) else {
             return RecordingDestinationSelection(identity: identity, url: defaultURL, state: .unavailable)
         }
@@ -195,6 +220,14 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
               let catalog = try? JSONDecoder().decode(Catalog.self, from: data),
               catalog.version == 1 else { return nil }
         return catalog
+    }
+
+    private func loadCurrentIdentity() -> CurrentIdentityLoadResult {
+        guard let data = defaults.data(forKey: Self.currentIdentityKey) else { return .absent }
+        guard let identity = try? JSONDecoder().decode(RecordingDestinationIdentity.self, from: data) else {
+            return .corrupt
+        }
+        return .valid(identity)
     }
 
     private func persist(catalog: Catalog, currentIdentity: RecordingDestinationIdentity) throws {

@@ -87,6 +87,37 @@ struct RecordingPendingStore: Sendable {
         return descriptor
     }
 
+    /// Removes only the exact direct child represented by an already-open handle.
+    /// URL paths are intentionally not accepted as deletion authority.
+    func removeRetainedSession(_ session: RecordingPendingSession) throws {
+        let rootDescriptor = try openRootDescriptor()
+        defer { Darwin.close(rootDescriptor) }
+        var rootEntry = stat()
+        guard fstatat(rootDescriptor, session.directoryName, &rootEntry, AT_SYMLINK_NOFOLLOW) == 0,
+              matches(rootEntry, session.identity),
+              (rootEntry.st_mode & S_IFMT) == S_IFDIR else {
+            throw RecordingPendingStoreError.unsafeSession
+        }
+        try validateTree(directory: session.fileDescriptor)
+        try removeTree(directory: session.fileDescriptor)
+        var current = stat()
+        guard fstatat(rootDescriptor, session.directoryName, &current, AT_SYMLINK_NOFOLLOW) == 0,
+              matches(current, session.identity),
+              unlinkat(rootDescriptor, session.directoryName, AT_REMOVEDIR) == 0 else {
+            throw RecordingPendingStoreError.unsafeSession
+        }
+    }
+
+    func isSessionAbsent(named directoryName: String) throws -> Bool {
+        guard isSafeDirectoryName(directoryName) else { throw RecordingPendingStoreError.invalidSessionName }
+        let rootDescriptor = try openRootDescriptor()
+        defer { Darwin.close(rootDescriptor) }
+        var value = stat()
+        guard fstatat(rootDescriptor, directoryName, &value, AT_SYMLINK_NOFOLLOW) != 0 else { return false }
+        if errno == ENOENT { return true }
+        throw RecordingPendingStoreError.unsafeSession
+    }
+
     private func isSafeDirectoryName(_ name: String) -> Bool {
         !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\\") && !name.hasPrefix(".")
     }
@@ -97,5 +128,93 @@ struct RecordingPendingStore: Sendable {
             throw RecordingPendingStoreError.unsafeSession
         }
         return RecordingPendingSessionIdentity(device: Int64(value.st_dev), inode: Int64(value.st_ino))
+    }
+
+    private func matches(_ value: stat, _ identity: RecordingPendingSessionIdentity) -> Bool {
+        Int64(value.st_dev) == identity.device && Int64(value.st_ino) == identity.inode
+    }
+
+    private func validateTree(directory: Int32) throws {
+        for name in try entryNames(in: directory) {
+            var observed = stat()
+            guard fstatat(directory, name, &observed, AT_SYMLINK_NOFOLLOW) == 0 else {
+                throw RecordingPendingStoreError.unsafeSession
+            }
+            switch observed.st_mode & S_IFMT {
+            case S_IFREG:
+                let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                guard descriptor >= 0 else { throw RecordingPendingStoreError.unsafeSession }
+                defer { Darwin.close(descriptor) }
+                var opened = stat()
+                guard fstat(descriptor, &opened) == 0, sameEntry(observed, opened) else {
+                    throw RecordingPendingStoreError.unsafeSession
+                }
+            case S_IFDIR:
+                let descriptor = openat(directory, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard descriptor >= 0 else { throw RecordingPendingStoreError.unsafeSession }
+                defer { Darwin.close(descriptor) }
+                var opened = stat()
+                guard fstat(descriptor, &opened) == 0, sameEntry(observed, opened) else {
+                    throw RecordingPendingStoreError.unsafeSession
+                }
+                try validateTree(directory: descriptor)
+            default:
+                throw RecordingPendingStoreError.unsafeSession
+            }
+        }
+    }
+
+    private func removeTree(directory: Int32) throws {
+        for name in try entryNames(in: directory) {
+            var observed = stat()
+            guard fstatat(directory, name, &observed, AT_SYMLINK_NOFOLLOW) == 0 else {
+                throw RecordingPendingStoreError.unsafeSession
+            }
+            switch observed.st_mode & S_IFMT {
+            case S_IFREG:
+                var current = stat()
+                guard fstatat(directory, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                      sameEntry(current, observed), unlinkat(directory, name, 0) == 0 else {
+                    throw RecordingPendingStoreError.unsafeSession
+                }
+            case S_IFDIR:
+                let child = openat(directory, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard child >= 0 else { throw RecordingPendingStoreError.unsafeSession }
+                defer { Darwin.close(child) }
+                var opened = stat()
+                guard fstat(child, &opened) == 0, sameEntry(observed, opened) else {
+                    throw RecordingPendingStoreError.unsafeSession
+                }
+                try removeTree(directory: child)
+                var current = stat()
+                guard fstatat(directory, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                      sameEntry(current, opened), unlinkat(directory, name, AT_REMOVEDIR) == 0 else {
+                    throw RecordingPendingStoreError.unsafeSession
+                }
+            default:
+                throw RecordingPendingStoreError.unsafeSession
+            }
+        }
+    }
+
+    private func entryNames(in directory: Int32) throws -> [String] {
+        let duplicate = dup(directory)
+        guard duplicate >= 0, let stream = fdopendir(duplicate) else {
+            if duplicate >= 0 { Darwin.close(duplicate) }
+            throw RecordingPendingStoreError.unsafeSession
+        }
+        defer { closedir(stream) }
+        var names: [String] = []
+        while let entry = readdir(stream) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN)) { String(cString: $0) }
+            }
+            if name != ".", name != ".." { names.append(name) }
+        }
+        return names
+    }
+
+    private func sameEntry(_ lhs: stat, _ rhs: stat) -> Bool {
+        lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino && (lhs.st_mode & S_IFMT) == (rhs.st_mode & S_IFMT)
     }
 }

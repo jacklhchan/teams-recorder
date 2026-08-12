@@ -37,6 +37,19 @@ final class RecordingPendingStoreTests: XCTestCase {
         XCTAssertThrowsError(try fixture.store.openSession(for: session.lastPathComponent))
     }
 
+    func testRemovalRejectsReplacementAndDoesNotDeleteIt() throws {
+        let fixture = try PendingStoreFixture()
+        let session = try fixture.makeSession(named: "meeting-cleanup")
+        let handle = try fixture.store.openSession(for: session.lastPathComponent)
+        try FileManager.default.removeItem(at: session)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: false)
+        let sentinel = session.appendingPathComponent("keep")
+        try Data("keep".utf8).write(to: sentinel)
+
+        XCTAssertThrowsError(try fixture.store.removeRetainedSession(handle))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
+    }
+
     func testScanSessionsSkipsManifestAndPublisherStagingNames() throws {
         let fixture = try PendingStoreFixture()
         let session = try fixture.makeSession(named: "meeting-scan")

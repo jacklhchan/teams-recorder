@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 enum RecordingPublicationState: String, Codable, Equatable, Sendable {
-    case pending, publishing, waitingForDestination, needsAttention
+    case pending, publishing, waitingForDestination, needsAttention, published
 }
 
 struct RecordingPublicationItem: Codable, Equatable, Identifiable, Sendable {
@@ -18,6 +18,9 @@ struct RecordingPublicationItem: Codable, Equatable, Identifiable, Sendable {
     var attemptCount: Int
     var state: RecordingPublicationState
     var failureCategory: String?
+    /// Names are persisted rather than reconstructed from a URL after rename.
+    var publishedFolderName: String? = nil
+    var publishedRecordingName: String? = nil
 }
 
 struct RecordingPublicationManifest: Codable, Equatable, Sendable {

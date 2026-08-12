@@ -185,11 +185,90 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         XCTAssertTrue(fixture.sourceExists)
         XCTAssertEqual(fixture.coordinator.presentation.pendingCount, 1)
     }
+
+    func testScriptedManifestPublishingTransitionSaveFailureStopsBeforePublisher() async throws {
+        let fixture = try CoordinatorFixture()
+        let store = ScriptedCoordinatorManifestStore(items: [], failingSaveCalls: [2])
+        let coordinator = RecordingPublicationCoordinator(manifestStore: store, destinationStore: fixture.destination, publisher: fixture.publisher, pendingStore: fixture.pending, retryDelays: [1])
+
+        coordinator.enqueue(fixture.request)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(store.saveCalls, 2)
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertEqual(coordinator.presentation.stateText, "Publish failed")
+    }
+
+    func testPublishedRemovalPersistenceFailureStopsWithoutDuplicateCallbackAndRetryFinishes() async throws {
+        let fixture = try CoordinatorFixture(manifestState: .published)
+        let store = ScriptedCoordinatorManifestStore(items: fixture.persistedItems, failingSaveCalls: [1])
+        let coordinator = RecordingPublicationCoordinator(manifestStore: store, destinationStore: fixture.destination, publisher: fixture.publisher, pendingStore: fixture.pending, retryDelays: [1])
+        let completions = CompletionBox()
+        coordinator.onCompleted = { completions.append($0) }
+
+        coordinator.resume()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(completions.values.count, 1)
+        XCTAssertEqual(fixture.destination.pruneCalls, 0)
+        XCTAssertLessThanOrEqual(store.saveCalls, 1)
+        XCTAssertEqual(coordinator.presentation.stateText, "Publish failed")
+
+        store.failingSaveCalls = []
+        coordinator.retryNow()
+        await fixture.waitForIdle()
+
+        XCTAssertTrue(store.items.isEmpty)
+        XCTAssertEqual(completions.values.count, 1)
+        XCTAssertEqual(fixture.destination.pruneCalls, 1)
+    }
+
+    func testFailedInitialLoadRemainsReloadableOnSecondResume() async throws {
+        let fixture = try CoordinatorFixture(manifestState: .published)
+        var item = try XCTUnwrap(fixture.persistedItems.first)
+        item.state = .pending
+        let store = ScriptedCoordinatorManifestStore(items: [item], failingLoads: 1)
+        let coordinator = RecordingPublicationCoordinator(manifestStore: store, destinationStore: fixture.destination, publisher: fixture.publisher, pendingStore: fixture.pending, retryDelays: [1])
+
+        coordinator.resume()
+        XCTAssertEqual(coordinator.presentation.stateText, "Publish failed")
+        coordinator.resume()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(store.loadCalls, 2)
+        XCTAssertEqual(fixture.publisher.publishedIDs, [fixture.request.id])
+    }
 }
 
 private final class FailingCoordinatorManifestStore: RecordingPublicationManifestStoring, @unchecked Sendable {
     func loadOrRebuild(from pendingStore: RecordingPendingStore) throws -> [RecordingPublicationItem] { [] }
     func save(_ items: [RecordingPublicationItem]) throws { throw RecordingPublicationManifestStoreError.writeFailed(EIO) }
+}
+
+private final class ScriptedCoordinatorManifestStore: RecordingPublicationManifestStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    var items: [RecordingPublicationItem]
+    var failingSaveCalls: Set<Int>
+    private(set) var saveCalls = 0
+    private(set) var loadCalls = 0
+    private var failingLoads: Int
+
+    init(items: [RecordingPublicationItem], failingSaveCalls: Set<Int> = [], failingLoads: Int = 0) {
+        self.items = items; self.failingSaveCalls = failingSaveCalls; self.failingLoads = failingLoads
+    }
+    func loadOrRebuild(from pendingStore: RecordingPendingStore) throws -> [RecordingPublicationItem] {
+        lock.lock(); defer { lock.unlock() }
+        loadCalls += 1
+        if failingLoads > 0 { failingLoads -= 1; throw RecordingPublicationManifestStoreError.readFailed(EIO) }
+        return items
+    }
+    func save(_ items: [RecordingPublicationItem]) throws {
+        lock.lock(); defer { lock.unlock() }
+        saveCalls += 1
+        if failingSaveCalls.contains(saveCalls) { throw RecordingPublicationManifestStoreError.writeFailed(EIO) }
+        self.items = items
+    }
 }
 
 @MainActor
@@ -258,7 +337,8 @@ private final class CoordinatorDestinationStore: RecordingDestinationStoring, @u
         guard available, identity == self.identity else { throw RecordingPublicationError.destinationUnavailable }
         return .init(url: url, close: {})
     }
-    func prune(keeping identities: Set<RecordingDestinationIdentity>) {}
+    private(set) var pruneCalls = 0
+    func prune(keeping identities: Set<RecordingDestinationIdentity>) { lock.lock(); pruneCalls += 1; lock.unlock() }
 }
 
 private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked Sendable {

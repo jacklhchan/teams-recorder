@@ -108,7 +108,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
 
     private func drain(generation workerGeneration: UInt64) async {
         defer { if generation == workerGeneration { worker = nil; publishPresentation() } }
-        while current(workerGeneration) {
+        while current(workerGeneration) && !persistenceFailed {
             guard let item = nextEligibleItem() else {
                 guard let delay = nextRetryDelay() else { return }
                 do { try await sleeper(delay) } catch { return }

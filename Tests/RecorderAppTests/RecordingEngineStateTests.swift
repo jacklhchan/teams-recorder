@@ -760,6 +760,36 @@ final class RecordingEngineStateTests: XCTestCase {
         }
     }
 
+    func testPendingSessionCreationFailureStopsCaptureAndPreservesExistingDirectory() async throws {
+        let source = FakeCaptureSource()
+        let engine = RecordingEngine(captureSource: source, mixerBlockFrames: 4)
+        let base = temporaryFolder()
+        let existing = base.appendingPathComponent("existing-session", isDirectory: true)
+        try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
+        let sentinel = existing.appendingPathComponent("sentinel")
+        try Data("keep".utf8).write(to: sentinel)
+
+        do {
+            _ = try await engine.start(
+                selection: .allSystemAudio,
+                microphoneUID: nil,
+                baseFolder: base,
+                folderPrefix: "invalid\\name"
+            )
+            XCTFail("Expected pending session creation failure")
+        } catch RecordingEngineError.cannotCreateFolder {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(source.stopCount, 1)
+        XCTAssertFalse(engine.isMonitoring)
+        XCTAssertFalse(engine.isRecording)
+        XCTAssertNil(engine.captureConnectionSnapshot.sourceSessionID)
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
+    }
+
     func testCoordinatorFailureDoesNotDeleteReplacementOfAdmittedSession() async throws {
         let source = FakeCaptureSource()
         let base = temporaryFolder()

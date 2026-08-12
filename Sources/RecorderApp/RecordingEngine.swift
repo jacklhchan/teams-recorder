@@ -432,6 +432,7 @@ final class RecordingEngine: ObservableObject {
                 .createSession(named: folder.lastPathComponent)
             admittedPendingSession = admittedSession
         } catch {
+            await rollbackFailedStart(removeFolderIfEmpty: false)
             throw RecordingEngineError.cannotCreateFolder
         }
         guard let admittedSession = admittedPendingSession else { throw RecordingEngineError.cannotCreateFolder }

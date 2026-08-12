@@ -50,9 +50,9 @@ final class RecordingEngineStateTests: XCTestCase {
         await settle()
         let second = Task { await engine.switchMicrophone(to: "C") }
         await settle()
+        source.pauseMicrophoneSwitch = false
         source.completeNextMicrophoneSwitch(with: .switched(previousUID: "A", currentUID: "B"))
-        await settle()
-        source.completeNextMicrophoneSwitch(with: .switched(previousUID: "A", currentUID: "C"))
+        await waitUntil { source.microphoneSwitchCount == 2 }
 
         let firstOutcome = await first.value
         let secondOutcome = await second.value
@@ -61,6 +61,32 @@ final class RecordingEngineStateTests: XCTestCase {
         XCTAssertEqual(engine.continuitySnapshot.microphoneUID, "C")
         XCTAssertEqual(source.startCount, 1)
         XCTAssertEqual(source.stopCount, 0)
+        _ = await engine.stop()
+    }
+
+    func testOverlappingLiveMicrophoneSwitchSerializesSourceOperationsAndLetsLatestWin() async throws {
+        let (engine, _, source) = coordinatorEngine()
+        _ = try await engine.start(selection: .allSystemAudio, microphoneUID: "A", baseFolder: temporaryFolder())
+        source.pauseMicrophoneSwitch = true
+
+        let first = Task { await engine.switchMicrophone(to: "B") }
+        await settle()
+        let second = Task { await engine.switchMicrophone(to: "C") }
+        await settle()
+
+        XCTAssertEqual(source.maximumConcurrentMicrophoneSwitches, 1)
+        XCTAssertEqual(source.microphoneSwitchCount, 1)
+        source.pauseMicrophoneSwitch = false
+        source.completeNextMicrophoneSwitch(with: .switched(previousUID: "A", currentUID: "B"))
+        await waitUntil { source.microphoneSwitchCount == 2 }
+        XCTAssertEqual(source.maximumConcurrentMicrophoneSwitches, 1)
+        XCTAssertEqual(source.microphoneSwitchCount, 2)
+
+        let firstOutcome = await first.value
+        let secondOutcome = await second.value
+        XCTAssertEqual(firstOutcome, .superseded(requestedUID: "B"))
+        XCTAssertEqual(secondOutcome, .switched(previousUID: "A", currentUID: "C"))
+        XCTAssertEqual(engine.continuitySnapshot.microphoneUID, "C")
         _ = await engine.stop()
     }
 
@@ -2039,6 +2065,9 @@ private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendabl
     var pauseVideoTargetUpdates = false
     var pauseMicrophoneSwitch = false
     var microphoneSwitchOutcome: MicrophoneSwitchOutcome?
+    private(set) var microphoneSwitchCount = 0
+    private(set) var activeMicrophoneSwitches = 0
+    private(set) var maximumConcurrentMicrophoneSwitches = 0
     var windows: [TeamsWindowSnapshot] = []
     var teamsWindowRefreshError: Error?
     var videoTargetErrors: [Int: Error] = [:]
@@ -2072,6 +2101,10 @@ private final class FakeCaptureSource: CaptureSourceProtocol, @unchecked Sendabl
         to microphoneUID: String?,
         lifecycle: MicrophoneSwitchLifecycleToken
     ) async -> MicrophoneSwitchOutcome {
+        microphoneSwitchCount += 1
+        activeMicrophoneSwitches += 1
+        maximumConcurrentMicrophoneSwitches = max(maximumConcurrentMicrophoneSwitches, activeMicrophoneSwitches)
+        defer { activeMicrophoneSwitches -= 1 }
         if pauseMicrophoneSwitch {
             return await withCheckedContinuation { continuation in
                 microphoneSwitchContinuations.append(continuation)

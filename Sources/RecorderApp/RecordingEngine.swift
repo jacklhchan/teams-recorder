@@ -139,6 +139,7 @@ final class RecordingEngine: ObservableObject {
     private var recordingEpoch: UInt64?
     private var nextRecordingEpoch: UInt64 = 0
     private var microphoneSwitchGeneration: UInt64 = 0
+    private var microphoneSwitchTransition: MicrophoneSwitchTransition?
     private var activeSelection: ResolvedCaptureSelection?
     private var activeMicrophoneUID: String?
     private var isStopping = false
@@ -241,7 +242,24 @@ final class RecordingEngine: ObservableObject {
             recordingEpoch: recordingEpoch,
             generation: microphoneSwitchGeneration
         )
-        let outcome = await captureSource.switchMicrophone(to: microphoneUID, lifecycle: token)
+        while let transition = microphoneSwitchTransition {
+            _ = await transition.task.value
+            if microphoneSwitchTransition?.token == transition.token {
+                microphoneSwitchTransition = nil
+            }
+            guard token.generation == microphoneSwitchGeneration else {
+                return .superseded(requestedUID: microphoneUID)
+            }
+        }
+
+        let task = Task { [captureSource] in
+            await captureSource.switchMicrophone(to: microphoneUID, lifecycle: token)
+        }
+        microphoneSwitchTransition = MicrophoneSwitchTransition(token: token, task: task)
+        let outcome = await task.value
+        if microphoneSwitchTransition?.token == token {
+            microphoneSwitchTransition = nil
+        }
         guard token.generation == microphoneSwitchGeneration,
               self.sourceSessionID == token.sourceSessionID,
               self.recordingEpoch == token.recordingEpoch,
@@ -1378,6 +1396,11 @@ private struct ReconnectTransition {
     let id: UUID
     let request: ReconnectRequest
     let task: Task<Void, Error>
+}
+
+private struct MicrophoneSwitchTransition {
+    let token: MicrophoneSwitchLifecycleToken
+    let task: Task<MicrophoneSwitchOutcome, Never>
 }
 
 private struct ReconnectRequest: Equatable {

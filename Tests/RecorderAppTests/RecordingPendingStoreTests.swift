@@ -11,6 +11,27 @@ final class RecordingPendingStoreTests: XCTestCase {
         XCTAssertEqual(try fixture.permissions(of: fixture.root) & 0o777, 0o700)
     }
 
+    func testCreateSessionRejectsExistingNameWithoutReusingIt() throws {
+        let fixture = try PendingStoreFixture()
+        let existing = try fixture.makeSession(named: "meeting-collision")
+
+        XCTAssertThrowsError(try fixture.store.createSession(named: "meeting-collision"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: existing.path))
+    }
+
+    func testCreateSessionRejectsReplacementObservedBeforeOpen() throws {
+        let fixture = try PendingStoreFixture()
+        let name = "meeting-replaced"
+        let replacement = fixture.root.appendingPathComponent(name)
+        let hooks = RecordingPendingStore.Hooks(afterCreateObservation: { parent, observedName in
+            XCTAssertEqual(renameat(parent, observedName, parent, "original"), 0)
+            XCTAssertEqual(mkdirat(parent, observedName, 0o700), 0)
+        })
+
+        XCTAssertThrowsError(try fixture.store.createSession(named: name, hooks: hooks))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: replacement.path))
+    }
+
     func testDirectChildIsAcceptedButSymlinkAndEscapeAreRejected() throws {
         let fixture = try PendingStoreFixture()
         let direct = try fixture.makeSession(named: "meeting-direct")

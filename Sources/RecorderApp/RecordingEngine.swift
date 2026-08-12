@@ -425,31 +425,15 @@ final class RecordingEngine: ObservableObject {
             "\(folderPrefix)-\(Self.folderStamp.string(from: Date()))",
             isDirectory: true
         )
-        let folderExistedBeforeStart = FileManager.default.fileExists(
-            atPath: folder.path
-        )
         do {
-            try FileManager.default.createDirectory(
-                at: folder,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
+            let admittedSession = try RecordingPendingStore(root: baseFolder)
+                .createSession(named: folder.lastPathComponent)
+            admittedPendingSession = admittedSession
         } catch {
-            await rollbackFailedStart(
-                folder: folder,
-                removeFolderIfEmpty: false
-            )
             throw RecordingEngineError.cannotCreateFolder
         }
-        let createdFolder = !folderExistedBeforeStart
-        let admittedSession: RecordingPendingSession
-        do {
-            admittedSession = try RecordingPendingStore(root: baseFolder)
-                .openSession(for: folder.lastPathComponent)
-        } catch {
-            await rollbackFailedStart(folder: folder, removeFolderIfEmpty: createdFolder)
-            throw RecordingEngineError.cannotCreateFolder
-        }
+        let createdFolder = true
+        guard let admittedSession = admittedPendingSession else { throw RecordingEngineError.cannotCreateFolder }
 
         let outputs = RecordingOutputURLs(folder: folder)
         nextRecordingEpoch &+= 1
@@ -484,7 +468,6 @@ final class RecordingEngine: ObservableObject {
         observedMixerLateFrames = 0
         currentRecordingURL = outputs.finalMP4
         outputFolder = folder
-        admittedPendingSession = admittedSession
         startedAt = Date()
         isRecording = true
         isStopping = false

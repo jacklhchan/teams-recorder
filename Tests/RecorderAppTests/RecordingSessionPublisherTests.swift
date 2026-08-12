@@ -258,6 +258,20 @@ final class RecordingSessionPublisherTests: XCTestCase {
         XCTAssertFalse(fixture.stagingExists)
     }
 
+    func testReplacementAtFinalRenameIsPreserved() async throws {
+        let fixture = try PublisherFixture(hooks: .init(beforeFinalRename: { parent, name in
+            XCTAssertEqual(mkdirat(parent, name, 0o700), 0)
+            let replacement = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+            if replacement >= 0 { Darwin.close(replacement) }
+        }))
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .destinationCollision)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.destinationURL.appendingPathComponent("meeting").path))
+        XCTAssertTrue(fixture.sourceExists)
+    }
+
     func testMarkerWriterCompletesDeterministicShortWrites() async throws {
         let fixture = try PublisherFixture(markerWriter: { descriptor, bytes, count in
             Darwin.write(descriptor, bytes, min(2, count))

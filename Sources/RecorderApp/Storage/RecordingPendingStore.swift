@@ -33,6 +33,7 @@ final class RecordingPendingSession: @unchecked Sendable {
 }
 
 struct RecordingPendingStore: Sendable {
+    struct Hooks: Sendable { var afterCreateObservation: (@Sendable (Int32, String) -> Void)? = nil }
     let root: URL
     let manifestURL: URL
 
@@ -76,6 +77,23 @@ struct RecordingPendingStore: Sendable {
             Darwin.close(rootDescriptor)
             throw error
         }
+    }
+
+    func createSession(named directoryName: String, hooks: Hooks = .init()) throws -> RecordingPendingSession {
+        guard isSafeDirectoryName(directoryName) else { throw RecordingPendingStoreError.invalidSessionName }
+        let rootDescriptor = try openRootDescriptor()
+        let rootIdentity = try directoryIdentity(of: rootDescriptor)
+        guard mkdirat(rootDescriptor, directoryName, 0o700) == 0 else { Darwin.close(rootDescriptor); throw RecordingPendingStoreError.unsafeSession }
+        var observed = stat()
+        guard fstatat(rootDescriptor, directoryName, &observed, AT_SYMLINK_NOFOLLOW) == 0, (observed.st_mode & S_IFMT) == S_IFDIR else { Darwin.close(rootDescriptor); throw RecordingPendingStoreError.unsafeSession }
+        hooks.afterCreateObservation?(rootDescriptor, directoryName)
+        let descriptor = openat(rootDescriptor, directoryName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { Darwin.close(rootDescriptor); throw RecordingPendingStoreError.unsafeSession }
+        do {
+            let identity = try directoryIdentity(of: descriptor)
+            guard matches(observed, identity) else { throw RecordingPendingStoreError.unsafeSession }
+            return .init(fileDescriptor: descriptor, rootFileDescriptor: rootDescriptor, rootIdentity: rootIdentity, identity: identity, directoryName: directoryName, displayURL: root.appendingPathComponent(directoryName, isDirectory: true))
+        } catch { Darwin.close(descriptor); Darwin.close(rootDescriptor); throw error }
     }
 
     func scanSessionNames() throws -> [String] {
@@ -142,15 +160,17 @@ struct RecordingPendingStore: Sendable {
         if existing >= 0 {
             defer { Darwin.close(existing) }
             var attributes = stat()
-            guard fstat(existing, &attributes) == 0, (attributes.st_mode & S_IFMT) == S_IFREG else { throw RecordingPendingStoreError.unsafeSession }
+            guard fstat(existing, &attributes) == 0, (attributes.st_mode & S_IFMT) == S_IFREG, attributes.st_nlink == 1, attributes.st_size <= 262_144 else { throw RecordingPendingStoreError.unsafeSession }
             let data = try readAll(from: existing)
             let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
             metadata = (try? decoder.decode(RecordingSessionMetadata.self, from: data)) ?? metadata
         } else if errno != ENOENT { throw RecordingPendingStoreError.unsafeSession }
         metadata.source = source
         metadata.schemaVersion = max(metadata.schemaVersion, 2)
+        try metadata.validateForPersistence()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(metadata)
+        guard data.count <= 262_144 else { throw RecordingPendingStoreError.unsafeSession }
         let temporary = ".recording-info-\(UUID().uuidString).tmp"
         let descriptor = openat(session.fileDescriptor, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw RecordingPendingStoreError.unsafeSession }
@@ -185,7 +205,7 @@ struct RecordingPendingStore: Sendable {
 
     private func readAll(from descriptor: Int32) throws -> Data {
         var data = Data(); var bytes = [UInt8](repeating: 0, count: 16_384)
-        while true { let count = Darwin.read(descriptor, &bytes, bytes.count); if count < 0 { throw RecordingPendingStoreError.unsafeSession }; if count == 0 { return data }; data.append(bytes, count: Int(count)) }
+        while true { let count = Darwin.read(descriptor, &bytes, bytes.count); if count < 0 { throw RecordingPendingStoreError.unsafeSession }; if count == 0 { return data }; guard data.count + Int(count) <= 262_144 else { throw RecordingPendingStoreError.unsafeSession }; data.append(bytes, count: Int(count)) }
     }
 
     private func writeAll(_ data: Data, to descriptor: Int32) throws {

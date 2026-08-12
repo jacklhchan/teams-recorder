@@ -133,6 +133,11 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
 
         let finalName = try destinationName(preferred: item.sessionDirectoryName, itemID: item.id, in: destinationFD)
         hooks.beforeFinalRename?(destinationFD, finalName)
+        var finalObservation = stat()
+        guard fstatat(destinationFD, finalName, &finalObservation, AT_SYMLINK_NOFOLLOW) != 0,
+              errno == ENOENT else {
+            throw RecordingPublicationError.destinationCollision
+        }
         guard renameatx_np(destinationFD, stagingName, destinationFD, finalName, UInt32(RENAME_EXCL)) == 0 else {
             throw RecordingPublicationError.destinationCollision
         }

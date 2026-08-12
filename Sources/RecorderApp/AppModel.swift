@@ -1797,6 +1797,10 @@ final class AppModel: ObservableObject {
         teamsAutoMeetingCoordinator.cancelCountdown()
     }
 
+    func rearmTeamsAutoMeeting() -> RecorderControlActionOutcome {
+        teamsAutoMeetingCoordinator.rearmCurrentMeeting() ? .accepted : .noOp
+    }
+
     private func suppressAutomationForActiveManualRecording() {
         guard recorder.isRecording,
               recordingOwnership == .manual else { return }

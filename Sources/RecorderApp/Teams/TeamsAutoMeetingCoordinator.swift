@@ -168,6 +168,17 @@ final class TeamsAutoMeetingCoordinator {
         state = .suppressedUntilMeetingEnd
     }
 
+    @discardableResult
+    func rearmCurrentMeeting() -> Bool {
+        guard isEnabled,
+              isInMeeting,
+              state == .suppressedUntilMeetingEnd else {
+            return false
+        }
+        beginTimer(.start, seconds: startCountdownSeconds)
+        return true
+    }
+
     func manualRecordingStarted() {
         guard isInMeeting else { return }
         suppressUntilMeetingEnd()

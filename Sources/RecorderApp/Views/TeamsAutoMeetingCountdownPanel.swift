@@ -30,6 +30,7 @@ struct TeamsAutoMeetingPresentation: Equatable {
     let detail: String
     let systemImage: String
     let showsCancel: Bool
+    let showsRearmNow: Bool
 
     static func make(state: TeamsAutoMeetingState) -> TeamsAutoMeetingPresentation {
         return switch state {
@@ -38,63 +39,72 @@ struct TeamsAutoMeetingPresentation: Equatable {
                 title: "Off",
                 detail: "Automatic recording is disabled",
                 systemImage: "circle.dashed",
-                showsCancel: false
+                showsCancel: false,
+                showsRearmNow: false
             )
         case .waitingForMeeting:
             .init(
                 title: "Waiting for meeting",
                 detail: "Watching Teams meeting windows locally",
                 systemImage: "clock",
-                showsCancel: false
+                showsCancel: false,
+                showsRearmNow: false
             )
         case .startCountdown(let secondsRemaining):
             .init(
                 title: "Recording starts in \(secondsRemaining)s",
                 detail: "Teams meeting detected",
                 systemImage: "record.circle",
-                showsCancel: true
+                showsCancel: true,
+                showsRearmNow: false
             )
         case .starting:
             .init(
                 title: "Starting recording",
                 detail: "Teams meeting detected",
                 systemImage: "record.circle",
-                showsCancel: false
+                showsCancel: false,
+                showsRearmNow: false
             )
         case .automaticRecording:
             .init(
                 title: "Recording automatically",
                 detail: "Teams meeting in progress",
                 systemImage: "record.circle.fill",
-                showsCancel: false
+                showsCancel: false,
+                showsRearmNow: false
             )
         case .stopCountdown(let secondsRemaining):
             .init(
                 title: "Stopping in \(secondsRemaining)s",
                 detail: "Confirming the meeting has ended",
                 systemImage: "stop.circle",
-                showsCancel: false
+                showsCancel: false,
+                showsRearmNow: false
             )
         case .suppressedUntilMeetingEnd:
             .init(
                 title: "Cancelled for this meeting",
                 detail: "Automatic recording will re-arm after the meeting",
                 systemImage: "xmark.circle",
-                showsCancel: false
+                showsCancel: false,
+                showsRearmNow: true
             )
         case .startBlocked(let message):
             .init(
                 title: "Needs permission",
                 detail: message,
                 systemImage: "exclamationmark.triangle.fill",
-                showsCancel: false
+                showsCancel: false,
+                showsRearmNow: false
             )
         case .startFailed(let message):
             .init(
                 title: "Start failed",
                 detail: message,
                 systemImage: "exclamationmark.triangle.fill",
-                showsCancel: false
+                showsCancel: false,
+                showsRearmNow: false
             )
         }
     }

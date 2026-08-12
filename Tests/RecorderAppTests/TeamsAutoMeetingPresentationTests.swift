@@ -27,12 +27,36 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
         XCTAssertTrue(presentation.showsCancel)
     }
 
+    func testSuppressedPresentationExposesRearmNowOnly() {
+        XCTAssertTrue(
+            TeamsAutoMeetingPresentation.make(
+                state: .suppressedUntilMeetingEnd
+            ).showsRearmNow
+        )
+        XCTAssertFalse(
+            TeamsAutoMeetingPresentation.make(
+                state: .startBlocked("Microphone permission is required.")
+            ).showsRearmNow
+        )
+        XCTAssertFalse(
+            TeamsAutoMeetingPresentation.make(
+                state: .startFailed("Microphone unavailable")
+            ).showsRearmNow
+        )
+        XCTAssertFalse(
+            TeamsAutoMeetingPresentation.make(
+                state: .waitingForMeeting
+            ).showsRearmNow
+        )
+    }
+
     func testEveryAutoMeetingStateHasTheExpectedPresentation() {
         let cases: [(
             TeamsAutoMeetingState,
             String,
             String,
             String,
+            Bool,
             Bool
         )] = [
             (
@@ -40,6 +64,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
                 "Off",
                 "Automatic recording is disabled",
                 "circle.dashed",
+                false,
                 false
             ),
             (
@@ -47,6 +72,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
                 "Waiting for meeting",
                 "Watching Teams meeting windows locally",
                 "clock",
+                false,
                 false
             ),
             (
@@ -54,13 +80,15 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
                 "Recording starts in 5s",
                 "Teams meeting detected",
                 "record.circle",
-                true
+                true,
+                false
             ),
             (
                 .starting,
                 "Starting recording",
                 "Teams meeting detected",
                 "record.circle",
+                false,
                 false
             ),
             (
@@ -68,6 +96,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
                 "Recording automatically",
                 "Teams meeting in progress",
                 "record.circle.fill",
+                false,
                 false
             ),
             (
@@ -75,6 +104,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
                 "Stopping in 7s",
                 "Confirming the meeting has ended",
                 "stop.circle",
+                false,
                 false
             ),
             (
@@ -82,13 +112,15 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
                 "Cancelled for this meeting",
                 "Automatic recording will re-arm after the meeting",
                 "xmark.circle",
-                false
+                false,
+                true
             ),
             (
                 .startBlocked("Microphone permission is required."),
                 "Needs permission",
                 "Microphone permission is required.",
                 "exclamationmark.triangle.fill",
+                false,
                 false
             ),
             (
@@ -96,6 +128,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
                 "Start failed",
                 "Microphone unavailable",
                 "exclamationmark.triangle.fill",
+                false,
                 false
             ),
         ]
@@ -105,7 +138,8 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
             expectedTitle,
             expectedDetail,
             expectedImage,
-            expectedCancel
+            expectedCancel,
+            expectedRearmNow
         ) in cases {
             let presentation = TeamsAutoMeetingPresentation.make(state: state)
 
@@ -113,6 +147,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
             XCTAssertEqual(presentation.detail, expectedDetail)
             XCTAssertEqual(presentation.systemImage, expectedImage)
             XCTAssertEqual(presentation.showsCancel, expectedCancel)
+            XCTAssertEqual(presentation.showsRearmNow, expectedRearmNow)
         }
     }
 

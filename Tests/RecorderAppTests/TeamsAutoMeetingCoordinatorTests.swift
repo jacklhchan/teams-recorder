@@ -54,6 +54,66 @@ final class TeamsAutoMeetingCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testRearmNowFromSuppressedMeetingStartsExactlyOneConfiguredCountdown() async {
+        let ticker = ManualAutoMeetingTicker()
+        let coordinator = TeamsAutoMeetingCoordinator(
+            tick: { await ticker.waitForTick() }
+        )
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onCommand = { commands.append($0) }
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        await Task.yield()
+        coordinator.cancelCountdown()
+        await fire(ticker)
+        await Task.yield()
+
+        XCTAssertTrue(coordinator.rearmCurrentMeeting())
+        XCTAssertEqual(coordinator.state, .startCountdown(secondsRemaining: 5))
+        XCTAssertTrue(coordinator.hasPendingTimer)
+
+        await Task.yield()
+        await fire(ticker, count: 5)
+
+        XCTAssertEqual(coordinator.state, .starting)
+        XCTAssertEqual(commands, [.startRecording])
+        XCTAssertFalse(coordinator.hasPendingTimer)
+    }
+
+    @MainActor
+    func testRearmNowIsIgnoredUnlessSuppressedEnabledAndMeetingPresent() {
+        let coordinator = TeamsAutoMeetingCoordinator()
+        var commands: [TeamsAutoMeetingCommand] = []
+        coordinator.onCommand = { commands.append($0) }
+
+        coordinator.setEnabled(true)
+        XCTAssertFalse(coordinator.rearmCurrentMeeting())
+        XCTAssertEqual(coordinator.state, .waitingForMeeting)
+        XCTAssertFalse(coordinator.hasPendingTimer)
+
+        coordinator.handleMeetingState(isInMeeting: true)
+        XCTAssertFalse(coordinator.rearmCurrentMeeting())
+        XCTAssertEqual(coordinator.state, .startCountdown(secondsRemaining: 5))
+        XCTAssertTrue(coordinator.hasPendingTimer)
+
+        coordinator.cancelCountdown()
+        coordinator.setEnabled(false)
+        XCTAssertFalse(coordinator.rearmCurrentMeeting())
+        XCTAssertEqual(coordinator.state, .disabled)
+        XCTAssertFalse(coordinator.hasPendingTimer)
+
+        coordinator.setEnabled(true)
+        coordinator.handleMeetingState(isInMeeting: true)
+        coordinator.cancelCountdown()
+        coordinator.handleConfirmedMeetingEnd()
+        XCTAssertFalse(coordinator.rearmCurrentMeeting())
+        XCTAssertEqual(coordinator.state, .waitingForMeeting)
+        XCTAssertFalse(coordinator.hasPendingTimer)
+        XCTAssertEqual(commands, [])
+    }
+
+    @MainActor
     func testEnableWaitingCallbackCanSynchronouslySuppressKnownMeeting() {
         let coordinator = TeamsAutoMeetingCoordinator()
 

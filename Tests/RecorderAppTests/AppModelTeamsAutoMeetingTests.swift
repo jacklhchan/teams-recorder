@@ -4,6 +4,33 @@ import XCTest
 
 @MainActor
 final class AppModelTeamsAutoMeetingTests: XCTestCase {
+    func testRearmNowForSuppressedActiveMeetingReusesCoordinatorCountdown() async {
+        let fixture = makeRecordingFixture()
+        fixture.model.setTeamsAutoMeetingEnabled(true)
+        emitMeeting(true, in: fixture)
+        await Task.yield()
+        fixture.model.cancelTeamsAutoMeetingCountdown()
+        await fire(fixture.ticker)
+        await Task.yield()
+
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .suppressedUntilMeetingEnd
+        )
+        XCTAssertEqual(fixture.model.rearmTeamsAutoMeeting(), .accepted)
+        XCTAssertEqual(
+            fixture.model.teamsAutoMeetingState,
+            .startCountdown(secondsRemaining: 5)
+        )
+        XCTAssertEqual(fixture.model.rearmTeamsAutoMeeting(), .noOp)
+
+        await Task.yield()
+        await fire(fixture.ticker, count: 5)
+        await waitUntil { !fixture.model.isCaptureLifecycleWorking }
+
+        XCTAssertEqual(fixture.source.startCount, 1)
+    }
+
     func testThreeEligibleWindowRefreshesBeginExistingCountdown() async {
         let fixture = makeRecordingFixture()
         let teamsApplication = CaptureApplication(

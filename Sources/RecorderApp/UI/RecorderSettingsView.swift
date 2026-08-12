@@ -168,7 +168,8 @@ struct RecorderSettingsView: View {
                         )
                         TeamsAutoMeetingStateView(
                             presentation: autoMeetingPresentation,
-                            cancel: model.cancelTeamsAutoMeetingCountdown
+                            cancel: model.cancelTeamsAutoMeetingCountdown,
+                            rearm: { _ = model.rearmTeamsAutoMeeting() }
                         )
                     }
                 }
@@ -500,6 +501,7 @@ private struct TeamsAutoMeetingDetailView: View {
 private struct TeamsAutoMeetingStateView: View {
     let presentation: TeamsAutoMeetingPresentation
     let cancel: () -> Void
+    let rearm: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -518,6 +520,13 @@ private struct TeamsAutoMeetingStateView: View {
                     .help("Cancel automatic recording")
                     .accessibilityLabel("Cancel automatic recording")
                     .accessibilityIdentifier("teams-auto-recording-cancel")
+            }
+            if presentation.showsRearmNow {
+                Button("Re-arm Now", action: rearm)
+                    .buttonStyle(.bordered)
+                    .help("Re-arm Now")
+                    .accessibilityLabel("Re-arm Now")
+                    .accessibilityIdentifier("teams-auto-recording-rearm-now")
             }
         }
     }

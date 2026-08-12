@@ -601,7 +601,10 @@ git commit -m "feat: publish verified recording sessions"
 
 **Files:**
 - Create: `Sources/RecorderApp/Storage/RecordingPublicationCoordinator.swift`
+- Modify: `Sources/RecorderApp/Storage/RecordingPendingStore.swift`
+- Modify: `Sources/RecorderApp/Storage/RecordingPublicationManifest.swift`
 - Create: `Tests/RecorderAppTests/RecordingPublicationCoordinatorTests.swift`
+- Modify: `Tests/RecorderAppTests/RecordingPendingStoreTests.swift`
 
 **Interfaces:**
 - Consumes: `RecordingPublicationManifestStore`, `RecordingDestinationStoring`, `RecordingSessionPublishing`, and `RecordingPendingStore`.
@@ -679,7 +682,7 @@ Expected: compilation fails because coordinator and presentation types do not ex
 ```swift
 struct RecordingPublicationRequest: Equatable, Sendable {
     let id: UUID
-    let localFolderURL: URL
+    let sessionDirectoryName: String
     let destinationIdentity: RecordingDestinationIdentity
     let workspaceFence: WorkspacePublicationFence
     let source: RecordingSource
@@ -723,11 +726,22 @@ item, not an in-memory request. Classify `destinationUnavailable` as
 verification mismatch as `needsAttention`; classify transient I/O as `pending`
 with bounded retry delays of 2, 10, 30, 60, then 300 seconds. Manual retry
 immediately moves waiting and transient pending items to the drain head. Only
-after a current-generation publish success does the coordinator emit
-completion, remove the validated local direct child, remove the manifest item,
-persist the manifest, and prune destination catalog entries not referenced by
-the remaining queue or current selection. Shutdown increments the generation,
-cancels the task, and rejects late completion.
+after a current-generation publish success may the coordinator persist a
+`.published` terminal item containing validated direct-child folder and
+recording names. Persist that terminal state before completion delivery or
+source deletion. Relaunch resumes `.published` items, reconstructs the stable
+completion, performs descriptor-relative identity-bound source cleanup, then
+removes and persists the manifest item. This closes the crash window between
+destination rename, completion delivery, source cleanup, and queue removal.
+
+`RecordingPendingStore` owns recursive descriptor-relative cleanup for an
+already-retained `RecordingPendingSession`; it must reject root-entry identity
+replacement, symlinks, and unsupported entries without deleting them. The
+coordinator must not use a pending URL or `FileManager.removeItem(at:)` as
+deletion authority. Extend the manifest item with backward-compatible optional
+published folder/recording names and the state enum with `.published`. Prune
+destination catalog entries only after durable queue removal. Shutdown
+increments the generation, cancels the task, and rejects late completion.
 
 - [ ] **Step 4: Run coordinator tests and verify GREEN**
 
@@ -736,7 +750,7 @@ Run the Step 2 command. Expected: all coordinator tests pass.
 - [ ] **Step 5: Commit Task 4**
 
 ```bash
-git add Sources/RecorderApp/Storage/RecordingPublicationCoordinator.swift Tests/RecorderAppTests/RecordingPublicationCoordinatorTests.swift
+git add Sources/RecorderApp/Storage/RecordingPublicationCoordinator.swift Sources/RecorderApp/Storage/RecordingPendingStore.swift Sources/RecorderApp/Storage/RecordingPublicationManifest.swift Tests/RecorderAppTests/RecordingPublicationCoordinatorTests.swift Tests/RecorderAppTests/RecordingPendingStoreTests.swift
 git commit -m "feat: resume pending recording publication"
 ```
 

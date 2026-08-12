@@ -14,6 +14,10 @@ namespace TeamsRecorder.Windows.WinUI;
 /// </summary>
 public sealed partial class RecordingOverlayWindow : Window
 {
+    private const int DefaultWidthDips = 448;
+    private const int DefaultHeightDips = 340;
+    private const int MinimumWidthDips = 420;
+    private const int MinimumHeightDips = 300;
     private const int GwlExStyle = -20;
     private const nint WsExToolWindow = 0x00000080;
     private const nint WsExNoActivate = 0x08000000;
@@ -28,25 +32,27 @@ public sealed partial class RecordingOverlayWindow : Window
     private bool indicatorVisible = true;
     private bool isClosing;
     private bool isApplyingPresentation;
+    private bool isApplyingWindowSize;
     private RecordingOverlayMode currentMode = RecordingOverlayMode.Countdown;
 
     public RecordingOverlayWindow()
     {
         InitializeComponent();
 
-        AppWindow.Resize(new SizeInt32(448, 276));
+        ResizeForCurrentDpi(resetToDefault: true);
         AppWindow.IsShownInSwitchers = false;
         MoveToWorkingAreaCorner();
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
             presenter.IsAlwaysOnTop = true;
-            presenter.IsResizable = false;
+            presenter.IsResizable = true;
             presenter.IsMaximizable = false;
             presenter.IsMinimizable = false;
-            presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
+            presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
         }
 
         ApplyNoActivateStyle();
+        AppWindow.Changed += OnAppWindowChanged;
         AppWindow.Closing += OnAppWindowClosing;
         indicatorTimer = DispatcherQueue.CreateTimer();
         indicatorTimer.Interval = TimeSpan.FromMilliseconds(550);
@@ -146,6 +152,55 @@ public sealed partial class RecordingOverlayWindow : Window
             Math.Max(workArea.Y + margin, workArea.Y + workArea.Height - AppWindow.Size.Height - margin)));
     }
 
+    private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (isApplyingWindowSize || (!args.DidSizeChange && !args.DidPositionChange))
+        {
+            return;
+        }
+
+        // AppWindow sizes are physical pixels while XAML measures in DIPs.
+        // Re-evaluate the minimum after either a user resize or a move to a
+        // monitor with a different scale factor.
+        ResizeForCurrentDpi(resetToDefault: false);
+    }
+
+    private void ResizeForCurrentDpi(bool resetToDefault)
+    {
+        var dpi = GetDpiForWindow(WindowNative.GetWindowHandle(this));
+        if (dpi == 0)
+        {
+            dpi = 96;
+        }
+
+        var minimumWidth = ScaleForDpi(MinimumWidthDips, dpi);
+        var minimumHeight = ScaleForDpi(MinimumHeightDips, dpi);
+        var width = resetToDefault
+            ? ScaleForDpi(DefaultWidthDips, dpi)
+            : Math.Max(AppWindow.Size.Width, minimumWidth);
+        var height = resetToDefault
+            ? ScaleForDpi(DefaultHeightDips, dpi)
+            : Math.Max(AppWindow.Size.Height, minimumHeight);
+
+        if (AppWindow.Size.Width == width && AppWindow.Size.Height == height)
+        {
+            return;
+        }
+
+        isApplyingWindowSize = true;
+        try
+        {
+            AppWindow.Resize(new SizeInt32(width, height));
+        }
+        finally
+        {
+            isApplyingWindowSize = false;
+        }
+    }
+
+    internal static int ScaleForDpi(int dips, uint dpi) =>
+        Math.Max(1, (int)Math.Ceiling(dips * dpi / 96d));
+
     internal void HideNonActivating()
     {
         indicatorTimer.Stop();
@@ -203,6 +258,7 @@ public sealed partial class RecordingOverlayWindow : Window
     {
         if (isClosing)
         {
+            AppWindow.Changed -= OnAppWindowChanged;
             return;
         }
 
@@ -237,6 +293,9 @@ public sealed partial class RecordingOverlayWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern nint SetWindowLongPtr(nint hWnd, int nIndex, nint dwNewLong);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(nint hwnd);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

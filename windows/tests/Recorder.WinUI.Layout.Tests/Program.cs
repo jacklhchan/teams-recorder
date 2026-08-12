@@ -33,6 +33,7 @@ var tests = new (string Name, Action Run)[]
     ("Teams runtime uses local monitoring and retires WebSocket construction", TeamsRuntimeUsesLocalMonitoring),
     ("recording overlay owns a safe dynamic Teams video toggle", OverlayVideoToggleIsSafe),
     ("recording overlay supports active countdown and finalizing states", OverlayStatesAreComplete),
+    ("recording overlay scales for DPI and remains user-resizable", OverlayIsDpiAwareAndResizable),
     ("pipe control joins the UI lifecycle and stops before finalization", ControlRuntimeLifecycleIsBounded),
     ("pipe status remains a bounded privacy-safe projection", ControlStatusIsPrivate),
 };
@@ -443,7 +444,7 @@ void OverlayStatesAreComplete()
     Contains("IsAlwaysOnTop = true", overlayCode, "Overlay must stay on top.");
     Contains("WsExNoActivate", overlayCode, "Overlay must not activate.");
     Contains("SwpNoActivate", overlayCode, "Overlay must show without activation.");
-    Contains("SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false)", overlayCode, "Overlay must not expose a standard close title bar.");
+    Contains("SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false)", overlayCode, "Overlay needs a resize border without exposing a close title bar.");
     Contains("args.Cancel = true", overlayCode, "Overlay close must be rejected until controlled shutdown.");
     Contains("ActionButton.IsEnabled = !isFinalizing", overlayCode, "Finalizing must lock the overlay action.");
     Contains("ActionButton.Content = isRecording ? \"停止錄音\"", overlayCode,
@@ -451,6 +452,16 @@ void OverlayStatesAreComplete()
     Contains("presentation.Mode == RecordingOverlayMode.Recording", overlayCode,
         "The lifecycle action must route by state rather than localized button text.");
     Contains("TeamsWindowCaptureToggle.IsEnabled = isRecording", overlayCode, "Capture toggle must be editable only while active.");
+}
+
+void OverlayIsDpiAwareAndResizable()
+{
+    Contains("GetDpiForWindow", overlayCode, "Overlay physical pixels must be scaled from WinUI DIPs at the active monitor DPI.");
+    Contains("ScaleForDpi", overlayCode, "Overlay sizing needs one tested DPI conversion policy.");
+    Contains("MinimumWidthDips", overlayCode, "Overlay must enforce a readable minimum width.");
+    Contains("MinimumHeightDips", overlayCode, "Overlay must enforce a readable minimum height.");
+    Contains("presenter.IsResizable = true", overlayCode, "Users must be able to enlarge the floating controller.");
+    DoesNotContain("AppWindow.Resize(new SizeInt32(448, 276))", overlayCode, "A fixed physical-pixel size clips the overlay above 100% display scaling.");
 }
 
 XElement SingleByName(string name) =>

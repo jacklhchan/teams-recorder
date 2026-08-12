@@ -4,6 +4,41 @@ import XCTest
 @testable import RecorderApp
 
 final class TranscriptionArtifactPublisherTests: XCTestCase {
+    func testPublicationLogSchemaAcceptsOnlyTypedBoundedEvents() throws {
+        let folder = try makeFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let events: [TranscriptionLogEvent] = [
+            .started,
+            .preparedChunks(Int.max),
+            .completedChunk(current: Int.min, total: Int.max),
+            .completed
+        ]
+
+        let artifacts = try TranscriptionArtifactPublisher().publish(
+            rawText: "raw",
+            finalText: "final",
+            manifest: .init(
+                model: "asr-model",
+                language: "yue",
+                chunkCount: 1,
+                responseFormats: ["json"]
+            ),
+            logEvents: events,
+            sessionFolder: folder
+        )
+
+        XCTAssertEqual(
+            try String(contentsOf: artifacts.logURL, encoding: .utf8),
+            """
+            Native transcription started
+            Prepared 10000 audio chunks
+            Completed chunk 0 of 10000
+            Native transcription completed
+
+            """
+        )
+    }
+
     func testNewPublicationArtifactsAreOwnerOnly() throws {
         let folder = try makeFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -17,7 +52,7 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
                 chunkCount: 1,
                 responseFormats: ["json"]
             ),
-            logLines: ["Started"],
+            logEvents: [.started],
             sessionFolder: folder,
             now: Date(timeIntervalSince1970: 1)
         )
@@ -36,7 +71,7 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
                 chunkCount: 1,
                 responseFormats: ["json"]
             ),
-            logLines: ["Completed"],
+            logEvents: [.completed],
             sessionFolder: folder,
             now: Date(timeIntervalSince1970: 2)
         )
@@ -83,7 +118,7 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
                 chunkCount: 1,
                 responseFormats: ["json"]
             ),
-            logLines: ["Completed"],
+            logEvents: [.completed],
             sessionFolder: folder
         )
 
@@ -209,7 +244,7 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
         )
     }
 
-    func testPublicationIsCanonicalSanitizedAndRetainsThreeBackups() throws {
+    func testPublicationIsCanonicalAndRetainsThreeBackups() throws {
         let folder = try makeFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let publisher = TranscriptionArtifactPublisher(
@@ -227,9 +262,9 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
                     chunkCount: 2,
                     responseFormats: ["verbose_json", "json"]
                 ),
-                logLines: [
-                    "Started",
-                    "Completed 2 chunks"
+                logEvents: [
+                    .started,
+                    .preparedChunks(2)
                 ],
                 sessionFolder: folder,
                 now: Date(timeIntervalSince1970: Double(index))

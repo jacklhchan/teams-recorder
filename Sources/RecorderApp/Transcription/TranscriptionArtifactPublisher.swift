@@ -83,6 +83,32 @@ struct PublishedTranscriptionArtifacts: Equatable, Sendable {
     let committedTranscriptRevision: TranscriptDocumentRevision
 }
 
+enum TranscriptionLogEvent: Equatable, Sendable {
+    static let maximumChunkCount = 10_000
+
+    case started
+    case preparedChunks(Int)
+    case completedChunk(current: Int, total: Int)
+    case completed
+
+    fileprivate var line: String {
+        switch self {
+        case .started:
+            "Native transcription started"
+        case .preparedChunks(let count):
+            "Prepared \(Self.bounded(count)) audio chunks"
+        case .completedChunk(let current, let total):
+            "Completed chunk \(Self.bounded(current)) of \(Self.bounded(total))"
+        case .completed:
+            "Native transcription completed"
+        }
+    }
+
+    private static func bounded(_ value: Int) -> Int {
+        min(max(0, value), maximumChunkCount)
+    }
+}
+
 enum TranscriptionArtifactPublicationError:
     LocalizedError,
     Equatable
@@ -136,7 +162,7 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         rawText: String,
         finalText: String,
         manifest: TranscriptionPublicationManifest,
-        logLines: [String],
+        logEvents: [TranscriptionLogEvent],
         sessionFolder: URL,
         now: Date = Date()
     ) throws -> PublishedTranscriptionArtifacts {
@@ -158,7 +184,7 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             (
                 "transcription.log",
                 Data(
-                    sanitizedLog(logLines)
+                    serializedLog(logEvents)
                         .joined(separator: "\n")
                         .appending("\n")
                         .utf8
@@ -325,20 +351,15 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         }
     }
 
-    private func sanitizedLog(_ lines: [String]) -> [String] {
+    private func serializedLog(_ events: [TranscriptionLogEvent]) -> [String] {
         var retainedBytes = 0
         var result: [String] = []
-        for line in lines {
-            let sanitized = String(
-                line
-                    .replacingOccurrences(of: "\r", with: " ")
-                    .replacingOccurrences(of: "\n", with: " ")
-                    .prefix(1_000)
-            )
-            let bytes = sanitized.utf8.count + 1
+        for event in events {
+            let line = event.line
+            let bytes = line.utf8.count + 1
             guard retainedBytes + bytes <= 64 * 1_024 else { break }
             retainedBytes += bytes
-            result.append(sanitized)
+            result.append(line)
         }
         return result
     }

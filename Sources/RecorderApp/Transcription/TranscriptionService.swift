@@ -176,9 +176,9 @@ struct NativeOpenAICompatibleTranscriptionService:
         )
         var texts: [String] = []
         var responseFormats: [String] = []
-        var logLines = [
-            "Native transcription started",
-            "Prepared \(chunks.count) audio chunks"
+        var logEvents: [TranscriptionLogEvent] = [
+            .started,
+            .preparedChunks(chunks.count)
         ]
         for (offset, chunk) in chunks.enumerated() {
             try Task.checkCancellation()
@@ -211,15 +211,15 @@ struct NativeOpenAICompatibleTranscriptionService:
             )
             texts.append(result.text)
             responseFormats.append(result.responseFormat.rawValue)
-            logLines.append(
-                "Completed chunk \(offset + 1) of \(chunks.count)"
+            logEvents.append(
+                .completedChunk(current: offset + 1, total: chunks.count)
             )
         }
         try Task.checkCancellation()
         onProgress(.publishing)
         let raw = TranscriptMerger.merge(texts)
         let final = converter.convert(raw)
-        logLines.append("Native transcription completed")
+        logEvents.append(.completed)
         let artifacts = try publisher.publish(
             rawText: raw,
             finalText: final,
@@ -229,7 +229,7 @@ struct NativeOpenAICompatibleTranscriptionService:
                 chunkCount: chunks.count,
                 responseFormats: responseFormats
             ),
-            logLines: logLines,
+            logEvents: logEvents,
             sessionFolder: request.sessionFolder
         )
         return .init(

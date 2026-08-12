@@ -6,6 +6,23 @@ import XCTest
 final class MeetingIntelligenceStoreTests: XCTestCase {
     private let gate = RecordingSessionMutationGate()
 
+    func testGeneratedArtifactStagePromotionAndStateAreOwnerOnly() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let artifactStore = MeetingIntelligenceArtifactStore(mutationGate: gate)
+
+        let staged = try artifactStore.stage(fixture.artifact(), in: fixture.folder)
+        XCTAssertEqual(try permissions(of: staged), 0o600)
+
+        try artifactStore.promoteStaged(staged, in: fixture.folder)
+        XCTAssertEqual(try permissions(of: fixture.artifactURL), 0o600)
+
+        try MeetingIntelligenceStateStore(mutationGate: gate).save(
+            fixture.state(),
+            in: fixture.folder
+        )
+        XCTAssertEqual(try permissions(of: fixture.stateURL), 0o600)
+    }
+
     func testStagesAndPromotesValidArtifact() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
         let store = MeetingIntelligenceArtifactStore(mutationGate: gate)
@@ -17,6 +34,11 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
 
         try store.promoteStaged(staged, in: fixture.folder)
         XCTAssertEqual(try store.load(in: fixture.folder), artifact)
+    }
+
+    private func permissions(of url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).intValue
     }
 
     func testRemoveStagedUsesIdentityCheckedCleanup() throws {

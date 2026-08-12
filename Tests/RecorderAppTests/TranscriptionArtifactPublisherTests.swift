@@ -4,6 +4,98 @@ import XCTest
 @testable import RecorderApp
 
 final class TranscriptionArtifactPublisherTests: XCTestCase {
+    func testNewPublicationArtifactsAreOwnerOnly() throws {
+        let folder = try makeFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        _ = try TranscriptionArtifactPublisher().publish(
+            rawText: "old raw",
+            finalText: "old final",
+            manifest: .init(
+                model: "asr-model",
+                language: "yue",
+                chunkCount: 1,
+                responseFormats: ["json"]
+            ),
+            logLines: ["Started"],
+            sessionFolder: folder,
+            now: Date(timeIntervalSince1970: 1)
+        )
+        for name in TranscriptionArtifactPublisher.canonicalNames {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: folder.appendingPathComponent(name).path
+            )
+        }
+        let artifacts = try TranscriptionArtifactPublisher().publish(
+            rawText: "raw",
+            finalText: "final",
+            manifest: .init(
+                model: "asr-model",
+                language: "yue",
+                chunkCount: 1,
+                responseFormats: ["json"]
+            ),
+            logLines: ["Completed"],
+            sessionFolder: folder,
+            now: Date(timeIntervalSince1970: 2)
+        )
+
+        var generatedURLs = [
+            artifacts.rawTranscriptURL,
+            artifacts.transcriptURL,
+            artifacts.manifestURL,
+            artifacts.logURL
+        ]
+        generatedURLs += try FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.contains(".previous-") }
+        XCTAssertEqual(generatedURLs.count, 8)
+        for url in generatedURLs {
+            XCTAssertEqual(try permissions(of: url), 0o600, url.lastPathComponent)
+        }
+    }
+
+    func testNewFailureDiagnosticIsOwnerOnly() throws {
+        let folder = try makeFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let diagnostic = try TranscriptionArtifactPublisher().publishFailureDiagnostic(
+            .init(stage: .upload, errorCode: .providerTransportFailure),
+            sessionFolder: folder
+        )
+
+        XCTAssertEqual(try permissions(of: diagnostic), 0o600)
+    }
+
+    func testPublicationStagingDirectoryIsOwnerOnly() throws {
+        let folder = try makeFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let retainingFileManager = RetainingTranscriptionStagingFileManager()
+
+        _ = try TranscriptionArtifactPublisher(fileManager: retainingFileManager).publish(
+            rawText: "raw",
+            finalText: "final",
+            manifest: .init(
+                model: "asr-model",
+                language: "yue",
+                chunkCount: 1,
+                responseFormats: ["json"]
+            ),
+            logLines: ["Completed"],
+            sessionFolder: folder
+        )
+
+        let staging = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: folder,
+                includingPropertiesForKeys: nil
+            ).first { $0.lastPathComponent.hasPrefix(".transcription-publish-") }
+        )
+        XCTAssertEqual(try permissions(of: staging), 0o700)
+    }
+
     func testFailureDiagnosticPersistsOnlyAllowlistedTypedFields() throws {
         let folder = try makeFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -245,5 +337,17 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
             withIntermediateDirectories: true
         )
         return folder
+    }
+
+    private func permissions(of url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).intValue
+    }
+}
+
+private final class RetainingTranscriptionStagingFileManager: FileManager, @unchecked Sendable {
+    override func removeItem(at URL: URL) throws {
+        guard !URL.lastPathComponent.hasPrefix(".transcription-publish-") else { return }
+        try super.removeItem(at: URL)
     }
 }

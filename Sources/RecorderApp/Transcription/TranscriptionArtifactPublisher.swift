@@ -90,6 +90,7 @@ enum TranscriptionArtifactPublicationError:
     case unsafeExistingArtifact(String)
     case unsafeSessionFolder
     case diagnosticTooLarge
+    case artifactWriteFailed
 
     var errorDescription: String? {
         switch self {
@@ -99,6 +100,8 @@ enum TranscriptionArtifactPublicationError:
             "Refusing to write a transcription diagnostic outside a regular session folder."
         case .diagnosticTooLarge:
             "Transcription diagnostic exceeds the maximum size."
+        case .artifactWriteFailed:
+            "Unable to write the transcription artifact safely."
         }
     }
 }
@@ -142,10 +145,7 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             ".transcription-publish-\(UUID().uuidString)",
             isDirectory: true
         )
-        try fileManager.createDirectory(
-            at: staging,
-            withIntermediateDirectories: false
-        )
+        try OwnerOnlyArtifactWriter.createDirectory(at: staging)
         defer { try? fileManager.removeItem(at: staging) }
 
         let encoder = JSONEncoder()
@@ -166,9 +166,9 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             )
         ]
         for (name, data) in contents {
-            try data.write(
-                to: staging.appendingPathComponent(name),
-                options: .atomic
+            try OwnerOnlyArtifactWriter.writeAtomically(
+                data,
+                to: staging.appendingPathComponent(name)
             )
         }
 
@@ -179,8 +179,8 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
                 let backup = sessionFolder.appendingPathComponent(
                     "\(name).previous-\(backupStamp(now))-\(UUID().uuidString)"
                 )
-                try fileManager.copyItem(
-                    at: destination,
+                try OwnerOnlyArtifactWriter.writeAtomically(
+                    OwnerOnlyArtifactWriter.readRegularFile(at: destination),
                     to: backup
                 )
             }
@@ -188,8 +188,8 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         for (name, _) in contents {
             let staged = staging.appendingPathComponent(name)
             let destination = sessionFolder.appendingPathComponent(name)
-            let data = try Data(contentsOf: staged)
-            try data.write(to: destination, options: .atomic)
+            let data = try OwnerOnlyArtifactWriter.readRegularFile(at: staged)
+            try OwnerOnlyArtifactWriter.writeAtomically(data, to: destination)
             try pruneBackups(for: name, in: sessionFolder)
         }
         try expireLegacyRuns(
@@ -237,7 +237,7 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
                 Self.failureDiagnosticFileName
             )
             try validateExistingArtifact(destination)
-            try data.write(to: destination, options: .atomic)
+            try OwnerOnlyArtifactWriter.writeAtomically(data, to: destination)
             return destination
         }
     }
@@ -354,4 +354,110 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         formatter.dateFormat = "yyyyMMddHHmmssSSS"
         return formatter
     }()
+}
+
+private enum OwnerOnlyArtifactWriter {
+    static func createDirectory(at url: URL) throws {
+        guard mkdir(url.path, 0o700) == 0 else {
+            throw TranscriptionArtifactPublicationError.artifactWriteFailed
+        }
+        let descriptor = open(
+            url.path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard descriptor >= 0 else {
+            throw TranscriptionArtifactPublicationError.artifactWriteFailed
+        }
+        defer { Darwin.close(descriptor) }
+
+        // Some filesystems do not support POSIX modes. The directory remains
+        // usable and the publication continues with the mode requested at
+        // creation instead of deleting an otherwise valid result.
+        _ = fchmod(descriptor, 0o700)
+    }
+
+    static func writeAtomically(_ data: Data, to destination: URL) throws {
+        let directoryURL = destination.deletingLastPathComponent()
+        let directory = open(
+            directoryURL.path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard directory >= 0 else {
+            throw TranscriptionArtifactPublicationError.artifactWriteFailed
+        }
+        defer { Darwin.close(directory) }
+
+        let temporaryName = ".owner-only-artifact-\(UUID().uuidString).tmp"
+        let descriptor = openat(
+            directory,
+            temporaryName,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            0o600
+        )
+        guard descriptor >= 0 else {
+            throw TranscriptionArtifactPublicationError.artifactWriteFailed
+        }
+        defer {
+            Darwin.close(descriptor)
+            _ = unlinkat(directory, temporaryName, 0)
+        }
+
+        // Keep the successful write when mode mutation is unsupported. The
+        // open mode is already owner-only on POSIX-capable filesystems.
+        _ = fchmod(descriptor, 0o600)
+        try writeAll(data, to: descriptor)
+        guard fsync(descriptor) == 0,
+              renameat(
+                directory,
+                temporaryName,
+                directory,
+                destination.lastPathComponent
+              ) == 0 else {
+            throw TranscriptionArtifactPublicationError.artifactWriteFailed
+        }
+        _ = fsync(directory)
+    }
+
+    static func readRegularFile(at url: URL) throws -> Data {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            throw TranscriptionArtifactPublicationError.artifactWriteFailed
+        }
+        defer { Darwin.close(descriptor) }
+
+        var attributes = stat()
+        guard fstat(descriptor, &attributes) == 0,
+              (attributes.st_mode & S_IFMT) == S_IFREG,
+              attributes.st_nlink == 1 else {
+            throw TranscriptionArtifactPublicationError.artifactWriteFailed
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+        while true {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            guard count >= 0 else {
+                throw TranscriptionArtifactPublicationError.artifactWriteFailed
+            }
+            guard count > 0 else { return data }
+            data.append(buffer, count: Int(count))
+        }
+    }
+
+    private static func writeAll(_ data: Data, to descriptor: Int32) throws {
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                guard let baseAddress = bytes.baseAddress else { return }
+                let count = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    bytes.count - offset
+                )
+                guard count > 0 else {
+                    throw TranscriptionArtifactPublicationError.artifactWriteFailed
+                }
+                offset += Int(count)
+            }
+        }
+    }
 }

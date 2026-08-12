@@ -25,6 +25,14 @@ struct AppPaths: Sendable {
         appSupportDirectory.appendingPathComponent("Diagnostics", isDirectory: true)
     }
 
+    var pendingRecordingsDirectory: URL {
+        appSupportDirectory.appendingPathComponent("Pending Recordings", isDirectory: true)
+    }
+
+    var recordingPublicationManifestURL: URL {
+        pendingRecordingsDirectory.appendingPathComponent("publication-queue-v1.json")
+    }
+
     var omlxSettingsURL: URL {
         homeDirectory.appendingPathComponent(".omlx/settings.json")
     }

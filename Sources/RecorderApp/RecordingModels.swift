@@ -1,6 +1,6 @@
 import Foundation
 
-struct RecordingHealthReport: Equatable, Sendable {
+struct RecordingHealthReport: Codable, Equatable, Sendable {
     var systemSignalSeen = false
     var micSignalSeen = false
     var clippingEvents = 0

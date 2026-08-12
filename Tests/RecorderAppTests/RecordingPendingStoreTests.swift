@@ -1,0 +1,160 @@
+import Foundation
+import XCTest
+@testable import RecorderApp
+
+final class RecordingPendingStoreTests: XCTestCase {
+    func testCreateRootUsesOwnerOnlyPermissions() throws {
+        let fixture = try PendingStoreFixture()
+        try fixture.store.prepareRoot()
+
+        XCTAssertEqual(try fixture.permissions(of: fixture.root) & 0o777, 0o700)
+    }
+
+    func testDirectChildIsAcceptedButSymlinkAndEscapeAreRejected() throws {
+        let fixture = try PendingStoreFixture()
+        let direct = try fixture.makeSession(named: "meeting-direct")
+        let outside = try fixture.makeOutsideSession(named: "meeting-outside")
+        let link = fixture.root.appendingPathComponent("meeting-link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+
+        XCTAssertEqual(try fixture.store.sessionURL(for: direct.lastPathComponent), direct)
+        XCTAssertThrowsError(try fixture.store.sessionURL(for: link.lastPathComponent))
+        XCTAssertThrowsError(try fixture.store.sessionURL(for: "../meeting-outside"))
+    }
+
+    func testScanSessionsSkipsManifestAndPublisherStagingNames() throws {
+        let fixture = try PendingStoreFixture()
+        let session = try fixture.makeSession(named: "meeting-scan")
+        try fixture.store.prepareRoot()
+        try FileManager.default.createDirectory(at: fixture.root.appendingPathComponent(".publisher-staging-123"), withIntermediateDirectories: false)
+        try Data().write(to: fixture.manifestURL)
+
+        XCTAssertEqual(try fixture.store.scanSessions(), [session])
+    }
+
+    func testManifestRoundTripPreservesEveryHealthFieldAndResetsPublishingToPending() throws {
+        let fixture = try PendingStoreFixture()
+        _ = try fixture.makeSession(named: "meeting-round-trip")
+        let original = fixture.item(sessionDirectoryName: "meeting-round-trip", state: .publishing)
+        let manifest = RecordingPublicationManifestStore(manifestURL: fixture.manifestURL)
+
+        try manifest.save([original])
+        let loaded = try manifest.loadOrRebuild(from: fixture.store)
+
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].id, original.id)
+        XCTAssertEqual(loaded[0].sessionDirectoryName, original.sessionDirectoryName)
+        XCTAssertEqual(loaded[0].destinationIdentity, original.destinationIdentity)
+        XCTAssertEqual(loaded[0].workspaceFenceRevision, original.workspaceFenceRevision)
+        XCTAssertEqual(loaded[0].recordingSource, original.recordingSource)
+        XCTAssertEqual(loaded[0].health, original.health)
+        XCTAssertEqual(loaded[0].metadataWarning, original.metadataWarning)
+        XCTAssertEqual(loaded[0].createdAt, original.createdAt)
+        XCTAssertEqual(loaded[0].lastAttemptAt, original.lastAttemptAt)
+        XCTAssertEqual(loaded[0].attemptCount, original.attemptCount)
+        XCTAssertEqual(loaded[0].state, .pending)
+        XCTAssertEqual(loaded[0].failureCategory, original.failureCategory)
+        XCTAssertEqual(try manifest.loadOrRebuild(from: fixture.store)[0].state, .pending)
+    }
+
+    func testCorruptManifestPreservesSessionsAndRebuildsNeedsAttentionItems() throws {
+        let fixture = try PendingStoreFixture()
+        let session = try fixture.makeSession(named: "meeting-recover")
+        try Data("broken".utf8).write(to: fixture.manifestURL)
+        let manifest = RecordingPublicationManifestStore(manifestURL: fixture.manifestURL)
+
+        let items = try manifest.loadOrRebuild(from: fixture.store)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: session.path))
+        XCTAssertEqual(items.map(\.state), [.needsAttention])
+        XCTAssertEqual(items.map(\.sessionDirectoryName), [session.lastPathComponent])
+    }
+
+    func testUnsupportedManifestVersionPreservesSessionsAndRebuildsNeedsAttentionItems() throws {
+        let fixture = try PendingStoreFixture()
+        let session = try fixture.makeSession(named: "meeting-version-recover")
+        try Data("{\"version\": 2, \"items\": []}".utf8).write(to: fixture.manifestURL)
+
+        let items = try RecordingPublicationManifestStore(manifestURL: fixture.manifestURL)
+            .loadOrRebuild(from: fixture.store)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: session.path))
+        XCTAssertEqual(items.map(\.state), [.needsAttention])
+    }
+}
+
+private final class PendingStoreFixture {
+    let temporaryRoot: URL
+    let root: URL
+    let manifestURL: URL
+    let store: RecordingPendingStore
+
+    init() throws {
+        temporaryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        root = temporaryRoot.appendingPathComponent("Pending Recordings", isDirectory: true)
+        manifestURL = root.appendingPathComponent("publication-queue-v1.json")
+        store = RecordingPendingStore(root: root, manifestURL: manifestURL)
+        try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: temporaryRoot)
+    }
+
+    func makeSession(named name: String) throws -> URL {
+        try store.prepareRoot()
+        let session = root.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: false)
+        return session
+    }
+
+    func makeOutsideSession(named name: String) throws -> URL {
+        let session = temporaryRoot.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: false)
+        return session
+    }
+
+    func permissions(of url: URL) throws -> UInt16 {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).uint16Value
+    }
+
+    func item(sessionDirectoryName: String, state: RecordingPublicationState) -> RecordingPublicationItem {
+        let startedAt = Date(timeIntervalSinceReferenceDate: 100)
+        let endedAt = Date(timeIntervalSinceReferenceDate: 200)
+        let health = RecordingHealthReport(
+            systemSignalSeen: true,
+            micSignalSeen: true,
+            clippingEvents: 1,
+            droppedBuffers: 2,
+            conversionFailures: 3,
+            lateFrames: 4,
+            systemDisconnects: 5,
+            microphoneDisconnects: 6,
+            streamFailures: 7,
+            timelineDiscontinuities: 8,
+            videoDroppedFrames: 9,
+            videoInvalidTimestamps: 10,
+            videoStallEvents: 11,
+            videoFilterFailures: 12,
+            muxFallbackEvents: 13,
+            metadataWriteFailures: 14,
+            startedAt: startedAt,
+            endedAt: endedAt
+        )
+        return RecordingPublicationItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            sessionDirectoryName: sessionDirectoryName,
+            destinationIdentity: RecordingDestinationIdentity(id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!),
+            workspaceFenceRevision: 42,
+            recordingSource: .teamsAutomatic,
+            health: health,
+            metadataWarning: "metadata warning",
+            createdAt: Date(timeIntervalSinceReferenceDate: 300),
+            lastAttemptAt: Date(timeIntervalSinceReferenceDate: 400),
+            attemptCount: 5,
+            state: state,
+            failureCategory: "network"
+        )
+    }
+}

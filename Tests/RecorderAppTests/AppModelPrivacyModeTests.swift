@@ -1,0 +1,40 @@
+import Combine
+import XCTest
+@testable import RecorderApp
+
+@MainActor
+final class AppModelPrivacyModeTests: XCTestCase {
+    func testInjectedPrivacyPolicyIsRetainedAndItsToggleProjectsAndPersists() {
+        let defaults = makeDefaults()
+        let policy = PrivacyModePolicy(defaults: defaults)
+        let model = AppModel(
+            defaults: defaults,
+            privacyModePolicy: policy,
+            performStartupWork: false
+        )
+        var publications = 0
+        let observation = model.$privacyModeEnabled.dropFirst().sink { _ in
+            publications += 1
+        }
+        defer { observation.cancel() }
+
+        XCTAssertTrue(model.privacyModePolicy === policy)
+        XCTAssertFalse(model.privacyModeEnabled)
+
+        model.setPrivacyModeEnabled(true)
+
+        XCTAssertTrue(model.privacyModeEnabled)
+        XCTAssertEqual(publications, 1)
+        XCTAssertTrue(PrivacyModePolicy(defaults: defaults).isEnabled)
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suiteName = "AppModelPrivacyModeTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        return defaults
+    }
+}

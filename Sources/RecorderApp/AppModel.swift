@@ -46,6 +46,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published private(set) var recordingDestinationState: RecordingDestinationState = .ready
     @Published private(set) var recordingPublicationPresentation = RecordingPublicationPresentation(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0)
+    @Published private(set) var privacyModeEnabled: Bool
     @Published var statusMessage = "Ready"
     @Published var lastHealthReport: RecordingHealthReport?
     @Published private(set) var lastRecordingSavedAsM4A = false
@@ -66,6 +67,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var teamsScreenCaptureCandidates: [TeamsWindowDescriptor] = []
 
     let recorder: RecordingEngine
+    let privacyModePolicy: PrivacyModePolicy
     let aiProviderSettingsModel: AIProviderSettingsModel
     private let recordingSessionCoordinator:
         RecordingSessionCoordinator
@@ -220,6 +222,7 @@ final class AppModel: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
+        privacyModePolicy: PrivacyModePolicy? = nil,
         providerRepository: (any OpenAICompatibleProviderManaging)? = nil,
         appPaths: AppPaths = .live,
         recorder: RecordingEngine? = nil,
@@ -297,6 +300,10 @@ final class AppModel: ObservableObject {
         },
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
     ) {
+        let activePrivacyModePolicy = privacyModePolicy
+            ?? PrivacyModePolicy(defaults: defaults)
+        self.privacyModePolicy = activePrivacyModePolicy
+        privacyModeEnabled = activePrivacyModePolicy.isEnabled
         let activeDestinationStore = recordingDestinationStore
             ?? RecordingDestinationStore(defaults: defaults)
         let destinationSelection: RecordingDestinationSelection
@@ -520,6 +527,13 @@ final class AppModel: ObservableObject {
         capturePersistence = CaptureSelectionPersistence(defaults: defaults)
         captureSelection = capturePersistence.loadSelection()
         selectedMicrophoneUID = capturePersistence.loadMicrophoneUID()
+        activePrivacyModePolicy.$isEnabled
+            .removeDuplicates()
+            .sink { [weak self] enabled in
+                guard self?.privacyModeEnabled != enabled else { return }
+                self?.privacyModeEnabled = enabled
+            }
+            .store(in: &cancellables)
         self.playbackFeature.onStatusMessage = { [weak self] message in
             self?.statusMessage = message
         }
@@ -624,6 +638,10 @@ final class AppModel: ObservableObject {
         aiProviderSettingsModel.performStartupMigration(
             settingsURL: appPaths.omlxSettingsURL
         )
+    }
+
+    func setPrivacyModeEnabled(_ enabled: Bool) {
+        privacyModePolicy.setEnabled(enabled)
     }
 
     deinit {

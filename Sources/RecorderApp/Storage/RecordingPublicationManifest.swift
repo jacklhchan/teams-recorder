@@ -25,6 +25,10 @@ struct RecordingPublicationItem: Codable, Equatable, Identifiable, Sendable {
     /// identity and therefore deliberately cannot perform destructive cleanup.
     var publishedSourceDevice: Int64? = nil
     var publishedSourceInode: Int64? = nil
+    /// The pending-root identity is also admitted by the publisher. Both the
+    /// root and direct-session identities must match before destructive cleanup.
+    var publishedSourceRootDevice: Int64? = nil
+    var publishedSourceRootInode: Int64? = nil
 }
 
 struct RecordingPublicationManifest: Codable, Equatable, Sendable {

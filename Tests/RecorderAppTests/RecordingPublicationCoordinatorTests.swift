@@ -117,6 +117,74 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(presentation.retainedLocalCount, 6)
     }
+
+    func testPublishedDestinationUnavailableRemainsTerminalWaitingAndManualRetryValidatesBeforeCompleting() async throws {
+        let fixture = try CoordinatorFixture(destinationAvailable: false, manifestState: .published)
+        fixture.coordinator.resume()
+        await fixture.waitForIdle()
+
+        let waiting = try XCTUnwrap(fixture.persistedItems.first)
+        XCTAssertEqual(waiting.state, .published)
+        XCTAssertEqual(waiting.failureCategory, "destinationUnavailable")
+        XCTAssertEqual(fixture.coordinator.presentation.pendingCount, 0)
+        XCTAssertEqual(fixture.coordinator.presentation.waitingCount, 1)
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+
+        fixture.destinationAvailable = true
+        fixture.coordinator.retryNow()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.validationIDs, [fixture.request.id])
+        XCTAssertEqual(fixture.completions.values.map(\.itemID), [fixture.request.id])
+    }
+
+    func testTransientFailureWakesForBoundedBackoffWithoutBusyLoop() async throws {
+        let fixture = try CoordinatorFixture(publisherErrors: [.ioFailure("once")], retryDelays: [0.02])
+        fixture.coordinator.enqueue(fixture.request)
+        await fixture.wait(seconds: 0.12)
+
+        XCTAssertEqual(fixture.publisher.attemptCount, 2)
+        XCTAssertEqual(fixture.publisher.publishedIDs, [fixture.request.id])
+        XCTAssertLessThan(fixture.publisher.attemptCount, 4)
+    }
+
+    func testPublishedValidationFailureNeedsAttentionBeforeCallbackOrDelete() async throws {
+        let fixture = try CoordinatorFixture(manifestState: .published)
+        fixture.publisher.validationError = .verificationMismatch
+        fixture.coordinator.resume()
+        await fixture.waitForIdle()
+
+        XCTAssertTrue(fixture.completions.values.isEmpty)
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertEqual(fixture.coordinator.presentation.needsAttentionCount, 1)
+    }
+
+    func testLegacyPublishedItemMissingRootIdentityFailsClosedBeforeCallbackOrDelete() async throws {
+        let fixture = try CoordinatorFixture(manifestState: .published)
+        var item = try XCTUnwrap(fixture.persistedItems.first)
+        item.publishedSourceRootDevice = nil
+        try fixture.manifest.save([item])
+        fixture.coordinator.resume()
+        await fixture.waitForIdle()
+
+        XCTAssertTrue(fixture.completions.values.isEmpty)
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertEqual(fixture.coordinator.presentation.needsAttentionCount, 1)
+    }
+
+    func testShutdownRejectsLatePublisherFailureWithoutTransition() async throws {
+        let fixture = try CoordinatorFixture()
+        fixture.publisher.suspendNextPublish = true
+        fixture.coordinator.enqueue(fixture.request)
+        await fixture.publisher.waitUntilSuspended()
+        fixture.coordinator.shutdown()
+        fixture.publisher.completeSuspendedPublish(throwing: .ioFailure("late"))
+        await fixture.waitForIdle()
+
+        XCTAssertTrue(fixture.completions.values.isEmpty)
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertEqual(fixture.coordinator.presentation.pendingCount, 1)
+    }
 }
 
 private final class FailingCoordinatorManifestStore: RecordingPublicationManifestStoring, @unchecked Sendable {
@@ -138,7 +206,9 @@ private final class CoordinatorFixture {
     var destinationAvailable: Bool { get { destination.available } set { destination.available = newValue } }
     var sourceExists: Bool { FileManager.default.fileExists(atPath: pending.root.appendingPathComponent(request.sessionDirectoryName).path) }
 
-    init(destinationAvailable: Bool = true, manifestState: RecordingPublicationState? = nil, publisherError: RecordingPublicationError? = nil) throws {
+    var persistedItems: [RecordingPublicationItem] { (try? manifest.loadOrRebuild(from: pending)) ?? [] }
+
+    init(destinationAvailable: Bool = true, manifestState: RecordingPublicationState? = nil, publisherError: RecordingPublicationError? = nil, publisherErrors: [RecordingPublicationError] = [], retryDelays: [TimeInterval] = [0]) throws {
         temporaryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let root = temporaryRoot.appendingPathComponent("pending", isDirectory: true)
         pending = RecordingPendingStore(root: root)
@@ -152,14 +222,14 @@ private final class CoordinatorFixture {
         destination.identity = identity
         destination.url = temporaryRoot.appendingPathComponent("destination", isDirectory: true)
         try FileManager.default.createDirectory(at: destination.url, withIntermediateDirectories: true)
-        publisher = CoordinatorPublisher(error: publisherError, destination: destination.url, pending: pending)
+        publisher = CoordinatorPublisher(error: publisherError, errors: publisherErrors, destination: destination.url, pending: pending)
         if let manifestState {
             let session = try pending.openSession(for: name)
-            try manifest.save([.init(id: request.id, sessionDirectoryName: name, destinationIdentity: identity, workspaceFenceRevision: 3, recordingSource: .manual, health: .init(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: manifestState, failureCategory: nil, publishedFolderName: manifestState == .published ? "meeting" : nil, publishedRecordingName: manifestState == .published ? "recording.m4a" : nil, publishedSourceDevice: manifestState == .published ? session.identity.device : nil, publishedSourceInode: manifestState == .published ? session.identity.inode : nil)])
+            try manifest.save([.init(id: request.id, sessionDirectoryName: name, destinationIdentity: identity, workspaceFenceRevision: 3, recordingSource: .manual, health: .init(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: manifestState, failureCategory: nil, publishedFolderName: manifestState == .published ? "meeting" : nil, publishedRecordingName: manifestState == .published ? "recording.m4a" : nil, publishedSourceDevice: manifestState == .published ? session.identity.device : nil, publishedSourceInode: manifestState == .published ? session.identity.inode : nil, publishedSourceRootDevice: manifestState == .published ? session.rootIdentity.device : nil, publishedSourceRootInode: manifestState == .published ? session.rootIdentity.inode : nil)])
         } else {
             try manifest.save([])
         }
-        coordinator = .init(manifestStore: manifest, destinationStore: destination, publisher: publisher, pendingStore: pending, retryDelays: [0])
+        coordinator = .init(manifestStore: manifest, destinationStore: destination, publisher: publisher, pendingStore: pending, retryDelays: retryDelays)
         coordinator.onCompleted = { [completions] completion in completions.append(completion) }
     }
 
@@ -167,6 +237,11 @@ private final class CoordinatorFixture {
 
     func waitForIdle() async {
         for _ in 0..<30 { await Task.yield(); try? await Task.sleep(nanoseconds: 5_000_000) }
+    }
+
+    func wait(seconds: TimeInterval) async {
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        await waitForIdle()
     }
 }
 
@@ -189,17 +264,21 @@ private final class CoordinatorDestinationStore: RecordingDestinationStoring, @u
 private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked Sendable {
     private let lock = NSLock()
     private let error: RecordingPublicationError?
+    private var errors: [RecordingPublicationError]
     private let destination: URL
     private let pending: RecordingPendingStore
     private(set) var publishedIDs: [UUID] = []
     private(set) var attemptCount = 0
+    private(set) var validationIDs: [UUID] = []
     var beforeSuccess: (() -> Void)?
+    var validationError: RecordingPublicationError?
     var suspendNextPublish = false
     private var suspendedContinuation: CheckedContinuation<RecordingPublicationSuccess, Error>?
-    init(error: RecordingPublicationError?, destination: URL, pending: RecordingPendingStore) { self.error = error; self.destination = destination; self.pending = pending }
+    init(error: RecordingPublicationError?, errors: [RecordingPublicationError], destination: URL, pending: RecordingPendingStore) { self.error = error; self.errors = errors; self.destination = destination; self.pending = pending }
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
         withLock { attemptCount += 1 }
         if let error { throw error }
+        if let error = withLockResult({ errors.isEmpty ? nil : errors.removeFirst() }) { throw error }
         let source = try pending.openSession(for: item.sessionDirectoryName)
         withLock { publishedIDs.append(item.id) }
         if suspendNextPublish {
@@ -209,29 +288,37 @@ private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked
         }
         beforeSuccess?()
         let folder = self.destination.appendingPathComponent("meeting", isDirectory: true)
-        return .init(itemID: item.id, folderURL: folder, recordingURL: folder.appendingPathComponent("recording.m4a"), sourceDevice: source.identity.device, sourceInode: source.identity.inode)
+        return .init(itemID: item.id, folderURL: folder, recordingURL: folder.appendingPathComponent("recording.m4a"), sourceDevice: source.identity.device, sourceInode: source.identity.inode, sourceRootDevice: source.rootIdentity.device, sourceRootInode: source.rootIdentity.inode)
     }
     func waitUntilSuspended() async {
         for _ in 0..<100 where suspendedContinuation == nil { await Task.yield() }
     }
     func completeSuspendedPublish() {
+        completeSuspendedPublish(throwing: nil)
+    }
+    func completeSuspendedPublish(throwing failure: RecordingPublicationError?) {
         lock.lock()
         let continuation = suspendedContinuation
         suspendedContinuation = nil
         lock.unlock()
         guard let continuation else { return }
+        if let failure { continuation.resume(throwing: failure); return }
         let folder = destination.appendingPathComponent("meeting", isDirectory: true)
         do {
             let source = try pending.openSession(for: "meeting")
-            continuation.resume(returning: .init(itemID: publishedIDs.last!, folderURL: folder, recordingURL: folder.appendingPathComponent("recording.m4a"), sourceDevice: source.identity.device, sourceInode: source.identity.inode))
+            continuation.resume(returning: .init(itemID: publishedIDs.last!, folderURL: folder, recordingURL: folder.appendingPathComponent("recording.m4a"), sourceDevice: source.identity.device, sourceInode: source.identity.inode, sourceRootDevice: source.rootIdentity.device, sourceRootInode: source.rootIdentity.inode))
         } catch { continuation.resume(throwing: error) }
     }
     func validatePublished(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
+        withLock { validationIDs.append(item.id) }
+        if let validationError { throw validationError }
         guard let device = item.publishedSourceDevice, let inode = item.publishedSourceInode,
+              let rootDevice = item.publishedSourceRootDevice, let rootInode = item.publishedSourceRootInode,
               let folder = item.publishedFolderName, let recording = item.publishedRecordingName else { throw RecordingPublicationError.verificationMismatch }
-        return .init(itemID: item.id, folderURL: destination.url.appendingPathComponent(folder), recordingURL: destination.url.appendingPathComponent(folder).appendingPathComponent(recording), sourceDevice: device, sourceInode: inode)
+        return .init(itemID: item.id, folderURL: destination.url.appendingPathComponent(folder), recordingURL: destination.url.appendingPathComponent(folder).appendingPathComponent(recording), sourceDevice: device, sourceInode: inode, sourceRootDevice: rootDevice, sourceRootInode: rootInode)
     }
     private func withLock(_ operation: () -> Void) { lock.lock(); defer { lock.unlock() }; operation() }
+    private func withLockResult<T>(_ operation: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return operation() }
 }
 
 private final class CompletionBox: @unchecked Sendable {

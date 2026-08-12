@@ -46,6 +46,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
     private let publisher: RecordingSessionPublishing
     private let pendingStore: RecordingPendingStore
     private let retryDelays: [TimeInterval]
+    private let sleeper: @Sendable (TimeInterval) async throws -> Void
     private var items: [RecordingPublicationItem] = []
     private var generation: UInt64 = 0
     private var worker: Task<Void, Never>?
@@ -56,12 +57,13 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
     var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
     var onCompleted: ((RecordingPublicationCompleted) -> Void)?
 
-    init(manifestStore: any RecordingPublicationManifestStoring, destinationStore: RecordingDestinationStoring, publisher: RecordingSessionPublishing, pendingStore: RecordingPendingStore, retryDelays: [TimeInterval] = [2, 10, 30, 60, 300]) {
+    init(manifestStore: any RecordingPublicationManifestStoring, destinationStore: RecordingDestinationStoring, publisher: RecordingSessionPublishing, pendingStore: RecordingPendingStore, retryDelays: [TimeInterval] = [2, 10, 30, 60, 300], sleeper: @escaping @Sendable (TimeInterval) async throws -> Void = { delay in try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }) {
         self.manifestStore = manifestStore
         self.destinationStore = destinationStore
         self.publisher = publisher
         self.pendingStore = pendingStore
         self.retryDelays = retryDelays.filter { $0 > 0 }.isEmpty ? [1] : retryDelays.filter { $0 > 0 }
+        self.sleeper = sleeper
     }
 
     var presentation: RecordingPublicationPresentation { presentation(for: items) }
@@ -78,12 +80,20 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
 
     func retryNow() {
         guard loadIfNeeded() else { publishPresentation(); return }
+        generation &+= 1; worker?.cancel(); worker = nil
         let old = items
+        let retryable = items.filter { $0.state == .waitingForDestination || ($0.state == .pending && $0.failureCategory == "transient") || ($0.state == .published && $0.failureCategory == "destinationUnavailable") }
+        let retained = items.filter { item in !retryable.contains(where: { $0.id == item.id }) }
+        items = retryable + retained
         for index in items.indices where items[index].state == .waitingForDestination || (items[index].state == .pending && items[index].failureCategory == "transient") {
-            items[index].state = .pending; items[index].lastAttemptAt = nil
+            items[index].state = .pending
+            items[index].failureCategory = nil
+            items[index].lastAttemptAt = nil
+        }
+        for index in items.indices where items[index].state == .published && items[index].failureCategory == "destinationUnavailable" {
+            items[index].lastAttemptAt = nil
         }
         guard persist() else { items = old; publishPresentation(); return }
-        generation &+= 1; worker?.cancel(); worker = nil
         publishPresentation(); startWorker()
     }
 
@@ -99,7 +109,11 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
     private func drain(generation workerGeneration: UInt64) async {
         defer { if generation == workerGeneration { worker = nil; publishPresentation() } }
         while current(workerGeneration) {
-            guard let item = nextEligibleItem() else { return }
+            guard let item = nextEligibleItem() else {
+                guard let delay = nextRetryDelay() else { return }
+                do { try await sleeper(delay) } catch { return }
+                continue
+            }
             if item.state == .published { await finishPublished(item, generation: workerGeneration); continue }
             guard transitionToPublishing(item.id, generation: workerGeneration) else { return }
             do {
@@ -121,23 +135,32 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
         do {
             let access: RecordingDestinationAccess
             do { access = try destinationStore.access(identity: item.destinationIdentity) }
-            catch { _ = transition(item.id, to: .waitingForDestination, category: "destinationUnavailable"); return }
+            catch { guard current(workerGeneration) else { return }; _ = recordPublishedDestinationUnavailable(item.id); return }
             defer { access.close() }
             let validated = try await publisher.validatePublished(item: item, destination: access)
             guard current(workerGeneration), validated.itemID == item.id, validated.folderURL.lastPathComponent == folder, validated.recordingURL.lastPathComponent == recording else { return }
-            let completed = RecordingPublicationCompleted(itemID: item.id, folderURL: validated.folderURL, recordingURL: validated.folderURL.appendingPathComponent(recording).standardizedFileURL, workspaceFence: .init(revision: item.workspaceFenceRevision), source: item.recordingSource, health: item.health, metadataWarning: item.metadataWarning)
-            if deliveredIDs.insert(item.id).inserted { onCompleted?(completed) }
-            guard current(workerGeneration), let device = item.publishedSourceDevice, let inode = item.publishedSourceInode else { _ = transition(item.id, to: .needsAttention, category: "missingSourceIdentity"); return }
+            guard let sourceDevice = item.publishedSourceDevice, let sourceInode = item.publishedSourceInode,
+                  let rootDevice = item.publishedSourceRootDevice, let rootInode = item.publishedSourceRootInode else {
+                _ = transition(item.id, to: .needsAttention, category: "missingSourceIdentity")
+                return
+            }
             if try !pendingStore.isSessionAbsent(named: item.sessionDirectoryName) {
                 let session = try pendingStore.openSession(for: item.sessionDirectoryName)
-                guard session.identity == .init(device: device, inode: inode) else { _ = transition(item.id, to: .needsAttention, category: "sourceReplacement"); return }
+                guard session.rootIdentity == .init(device: rootDevice, inode: rootInode),
+                      session.identity == .init(device: sourceDevice, inode: sourceInode) else {
+                    _ = transition(item.id, to: .needsAttention, category: "sourceReplacement")
+                    return
+                }
                 try pendingStore.removeRetainedSession(session)
             }
+            guard current(workerGeneration) else { return }
+            let completed = RecordingPublicationCompleted(itemID: item.id, folderURL: validated.folderURL, recordingURL: validated.folderURL.appendingPathComponent(recording).standardizedFileURL, workspaceFence: .init(revision: item.workspaceFenceRevision), source: item.recordingSource, health: item.health, metadataWarning: item.metadataWarning)
+            if deliveredIDs.insert(item.id).inserted { onCompleted?(completed) }
             guard current(workerGeneration) else { return }
             let old = items; items.removeAll { $0.id == item.id }
             guard persist() else { items = old; return }
             destinationStore.prune(keeping: Set(items.map(\.destinationIdentity))); publishPresentation()
-        } catch { _ = recordFailure(item.id, error: error) }
+        } catch { guard current(workerGeneration) else { return }; _ = recordFailure(item.id, error: error) }
     }
 
     private func transitionToPublishing(_ id: UUID, generation: UInt64) -> Bool {
@@ -147,7 +170,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
     }
     private func markPublished(_ id: UUID, success: RecordingPublicationSuccess, generation: UInt64) -> Bool {
         guard current(generation), let index = items.firstIndex(where: { $0.id == id }) else { return false }
-        let old = items[index]; items[index].state = .published; items[index].failureCategory = nil; items[index].publishedFolderName = success.folderURL.lastPathComponent; items[index].publishedRecordingName = success.recordingURL.lastPathComponent; items[index].publishedSourceDevice = success.sourceDevice; items[index].publishedSourceInode = success.sourceInode
+        let old = items[index]; items[index].state = .published; items[index].failureCategory = nil; items[index].publishedFolderName = success.folderURL.lastPathComponent; items[index].publishedRecordingName = success.recordingURL.lastPathComponent; items[index].publishedSourceDevice = success.sourceDevice; items[index].publishedSourceInode = success.sourceInode; items[index].publishedSourceRootDevice = success.sourceRootDevice; items[index].publishedSourceRootInode = success.sourceRootInode
         guard persist() else { items[index] = old; return false }; return true
     }
     private func transition(_ id: UUID, to state: RecordingPublicationState, category: String) -> Bool {
@@ -163,14 +186,39 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
         default: return transition(id, to: .pending, category: "transient")
         }
     }
-    private func nextEligibleItem() -> RecordingPublicationItem? {
-        if let published = items.first(where: { $0.state == .published }) { return published }
-        let now = Date(); return items.first { item in guard item.state == .pending else { return false }; guard let last = item.lastAttemptAt else { return true }; return now.timeIntervalSince(last) >= retryDelays[min(max(item.attemptCount - 1, 0), retryDelays.count - 1)] }
+    private func recordPublishedDestinationUnavailable(_ id: UUID) -> Bool {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        let old = items[index]
+        items[index].state = .published
+        items[index].failureCategory = "destinationUnavailable"
+        items[index].lastAttemptAt = Date()
+        items[index].attemptCount += 1
+        guard persist() else { items[index] = old; return false }
+        publishPresentation()
+        return true
     }
+    private func nextEligibleItem() -> RecordingPublicationItem? {
+        let now = Date()
+        return items.first { item in
+            guard item.state == .pending || item.state == .published else { return false }
+            guard item.state == .pending || item.failureCategory == "destinationUnavailable" else { return true }
+            return isEligible(item, now: now)
+        }
+    }
+    private func nextRetryDelay() -> TimeInterval? {
+        let now = Date()
+        let deadlines = items.compactMap { item -> TimeInterval? in
+            guard (item.state == .pending && item.failureCategory == "transient") || (item.state == .published && item.failureCategory == "destinationUnavailable"), let last = item.lastAttemptAt else { return nil }
+            return max(0, retryDelay(for: item) - now.timeIntervalSince(last))
+        }
+        return deadlines.min()
+    }
+    private func isEligible(_ item: RecordingPublicationItem, now: Date) -> Bool { guard let last = item.lastAttemptAt else { return true }; return now.timeIntervalSince(last) >= retryDelay(for: item) }
+    private func retryDelay(for item: RecordingPublicationItem) -> TimeInterval { retryDelays[min(max(item.attemptCount - 1, 0), retryDelays.count - 1)] }
     private func loadIfNeeded() -> Bool { guard !loaded else { return true }; do { items = try manifestStore.loadOrRebuild(from: pendingStore); loaded = true; persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }
     private func persist() -> Bool { do { try manifestStore.save(items); persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }
     private func current(_ candidate: UInt64) -> Bool { generation == candidate && !Task.isCancelled }
-    private func presentation(for items: [RecordingPublicationItem]) -> RecordingPublicationPresentation { let pending = items.filter { $0.state == .pending || $0.state == .publishing || $0.state == .published }.count; let waiting = items.filter { $0.state == .waitingForDestination }.count; let attention = items.filter { $0.state == .needsAttention }.count; let text = persistenceFailed ? "Publish failed" : attention > 0 ? "Needs attention" : waiting > 0 ? "Waiting for destination" : pending > 0 ? "Publishing" : "Up to date"; return .init(stateText: text, pendingCount: pending, waitingCount: waiting, needsAttentionCount: attention) }
+    private func presentation(for items: [RecordingPublicationItem]) -> RecordingPublicationPresentation { let pending = items.filter { $0.state == .pending || $0.state == .publishing || ($0.state == .published && $0.failureCategory != "destinationUnavailable") }.count; let waiting = items.filter { $0.state == .waitingForDestination || ($0.state == .published && $0.failureCategory == "destinationUnavailable") }.count; let attention = items.filter { $0.state == .needsAttention }.count; let text = persistenceFailed ? "Publish failed" : attention > 0 ? "Needs attention" : waiting > 0 ? "Waiting for destination" : pending > 0 ? "Publishing" : "Up to date"; return .init(stateText: text, pendingCount: pending, waitingCount: waiting, needsAttentionCount: attention) }
     private func publishPresentation() { onPresentationChange?(presentation) }
     private func simpleName(_ name: String) -> Bool { !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\\") && !name.hasPrefix(".") }
 }

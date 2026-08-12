@@ -9,6 +9,8 @@ struct RecordingPublicationSuccess: Equatable, Sendable {
     let recordingURL: URL
     let sourceDevice: Int64
     let sourceInode: Int64
+    let sourceRootDevice: Int64
+    let sourceRootInode: Int64
 }
 
 enum RecordingPublicationError: Error, Equatable, Sendable {
@@ -82,7 +84,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
             digest: sourceDigest,
             recordingName: recordingName
         ) {
-            return .init(itemID: existing.itemID, folderURL: existing.folderURL, recordingURL: existing.recordingURL, sourceDevice: source.identity.device, sourceInode: source.identity.inode)
+            return .init(itemID: existing.itemID, folderURL: existing.folderURL, recordingURL: existing.recordingURL, sourceDevice: source.identity.device, sourceInode: source.identity.inode, sourceRootDevice: source.rootIdentity.device, sourceRootInode: source.rootIdentity.inode)
         }
 
         let stagingName = ".\(item.id.uuidString).lmr-publishing"
@@ -147,7 +149,9 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
             folderURL: folderURL,
             recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL,
             sourceDevice: source.identity.device,
-            sourceInode: source.identity.inode
+            sourceInode: source.identity.inode,
+            sourceRootDevice: source.rootIdentity.device,
+            sourceRootInode: source.rootIdentity.inode
         )
     }
 
@@ -171,7 +175,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
                 throw RecordingPublicationError.verificationMismatch
             }
             let folderURL = destination.url.appendingPathComponent(folderName, isDirectory: true).standardizedFileURL
-            return .init(itemID: item.id, folderURL: folderURL, recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL, sourceDevice: 0, sourceInode: 0)
+            return .init(itemID: item.id, folderURL: folderURL, recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL, sourceDevice: 0, sourceInode: 0, sourceRootDevice: 0, sourceRootInode: 0)
         }
     }
 
@@ -560,7 +564,9 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
                         folderURL: folderURL,
                         recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL,
                         sourceDevice: 0,
-                        sourceInode: 0
+                        sourceInode: 0,
+                        sourceRootDevice: 0,
+                        sourceRootInode: 0
                     )
                 }
             ) {

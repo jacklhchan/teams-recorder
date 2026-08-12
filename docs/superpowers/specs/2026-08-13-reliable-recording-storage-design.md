@@ -2,7 +2,9 @@
 
 ## Status
 
-Approved on 2026-08-13.
+Approved on 2026-08-13. Amended the same day to use adaptive bookmarks after
+the current non-sandboxed build was verified to reject security-scoped bookmark
+creation.
 
 ## Context
 
@@ -76,9 +78,21 @@ two canonical workspaces. It is unnecessary for the requested behavior.
 ### Recording destination persistence
 
 A `RecordingDestinationStore` owns the selected destination. It stores a
-versioned security-scoped bookmark in `UserDefaults`; it never stores a OneDrive
-credential. The store exposes a resolved destination and an explicit access
-state:
+versioned bookmark catalog in `UserDefaults`; it never stores a OneDrive
+credential. Each catalog entry has a stable destination identity, intended
+path, bookmark kind, and bookmark data. The current destination identity is
+stored separately. Older entries remain available while a pending queue item
+still references them, so changing the output folder never silently retargets
+an already finalized recording.
+
+Bookmark creation is adaptive. The store first requests a security-scoped
+bookmark. The current non-sandboxed build can reject that operation through
+`ScopedBookmarksAgent`, so the store falls back to a standard bookmark and
+records that kind. A future sandboxed build can create and resolve
+security-scoped entries without changing the catalog schema. Plain path-only
+persistence is not used.
+
+The store exposes a resolved destination and an explicit access state:
 
 - `ready`
 - `needsFolderAccess`
@@ -90,9 +104,11 @@ keeps the intended destination label and asks the user to select the folder
 again. An explicitly injected `initialOutputFolder` remains authoritative in
 tests and previews and is not replaced by persisted state.
 
-The app holds security-scoped access only for the duration required to inspect
-or publish files. It balances every successful `startAccessingSecurityScopedResource`
-call with `stopAccessingSecurityScopedResource`.
+For a security-scoped entry, the app holds scoped access only for the duration
+required to inspect or publish files and balances every successful
+`startAccessingSecurityScopedResource` call with
+`stopAccessingSecurityScopedResource`. A standard bookmark in the current
+non-sandboxed build uses a no-op access lease after resolution.
 
 ### Local pending root
 
@@ -125,6 +141,8 @@ versioned, atomically written JSON manifest in the pending root. Each item has:
 - creation and last-attempt timestamps;
 - attempt count;
 - state and a non-sensitive failure reason.
+- the finalized recording health and metadata-warning context required to
+  recreate a complete Library finalization after relaunch.
 
 Queue states are:
 
@@ -153,21 +171,30 @@ main actor:
 3. Validate that the finalized recording is a regular non-empty file and can
    be opened as media with a finite duration greater than zero.
 4. Resolve and temporarily access the selected destination bookmark.
-5. Create an owner-only hidden staging directory under the destination using a
+5. Before copying, look for an exact publication marker for this queue item. If
+   a previously published folder has the matching marker and verified source
+   inventory digest, treat it as the idempotent result rather than publishing a
+   duplicate.
+6. Create an owner-only hidden staging directory under the destination using a
    unique session identifier.
-6. Copy the complete session contents without following symbolic links.
-7. Compare the source and destination file inventory, byte sizes, and SHA-256
-   digests for every regular file.
-8. Atomically rename the staging directory to its published session name using
+7. Copy the complete session contents without following symbolic links and add
+   a versioned publication marker containing the queue item identity and source
+   inventory digest.
+8. Compare the source and destination content inventory, byte sizes, and
+   SHA-256 digests for every regular session file; exclude only the exact owned
+   publication marker from this equality check.
+9. Atomically rename the staging directory to its published session name using
    no-replace semantics.
-9. Confirm that the published recording still passes media validation.
-10. Publish the destination session through the existing Library workspace
+10. Confirm that the published recording still passes media validation.
+11. Publish the destination session through the existing Library workspace
     fence and mutation boundary.
-11. Remove the local pending session only after all previous steps succeed.
+12. Remove the local pending session only after all previous steps succeed.
 
 An existing destination name is never overwritten. A collision receives a new
 unique session name. A destination entry introduced during publication causes
 the no-replace rename to fail safely and the local source remains intact.
+The publication marker makes the operation idempotent if the process exits
+after the destination rename but before manifest or local-source cleanup.
 
 Hash calculation occurs only after local finalization and runs in background
 work. It never executes on capture callbacks.
@@ -242,8 +269,10 @@ automatically retried. The UI never claims that it was published or deletes it.
 
 ## Security Boundaries
 
-- Bookmark data is versioned non-secret configuration. No account credential or
-  provider key is stored with it.
+- Adaptive bookmark catalog data is versioned non-secret configuration. No
+  account credential or provider key is stored with it. Old destination entries
+  are pruned only after neither the current selection nor any manifest item
+  references their identity.
 - Pending files, manifests, and destination staging directories are owner-only.
 - All recursive operations validate canonical containment and reject symlinks.
 - Publication never follows an attacker-controlled link or overwrites an
@@ -260,8 +289,9 @@ cloud or device matrix.
 
 ### Unit and focused integration tests
 
-1. A valid bookmark restores the selected folder; a stale bookmark requests
-   folder access and never falls back to Downloads.
+1. A security-scoped bookmark is preferred; a non-sandboxed creation failure
+   falls back to a standard bookmark. Both restore the selected folder, while a
+   stale bookmark requests folder access and never falls back to Downloads.
 2. A recording is finalized under the local pending root, then enqueued.
 3. An unavailable destination retains the local session and later retry
    publishes it.
@@ -271,8 +301,12 @@ cloud or device matrix.
 7. A symlink or canonical-path escape is rejected.
 8. An inventory, size, or SHA-256 mismatch retains the local source.
 9. Successful verified publication removes the local pending copy exactly once.
-10. A stale workspace fence does not publish obsolete Library state.
-11. Existing incomplete-session recovery, low-storage behavior, and Library
+10. A relaunch after destination rename but before cleanup recognizes the
+    matching publication marker and does not create a duplicate destination.
+11. A destination change retains access to the old identity until its pending
+    item publishes, and does not retarget that item.
+12. A stale workspace fence does not publish obsolete Library state.
+13. Existing incomplete-session recovery, low-storage behavior, and Library
     mutation-gate tests remain green.
 
 ### Manual staging acceptance

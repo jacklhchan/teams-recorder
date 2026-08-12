@@ -18,9 +18,10 @@ final class RecordingPendingStoreTests: XCTestCase {
         let link = fixture.root.appendingPathComponent("meeting-link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
 
-        XCTAssertEqual(try fixture.store.sessionURL(for: direct.lastPathComponent), direct)
-        XCTAssertThrowsError(try fixture.store.sessionURL(for: link.lastPathComponent))
-        XCTAssertThrowsError(try fixture.store.sessionURL(for: "../meeting-outside"))
+        let handle = try fixture.store.openSession(for: direct.lastPathComponent)
+        XCTAssertEqual(handle.displayURL, direct)
+        XCTAssertThrowsError(try fixture.store.openSession(for: link.lastPathComponent))
+        XCTAssertThrowsError(try fixture.store.openSession(for: "../meeting-outside"))
     }
 
     func testSessionHandleKeepsOriginalDirectoryAfterNameIsReplacedBySymlink() throws {
@@ -43,7 +44,7 @@ final class RecordingPendingStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: fixture.root.appendingPathComponent(".publisher-staging-123"), withIntermediateDirectories: false)
         try Data().write(to: fixture.manifestURL)
 
-        XCTAssertEqual(try fixture.store.scanSessions(), [session])
+        XCTAssertEqual(try fixture.store.scanSessionNames(), [session.lastPathComponent])
     }
 
     func testManifestRoundTripPreservesEveryHealthFieldAndResetsPublishingToPending() throws {
@@ -100,6 +101,21 @@ final class RecordingPendingStoreTests: XCTestCase {
         XCTAssertEqual(try fixture.permissions(of: fixture.manifestURL) & 0o777, 0o644)
     }
 
+    func testSaveRejectsUnsafeExistingManifestWithoutReplacingIt() throws {
+        let fixture = try PendingStoreFixture()
+        let original = Data("unsafe exact manifest".utf8)
+        try fixture.store.prepareRoot()
+        try original.write(to: fixture.manifestURL)
+        XCTAssertEqual(chmod(fixture.manifestURL.path, 0o644), 0)
+
+        XCTAssertThrowsError(
+            try RecordingPublicationManifestStore(manifestURL: fixture.manifestURL)
+                .save([fixture.item(sessionDirectoryName: "meeting", state: .pending)])
+        )
+        XCTAssertEqual(try Data(contentsOf: fixture.manifestURL), original)
+        XCTAssertEqual(try fixture.permissions(of: fixture.manifestURL) & 0o777, 0o644)
+    }
+
     func testManifestParentSymlinkIsRejectedWithoutFollowingIt() throws {
         let fixture = try PendingStoreFixture()
         let outside = fixture.temporaryRoot.appendingPathComponent("outside", isDirectory: true)
@@ -119,12 +135,16 @@ final class RecordingPendingStoreTests: XCTestCase {
         let fixture = try PendingStoreFixture()
         let session = try fixture.makeSession(named: "meeting-version-recover")
         try Data("{\"version\": 2, \"items\": []}".utf8).write(to: fixture.manifestURL)
+        XCTAssertEqual(chmod(fixture.manifestURL.path, 0o600), 0)
 
         let items = try RecordingPublicationManifestStore(manifestURL: fixture.manifestURL)
             .loadOrRebuild(from: fixture.store)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: session.path))
         XCTAssertEqual(items.map(\.state), [.needsAttention])
+        let relaunched = try RecordingPublicationManifestStore(manifestURL: fixture.manifestURL)
+            .loadOrRebuild(from: fixture.store)
+        XCTAssertEqual(relaunched, items)
     }
 }
 

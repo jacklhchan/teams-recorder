@@ -68,18 +68,16 @@ struct RecordingPendingStore: Sendable {
         }
     }
 
-    /// Compatibility display-path API. Use `openSession(for:)` for file operations.
-    func sessionURL(for directoryName: String) throws -> URL {
-        try openSession(for: directoryName).displayURL
-    }
-
-    func scanSessions() throws -> [URL] {
+    func scanSessionNames() throws -> [String] {
         try prepareRoot()
         let contents = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
         return contents
             .filter { $0.lastPathComponent != manifestURL.lastPathComponent }
-            .compactMap { url in try? openSession(for: url.lastPathComponent).displayURL }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .compactMap { url in
+                let name = url.lastPathComponent
+                return (try? openSession(for: name)) == nil ? nil : name
+            }
+            .sorted()
     }
 
     func openRootDescriptor() throws -> Int32 {

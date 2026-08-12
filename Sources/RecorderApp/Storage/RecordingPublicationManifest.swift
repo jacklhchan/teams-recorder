@@ -75,8 +75,8 @@ struct RecordingPublicationManifestStore: Sendable {
     }
 
     private func rebuild(from pendingStore: RecordingPendingStore, persistRelativeTo descriptor: Int32?) throws -> [RecordingPublicationItem] {
-        let items = try pendingStore.scanSessions().map { session in
-            RecordingPublicationItem(id: UUID(), sessionDirectoryName: session.lastPathComponent, destinationIdentity: RecordingDestinationIdentity(id: UUID()), workspaceFenceRevision: WorkspacePublicationFence.initial.revision, recordingSource: .manual, health: RecordingHealthReport(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: .needsAttention, failureCategory: "manifestRecovery")
+        let items = try pendingStore.scanSessionNames().map { name in
+            RecordingPublicationItem(id: UUID(), sessionDirectoryName: name, destinationIdentity: RecordingDestinationIdentity(id: UUID()), workspaceFenceRevision: WorkspacePublicationFence.initial.revision, recordingSource: .manual, health: RecordingHealthReport(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: .needsAttention, failureCategory: "manifestRecovery")
         }
         if let descriptor { try writeAtomically(JSONEncoder().encode(RecordingPublicationManifest(version: Self.version, items: items)), relativeTo: descriptor) }
         return items
@@ -113,8 +113,22 @@ struct RecordingPublicationManifestStore: Sendable {
         defer { Darwin.close(descriptor); _ = unlinkat(directory, name, 0) }
         try writeAll(data, to: descriptor)
         guard fsync(descriptor) == 0 else { throw RecordingPublicationManifestStoreError.writeFailed(errno) }
+        try validateExistingManifestForReplacement(relativeTo: directory)
         guard renameat(directory, name, directory, Self.fileName) == 0 else { throw RecordingPublicationManifestStoreError.writeFailed(errno) }
         guard fsync(directory) == 0 else { throw RecordingPublicationManifestStoreError.writeFailed(errno) }
+    }
+
+    private func validateExistingManifestForReplacement(relativeTo directory: Int32) throws {
+        var attributes = stat()
+        guard fstatat(directory, Self.fileName, &attributes, AT_SYMLINK_NOFOLLOW) == 0 else {
+            if errno == ENOENT { return }
+            throw RecordingPublicationManifestStoreError.writeFailed(errno)
+        }
+        guard (attributes.st_mode & S_IFMT) == S_IFREG,
+              attributes.st_uid == getuid(),
+              (attributes.st_mode & 0o777) == 0o600 else {
+            throw RecordingPublicationManifestStoreError.unsafeManifest
+        }
     }
 
     private func readAll(from descriptor: Int32) throws -> Data {

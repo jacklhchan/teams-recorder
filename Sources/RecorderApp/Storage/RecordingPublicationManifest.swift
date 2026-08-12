@@ -21,6 +21,10 @@ struct RecordingPublicationItem: Codable, Equatable, Identifiable, Sendable {
     /// Names are persisted rather than reconstructed from a URL after rename.
     var publishedFolderName: String? = nil
     var publishedRecordingName: String? = nil
+    /// Identity of the source admitted by the publisher.  Old manifests have no
+    /// identity and therefore deliberately cannot perform destructive cleanup.
+    var publishedSourceDevice: Int64? = nil
+    var publishedSourceInode: Int64? = nil
 }
 
 struct RecordingPublicationManifest: Codable, Equatable, Sendable {

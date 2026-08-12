@@ -49,6 +49,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
     private var generation: UInt64 = 0
     private var worker: Task<Void, Never>?
     private var loaded = false
+    private var persistenceFailed = false
 
     var onPresentationChange: (@MainActor (RecordingPublicationPresentation) -> Void)?
     var onCompleted: (@MainActor (RecordingPublicationCompleted) -> Void)?
@@ -64,7 +65,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
         self.destinationStore = destinationStore
         self.publisher = publisher
         self.pendingStore = pendingStore
-        self.retryDelays = retryDelays
+        self.retryDelays = retryDelays.isEmpty ? [0] : retryDelays
     }
 
     var presentation: RecordingPublicationPresentation { lock.withLock { presentation(for: items) } }
@@ -79,7 +80,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
                 recordingSource: request.source, health: request.health, metadataWarning: request.metadataWarning,
                 createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: .pending, failureCategory: nil
             ))
-            persistLocked()
+            guard persistLocked() else { items.removeLast(); return }
         }
         publishPresentation()
         startWorker()
@@ -98,7 +99,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
                 items[index].state = .pending
                 items[index].lastAttemptAt = nil
             }
-            persistLocked()
+            _ = persistLocked()
         }
         publishPresentation()
         startWorker()
@@ -125,7 +126,11 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
 
     private func drain(generation workerGeneration: UInt64) async {
         while !Task.isCancelled {
-            guard let item = lock.withLock({ nextEligibleItemLocked() }) else { break }
+            guard let item = lock.withLock({ nextEligibleItemLocked() }) else {
+                guard let delay = lock.withLock({ nextRetryDelayLocked() }) else { break }
+                try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+                continue
+            }
             if item.state == .published {
                 await finishPublished(item, generation: workerGeneration)
                 continue
@@ -135,11 +140,13 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
                 items[index].state = .publishing
                 items[index].lastAttemptAt = Date()
                 items[index].attemptCount += 1
-                persistLocked()
+                guard persistLocked() else { return }
             }
             publishPresentation()
             do {
-                let access = try destinationStore.access(identity: item.destinationIdentity)
+                let access: RecordingDestinationAccess
+                do { access = try destinationStore.access(identity: item.destinationIdentity) }
+                catch { recordWaiting(item.id); continue }
                 defer { access.close() }
                 let success = try await publisher.publish(item: item, destination: access)
                 guard isCurrent(workerGeneration) else { return }
@@ -153,7 +160,9 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
                     items[index].failureCategory = nil
                     items[index].publishedFolderName = success.folderURL.lastPathComponent
                     items[index].publishedRecordingName = success.recordingURL.lastPathComponent
-                    persistLocked()
+                    items[index].publishedSourceDevice = success.sourceDevice
+                    items[index].publishedSourceInode = success.sourceInode
+                    guard persistLocked() else { return nil }
                     return items[index]
                 }
                 guard let saved else { return }
@@ -176,9 +185,18 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
             return
         }
         do {
-            let access = try destinationStore.access(identity: item.destinationIdentity)
+            let access: RecordingDestinationAccess
+            do { access = try destinationStore.access(identity: item.destinationIdentity) }
+            catch { recordPublishedWaiting(item.id); return }
             defer { access.close() }
-            let folder = access.url.appendingPathComponent(folderName, isDirectory: true).standardizedFileURL
+            let validated = try await publisher.validatePublished(item: item, destination: access)
+            guard isCurrent(workerGeneration) else { return }
+            guard validated.itemID == item.id,
+                  validated.folderURL.lastPathComponent == folderName,
+                  validated.recordingURL.lastPathComponent == recordingName else {
+                throw RecordingPublicationError.verificationMismatch
+            }
+            let folder = validated.folderURL
             let completed = RecordingPublicationCompleted(
                 itemID: item.id, folderURL: folder, recordingURL: folder.appendingPathComponent(recordingName).standardizedFileURL,
                 workspaceFence: .init(revision: item.workspaceFenceRevision), source: item.recordingSource,
@@ -187,20 +205,29 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
             guard isCurrent(workerGeneration) else { return }
             if let callback = onCompleted { await callback(completed) }
             guard isCurrent(workerGeneration) else { return }
+            guard let sourceDevice = item.publishedSourceDevice, let sourceInode = item.publishedSourceInode else {
+                markNeedsAttention(item.id, category: "missingSourceIdentity")
+                return
+            }
             if try !pendingStore.isSessionAbsent(named: item.sessionDirectoryName) {
                 let session = try pendingStore.openSession(for: item.sessionDirectoryName)
+                guard session.identity == .init(device: sourceDevice, inode: sourceInode) else {
+                    markNeedsAttention(item.id, category: "sourceReplacement")
+                    return
+                }
                 try pendingStore.removeRetainedSession(session)
             }
             guard isCurrent(workerGeneration) else { return }
             lock.withLock {
                 guard generation == workerGeneration else { return }
+                let prior = items
                 items.removeAll { $0.id == item.id }
-                persistLocked()
+                guard persistLocked() else { items = prior; return }
                 destinationStore.prune(keeping: Set(items.map(\.destinationIdentity)))
             }
             publishPresentation()
         } catch {
-            markNeedsAttention(item.id, category: "cleanup")
+            recordFailure(item.id, error: error)
         }
     }
 
@@ -210,7 +237,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
             guard let publicationError = error as? RecordingPublicationError else {
                 items[index].state = .pending
                 items[index].failureCategory = "transient"
-                persistLocked()
+                _ = persistLocked()
                 return
             }
             switch publicationError {
@@ -220,11 +247,14 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
             case .invalidSource, .unsafeEntry, .invalidMedia, .verificationMismatch:
                 items[index].state = .needsAttention
                 items[index].failureCategory = "invalidSource"
-            case .destinationCollision, .ioFailure:
+            case .destinationCollision:
+                items[index].state = .needsAttention
+                items[index].failureCategory = "destinationCollision"
+            case .ioFailure:
                 items[index].state = .pending
                 items[index].failureCategory = "transient"
             }
-            persistLocked()
+            _ = persistLocked()
         }
         publishPresentation()
     }
@@ -234,7 +264,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
             guard let index = items.firstIndex(where: { $0.id == id }) else { return }
             items[index].state = .needsAttention
             items[index].failureCategory = category
-            persistLocked()
+            _ = persistLocked()
         }
         publishPresentation()
     }
@@ -250,13 +280,44 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating, @
         }
     }
 
+    private func nextRetryDelayLocked() -> TimeInterval? {
+        let now = Date()
+        let delays = items.compactMap { item -> TimeInterval? in
+            guard item.state == .pending, let last = item.lastAttemptAt else { return nil }
+            let delay = retryDelays[min(max(item.attemptCount - 1, 0), retryDelays.count - 1)]
+            return max(0, delay - now.timeIntervalSince(last))
+        }
+        return delays.min()
+    }
+
     private func loadIfNeededLocked() {
         guard !loaded else { return }
-        items = (try? manifestStore.loadOrRebuild(from: pendingStore)) ?? []
+        do { items = try manifestStore.loadOrRebuild(from: pendingStore) }
+        catch { items = []; persistenceFailed = true }
         loaded = true
     }
 
-    private func persistLocked() { try? manifestStore.save(items) }
+    @discardableResult private func persistLocked() -> Bool {
+        do { try manifestStore.save(items); persistenceFailed = false; return true }
+        catch { persistenceFailed = true; return false }
+    }
+    private func recordWaiting(_ id: UUID) {
+        lock.withLock {
+            guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+            items[index].state = .waitingForDestination
+            items[index].failureCategory = "destinationUnavailable"
+            _ = persistLocked()
+        }
+        publishPresentation()
+    }
+    private func recordPublishedWaiting(_ id: UUID) {
+        lock.withLock {
+            guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+            items[index].failureCategory = "destinationUnavailable"
+            _ = persistLocked()
+        }
+        publishPresentation()
+    }
     private func isCurrent(_ candidate: UInt64) -> Bool { lock.withLock { generation == candidate && !Task.isCancelled } }
     private func presentation(for items: [RecordingPublicationItem]) -> RecordingPublicationPresentation {
         let pending = items.filter { $0.state == .pending || $0.state == .publishing }.count

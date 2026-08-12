@@ -7,6 +7,8 @@ struct RecordingPublicationSuccess: Equatable, Sendable {
     let itemID: UUID
     let folderURL: URL
     let recordingURL: URL
+    let sourceDevice: Int64
+    let sourceInode: Int64
 }
 
 enum RecordingPublicationError: Error, Equatable, Sendable {
@@ -16,6 +18,13 @@ enum RecordingPublicationError: Error, Equatable, Sendable {
 
 protocol RecordingSessionPublishing: Sendable {
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess
+    func validatePublished(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess
+}
+
+extension RecordingSessionPublishing {
+    func validatePublished(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
+        throw RecordingPublicationError.verificationMismatch
+    }
 }
 
 struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendable {
@@ -73,7 +82,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
             digest: sourceDigest,
             recordingName: recordingName
         ) {
-            return existing
+            return .init(itemID: existing.itemID, folderURL: existing.folderURL, recordingURL: existing.recordingURL, sourceDevice: source.identity.device, sourceInode: source.identity.inode)
         }
 
         let stagingName = ".\(item.id.uuidString).lmr-publishing"
@@ -136,8 +145,38 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         return .init(
             itemID: item.id,
             folderURL: folderURL,
-            recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL
+            recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL,
+            sourceDevice: source.identity.device,
+            sourceInode: source.identity.inode
         )
+    }
+
+    func validatePublished(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
+        guard let folderName = item.publishedFolderName, let recordingName = item.publishedRecordingName,
+              isSimpleName(folderName), isSimpleName(recordingName) else {
+            throw RecordingPublicationError.verificationMismatch
+        }
+        let destinationFD = try openDestination(destination.url)
+        defer { Darwin.close(destinationFD) }
+        var observation = stat()
+        guard fstatat(destinationFD, folderName, &observation, AT_SYMLINK_NOFOLLOW) == 0,
+              (observation.st_mode & S_IFMT) == S_IFDIR else { throw RecordingPublicationError.verificationMismatch }
+        return try withOpenedDirectory(parent: destinationFD, name: folderName, observation: observation, context: .published) { folder in
+            guard let marker = readMarker(in: folder), marker.version == 1, marker.itemID == item.id else {
+                throw RecordingPublicationError.verificationMismatch
+            }
+            let inventory = try inventory(directory: folder, context: .published, excludingMarker: true)
+            guard aggregateDigest(inventory) == marker.inventoryDigest,
+                  validateMedia(named: recordingName, in: folder, context: .published) else {
+                throw RecordingPublicationError.verificationMismatch
+            }
+            let folderURL = destination.url.appendingPathComponent(folderName, isDirectory: true).standardizedFileURL
+            return .init(itemID: item.id, folderURL: folderURL, recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL, sourceDevice: 0, sourceInode: 0)
+        }
+    }
+
+    private func isSimpleName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.hasPrefix(".") && !name.contains("/") && !name.contains("\\")
     }
 
     private static func liveMediaValidator(_ descriptor: Int32, _ recordingName: String) -> Bool {
@@ -519,7 +558,9 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
                     return .init(
                         itemID: itemID,
                         folderURL: folderURL,
-                        recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL
+                        recordingURL: folderURL.appendingPathComponent(recordingName).standardizedFileURL,
+                        sourceDevice: 0,
+                        sourceInode: 0
                     )
                 }
             ) {

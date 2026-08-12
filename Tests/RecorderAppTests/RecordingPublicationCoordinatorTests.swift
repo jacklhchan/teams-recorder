@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -105,9 +106,10 @@ private final class CoordinatorFixture {
         destination.identity = identity
         destination.url = temporaryRoot.appendingPathComponent("destination", isDirectory: true)
         try FileManager.default.createDirectory(at: destination.url, withIntermediateDirectories: true)
-        publisher = CoordinatorPublisher(error: publisherError, destination: destination.url)
+        publisher = CoordinatorPublisher(error: publisherError, destination: destination.url, pending: pending)
         if let manifestState {
-            try manifest.save([.init(id: request.id, sessionDirectoryName: name, destinationIdentity: identity, workspaceFenceRevision: 3, recordingSource: .manual, health: .init(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: manifestState, failureCategory: nil, publishedFolderName: manifestState == .published ? "meeting" : nil, publishedRecordingName: manifestState == .published ? "recording.m4a" : nil)])
+            let session = try pending.openSession(for: name)
+            try manifest.save([.init(id: request.id, sessionDirectoryName: name, destinationIdentity: identity, workspaceFenceRevision: 3, recordingSource: .manual, health: .init(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: manifestState, failureCategory: nil, publishedFolderName: manifestState == .published ? "meeting" : nil, publishedRecordingName: manifestState == .published ? "recording.m4a" : nil, publishedSourceDevice: manifestState == .published ? session.identity.device : nil, publishedSourceInode: manifestState == .published ? session.identity.inode : nil)])
         } else {
             try manifest.save([])
         }
@@ -142,17 +144,24 @@ private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked
     private let lock = NSLock()
     private let error: RecordingPublicationError?
     private let destination: URL
+    private let pending: RecordingPendingStore
     private(set) var publishedIDs: [UUID] = []
     private(set) var attemptCount = 0
     var beforeSuccess: (() -> Void)?
-    init(error: RecordingPublicationError?, destination: URL) { self.error = error; self.destination = destination }
+    init(error: RecordingPublicationError?, destination: URL, pending: RecordingPendingStore) { self.error = error; self.destination = destination; self.pending = pending }
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
         withLock { attemptCount += 1 }
         if let error { throw error }
+        let source = try pending.openSession(for: item.sessionDirectoryName)
         withLock { publishedIDs.append(item.id) }
         beforeSuccess?()
         let folder = self.destination.appendingPathComponent("meeting", isDirectory: true)
-        return .init(itemID: item.id, folderURL: folder, recordingURL: folder.appendingPathComponent("recording.m4a"))
+        return .init(itemID: item.id, folderURL: folder, recordingURL: folder.appendingPathComponent("recording.m4a"), sourceDevice: source.identity.device, sourceInode: source.identity.inode)
+    }
+    func validatePublished(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
+        guard let device = item.publishedSourceDevice, let inode = item.publishedSourceInode,
+              let folder = item.publishedFolderName, let recording = item.publishedRecordingName else { throw RecordingPublicationError.verificationMismatch }
+        return .init(itemID: item.id, folderURL: destination.url.appendingPathComponent(folder), recordingURL: destination.url.appendingPathComponent(folder).appendingPathComponent(recording), sourceDevice: device, sourceInode: inode)
     }
     private func withLock(_ operation: () -> Void) { lock.lock(); defer { lock.unlock() }; operation() }
 }

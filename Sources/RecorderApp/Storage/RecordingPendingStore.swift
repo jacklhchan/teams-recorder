@@ -14,18 +14,22 @@ struct RecordingPendingSessionIdentity: Equatable, Sendable {
 
 final class RecordingPendingSession: @unchecked Sendable {
     let fileDescriptor: Int32
+    let rootFileDescriptor: Int32
+    let rootIdentity: RecordingPendingSessionIdentity
     let identity: RecordingPendingSessionIdentity
     let directoryName: String
     let displayURL: URL
 
-    init(fileDescriptor: Int32, identity: RecordingPendingSessionIdentity, directoryName: String, displayURL: URL) {
+    init(fileDescriptor: Int32, rootFileDescriptor: Int32, rootIdentity: RecordingPendingSessionIdentity, identity: RecordingPendingSessionIdentity, directoryName: String, displayURL: URL) {
         self.fileDescriptor = fileDescriptor
+        self.rootFileDescriptor = rootFileDescriptor
+        self.rootIdentity = rootIdentity
         self.identity = identity
         self.directoryName = directoryName
         self.displayURL = displayURL
     }
 
-    deinit { Darwin.close(fileDescriptor) }
+    deinit { Darwin.close(fileDescriptor); Darwin.close(rootFileDescriptor) }
 }
 
 struct RecordingPendingStore: Sendable {
@@ -51,19 +55,22 @@ struct RecordingPendingStore: Sendable {
         try prepareRoot()
         guard isSafeDirectoryName(directoryName) else { throw RecordingPendingStoreError.invalidSessionName }
         let rootDescriptor = try openRootDescriptor()
-        defer { Darwin.close(rootDescriptor) }
+        let rootIdentity = try directoryIdentity(of: rootDescriptor)
         let descriptor = openat(rootDescriptor, directoryName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw RecordingPendingStoreError.unsafeSession }
         do {
             let identity = try directoryIdentity(of: descriptor)
             return RecordingPendingSession(
                 fileDescriptor: descriptor,
+                rootFileDescriptor: rootDescriptor,
+                rootIdentity: rootIdentity,
                 identity: identity,
                 directoryName: directoryName,
                 displayURL: root.appendingPathComponent(directoryName, isDirectory: true)
             )
         } catch {
             Darwin.close(descriptor)
+            Darwin.close(rootDescriptor)
             throw error
         }
     }
@@ -90,8 +97,10 @@ struct RecordingPendingStore: Sendable {
     /// Removes only the exact direct child represented by an already-open handle.
     /// URL paths are intentionally not accepted as deletion authority.
     func removeRetainedSession(_ session: RecordingPendingSession) throws {
-        let rootDescriptor = try openRootDescriptor()
-        defer { Darwin.close(rootDescriptor) }
+        let rootDescriptor = session.rootFileDescriptor
+        guard try directoryIdentity(of: rootDescriptor) == session.rootIdentity else {
+            throw RecordingPendingStoreError.unsafeSession
+        }
         var rootEntry = stat()
         guard fstatat(rootDescriptor, session.directoryName, &rootEntry, AT_SYMLINK_NOFOLLOW) == 0,
               matches(rootEntry, session.identity),

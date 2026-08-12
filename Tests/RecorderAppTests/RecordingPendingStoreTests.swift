@@ -32,6 +32,53 @@ final class RecordingPendingStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: replacement.path))
     }
 
+    func testOversizedMetadataIsRejectedWithoutChangingOriginalBytes() throws {
+        let fixture = try PendingStoreFixture()
+        let session = try fixture.store.createSession(named: "meeting-large-metadata")
+        let metadataURL = session.displayURL.appendingPathComponent(RecordingSessionMetadataStore.fileName)
+        let original = Data(repeating: 0x61, count: 262_145)
+        try original.write(to: metadataURL)
+
+        XCTAssertThrowsError(try fixture.store.updateRecordingSourceMetadata(.teamsAutomatic, in: session))
+        XCTAssertEqual(try Data(contentsOf: metadataURL), original)
+    }
+
+    func testUnknownTitleOriginIsRejectedWithoutChangingOriginalBytes() throws {
+        let fixture = try PendingStoreFixture()
+        let session = try fixture.store.createSession(named: "meeting-unknown-origin")
+        let metadataURL = session.displayURL.appendingPathComponent(RecordingSessionMetadataStore.fileName)
+        let original = Data(#"{"schemaVersion":2,"titleOrigin":"future-origin","source":"manual"}"#.utf8)
+        try original.write(to: metadataURL)
+
+        XCTAssertThrowsError(try fixture.store.updateRecordingSourceMetadata(.teamsAutomatic, in: session))
+        XCTAssertEqual(try Data(contentsOf: metadataURL), original)
+    }
+
+    func testMetadataReplacementBeforeRenameIsPreserved() throws {
+        let fixture = try PendingStoreFixture()
+        let session = try fixture.store.createSession(named: "meeting-metadata-replacement")
+        let metadataURL = session.displayURL.appendingPathComponent(RecordingSessionMetadataStore.fileName)
+        let original = Data(#"{"schemaVersion":2,"titleOrigin":"unset","source":"manual"}"#.utf8)
+        let replacement = Data("replacement".utf8)
+        try original.write(to: metadataURL)
+        let hooks = RecordingPendingStore.Hooks(beforeMetadataRename: { directory, name in
+            XCTAssertEqual(renameat(directory, name, directory, "original-recording-info.json"), 0)
+            let descriptor = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+            XCTAssertGreaterThanOrEqual(descriptor, 0)
+            if descriptor >= 0 {
+                replacement.withUnsafeBytes { bytes in _ = Darwin.write(descriptor, bytes.baseAddress!, bytes.count) }
+                Darwin.close(descriptor)
+            }
+        })
+
+        XCTAssertThrowsError(try fixture.store.updateRecordingSourceMetadata(.teamsAutomatic, in: session, hooks: hooks))
+        XCTAssertEqual(try Data(contentsOf: metadataURL), replacement)
+        XCTAssertFalse(
+            try FileManager.default.contentsOfDirectory(atPath: session.displayURL.path)
+                .contains { $0.hasPrefix(".recording-info-") && $0.hasSuffix(".tmp") }
+        )
+    }
+
     func testDirectChildIsAcceptedButSymlinkAndEscapeAreRejected() throws {
         let fixture = try PendingStoreFixture()
         let direct = try fixture.makeSession(named: "meeting-direct")

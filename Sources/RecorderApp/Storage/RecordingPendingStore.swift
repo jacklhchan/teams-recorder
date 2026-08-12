@@ -33,7 +33,10 @@ final class RecordingPendingSession: @unchecked Sendable {
 }
 
 struct RecordingPendingStore: Sendable {
-    struct Hooks: Sendable { var afterCreateObservation: (@Sendable (Int32, String) -> Void)? = nil }
+    struct Hooks: Sendable {
+        var afterCreateObservation: (@Sendable (Int32, String) -> Void)? = nil
+        var beforeMetadataRename: (@Sendable (Int32, String) -> Void)? = nil
+    }
     let root: URL
     let manifestURL: URL
 
@@ -150,35 +153,100 @@ struct RecordingPendingStore: Sendable {
         }
     }
 
+    func duplicateRetainedSession(_ session: RecordingPendingSession) throws -> RecordingPendingSession {
+        let rootDescriptor = dup(session.rootFileDescriptor)
+        guard rootDescriptor >= 0 else { throw RecordingPendingStoreError.unsafeSession }
+        let descriptor = dup(session.fileDescriptor)
+        guard descriptor >= 0 else { Darwin.close(rootDescriptor); throw RecordingPendingStoreError.unsafeSession }
+        return .init(
+            fileDescriptor: descriptor,
+            rootFileDescriptor: rootDescriptor,
+            rootIdentity: session.rootIdentity,
+            identity: session.identity,
+            directoryName: session.directoryName,
+            displayURL: session.displayURL
+        )
+    }
+
     /// Updates source metadata through the admitted directory descriptor, never
     /// through the visible session path.
-    func updateRecordingSourceMetadata(_ source: RecordingSource, in session: RecordingPendingSession) throws {
+    func updateRecordingSourceMetadata(
+        _ source: RecordingSource,
+        in session: RecordingPendingSession,
+        hooks: Hooks = .init()
+    ) throws {
         try validateRetainedSession(session)
-        let name = RecordingSessionMetadataStore.fileName
-        var metadata = RecordingSessionMetadata()
-        let existing = openat(session.fileDescriptor, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        if existing >= 0 {
-            defer { Darwin.close(existing) }
-            var attributes = stat()
-            guard fstat(existing, &attributes) == 0, (attributes.st_mode & S_IFMT) == S_IFREG, attributes.st_nlink == 1, attributes.st_size <= 262_144 else { throw RecordingPendingStoreError.unsafeSession }
-            let data = try readAll(from: existing)
-            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-            metadata = (try? decoder.decode(RecordingSessionMetadata.self, from: data)) ?? metadata
-        } else if errno != ENOENT { throw RecordingPendingStoreError.unsafeSession }
+        let loaded = try loadMetadata(in: session)
+        var metadata = loaded.metadata
         metadata.source = source
+        try replaceMetadata(metadata, expected: loaded.observation, in: session, hooks: hooks)
+    }
+
+    func saveRecordingMetadata(
+        _ metadata: RecordingSessionMetadata,
+        in session: RecordingPendingSession,
+        hooks: Hooks = .init()
+    ) throws {
+        try validateRetainedSession(session)
+        let loaded = try loadMetadata(in: session)
+        try loaded.metadata.validateForPersistence()
+        try replaceMetadata(metadata, expected: loaded.observation, in: session, hooks: hooks)
+    }
+
+    private func replaceMetadata(
+        _ value: RecordingSessionMetadata,
+        expected: stat?,
+        in session: RecordingPendingSession,
+        hooks: Hooks
+    ) throws {
+        var metadata = value
         metadata.schemaVersion = max(metadata.schemaVersion, 2)
         try metadata.validateForPersistence()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(metadata)
         guard data.count <= 262_144 else { throw RecordingPendingStoreError.unsafeSession }
+        let name = RecordingSessionMetadataStore.fileName
         let temporary = ".recording-info-\(UUID().uuidString).tmp"
         let descriptor = openat(session.fileDescriptor, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw RecordingPendingStoreError.unsafeSession }
         defer { Darwin.close(descriptor); _ = unlinkat(session.fileDescriptor, temporary, 0) }
         try writeAll(data, to: descriptor)
-        guard fsync(descriptor) == 0,
+        guard fsync(descriptor) == 0 else { throw RecordingPendingStoreError.unsafeSession }
+        hooks.beforeMetadataRename?(session.fileDescriptor, name)
+        guard metadataTargetMatches(expected, named: name, in: session.fileDescriptor),
               renameat(session.fileDescriptor, temporary, session.fileDescriptor, name) == 0,
               fsync(session.fileDescriptor) == 0 else { throw RecordingPendingStoreError.unsafeSession }
+    }
+
+    private func loadMetadata(in session: RecordingPendingSession) throws -> (metadata: RecordingSessionMetadata, observation: stat?) {
+        let name = RecordingSessionMetadataStore.fileName
+        var observed = stat()
+        guard fstatat(session.fileDescriptor, name, &observed, AT_SYMLINK_NOFOLLOW) == 0 else {
+            if errno == ENOENT { return (RecordingSessionMetadata(), nil) }
+            throw RecordingPendingStoreError.unsafeSession
+        }
+        guard (observed.st_mode & S_IFMT) == S_IFREG, observed.st_nlink == 1, observed.st_size <= 262_144 else { throw RecordingPendingStoreError.unsafeSession }
+        let existing = openat(session.fileDescriptor, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard existing >= 0 else { throw RecordingPendingStoreError.unsafeSession }
+        defer { Darwin.close(existing) }
+        var opened = stat()
+        guard fstat(existing, &opened) == 0, sameEntry(observed, opened), opened.st_nlink == 1 else { throw RecordingPendingStoreError.unsafeSession }
+        let data = try readAll(from: existing)
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let metadata = try decoder.decode(RecordingSessionMetadata.self, from: data)
+        try metadata.validateForPersistence()
+        return (metadata, observed)
+    }
+
+    private func metadataTargetMatches(_ expected: stat?, named name: String, in directory: Int32) -> Bool {
+        var current = stat()
+        if let expected {
+            return fstatat(directory, name, &current, AT_SYMLINK_NOFOLLOW) == 0
+                && (current.st_mode & S_IFMT) == S_IFREG
+                && current.st_nlink == 1
+                && sameEntry(expected, current)
+        }
+        return fstatat(directory, name, &current, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT
     }
 
     func isSessionAbsent(named directoryName: String) throws -> Bool {

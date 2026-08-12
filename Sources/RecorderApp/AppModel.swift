@@ -1301,7 +1301,7 @@ final class AppModel: ObservableObject {
                 await finalizeLateRecordingStart(attempt)
                 return
             }
-            guard let retainedSession = recorder.takeAdmittedPendingSession() else {
+            guard let retainedSession = recorder.copyAdmittedPendingSession() else {
                 _ = await recorder.stop()
                 clearActiveRecordingPublicationContext()
                 statusMessage = "Recording saved locally, but publication needs attention"
@@ -1466,7 +1466,7 @@ final class AppModel: ObservableObject {
                     baseFolder: recordingFolder,
                     folderPrefix: "test"
                 )
-                guard let retainedSession = recorder.takeAdmittedPendingSession() else {
+                guard let retainedSession = recorder.copyAdmittedPendingSession() else {
                     _ = await recorder.stop()
                     clearActiveRecordingPublicationContext()
                     clearTestRecordingRuntimeState()

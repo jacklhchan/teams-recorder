@@ -8,7 +8,7 @@ typealias RecordingMediaCoordinatorFactory = (
     CaptureFilterRevision,
     OSType
 ) throws -> RecordingMediaCoordinating
-typealias RecordingMetadataWriter = (RecordingSessionMetadata, URL) throws -> Void
+typealias RecordingMetadataWriter = (RecordingSessionMetadata, RecordingPendingSession) throws -> Void
 
 protocol CaptureSourceProtocol: AnyObject {
     var screenVideoFormat: ScreenVideoFormat { get }
@@ -70,9 +70,10 @@ final class RecordingEngine: ObservableObject {
     /// Descriptor-bound admission captured while creating the pending child.
     private var admittedPendingSession: RecordingPendingSession?
 
-    func takeAdmittedPendingSession() -> RecordingPendingSession? {
-        defer { admittedPendingSession = nil }
-        return admittedPendingSession
+    func copyAdmittedPendingSession() -> RecordingPendingSession? {
+        guard let admittedPendingSession else { return nil }
+        return try? RecordingPendingStore(root: admittedPendingSession.displayURL.deletingLastPathComponent())
+            .duplicateRetainedSession(admittedPendingSession)
     }
     @Published private(set) var systemLevel = LevelSnapshot()
     @Published private(set) var micLevel = LevelSnapshot()
@@ -133,8 +134,9 @@ final class RecordingEngine: ObservableObject {
         captureSource: CaptureSourceProtocol = ScreenCaptureSource(),
         writerFactory: MixedAudioWriterFactory? = nil,
         coordinatorFactory: RecordingMediaCoordinatorFactory? = nil,
-        metadataWriter: @escaping RecordingMetadataWriter = { metadata, folder in
-            try RecordingSessionMetadataStore.save(metadata, in: folder)
+        metadataWriter: @escaping RecordingMetadataWriter = { metadata, session in
+            try RecordingPendingStore(root: session.displayURL.deletingLastPathComponent())
+                .saveRecordingMetadata(metadata, in: session)
         },
         mixerBlockFrames: Int = 960,
         virtualMicPublisher: VirtualMicPublishing = VirtualMicPublisher(),
@@ -432,13 +434,14 @@ final class RecordingEngine: ObservableObject {
         } catch {
             throw RecordingEngineError.cannotCreateFolder
         }
-        let createdFolder = true
         guard let admittedSession = admittedPendingSession else { throw RecordingEngineError.cannotCreateFolder }
+        let pendingStore = RecordingPendingStore(root: baseFolder)
 
         let outputs = RecordingOutputURLs(folder: folder)
         nextRecordingEpoch &+= 1
         let epoch = nextRecordingEpoch
         do {
+            try pendingStore.validateRetainedSession(admittedSession)
             let coordinator = try coordinatorFactory(
                 outputs,
                 sourceSessionID,
@@ -446,14 +449,14 @@ final class RecordingEngine: ObservableObject {
                 activeFilterRevision,
                 captureSource.screenVideoFormat.pixelFormat
             )
+            try pendingStore.validateRetainedSession(admittedSession)
             coordinator.setVideoEventHandler { [weak self] event in
                 Task { @MainActor [weak self] in self?.receive(videoEvent: event) }
             }
             mediaCoordinator = coordinator
         } catch {
             await rollbackFailedStart(
-                folder: folder,
-                removeFolderIfEmpty: createdFolder
+                removeFolderIfEmpty: true
             )
             throw RecordingEngineError.writerFailed(error.localizedDescription)
         }
@@ -488,6 +491,7 @@ final class RecordingEngine: ObservableObject {
         isStopping = true
         screenToggleGeneration &+= 1
         let recordingFolder = outputFolder
+        let recordingSession = admittedPendingSession
         let sourceSessionID = sourceSessionID
 
         if let sourceSessionID {
@@ -532,7 +536,7 @@ final class RecordingEngine: ObservableObject {
                 recordMuxFallbackIfNeeded()
                 captureStatus = .warning(warning)
             }
-            if let recordingFolder {
+            if let recordingSession {
                 do {
                     try metadataWriter(
                         RecordingSessionMetadata(
@@ -541,7 +545,7 @@ final class RecordingEngine: ObservableObject {
                             capturedTeamsWindow: outcome.capturedWindow,
                             recoveryState: outcome.recoveryState
                         ),
-                        recordingFolder
+                        recordingSession
                     )
                 } catch {
                     currentHealth.metadataWriteFailures += 1
@@ -567,6 +571,7 @@ final class RecordingEngine: ObservableObject {
         }
         recordingEpoch = nil
         currentRecordingURL = nil
+        admittedPendingSession = nil
         startedAt = nil
         isRecording = false
         isStopping = false
@@ -1082,16 +1087,15 @@ final class RecordingEngine: ObservableObject {
     }
 
     private func rollbackFailedStart(
-        folder: URL,
         removeFolderIfEmpty: Bool
     ) async {
+        let retainedSession = admittedPendingSession
         mediaCoordinator?.setVideoEventHandler(nil)
         mediaCoordinator = nil
         videoIngress.deactivate()
         recordingEpoch = nil
         currentRecordingURL = nil
         outputFolder = nil
-        admittedPendingSession = nil
         startedAt = nil
         isRecording = false
         isStopping = false
@@ -1108,15 +1112,11 @@ final class RecordingEngine: ObservableObject {
         await stopActiveSourceSession()
         resetMonitoringState()
 
-        guard removeFolderIfEmpty,
-              let contents = try? FileManager.default.contentsOfDirectory(
-                  at: folder,
-                  includingPropertiesForKeys: nil
-              ),
-              contents.isEmpty else {
-            return
+        if removeFolderIfEmpty, let retainedSession {
+            try? RecordingPendingStore(root: retainedSession.displayURL.deletingLastPathComponent())
+                .removeRetainedSession(retainedSession)
         }
-        try? FileManager.default.removeItem(at: folder)
+        admittedPendingSession = nil
     }
 
     private func clearMonitoringTransition(id: UUID) {

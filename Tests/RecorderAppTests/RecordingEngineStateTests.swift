@@ -759,6 +759,58 @@ final class RecordingEngineStateTests: XCTestCase {
             XCTAssertFalse(engine.isMonitoring)
         }
     }
+
+    func testCoordinatorFailureDoesNotDeleteReplacementOfAdmittedSession() async throws {
+        let source = FakeCaptureSource()
+        let base = temporaryFolder()
+        var original: URL?
+        var replacement: URL?
+        let engine = RecordingEngine(
+            captureSource: source,
+            coordinatorFactory: { outputs, _, _, _, _ in
+                let moved = base.appendingPathComponent("original", isDirectory: true)
+                try FileManager.default.moveItem(at: outputs.folder, to: moved)
+                try Data("original".utf8).write(to: moved.appendingPathComponent("original.txt"))
+                try FileManager.default.createDirectory(at: outputs.folder, withIntermediateDirectories: false)
+                try Data("replacement".utf8).write(to: outputs.folder.appendingPathComponent("sentinel"))
+                original = moved
+                replacement = outputs.folder
+                throw TestError.failed
+            },
+            mixerBlockFrames: 4
+        )
+
+        do {
+            _ = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: base)
+            XCTFail("Expected coordinator failure")
+        } catch {}
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(original).appendingPathComponent("original.txt").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(replacement).appendingPathComponent("sentinel").path))
+        XCTAssertFalse(engine.isRecording)
+        XCTAssertFalse(engine.isMonitoring)
+    }
+
+    func testStopMetadataDoesNotWriteReplacementSession() async throws {
+        let source = FakeCaptureSource()
+        let coordinator = FakeMediaCoordinator()
+        let engine = RecordingEngine(captureSource: source, coordinatorFactory: { _, _, _, _, _ in coordinator }, mixerBlockFrames: 4)
+        let base = temporaryFolder()
+        let folder = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: base)
+        let moved = base.appendingPathComponent("original", isDirectory: true)
+        try FileManager.default.moveItem(at: folder, to: moved)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let metadataURL = folder.appendingPathComponent(RecordingSessionMetadataStore.fileName)
+        let replacement = Data("replacement".utf8)
+        try replacement.write(to: metadataURL)
+        try Data("keep".utf8).write(to: folder.appendingPathComponent("sentinel"))
+
+        let result = await engine.stop()
+
+        XCTAssertEqual(try Data(contentsOf: metadataURL), replacement)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("sentinel").path))
+        XCTAssertEqual(result?.health.metadataWriteFailures, 1)
+    }
     func testRecordingMetadataPersistsIntervalsAndWindowIdentity() async throws {
         let source = FakeCaptureSource()
         let coordinator = FakeMediaCoordinator()

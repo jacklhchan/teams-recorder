@@ -260,6 +260,79 @@ enum MicrophoneDeviceResolver {
     }
 }
 
+struct LiveMicrophoneConfiguration: Equatable {
+    let sampleRate: Int
+    let channelCount: Int
+    let capturesAudio: Bool
+    let capturesMicrophone: Bool
+    let microphoneUID: String?
+    let pixelFormat: OSType
+}
+
+struct MicrophoneSwitchPlan: Equatable {
+    let configuration: LiveMicrophoneConfiguration
+    let rollbackConfiguration: LiveMicrophoneConfiguration
+    let requiresOutputReattach = false
+
+    init(previous: LiveMicrophoneConfiguration, requestedUID: String?) {
+        rollbackConfiguration = previous
+        configuration = LiveMicrophoneConfiguration(
+            sampleRate: previous.sampleRate,
+            channelCount: previous.channelCount,
+            capturesAudio: previous.capturesAudio,
+            capturesMicrophone: previous.capturesMicrophone,
+            microphoneUID: requestedUID,
+            pixelFormat: previous.pixelFormat
+        )
+    }
+}
+
+protocol MicrophoneConfigurationUpdating {
+    func update(_ configuration: LiveMicrophoneConfiguration) throws
+}
+
+enum MicrophoneSwitchConfigurationOperation {
+    static func apply(
+        _ plan: MicrophoneSwitchPlan,
+        updater: MicrophoneConfigurationUpdating
+    ) -> MicrophoneSwitchOutcome {
+        do {
+            try updater.update(plan.configuration)
+            return .switched(previousUID: plan.rollbackConfiguration.microphoneUID, currentUID: plan.configuration.microphoneUID)
+        } catch {
+            do {
+                try updater.update(plan.rollbackConfiguration)
+            } catch {
+                return .failed(requestedUID: plan.configuration.microphoneUID, message: error.localizedDescription)
+            }
+            return .failed(requestedUID: plan.configuration.microphoneUID, message: error.localizedDescription)
+        }
+    }
+}
+
+struct LiveMicrophoneSwitchLifecycle {
+    private var pending: (token: MicrophoneSwitchLifecycleToken, requestedUID: String?)?
+
+    mutating func begin(_ token: MicrophoneSwitchLifecycleToken, requestedUID: String?) {
+        pending = (token, requestedUID)
+    }
+
+    mutating func commitFirstFrame(for token: MicrophoneSwitchLifecycleToken) -> String? {
+        guard pending?.token == token else { return nil }
+        defer { pending = nil }
+        return pending?.requestedUID
+    }
+}
+
+enum MicrophoneSwitchAdmission {
+    static func admit(requestedUID: String?, availableUIDs: [String]) -> MicrophoneSwitchOutcome {
+        guard let requestedUID else { return .unchanged(currentUID: nil) }
+        return availableUIDs.contains(requestedUID)
+            ? .unchanged(currentUID: requestedUID)
+            : .unavailable(requestedUID: requestedUID, reason: .deviceMissing)
+    }
+}
+
 struct CaptureSessionToken: Equatable {
     let generation: UInt64
     let streamIdentity: ObjectIdentifier
@@ -600,6 +673,21 @@ final class ScreenCaptureSource: NSObject {
     private static let blackBackgroundColor = CGColor(gray: 0, alpha: 1)
 
     private final class ActiveSession {
+        final class PendingMicrophoneSwitch {
+            let lifecycle: MicrophoneSwitchLifecycleToken
+            let previousUID: String?
+            let requestedUID: String?
+            let continuation: CheckedContinuation<MicrophoneSwitchOutcome, Never>
+            var configurationApplied = false
+            var timeoutTask: Task<Void, Never>?
+
+            init(lifecycle: MicrophoneSwitchLifecycleToken, previousUID: String?, requestedUID: String?, continuation: CheckedContinuation<MicrophoneSwitchOutcome, Never>) {
+                self.lifecycle = lifecycle
+                self.previousUID = previousUID
+                self.requestedUID = requestedUID
+                self.continuation = continuation
+            }
+        }
         let stream: SCStream
         let output: ScreenCaptureStreamOutput
         let token: CaptureSessionToken
@@ -610,7 +698,8 @@ final class ScreenCaptureSource: NSObject {
         let screenPixelFormat: OSType
         let selectedApplication: CaptureApplication?
         var selectedApplicationState: SelectedApplicationSessionState?
-        let selectedMicrophoneUID: String?
+        var selectedMicrophoneUID: String?
+        var pendingMicrophoneSwitch: PendingMicrophoneSwitch?
         var eventState = CaptureSessionEventState()
         var livenessTask: Task<Void, Never>?
         var screenTargetLivenessTask: Task<Void, Never>?
@@ -684,6 +773,116 @@ final class ScreenCaptureSource: NSObject {
             height: 900,
             pixelFormat: pixelFormat ?? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         )
+    }
+
+    /// Kept disabled until device UAT establishes the ScreenCaptureKit contract.
+    var supportsLiveMicrophoneSwitch: Bool { false }
+
+    func switchMicrophone(
+        to microphoneUID: String?,
+        lifecycle token: MicrophoneSwitchLifecycleToken
+    ) async -> MicrophoneSwitchOutcome {
+        guard let session = currentSession() else {
+            return .unavailable(requestedUID: microphoneUID, reason: .streamStopped)
+        }
+        if session.selectedMicrophoneUID == microphoneUID {
+            return .unchanged(currentUID: microphoneUID)
+        }
+        let requestedUID: String?
+        do {
+            requestedUID = try MicrophoneDeviceResolver.resolveCurrentCaptureDeviceUID(coreAudioUID: microphoneUID)
+        } catch {
+            return .unavailable(requestedUID: microphoneUID, reason: .deviceMissing)
+        }
+        let oldConfiguration = Self.liveConfiguration(
+            cadence: session.committedFilterIntent?.cadence ?? .idle,
+            microphoneUID: session.selectedMicrophoneUID,
+            pixelFormat: session.screenPixelFormat
+        )
+        let newConfiguration = Self.liveConfiguration(
+            cadence: session.committedFilterIntent?.cadence ?? .idle,
+            microphoneUID: requestedUID,
+            pixelFormat: session.screenPixelFormat
+        )
+        return await withCheckedContinuation { continuation in
+            stateLock.lock()
+            guard activeSession === session,
+                  lifecycle.isActive(session.token),
+                  session.pendingMicrophoneSwitch == nil else {
+                stateLock.unlock()
+                continuation.resume(returning: .superseded(requestedUID: microphoneUID))
+                return
+            }
+            let pending = ActiveSession.PendingMicrophoneSwitch(
+                lifecycle: token,
+                previousUID: session.selectedMicrophoneUID,
+                requestedUID: requestedUID,
+                continuation: continuation
+            )
+            session.pendingMicrophoneSwitch = pending
+            stateLock.unlock()
+            Task { [weak self, weak session] in
+                guard let self, let session else { return }
+                do {
+                    try await session.stream.updateConfiguration(newConfiguration)
+                    self.microphoneQueue.sync {}
+                    session.output.drain()
+                    guard self.markMicrophoneConfigurationApplied(session, pending: pending) else {
+                        self.finishMicrophoneSwitch(session, pending: pending, outcome: .superseded(requestedUID: microphoneUID))
+                        return
+                    }
+                    pending.timeoutTask = Task { [weak self, weak session, weak pending] in
+                        try? await Task.sleep(for: .seconds(2))
+                        guard let self, let session, let pending else { return }
+                        await self.timeoutMicrophoneSwitch(session, pending: pending, rollback: oldConfiguration)
+                    }
+                } catch {
+                    if self.isSessionActive(session) { try? await session.stream.updateConfiguration(oldConfiguration) }
+                    self.finishMicrophoneSwitch(session, pending: pending, outcome: .failed(requestedUID: microphoneUID, message: "Microphone configuration update failed"))
+                }
+            }
+        }
+    }
+
+    private func markMicrophoneConfigurationApplied(
+        _ session: ActiveSession,
+        pending: ActiveSession.PendingMicrophoneSwitch
+    ) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session,
+              lifecycle.isActive(session.token),
+              session.pendingMicrophoneSwitch === pending else {
+            return false
+        }
+        pending.configurationApplied = true
+        return true
+    }
+
+    private func timeoutMicrophoneSwitch(_ session: ActiveSession, pending: ActiveSession.PendingMicrophoneSwitch, rollback: SCStreamConfiguration) async {
+        guard claimMicrophoneSwitch(session, pending: pending) else {
+            return
+        }
+        let active = isSessionActive(session)
+        if active { try? await session.stream.updateConfiguration(rollback) }
+        pending.continuation.resume(returning: active
+            ? .unavailable(requestedUID: pending.requestedUID, reason: .firstFrameTimeout)
+            : .unavailable(requestedUID: pending.requestedUID, reason: .streamStopped)
+        )
+    }
+
+    private func claimMicrophoneSwitch(_ session: ActiveSession, pending: ActiveSession.PendingMicrophoneSwitch) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard activeSession === session, session.pendingMicrophoneSwitch === pending else { return false }
+        session.pendingMicrophoneSwitch = nil
+        pending.timeoutTask?.cancel()
+        return true
+    }
+
+    private func finishMicrophoneSwitch(_ session: ActiveSession, pending: ActiveSession.PendingMicrophoneSwitch, outcome: MicrophoneSwitchOutcome) {
+        guard claimMicrophoneSwitch(session, pending: pending) else { return }
+        pending.continuation.resume(returning: outcome)
     }
 
     func refreshContent() async throws -> [CaptureApplication] {
@@ -1188,6 +1387,9 @@ final class ScreenCaptureSource: NSObject {
         guard let session = beginStop(for: stoppedStream) else {
             return
         }
+        if let pending = session.pendingMicrophoneSwitch {
+            finishMicrophoneSwitch(session, pending: pending, outcome: .unavailable(requestedUID: pending.requestedUID, reason: .streamStopped))
+        }
         resumeFilterWaiters(session, error: CaptureSourceError.streamStartCancelled)
         session.output.drain()
         removeOutputs(for: session, reportErrors: false)
@@ -1314,6 +1516,23 @@ final class ScreenCaptureSource: NSObject {
         configuration.excludesCurrentProcessAudio = true
         configuration.microphoneCaptureDeviceID = microphoneUID
         configureScreenFrames(configuration, cadence: intent.cadence)
+        configuration.pixelFormat = pixelFormat
+        return configuration
+    }
+
+    private static func liveConfiguration(
+        cadence: ScreenFrameCadence,
+        microphoneUID: String?,
+        pixelFormat: OSType
+    ) -> SCStreamConfiguration {
+        let configuration = SCStreamConfiguration()
+        configuration.capturesAudio = true
+        configuration.captureMicrophone = true
+        configuration.sampleRate = Int(SampleBufferConverter.outputSampleRate)
+        configuration.channelCount = 2
+        configuration.excludesCurrentProcessAudio = true
+        configuration.microphoneCaptureDeviceID = microphoneUID
+        configureScreenFrames(configuration, cadence: cadence)
         configuration.pixelFormat = pixelFormat
         return configuration
     }
@@ -1560,6 +1779,9 @@ final class ScreenCaptureSource: NSObject {
         guard let session = beginStop(expected: expectedSession) else {
             return
         }
+        if let pending = session.pendingMicrophoneSwitch {
+            finishMicrophoneSwitch(session, pending: pending, outcome: .unavailable(requestedUID: pending.requestedUID, reason: .streamStopped))
+        }
         resumeFilterWaiters(session, error: CaptureSourceError.streamStartCancelled)
         session.output.drain()
         removeOutputs(for: session, reportErrors: true)
@@ -1784,13 +2006,26 @@ final class ScreenCaptureSource: NSObject {
         for token: CaptureSessionToken
     ) {
         stateLock.lock()
-        defer { stateLock.unlock() }
         guard let session = activeSession,
               session.token == token,
               lifecycle.isActive(token) else {
+            stateLock.unlock()
             return
         }
         session.eventState.recordMicrophoneAudio()
+        guard let pending = session.pendingMicrophoneSwitch,
+              pending.configurationApplied else {
+            stateLock.unlock()
+            return
+        }
+        session.pendingMicrophoneSwitch = nil
+        session.selectedMicrophoneUID = pending.requestedUID
+        pending.timeoutTask?.cancel()
+        stateLock.unlock()
+        pending.continuation.resume(returning: .switched(
+            previousUID: pending.previousUID,
+            currentUID: pending.requestedUID
+        ))
     }
 
     private func microphoneHealthEvent(

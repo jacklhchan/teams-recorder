@@ -132,6 +132,35 @@ struct RecordingPendingStore: Sendable {
         }
     }
 
+    /// Updates source metadata through the admitted directory descriptor, never
+    /// through the visible session path.
+    func updateRecordingSourceMetadata(_ source: RecordingSource, in session: RecordingPendingSession) throws {
+        try validateRetainedSession(session)
+        let name = RecordingSessionMetadataStore.fileName
+        var metadata = RecordingSessionMetadata()
+        let existing = openat(session.fileDescriptor, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if existing >= 0 {
+            defer { Darwin.close(existing) }
+            var attributes = stat()
+            guard fstat(existing, &attributes) == 0, (attributes.st_mode & S_IFMT) == S_IFREG else { throw RecordingPendingStoreError.unsafeSession }
+            let data = try readAll(from: existing)
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            metadata = (try? decoder.decode(RecordingSessionMetadata.self, from: data)) ?? metadata
+        } else if errno != ENOENT { throw RecordingPendingStoreError.unsafeSession }
+        metadata.source = source
+        metadata.schemaVersion = max(metadata.schemaVersion, 2)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(metadata)
+        let temporary = ".recording-info-\(UUID().uuidString).tmp"
+        let descriptor = openat(session.fileDescriptor, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw RecordingPendingStoreError.unsafeSession }
+        defer { Darwin.close(descriptor); _ = unlinkat(session.fileDescriptor, temporary, 0) }
+        try writeAll(data, to: descriptor)
+        guard fsync(descriptor) == 0,
+              renameat(session.fileDescriptor, temporary, session.fileDescriptor, name) == 0,
+              fsync(session.fileDescriptor) == 0 else { throw RecordingPendingStoreError.unsafeSession }
+    }
+
     func isSessionAbsent(named directoryName: String) throws -> Bool {
         guard isSafeDirectoryName(directoryName) else { throw RecordingPendingStoreError.invalidSessionName }
         let rootDescriptor = try openRootDescriptor()
@@ -152,6 +181,18 @@ struct RecordingPendingStore: Sendable {
             throw RecordingPendingStoreError.unsafeSession
         }
         return RecordingPendingSessionIdentity(device: Int64(value.st_dev), inode: Int64(value.st_ino))
+    }
+
+    private func readAll(from descriptor: Int32) throws -> Data {
+        var data = Data(); var bytes = [UInt8](repeating: 0, count: 16_384)
+        while true { let count = Darwin.read(descriptor, &bytes, bytes.count); if count < 0 { throw RecordingPendingStoreError.unsafeSession }; if count == 0 { return data }; data.append(bytes, count: Int(count)) }
+    }
+
+    private func writeAll(_ data: Data, to descriptor: Int32) throws {
+        try data.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count { let count = Darwin.write(descriptor, raw.baseAddress!.advanced(by: offset), raw.count - offset); guard count > 0 else { throw RecordingPendingStoreError.unsafeSession }; offset += Int(count) }
+        }
     }
 
     private func matches(_ value: stat, _ identity: RecordingPendingSessionIdentity) -> Bool {

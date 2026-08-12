@@ -67,6 +67,13 @@ final class RecordingEngine: ObservableObject {
     @Published private(set) var isMonitoring = false
     @Published private(set) var startedAt: Date?
     @Published private(set) var outputFolder: URL?
+    /// Descriptor-bound admission captured while creating the pending child.
+    private var admittedPendingSession: RecordingPendingSession?
+
+    func takeAdmittedPendingSession() -> RecordingPendingSession? {
+        defer { admittedPendingSession = nil }
+        return admittedPendingSession
+    }
     @Published private(set) var systemLevel = LevelSnapshot()
     @Published private(set) var micLevel = LevelSnapshot()
     @Published private(set) var micMuted = false
@@ -435,6 +442,14 @@ final class RecordingEngine: ObservableObject {
             throw RecordingEngineError.cannotCreateFolder
         }
         let createdFolder = !folderExistedBeforeStart
+        let admittedSession: RecordingPendingSession
+        do {
+            admittedSession = try RecordingPendingStore(root: baseFolder)
+                .openSession(for: folder.lastPathComponent)
+        } catch {
+            await rollbackFailedStart(folder: folder, removeFolderIfEmpty: createdFolder)
+            throw RecordingEngineError.cannotCreateFolder
+        }
 
         let outputs = RecordingOutputURLs(folder: folder)
         nextRecordingEpoch &+= 1
@@ -469,6 +484,7 @@ final class RecordingEngine: ObservableObject {
         observedMixerLateFrames = 0
         currentRecordingURL = outputs.finalMP4
         outputFolder = folder
+        admittedPendingSession = admittedSession
         startedAt = Date()
         isRecording = true
         isStopping = false
@@ -1092,6 +1108,7 @@ final class RecordingEngine: ObservableObject {
         recordingEpoch = nil
         currentRecordingURL = nil
         outputFolder = nil
+        admittedPendingSession = nil
         startedAt = nil
         isRecording = false
         isStopping = false

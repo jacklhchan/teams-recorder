@@ -31,7 +31,7 @@ final class AppModel: ObservableObject {
     ) -> TranscriptionFeatureModel
     typealias RecordingSourceMetadataUpdater = (
         RecordingSource,
-        URL,
+        RecordingPendingSession,
         RecordingSessionMutationGate
     ) throws -> Void
     @Published var devices: [AudioDevice] = []
@@ -285,11 +285,10 @@ final class AppModel: ObservableObject {
         featureBoundaries: PRBFeatureBoundaries? = nil,
         defaultFeatureBoundariesFactory: PRBFeatureBoundariesFactory? = nil,
         recordingSourceMetadataUpdater: @escaping RecordingSourceMetadataUpdater = {
-            source, folder, gate in
-            try gate.withMutation(for: folder) {
-                var metadata = RecordingSessionMetadataStore.load(in: folder)
-                metadata.source = source
-                try RecordingSessionMetadataStore.save(metadata, in: folder)
+            source, session, gate in
+            try gate.withMutation(for: session.displayURL) {
+                try RecordingPendingStore(root: session.displayURL.deletingLastPathComponent())
+                    .updateRecordingSourceMetadata(source, in: session)
             }
         },
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
@@ -1302,9 +1301,11 @@ final class AppModel: ObservableObject {
                 await finalizeLateRecordingStart(attempt)
                 return
             }
-            guard let retainedSession = admittedPendingSession(for: recorder.outputFolder) else {
+            guard let retainedSession = recorder.takeAdmittedPendingSession() else {
                 _ = await recorder.stop()
+                clearActiveRecordingPublicationContext()
                 statusMessage = "Recording saved locally, but publication needs attention"
+                await completeRecordingStartAttempt(attempt)
                 return
             }
             activeRecordingPublicationContext = .init(
@@ -1465,7 +1466,7 @@ final class AppModel: ObservableObject {
                     baseFolder: recordingFolder,
                     folderPrefix: "test"
                 )
-                guard let retainedSession = admittedPendingSession(for: recorder.outputFolder) else {
+                guard let retainedSession = recorder.takeAdmittedPendingSession() else {
                     _ = await recorder.stop()
                     clearActiveRecordingPublicationContext()
                     clearTestRecordingRuntimeState()
@@ -1920,7 +1921,7 @@ final class AppModel: ObservableObject {
             do {
                 try recordingSourceMetadataUpdater(
                     recordingSource,
-                    result.folderURL,
+                    publicationContext.retainedSession,
                     transcriptMutationGate
                 )
             } catch {
@@ -1952,16 +1953,6 @@ final class AppModel: ObservableObject {
         if let automaticStopToken, !recorder.isRecording {
             completeAutomaticStopIntent(automaticStopToken)
         }
-    }
-
-    private func admittedPendingSession(for folder: URL?) -> RecordingPendingSession? {
-        guard let folder = folder?.standardizedFileURL,
-              folder.deletingLastPathComponent() == pendingRecordingStore.root.standardizedFileURL else { return nil }
-        let name = folder.lastPathComponent
-        guard let admitted = try? pendingRecordingStore.openSession(for: name),
-              admitted.displayURL.standardizedFileURL == folder,
-              admitted.directoryName == name else { return nil }
-        return admitted
     }
 
     private func validatesRetainedPendingSession(_ context: ActiveRecordingPublicationContext, result: RecordingResult) -> Bool {

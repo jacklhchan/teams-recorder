@@ -85,7 +85,7 @@ final class AppModelRecordingFinalizationTests: XCTestCase {
         )
     }
 
-    func testFinalizationFromWorkspaceSymlinkOutsidePendingRootIsNotAdmitted() async throws {
+    func testStartRejectsWorkspaceSymlinkBeforePendingSessionAdmission() async throws {
         let fixture = try makeFixture(initialOutputFolder: { physicalWorkspace in
             let alias = physicalWorkspace.deletingLastPathComponent()
                 .appendingPathComponent("workspace-alias-\(UUID().uuidString)", isDirectory: true)
@@ -95,27 +95,24 @@ final class AppModelRecordingFinalizationTests: XCTestCase {
             )
             return alias
         })
-        let refreshes = FinalizationRefreshRecorder()
-        await primeLibrary(fixture)
-        fixture.library.onSessionsLoaded = { snapshot in
-            refreshes.append(snapshot.sessions.map(\.folderURL))
-        }
-
-        try await start(fixture)
-        await fixture.model.finishRecording(playAfterStop: false)
-        for _ in 0 ..< 20 { await Task.yield() }
-
-        XCTAssertEqual(refreshes.count, 0)
-        XCTAssertTrue(fixture.library.sessions.isEmpty)
+        do {
+            _ = try await fixture.engine.start(
+                selection: .allSystemAudio,
+                microphoneUID: nil,
+                baseFolder: fixture.outputFolder
+            )
+            XCTFail("Expected symlinked pending root to be rejected")
+        } catch {}
+        XCTAssertFalse(fixture.engine.isRecording)
     }
 
     private func makeFixture(
-        updater: @escaping (RecordingSource, URL, RecordingSessionMutationGate) throws -> Void = {
-            source, folder, gate in
-            try gate.withMutation(for: folder) {
-                var metadata = RecordingSessionMetadataStore.load(in: folder)
+        updater: @escaping (RecordingSource, RecordingPendingSession, RecordingSessionMutationGate) throws -> Void = {
+            source, session, gate in
+            try gate.withMutation(for: session.displayURL) {
+                var metadata = RecordingSessionMetadataStore.load(in: session.displayURL)
                 metadata.source = source
-                try RecordingSessionMetadataStore.save(metadata, in: folder)
+                try RecordingSessionMetadataStore.save(metadata, in: session.displayURL)
             }
         },
         initialOutputFolder: (URL) throws -> URL = { $0 }

@@ -121,11 +121,11 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
                 do { try await sleeper(delay) } catch { return }
                 continue
             }
-            if item.state == .published { await finishPublished(item, generation: workerGeneration); continue }
             guard item.sourceIdentity != nil, item.sourceRootIdentity != nil else {
                 _ = transition(item.id, to: .needsAttention, category: "missingSourceIdentity")
                 continue
             }
+            if item.state == .published { await finishPublished(item, generation: workerGeneration); continue }
             guard transitionToPublishing(item.id, generation: workerGeneration) else { return }
             do {
                 let access: RecordingDestinationAccess

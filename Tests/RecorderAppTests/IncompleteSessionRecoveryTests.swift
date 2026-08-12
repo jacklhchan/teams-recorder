@@ -4,6 +4,26 @@ import XCTest
 @testable import RecorderApp
 
 final class IncompleteSessionRecoveryTests: XCTestCase {
+    func testDescriptorRecoveryRejectsBackupReplacedAfterValidation() throws {
+        let root = try makeRoot()
+        let folder = try makeFolder(in: root, name: "meeting-replaced-backup")
+        let backupName = "recording.audio-backup.m4a"
+        try Data("original backup".utf8).write(to: folder.appendingPathComponent(backupName))
+        let handle = try RecordingPendingStore(root: root).openSession(for: "meeting-replaced-backup")
+
+        IncompleteSessionRecovery(descriptorBackupValidator: { _ in
+            XCTAssertEqual(renameat(handle.fileDescriptor, backupName, handle.fileDescriptor, "old-backup.m4a"), 0)
+            let replacement = openat(handle.fileDescriptor, backupName, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+            XCTAssertGreaterThanOrEqual(replacement, 0)
+            if replacement >= 0 { Darwin.close(replacement) }
+            return true
+        }).recover(in: handle)
+
+        var value = stat()
+        XCTAssertNotEqual(fstatat(handle.fileDescriptor, "recording.m4a", &value, AT_SYMLINK_NOFOLLOW), 0)
+        XCTAssertEqual(fstatat(handle.fileDescriptor, backupName, &value, AT_SYMLINK_NOFOLLOW), 0)
+    }
+
     func testDescriptorRecoveryPromotesBackupWithoutReopeningDisplayURL() throws {
         let root = try makeRoot()
         let folder = try makeFolder(in: root, name: "meeting-descriptor")

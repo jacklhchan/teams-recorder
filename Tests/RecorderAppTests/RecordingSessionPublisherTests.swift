@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import RecorderApp
@@ -11,6 +12,37 @@ final class RecordingSessionPublisherTests: XCTestCase {
         }
         XCTAssertTrue(fixture.sourceExists)
         XCTAssertTrue(fixture.destinationIsEmpty)
+    }
+
+    func testNonemptyInvalidMediaIsRejected() async throws {
+        let fixture = try PublisherFixture(media: Data("not-media".utf8), mediaValidator: { _, _ in false })
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .invalidMedia)
+        }
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertTrue(fixture.destinationIsEmpty)
+    }
+
+    func testMediaValidatorReadsExactOpenedFileAfterPathReplacement() async throws {
+        let original = Data("original-media".utf8)
+        var fixture: PublisherFixture!
+        var observed = Data()
+        var didReplace = false
+        fixture = try PublisherFixture(media: original, mediaValidator: { descriptor, _ in
+            if !didReplace {
+                didReplace = true
+                let moved = fixture.sourceFolder.appendingPathComponent("moved.m4a")
+                try? FileManager.default.moveItem(at: fixture.recording, to: moved)
+                try? Data("replacement!!".utf8).write(to: fixture.recording)
+                observed = readDescriptor(descriptor)
+            }
+            return true
+        })
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) { _ in }
+
+        XCTAssertEqual(observed, original)
     }
 
     func testSymlinkInSessionTreeIsRejectedWithoutFollowingIt() async throws {
@@ -27,6 +59,127 @@ final class RecordingSessionPublisherTests: XCTestCase {
         XCTAssertTrue(fixture.destinationIsEmpty)
     }
 
+    func testSourceEntryIdentityChangeAfterObservationIsRejected() async throws {
+        var didReplace = false
+        var fixture: PublisherFixture!
+        fixture = try PublisherFixture(hooks: .init(afterEntryObservation: { context, directory, name in
+            guard context == .source, name == "recording.m4a", !didReplace else { return }
+            didReplace = true
+            XCTAssertEqual(renameat(directory, name, directory, "old-recording.m4a"), 0)
+            let replacement = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+            XCTAssertGreaterThanOrEqual(replacement, 0)
+            if replacement >= 0 {
+                _ = Darwin.write(replacement, [UInt8]("media".utf8), 5)
+                Darwin.close(replacement)
+            }
+        }))
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .unsafeEntry)
+        }
+        XCTAssertTrue(fixture.destinationIsEmpty)
+    }
+
+    func testTraversalDeeperThanLimitIsRejected() async throws {
+        let fixture = try PublisherFixture()
+        var folder = fixture.sourceFolder
+        for index in 0...32 {
+            folder.appendPathComponent("d\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        }
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .unsafeEntry)
+        }
+        XCTAssertTrue(fixture.destinationIsEmpty)
+    }
+
+    func testDigestMismatchKeepsSourceAndRemovesExactOwnedStaging() async throws {
+        let fixture = try PublisherFixture(hooks: .init(beforeStagingVerification: { staging in
+            let descriptor = openat(staging, "recording.m4a", O_WRONLY | O_TRUNC | O_NOFOLLOW)
+            XCTAssertGreaterThanOrEqual(descriptor, 0)
+            if descriptor >= 0 {
+                _ = Darwin.write(descriptor, [UInt8]("other".utf8), 5)
+                Darwin.close(descriptor)
+            }
+        }))
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .verificationMismatch)
+        }
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertFalse(fixture.stagingExists)
+    }
+
+    func testCleanupDoesNotDeleteLateReplacementOfStagingName() async throws {
+        let fixture = try PublisherFixture(hooks: .init(
+            beforeStagingVerification: { staging in
+                let descriptor = openat(staging, "recording.m4a", O_WRONLY | O_TRUNC | O_NOFOLLOW)
+                if descriptor >= 0 { Darwin.close(descriptor) }
+            },
+            beforeStagingCleanup: { parent, name in
+                XCTAssertEqual(renameat(parent, name, parent, ".moved-owned-staging"), 0)
+                XCTAssertEqual(mkdirat(parent, name, 0o700), 0)
+                let replacement = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+                XCTAssertGreaterThanOrEqual(replacement, 0)
+                if replacement >= 0 {
+                    let sentinel = openat(replacement, "sentinel", O_WRONLY | O_CREAT | O_EXCL, 0o600)
+                    if sentinel >= 0 { Darwin.close(sentinel) }
+                    Darwin.close(replacement)
+                }
+            }
+        ))
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) { _ in }
+
+        XCTAssertTrue(fixture.stagingExists)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.stagingURL.appendingPathComponent("sentinel").path))
+    }
+
+    func testExistingDestinationAndLateCollisionAreNeverOverwritten() async throws {
+        var fixture: PublisherFixture!
+        fixture = try PublisherFixture(hooks: .init(beforeFinalRename: { parent, finalName in
+            XCTAssertEqual(mkdirat(parent, finalName, 0o700), 0)
+            let collision = openat(parent, finalName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+            if collision >= 0 {
+                let sentinel = openat(collision, "late", O_WRONLY | O_CREAT | O_EXCL, 0o600)
+                if sentinel >= 0 { Darwin.close(sentinel) }
+                Darwin.close(collision)
+            }
+        }))
+        let originalFolder = fixture.destinationURL.appendingPathComponent("meeting", isDirectory: true)
+        try FileManager.default.createDirectory(at: originalFolder, withIntermediateDirectories: false)
+        try Data("keep".utf8).write(to: originalFolder.appendingPathComponent("existing"))
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .destinationCollision)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: originalFolder.appendingPathComponent("existing")), Data("keep".utf8))
+        let late = fixture.destinationURL.appendingPathComponent("meeting-\(fixture.item.id.uuidString)/late")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: late.path))
+        XCTAssertFalse(fixture.stagingExists)
+    }
+
+    func testPostRenameValidationRejectsRecordingSymlinkWithoutReopeningURL() async throws {
+        var validations = 0
+        let fixture = try PublisherFixture(
+            mediaValidator: { descriptor, _ in
+                validations += 1
+                return !readDescriptor(descriptor).isEmpty
+            },
+            hooks: .init(beforePublishedValidation: { folder, recordingName in
+                XCTAssertEqual(renameat(folder, recordingName, folder, "original.m4a"), 0)
+                XCTAssertEqual(symlinkat("original.m4a", folder, recordingName), 0)
+            })
+        )
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .invalidMedia)
+        }
+        XCTAssertEqual(validations, 1, "The URL/symlink destination must never reach the validator")
+    }
+
     func testVerifiedPublicationReturnsCanonicalDestinationAndKeepsSource() async throws {
         let fixture = try PublisherFixture()
 
@@ -38,13 +191,36 @@ final class RecordingSessionPublisherTests: XCTestCase {
         XCTAssertTrue(fixture.sourceExists)
     }
 
-    func testRetryAfterPublishedRenameUsesMarkerAndDoesNotDuplicateDestination() async throws {
+    func testRetryAfterPublishedRenameRecomputesInventoryBeforeTrustingMarker() async throws {
+        let fixture = try PublisherFixture()
+        let first = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+        try Data("tampered".utf8).write(to: first.recordingURL)
+
+        let second = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+
+        XCTAssertNotEqual(second.folderURL, first.folderURL)
+        XCTAssertEqual(fixture.publishedFolders.count, 2)
+        XCTAssertEqual(try Data(contentsOf: second.recordingURL), Data("media".utf8))
+    }
+
+    func testRetryAfterPublishedRenameUsesVerifiedMarkerAndDoesNotDuplicateDestination() async throws {
         let fixture = try PublisherFixture()
         let first = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
         let second = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
 
         XCTAssertEqual(second, first)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: fixture.destinationURL, includingPropertiesForKeys: nil).filter { !$0.lastPathComponent.hasPrefix(".") }.count, 1)
+        XCTAssertEqual(fixture.publishedFolders.count, 1)
+    }
+
+    func testOversizedMarkerIsNotReadAsIdempotentAuthority() async throws {
+        let fixture = try PublisherFixture()
+        let first = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+        try Data(repeating: 0x20, count: 65_537).write(to: first.folderURL.appendingPathComponent(".lmr-publication-v1.json"))
+
+        let second = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+
+        XCTAssertNotEqual(second.folderURL, first.folderURL)
+        XCTAssertEqual(fixture.publishedFolders.count, 2)
     }
 }
 
@@ -59,7 +235,13 @@ private final class PublisherFixture {
     let destination: RecordingDestinationAccess
     let publisher: RecordingSessionPublisher
 
-    init(media: Data = Data("media".utf8)) throws {
+    init(
+        media: Data = Data("media".utf8),
+        mediaValidator: @escaping RecordingSessionPublisher.MediaValidator = { descriptor, _ in
+            !readDescriptor(descriptor).isEmpty
+        },
+        hooks: RecordingSessionPublisher.Hooks = .init()
+    ) throws {
         temporaryRoot = FileManager.default.temporaryDirectory.appendingPathComponent("publisher-\(UUID().uuidString)", isDirectory: true)
         pendingRoot = temporaryRoot.appendingPathComponent("pending", isDirectory: true)
         destinationURL = temporaryRoot.appendingPathComponent("destination", isDirectory: true)
@@ -73,16 +255,33 @@ private final class PublisherFixture {
         try media.write(to: sourceFolder.appendingPathComponent("recording.m4a"))
         item = RecordingPublicationItem(id: UUID(), sessionDirectoryName: "meeting", destinationIdentity: .init(id: UUID()), workspaceFenceRevision: 1, recordingSource: .manual, health: .init(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: .pending, failureCategory: nil)
         destination = RecordingDestinationAccess(url: destinationURL, close: {})
-        publisher = RecordingSessionPublisher(pendingStore: store, mediaValidator: { url in
-            (try? Data(contentsOf: url).isEmpty == false) == true
-        })
+        publisher = RecordingSessionPublisher(pendingStore: store, mediaValidator: mediaValidator, hooks: hooks)
     }
 
     deinit { try? FileManager.default.removeItem(at: temporaryRoot) }
 
     var recording: URL { sourceFolder.appendingPathComponent("recording.m4a") }
     var sourceExists: Bool { FileManager.default.fileExists(atPath: sourceFolder.path) }
+    var stagingURL: URL { destinationURL.appendingPathComponent(".\(item.id.uuidString).lmr-publishing", isDirectory: true) }
+    var stagingExists: Bool { FileManager.default.fileExists(atPath: stagingURL.path) }
     var destinationIsEmpty: Bool { (try? FileManager.default.contentsOfDirectory(atPath: destinationURL.path).isEmpty) == true }
+    var publishedFolders: [URL] {
+        (try? FileManager.default.contentsOfDirectory(at: destinationURL, includingPropertiesForKeys: nil).filter { !$0.lastPathComponent.hasPrefix(".") }) ?? []
+    }
+}
+
+private func readDescriptor(_ descriptor: Int32) -> Data {
+    let copy = dup(descriptor)
+    guard copy >= 0 else { return Data() }
+    defer { Darwin.close(copy) }
+    guard lseek(copy, 0, SEEK_SET) >= 0 else { return Data() }
+    var result = Data()
+    var buffer = [UInt8](repeating: 0, count: 1024)
+    while true {
+        let count = Darwin.read(copy, &buffer, buffer.count)
+        guard count > 0 else { return result }
+        result.append(buffer, count: count)
+    }
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

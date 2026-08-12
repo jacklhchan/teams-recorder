@@ -41,9 +41,20 @@ struct IncompleteSessionRecovery {
     func recover(in session: RecordingPendingSession) {
         let finalName = "recording.m4a"
         let backupName = "recording.audio-backup.m4a"
-        guard regularFile(named: backupName, in: session.fileDescriptor),
-              !hasAnyFinal(in: session.fileDescriptor),
-              validBackup(named: backupName, in: session.fileDescriptor) else { return }
+        var observed = stat()
+        guard fstatat(session.fileDescriptor, backupName, &observed, AT_SYMLINK_NOFOLLOW) == 0,
+              (observed.st_mode & S_IFMT) == S_IFREG,
+              !hasAnyFinal(in: session.fileDescriptor) else { return }
+        let descriptor = openat(session.fileDescriptor, backupName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return }
+        defer { Darwin.close(descriptor) }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0,
+              sameIdentity(observed, opened),
+              descriptorBackupValidator(descriptor) else { return }
+        var immediatelyBeforeRename = stat()
+        guard fstatat(session.fileDescriptor, backupName, &immediatelyBeforeRename, AT_SYMLINK_NOFOLLOW) == 0,
+              sameIdentity(opened, immediatelyBeforeRename) else { return }
         _ = renameatx_np(session.fileDescriptor, backupName, session.fileDescriptor, finalName, UInt32(RENAME_EXCL))
     }
 
@@ -107,13 +118,6 @@ struct IncompleteSessionRecovery {
             .contains { regularFile(named: $0, in: directory) }
     }
 
-    private func validBackup(named name: String, in directory: Int32) -> Bool {
-        let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else { return false }
-        defer { Darwin.close(descriptor) }
-        return descriptorBackupValidator(descriptor)
-    }
-
     private static func liveDescriptorBackupValidator(_ descriptor: Int32) -> Bool {
         guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: "/dev/fd/\(descriptor)")),
               file.length > 0,
@@ -121,5 +125,12 @@ struct IncompleteSessionRecovery {
               file.processingFormat.sampleRate > 0,
               file.processingFormat.channelCount >= 1 else { return false }
         return true
+    }
+
+    private func sameIdentity(_ lhs: stat, _ rhs: stat) -> Bool {
+        (lhs.st_mode & S_IFMT) == (rhs.st_mode & S_IFMT)
+            && lhs.st_dev == rhs.st_dev
+            && lhs.st_ino == rhs.st_ino
+            && lhs.st_size == rhs.st_size
     }
 }

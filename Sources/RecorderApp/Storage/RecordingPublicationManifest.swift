@@ -38,7 +38,12 @@ enum RecordingPublicationManifestStoreError: Error, Equatable, Sendable {
     case writeFailed(Int32)
 }
 
-struct RecordingPublicationManifestStore: Sendable {
+protocol RecordingPublicationManifestStoring: Sendable {
+    func save(_ items: [RecordingPublicationItem]) throws
+    func loadOrRebuild(from pendingStore: RecordingPendingStore) throws -> [RecordingPublicationItem]
+}
+
+struct RecordingPublicationManifestStore: RecordingPublicationManifestStoring, Sendable {
     private static let version = 1
     private static let fileName = "publication-queue-v1.json"
     let manifestURL: URL

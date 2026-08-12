@@ -3,7 +3,32 @@ import Foundation
 import XCTest
 @testable import RecorderApp
 
+@MainActor
 final class RecordingPublicationCoordinatorTests: XCTestCase {
+    @MainActor
+    func testManifestSaveFailureBeforePublishingRetainsSourceAndDoesNotInvokePublisherOrCompletion() async throws {
+        let fixture = try CoordinatorFixture()
+        let failingManifest = FailingCoordinatorManifestStore()
+        let coordinator = RecordingPublicationCoordinator(
+            manifestStore: failingManifest,
+            destinationStore: fixture.destination,
+            publisher: fixture.publisher,
+            pendingStore: fixture.pending,
+            retryDelays: [1]
+        )
+        var presentations: [RecordingPublicationPresentation] = []
+        var completions: [RecordingPublicationCompleted] = []
+        coordinator.onPresentationChange = { presentations.append($0) }
+        coordinator.onCompleted = { completions.append($0) }
+
+        coordinator.enqueue(fixture.request)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+        XCTAssertTrue(completions.isEmpty)
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertEqual(presentations.last?.stateText, "Publish failed")
+    }
     func testOfflineAttemptRetainsSourceAndManualRetryPublishesThenCleansUp() async throws {
         let fixture = try CoordinatorFixture(destinationAvailable: false)
         fixture.coordinator.enqueue(fixture.request)
@@ -43,6 +68,21 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         XCTAssertTrue(fixture.sourceExists)
     }
 
+    func testShutdownRejectsLatePublisherSuccessWithoutCallbackOrCleanup() async throws {
+        let fixture = try CoordinatorFixture()
+        fixture.publisher.suspendNextPublish = true
+        fixture.coordinator.enqueue(fixture.request)
+        await fixture.publisher.waitUntilSuspended()
+
+        fixture.coordinator.shutdown()
+        fixture.publisher.completeSuspendedPublish()
+        await fixture.waitForIdle()
+
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertTrue(fixture.completions.values.isEmpty)
+        XCTAssertEqual(fixture.coordinator.presentation.pendingCount, 1)
+    }
+
     func testSourceReplacementBeforeCleanupIsNeverDeleted() async throws {
         let fixture = try CoordinatorFixture()
         fixture.publisher.beforeSuccess = {
@@ -79,6 +119,12 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
     }
 }
 
+private final class FailingCoordinatorManifestStore: RecordingPublicationManifestStoring, @unchecked Sendable {
+    func loadOrRebuild(from pendingStore: RecordingPendingStore) throws -> [RecordingPublicationItem] { [] }
+    func save(_ items: [RecordingPublicationItem]) throws { throw RecordingPublicationManifestStoreError.writeFailed(EIO) }
+}
+
+@MainActor
 private final class CoordinatorFixture {
     let temporaryRoot: URL
     let pending: RecordingPendingStore
@@ -148,15 +194,37 @@ private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked
     private(set) var publishedIDs: [UUID] = []
     private(set) var attemptCount = 0
     var beforeSuccess: (() -> Void)?
+    var suspendNextPublish = false
+    private var suspendedContinuation: CheckedContinuation<RecordingPublicationSuccess, Error>?
     init(error: RecordingPublicationError?, destination: URL, pending: RecordingPendingStore) { self.error = error; self.destination = destination; self.pending = pending }
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
         withLock { attemptCount += 1 }
         if let error { throw error }
         let source = try pending.openSession(for: item.sessionDirectoryName)
         withLock { publishedIDs.append(item.id) }
+        if suspendNextPublish {
+            return try await withCheckedThrowingContinuation { continuation in
+                lock.lock(); suspendedContinuation = continuation; lock.unlock()
+            }
+        }
         beforeSuccess?()
         let folder = self.destination.appendingPathComponent("meeting", isDirectory: true)
         return .init(itemID: item.id, folderURL: folder, recordingURL: folder.appendingPathComponent("recording.m4a"), sourceDevice: source.identity.device, sourceInode: source.identity.inode)
+    }
+    func waitUntilSuspended() async {
+        for _ in 0..<100 where suspendedContinuation == nil { await Task.yield() }
+    }
+    func completeSuspendedPublish() {
+        lock.lock()
+        let continuation = suspendedContinuation
+        suspendedContinuation = nil
+        lock.unlock()
+        guard let continuation else { return }
+        let folder = destination.appendingPathComponent("meeting", isDirectory: true)
+        do {
+            let source = try pending.openSession(for: "meeting")
+            continuation.resume(returning: .init(itemID: publishedIDs.last!, folderURL: folder, recordingURL: folder.appendingPathComponent("recording.m4a"), sourceDevice: source.identity.device, sourceInode: source.identity.inode))
+        } catch { continuation.resume(throwing: error) }
     }
     func validatePublished(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
         guard let device = item.publishedSourceDevice, let inode = item.publishedSourceInode,

@@ -7,7 +7,7 @@ enum RecordingPendingStoreError: Error, Equatable, Sendable {
     case unsafeSession
 }
 
-struct RecordingPendingSessionIdentity: Equatable, Sendable {
+struct RecordingPendingSessionIdentity: Codable, Equatable, Sendable {
     let device: Int64
     let inode: Int64
 }
@@ -100,22 +100,34 @@ struct RecordingPendingStore: Sendable {
     /// Removes only the exact direct child represented by an already-open handle.
     /// URL paths are intentionally not accepted as deletion authority.
     func removeRetainedSession(_ session: RecordingPendingSession) throws {
+        try validateRetainedSession(session)
         let rootDescriptor = session.rootFileDescriptor
-        guard try directoryIdentity(of: rootDescriptor) == session.rootIdentity else {
-            throw RecordingPendingStoreError.unsafeSession
-        }
-        var rootEntry = stat()
-        guard fstatat(rootDescriptor, session.directoryName, &rootEntry, AT_SYMLINK_NOFOLLOW) == 0,
-              matches(rootEntry, session.identity),
-              (rootEntry.st_mode & S_IFMT) == S_IFDIR else {
-            throw RecordingPendingStoreError.unsafeSession
-        }
         try validateTree(directory: session.fileDescriptor)
         try removeTree(directory: session.fileDescriptor)
         var current = stat()
         guard fstatat(rootDescriptor, session.directoryName, &current, AT_SYMLINK_NOFOLLOW) == 0,
               matches(current, session.identity),
               unlinkat(rootDescriptor, session.directoryName, AT_REMOVEDIR) == 0 else {
+            throw RecordingPendingStoreError.unsafeSession
+        }
+    }
+
+    /// Confirms both the currently reachable pending root and its direct child
+    /// still name the descriptors retained when the session was admitted.
+    func validateRetainedSession(_ session: RecordingPendingSession) throws {
+        guard try directoryIdentity(of: session.rootFileDescriptor) == session.rootIdentity,
+              try directoryIdentity(of: session.fileDescriptor) == session.identity else {
+            throw RecordingPendingStoreError.unsafeSession
+        }
+        let currentRoot = try openRootDescriptor()
+        defer { Darwin.close(currentRoot) }
+        guard try directoryIdentity(of: currentRoot) == session.rootIdentity else {
+            throw RecordingPendingStoreError.unsafeSession
+        }
+        var rootEntry = stat()
+        guard fstatat(currentRoot, session.directoryName, &rootEntry, AT_SYMLINK_NOFOLLOW) == 0,
+              matches(rootEntry, session.identity),
+              (rootEntry.st_mode & S_IFMT) == S_IFDIR else {
             throw RecordingPendingStoreError.unsafeSession
         }
     }

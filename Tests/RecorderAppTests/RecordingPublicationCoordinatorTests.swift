@@ -272,7 +272,7 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         let fixture = try CoordinatorFixture(manifestState: .published)
         var retry = try XCTUnwrap(fixture.persistedItems.first)
         retry.state = .pending; retry.failureCategory = "transient"; retry.lastAttemptAt = Date(); retry.attemptCount = 1
-        let blocked = RecordingPublicationItem(id: UUID(), sessionDirectoryName: retry.sessionDirectoryName, destinationIdentity: retry.destinationIdentity, workspaceFenceRevision: retry.workspaceFenceRevision, recordingSource: retry.recordingSource, health: retry.health, metadataWarning: retry.metadataWarning, createdAt: retry.createdAt, lastAttemptAt: retry.lastAttemptAt, attemptCount: retry.attemptCount, state: .needsAttention, failureCategory: "invalidSource", publishedFolderName: retry.publishedFolderName, publishedRecordingName: retry.publishedRecordingName, publishedSourceDevice: retry.publishedSourceDevice, publishedSourceInode: retry.publishedSourceInode, publishedSourceRootDevice: retry.publishedSourceRootDevice, publishedSourceRootInode: retry.publishedSourceRootInode)
+        let blocked = RecordingPublicationItem(id: UUID(), sessionDirectoryName: retry.sessionDirectoryName, destinationIdentity: retry.destinationIdentity, workspaceFenceRevision: retry.workspaceFenceRevision, recordingSource: retry.recordingSource, health: retry.health, metadataWarning: retry.metadataWarning, sourceIdentity: retry.sourceIdentity, sourceRootIdentity: retry.sourceRootIdentity, createdAt: retry.createdAt, lastAttemptAt: retry.lastAttemptAt, attemptCount: retry.attemptCount, state: .needsAttention, failureCategory: "invalidSource", publishedFolderName: retry.publishedFolderName, publishedRecordingName: retry.publishedRecordingName, publishedSourceDevice: retry.publishedSourceDevice, publishedSourceInode: retry.publishedSourceInode, publishedSourceRootDevice: retry.publishedSourceRootDevice, publishedSourceRootInode: retry.publishedSourceRootInode)
         let store = ScriptedCoordinatorManifestStore(items: [blocked, retry])
         let sleeper = SuspendedSleeper()
         let coordinator = RecordingPublicationCoordinator(manifestStore: store, destinationStore: fixture.destination, publisher: fixture.publisher, pendingStore: fixture.pending, retryDelays: [300], sleeper: { _ in try await sleeper.sleep() })
@@ -296,6 +296,25 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.publisher.attemptCount, 1)
         XCTAssertEqual(fixture.coordinator.presentation.needsAttentionCount, 1)
         XCTAssertTrue(fixture.sourceExists)
+    }
+
+    func testMissingAdmissionIdentityNeedsAttentionWithoutInvokingPublisher() async throws {
+        let fixture = try CoordinatorFixture()
+        let legacyRequest = RecordingPublicationRequest(
+            id: UUID(),
+            sessionDirectoryName: fixture.request.sessionDirectoryName,
+            destinationIdentity: fixture.request.destinationIdentity,
+            workspaceFence: fixture.request.workspaceFence,
+            source: fixture.request.source,
+            health: fixture.request.health,
+            metadataWarning: nil
+        )
+
+        fixture.coordinator.enqueue(legacyRequest)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+        XCTAssertEqual(fixture.coordinator.presentation.needsAttentionCount, 1)
     }
 
     func testPublishedValidationDestinationUnavailableRemainsTerminalUntilManualRetry() async throws {
@@ -379,7 +398,8 @@ private final class CoordinatorFixture {
         let name = "meeting"
         try FileManager.default.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: false)
         let identity = RecordingDestinationIdentity(id: UUID())
-        request = .init(id: UUID(), sessionDirectoryName: name, destinationIdentity: identity, workspaceFence: .init(revision: 3), source: .manual, health: .init(), metadataWarning: nil)
+        let admitted = try pending.openSession(for: name)
+        request = .init(id: UUID(), sessionDirectoryName: name, destinationIdentity: identity, workspaceFence: .init(revision: 3), source: .manual, health: .init(), metadataWarning: nil, sourceIdentity: admitted.identity, sourceRootIdentity: admitted.rootIdentity)
         manifest = RecordingPublicationManifestStore(manifestURL: pending.manifestURL)
         destination.available = destinationAvailable
         destination.identity = identity
@@ -388,7 +408,7 @@ private final class CoordinatorFixture {
         publisher = CoordinatorPublisher(error: publisherError, errors: publisherErrors, destination: destination.url, pending: pending)
         if let manifestState {
             let session = try pending.openSession(for: name)
-            try manifest.save([.init(id: request.id, sessionDirectoryName: name, destinationIdentity: identity, workspaceFenceRevision: 3, recordingSource: .manual, health: .init(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: manifestState, failureCategory: nil, publishedFolderName: manifestState == .published ? "meeting" : nil, publishedRecordingName: manifestState == .published ? "recording.m4a" : nil, publishedSourceDevice: manifestState == .published ? session.identity.device : nil, publishedSourceInode: manifestState == .published ? session.identity.inode : nil, publishedSourceRootDevice: manifestState == .published ? session.rootIdentity.device : nil, publishedSourceRootInode: manifestState == .published ? session.rootIdentity.inode : nil)])
+            try manifest.save([.init(id: request.id, sessionDirectoryName: name, destinationIdentity: identity, workspaceFenceRevision: 3, recordingSource: .manual, health: .init(), metadataWarning: nil, sourceIdentity: session.identity, sourceRootIdentity: session.rootIdentity, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: manifestState, failureCategory: nil, publishedFolderName: manifestState == .published ? "meeting" : nil, publishedRecordingName: manifestState == .published ? "recording.m4a" : nil, publishedSourceDevice: manifestState == .published ? session.identity.device : nil, publishedSourceInode: manifestState == .published ? session.identity.inode : nil, publishedSourceRootDevice: manifestState == .published ? session.rootIdentity.device : nil, publishedSourceRootInode: manifestState == .published ? session.rootIdentity.inode : nil)])
         } else {
             try manifest.save([])
         }

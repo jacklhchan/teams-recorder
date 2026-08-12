@@ -13,6 +13,10 @@ struct RecordingPublicationItem: Codable, Equatable, Identifiable, Sendable {
     let recordingSource: RecordingSource
     let health: RecordingHealthReport
     let metadataWarning: String?
+    /// Admission identities bind the request to the session opened at start.
+    /// Legacy/rebuilt entries intentionally lack them and need attention.
+    var sourceIdentity: RecordingPendingSessionIdentity? = nil
+    var sourceRootIdentity: RecordingPendingSessionIdentity? = nil
     let createdAt: Date
     var lastAttemptAt: Date?
     var attemptCount: Int

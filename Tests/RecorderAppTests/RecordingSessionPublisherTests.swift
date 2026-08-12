@@ -14,6 +14,45 @@ final class RecordingSessionPublisherTests: XCTestCase {
         XCTAssertTrue(fixture.destinationIsEmpty)
     }
 
+    func testPublisherRejectsMissingAdmissionIdentityBeforeWritingDestination() async throws {
+        let fixture = try PublisherFixture(admit: false)
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .invalidSource)
+        }
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertTrue(fixture.destinationIsEmpty)
+    }
+
+    func testPublisherRejectsMismatchedAdmissionIdentityBeforeWritingDestination() async throws {
+        let fixture = try PublisherFixture()
+        let wrongIdentity = RecordingPendingSessionIdentity(
+            device: fixture.item.sourceIdentity!.device,
+            inode: fixture.item.sourceIdentity!.inode + 1
+        )
+        let mismatched = RecordingPublicationItem(
+            id: fixture.item.id,
+            sessionDirectoryName: fixture.item.sessionDirectoryName,
+            destinationIdentity: fixture.item.destinationIdentity,
+            workspaceFenceRevision: fixture.item.workspaceFenceRevision,
+            recordingSource: fixture.item.recordingSource,
+            health: fixture.item.health,
+            metadataWarning: fixture.item.metadataWarning,
+            sourceIdentity: wrongIdentity,
+            sourceRootIdentity: fixture.item.sourceRootIdentity,
+            createdAt: fixture.item.createdAt,
+            lastAttemptAt: fixture.item.lastAttemptAt,
+            attemptCount: fixture.item.attemptCount,
+            state: fixture.item.state,
+            failureCategory: fixture.item.failureCategory
+        )
+
+        await XCTAssertThrowsErrorAsync(try await fixture.publisher.publish(item: mismatched, destination: fixture.destination)) {
+            XCTAssertEqual($0 as? RecordingPublicationError, .invalidSource)
+        }
+        XCTAssertTrue(fixture.destinationIsEmpty)
+    }
+
     func testNonemptyInvalidMediaIsRejected() async throws {
         let fixture = try PublisherFixture(media: Data("not-media".utf8), mediaValidator: { _, _ in false })
 
@@ -307,6 +346,7 @@ private final class PublisherFixture {
 
     init(
         media: Data = Data("media".utf8),
+        admit: Bool = true,
         mediaValidator: @escaping RecordingSessionPublisher.MediaValidator = { descriptor, _ in
             !readDescriptor(descriptor).isEmpty
         },
@@ -327,7 +367,8 @@ private final class PublisherFixture {
         sourceFolder = pendingRoot.appendingPathComponent("meeting", isDirectory: true)
         try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: false)
         try media.write(to: sourceFolder.appendingPathComponent("recording.m4a"))
-        item = RecordingPublicationItem(id: UUID(), sessionDirectoryName: "meeting", destinationIdentity: .init(id: UUID()), workspaceFenceRevision: 1, recordingSource: .manual, health: .init(), metadataWarning: nil, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: .pending, failureCategory: nil)
+        let retained = admit ? try store.openSession(for: "meeting") : nil
+        item = RecordingPublicationItem(id: UUID(), sessionDirectoryName: "meeting", destinationIdentity: .init(id: UUID()), workspaceFenceRevision: 1, recordingSource: .manual, health: .init(), metadataWarning: nil, sourceIdentity: retained?.identity, sourceRootIdentity: retained?.rootIdentity, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: .pending, failureCategory: nil)
         destination = RecordingDestinationAccess(url: destinationURL, close: {})
         publisher = RecordingSessionPublisher(
             pendingStore: store,

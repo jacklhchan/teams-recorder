@@ -66,7 +66,15 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
     }
 
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
+        guard let expectedSource = item.sourceIdentity,
+              let expectedRoot = item.sourceRootIdentity else {
+            throw RecordingPublicationError.invalidSource
+        }
         let source = try pendingStore.openSession(for: item.sessionDirectoryName)
+        guard source.identity == expectedSource,
+              source.rootIdentity == expectedRoot else {
+            throw RecordingPublicationError.invalidSource
+        }
         IncompleteSessionRecovery().recover(in: source)
         let sourceInventory = try inventory(directory: source.fileDescriptor, context: .source)
         let recordingName = try finalizedRecording(in: sourceInventory)

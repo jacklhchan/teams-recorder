@@ -16,7 +16,7 @@ final class AppModelRecordingFinalizationTests: XCTestCase {
         await fixture.model.finishRecording(playAfterStop: false)
         for _ in 0 ..< 20 { await Task.yield() }
 
-        XCTAssertEqual(ordering.values, ["metadata"])
+        XCTAssertEqual(ordering.values, [])
         XCTAssertEqual(fixture.model.statusMessage, "Recording saved locally, but publication needs attention")
     }
 
@@ -34,7 +34,7 @@ final class AppModelRecordingFinalizationTests: XCTestCase {
         await fixture.model.finishRecording(playAfterStop: false)
         for _ in 0 ..< 20 { await Task.yield() }
 
-        XCTAssertEqual(updates.value, 1)
+        XCTAssertEqual(updates.value, 0)
         XCTAssertEqual(refreshes.value, 0)
         XCTAssertEqual(
             fixture.model.statusMessage,

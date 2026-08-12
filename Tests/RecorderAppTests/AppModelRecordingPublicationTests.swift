@@ -24,6 +24,9 @@ final class AppModelRecordingPublicationTests: XCTestCase {
 
         let request = try XCTUnwrap(fixture.publication.requests.single)
         XCTAssertEqual(request.sessionDirectoryName, fixture.localResultFolderName)
+        let admitted = try fixture.pendingStore.openSession(for: request.sessionDirectoryName)
+        XCTAssertEqual(request.sourceIdentity, admitted.identity)
+        XCTAssertEqual(request.sourceRootIdentity, admitted.rootIdentity)
         XCTAssertTrue(fixture.library.sessions.isEmpty)
         XCTAssertEqual(fixture.model.statusMessage, "Recording saved locally; publishing")
     }
@@ -85,6 +88,27 @@ final class AppModelRecordingPublicationTests: XCTestCase {
         let request = try XCTUnwrap(fixture.publication.requests.single)
         XCTAssertEqual(request.destinationIdentity, capturedIdentity)
         XCTAssertEqual(request.workspaceFence, .initial)
+    }
+
+    func testReplacingPendingSessionAfterStartPreventsMetadataAndPublication() async throws {
+        let fixture = try AppModelPublicationFixture()
+        XCTAssertEqual(fixture.model.startRecordingFromControl(), .accepted)
+        await fixture.waitForRecorderStart()
+        let admitted = try XCTUnwrap(fixture.engine.outputFolder)
+        let moved = admitted.deletingLastPathComponent()
+            .appendingPathComponent("original-session", isDirectory: true)
+        try FileManager.default.moveItem(at: admitted, to: moved)
+        try FileManager.default.createDirectory(at: admitted, withIntermediateDirectories: false)
+        let replacement = admitted.appendingPathComponent("replacement.txt")
+        try Data("replacement".utf8).write(to: replacement)
+
+        fixture.model.startOrStop()
+        await fixture.waitForStoppedWithoutPublication()
+
+        XCTAssertEqual(fixture.metadataCounter.value, 0)
+        XCTAssertTrue(fixture.publication.requests.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: replacement.path))
+        XCTAssertEqual(fixture.model.statusMessage, "Recording saved locally, but publication needs attention")
     }
 
     func testSaveFailureLeavesCurrentDestinationAndFenceUnchanged() throws {
@@ -158,11 +182,13 @@ private final class AppModelPublicationFixture {
     let destination: URL
     let otherDestination: URL
     let pendingRoot: URL
+    let pendingStore: RecordingPendingStore
     let engine: RecordingEngine
     let publication = PublicationCoordinatorSpy()
     let destinationStore: PublicationDestinationStore
     let library: LibraryFeatureModel
     let model: AppModel
+    let metadataCounter: PublicationMetadataCounter
 
     init(
         destinationState: RecordingDestinationState = .ready,
@@ -175,6 +201,8 @@ private final class AppModelPublicationFixture {
         try FileManager.default.createDirectory(at: otherDestination, withIntermediateDirectories: true)
         let paths = AppPaths(homeDirectory: root, applicationSupportRoot: root)
         pendingRoot = paths.pendingRecordingsDirectory
+        pendingStore = RecordingPendingStore(root: pendingRoot)
+        metadataCounter = PublicationMetadataCounter()
         destinationStore = PublicationDestinationStore(url: destination, state: destinationState)
         engine = RecordingEngine(captureSource: PublicationCaptureSource(), writerFactory: { PublicationWriter(outputURL: $0) }, mixerBlockFrames: 4)
         library = LibraryFeatureModel(
@@ -202,7 +230,10 @@ private final class AppModelPublicationFixture {
             defaultInputDeviceID: { 1 },
             performStartupWork: false,
             initialOutputFolder: initialOutputFolder ? otherDestination : nil,
-            libraryFeature: library
+            libraryFeature: library,
+            recordingSourceMetadataUpdater: { [metadataCounter] _, _, _ in
+                metadataCounter.value += 1
+            }
         )
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
@@ -224,6 +255,7 @@ private final class AppModelPublicationFixture {
 
     func waitForRecorderStart() async { await waitUntil { self.engine.isRecording } }
     func waitForRecorderStop() async { await waitUntil { !self.engine.isRecording && !self.publication.requests.isEmpty } }
+    func waitForStoppedWithoutPublication() async { await waitUntil { !self.engine.isRecording } }
     func waitForLibraryFinalization() async { await waitUntil { !self.library.sessions.isEmpty } }
 
     func settleInitialLibraryLoad() async {
@@ -288,6 +320,11 @@ private final class PublicationDestinationStore: RecordingDestinationStoring {
 }
 
 private enum PublicationDestinationStoreError: Error { case saveFailed }
+
+@MainActor
+private final class PublicationMetadataCounter {
+    var value = 0
+}
 
 private final class PublicationCaptureSource: CaptureSourceProtocol {
     let screenVideoFormat = ScreenVideoFormat(width: 1, height: 1, pixelFormat: 0)

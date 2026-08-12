@@ -18,6 +18,7 @@ enum RecorderControlActionOutcome: Equatable {
 private struct ActiveRecordingPublicationContext {
     let destinationIdentity: RecordingDestinationIdentity
     let workspaceFence: WorkspacePublicationFence
+    let retainedSession: RecordingPendingSession
 }
 
 @MainActor
@@ -1291,11 +1292,6 @@ final class AppModel: ObservableObject {
             await completeRecordingStartAttempt(attempt)
             return
         }
-        activeRecordingPublicationContext = .init(
-            destinationIdentity: destinationIdentity,
-            workspaceFence: workspacePublicationFence
-        )
-
         do {
             try await recorder.start(
                 selection: resolvedCaptureSelection,
@@ -1306,6 +1302,16 @@ final class AppModel: ObservableObject {
                 await finalizeLateRecordingStart(attempt)
                 return
             }
+            guard let retainedSession = admittedPendingSession(for: recorder.outputFolder) else {
+                _ = await recorder.stop()
+                statusMessage = "Recording saved locally, but publication needs attention"
+                return
+            }
+            activeRecordingPublicationContext = .init(
+                destinationIdentity: destinationIdentity,
+                workspaceFence: workspacePublicationFence,
+                retainedSession: retainedSession
+            )
             invalidateTeamsScreenCaptureIntent()
             isTeamsScreenCaptureRequested = false
             await refreshTeamsScreenCaptureNow()
@@ -1336,7 +1342,7 @@ final class AppModel: ObservableObject {
                 teamsAutoMeetingCoordinator.automaticStartSucceeded()
             }
         } catch {
-            activeRecordingPublicationContext = nil
+            clearActiveRecordingPublicationContextIfNotRecording()
             if let currentAttempt = acceptedRecordingAttempt(
                 matching: attempt
             ) {
@@ -1394,6 +1400,8 @@ final class AppModel: ObservableObject {
                     ? .teamsAutomatic
                     : .manual
             )
+        } else {
+            clearActiveRecordingPublicationContextIfNotRecording()
         }
         if stoppedDuringAcceptedStart,
            acceptedAttempt?.ownership == .teamsAutomatic {
@@ -1418,6 +1426,7 @@ final class AppModel: ObservableObject {
         } else {
             finishCaptureLifecycle(attempt.lifecycleToken)
         }
+        clearActiveRecordingPublicationContextIfNotRecording()
     }
 
     func runTestRecording() {
@@ -1449,16 +1458,24 @@ final class AppModel: ObservableObject {
                 statusMessage = "Recording destination needs folder access."
                 return
             }
-            activeRecordingPublicationContext = .init(
-                destinationIdentity: destinationIdentity,
-                workspaceFence: workspacePublicationFence
-            )
             do {
                 try await recorder.start(
                     selection: resolvedCaptureSelection,
                     microphoneUID: selectedMicDevice?.uid,
                     baseFolder: recordingFolder,
                     folderPrefix: "test"
+                )
+                guard let retainedSession = admittedPendingSession(for: recorder.outputFolder) else {
+                    _ = await recorder.stop()
+                    clearActiveRecordingPublicationContext()
+                    clearTestRecordingRuntimeState()
+                    statusMessage = "Recording saved locally, but publication needs attention"
+                    return
+                }
+                activeRecordingPublicationContext = .init(
+                    destinationIdentity: destinationIdentity,
+                    workspaceFence: workspacePublicationFence,
+                    retainedSession: retainedSession
                 )
                 guard testRecordingContinues(token) else {
                     clearTestRecordingRuntimeState()
@@ -1487,7 +1504,7 @@ final class AppModel: ObservableObject {
                 statusMessage = "Test recording: 10 seconds"
                 startStorageMonitoring(folder: recordingFolder)
             } catch {
-                activeRecordingPublicationContext = nil
+                clearActiveRecordingPublicationContext()
                 clearTestRecordingRuntimeState()
                 guard recordingSessionCoordinator.accepts(token) else { return }
                 statusMessage = error.localizedDescription
@@ -1512,6 +1529,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearTestRecordingRuntimeState() {
+        clearActiveRecordingPublicationContext()
         isRunningTestRecording = false
         testRecordingStopTask?.cancel()
         testRecordingStopTask = nil
@@ -1885,11 +1903,19 @@ final class AppModel: ObservableObject {
         let publicationContext = activeRecordingPublicationContext
         let result = await recorder.stop()
         isRunningTestRecording = false
-        activeRecordingPublicationContext = nil
+        clearActiveRecordingPublicationContext()
         if let result {
             lastHealthReport = result.health
             lastRecordingSavedAsM4A =
                 result.recordingURL.lastPathComponent == "recording.m4a"
+            guard let publicationContext,
+                  validatesRetainedPendingSession(publicationContext, result: result) else {
+                statusMessage = "Recording saved locally, but publication needs attention"
+                if let automaticStopToken, !recorder.isRecording {
+                    completeAutomaticStopIntent(automaticStopToken)
+                }
+                return
+            }
             var metadataSaveError: Error?
             do {
                 try recordingSourceMetadataUpdater(
@@ -1900,10 +1926,7 @@ final class AppModel: ObservableObject {
             } catch {
                 metadataSaveError = error
             }
-            guard let publicationContext,
-                  let sessionDirectoryName = admittedPendingSessionName(
-                    for: result
-                  ) else {
+            guard validatesRetainedPendingSession(publicationContext, result: result) else {
                 statusMessage = "Recording saved locally, but publication needs attention"
                 if let automaticStopToken, !recorder.isRecording {
                     completeAutomaticStopIntent(automaticStopToken)
@@ -1912,12 +1935,14 @@ final class AppModel: ObservableObject {
             }
             let request = RecordingPublicationRequest(
                 id: UUID(),
-                sessionDirectoryName: sessionDirectoryName,
+                sessionDirectoryName: publicationContext.retainedSession.directoryName,
                 destinationIdentity: publicationContext.destinationIdentity,
                 workspaceFence: publicationContext.workspaceFence,
                 source: recordingSource,
                 health: result.health,
-                metadataWarning: metadataSaveError?.localizedDescription
+                metadataWarning: metadataSaveError?.localizedDescription,
+                sourceIdentity: publicationContext.retainedSession.identity,
+                sourceRootIdentity: publicationContext.retainedSession.rootIdentity
             )
             recordingPublicationCoordinator.enqueue(request)
             statusMessage = "Recording saved locally; publishing"
@@ -1929,19 +1954,30 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func admittedPendingSessionName(for result: RecordingResult) -> String? {
-        let folder = result.folderURL.standardizedFileURL
-        guard folder.deletingLastPathComponent() == pendingRecordingStore.root.standardizedFileURL,
-              result.recordingURL.standardizedFileURL.deletingLastPathComponent() == folder else {
-            return nil
-        }
+    private func admittedPendingSession(for folder: URL?) -> RecordingPendingSession? {
+        guard let folder = folder?.standardizedFileURL,
+              folder.deletingLastPathComponent() == pendingRecordingStore.root.standardizedFileURL else { return nil }
         let name = folder.lastPathComponent
         guard let admitted = try? pendingRecordingStore.openSession(for: name),
               admitted.displayURL.standardizedFileURL == folder,
-              admitted.directoryName == name else {
-            return nil
-        }
-        return name
+              admitted.directoryName == name else { return nil }
+        return admitted
+    }
+
+    private func validatesRetainedPendingSession(_ context: ActiveRecordingPublicationContext, result: RecordingResult) -> Bool {
+        let session = context.retainedSession
+        guard result.folderURL.standardizedFileURL == session.displayURL.standardizedFileURL,
+              result.recordingURL.standardizedFileURL.deletingLastPathComponent() == session.displayURL.standardizedFileURL else { return false }
+        return (try? pendingRecordingStore.validateRetainedSession(session)) != nil
+    }
+
+    private func clearActiveRecordingPublicationContext() {
+        activeRecordingPublicationContext = nil
+    }
+
+    private func clearActiveRecordingPublicationContextIfNotRecording() {
+        guard !recorder.isRecording else { return }
+        clearActiveRecordingPublicationContext()
     }
 
     private func projectRecordingPublicationStatus(

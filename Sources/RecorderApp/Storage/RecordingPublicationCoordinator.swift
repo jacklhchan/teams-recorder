@@ -8,6 +8,12 @@ struct RecordingPublicationRequest: Equatable, Sendable {
     let source: RecordingSource
     let health: RecordingHealthReport
     let metadataWarning: String?
+    let sourceIdentity: RecordingPendingSessionIdentity?
+    let sourceRootIdentity: RecordingPendingSessionIdentity?
+
+    init(id: UUID, sessionDirectoryName: String, destinationIdentity: RecordingDestinationIdentity, workspaceFence: WorkspacePublicationFence, source: RecordingSource, health: RecordingHealthReport, metadataWarning: String?, sourceIdentity: RecordingPendingSessionIdentity? = nil, sourceRootIdentity: RecordingPendingSessionIdentity? = nil) {
+        self.id = id; self.sessionDirectoryName = sessionDirectoryName; self.destinationIdentity = destinationIdentity; self.workspaceFence = workspaceFence; self.source = source; self.health = health; self.metadataWarning = metadataWarning; self.sourceIdentity = sourceIdentity; self.sourceRootIdentity = sourceRootIdentity
+    }
 }
 
 struct RecordingPublicationCompleted: Equatable, Sendable {
@@ -71,7 +77,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
 
     func enqueue(_ request: RecordingPublicationRequest) {
         guard loadIfNeeded(), !items.contains(where: { $0.id == request.id }) else { publishPresentation(); return }
-        let item = RecordingPublicationItem(id: request.id, sessionDirectoryName: request.sessionDirectoryName, destinationIdentity: request.destinationIdentity, workspaceFenceRevision: request.workspaceFence.revision, recordingSource: request.source, health: request.health, metadataWarning: request.metadataWarning, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: .pending, failureCategory: nil)
+        let item = RecordingPublicationItem(id: request.id, sessionDirectoryName: request.sessionDirectoryName, destinationIdentity: request.destinationIdentity, workspaceFenceRevision: request.workspaceFence.revision, recordingSource: request.source, health: request.health, metadataWarning: request.metadataWarning, sourceIdentity: request.sourceIdentity, sourceRootIdentity: request.sourceRootIdentity, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: .pending, failureCategory: nil)
         items.append(item)
         guard persist() else { items.removeLast(); publishPresentation(); return }
         publishPresentation(); startWorker()
@@ -116,6 +122,10 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
                 continue
             }
             if item.state == .published { await finishPublished(item, generation: workerGeneration); continue }
+            guard item.sourceIdentity != nil, item.sourceRootIdentity != nil else {
+                _ = transition(item.id, to: .needsAttention, category: "missingSourceIdentity")
+                continue
+            }
             guard transitionToPublishing(item.id, generation: workerGeneration) else { return }
             do {
                 let access: RecordingDestinationAccess

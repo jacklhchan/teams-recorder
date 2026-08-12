@@ -212,16 +212,30 @@ struct RecorderSettingsView: View {
             Text(model.outputFolder.path)
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
-            Text(publicationStatusText(publication))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Local pending copies")
+                    .font(.callout.weight(.medium))
+                Text(model.pendingRecordingsFolderURL.path)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                Text(publication.stateText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Text("Publishing / Pending: \(publication.pendingCount)")
+                    Text("Waiting: \(publication.waitingCount)")
+                    Text("Needs attention: \(publication.needsAttentionCount)")
+                }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            }
                 .accessibilityIdentifier(RecorderActionID.storagePendingStatus)
                 .background(RecorderSettingsAccessibilityMarker(
                     identifier: RecorderActionID.storagePendingStatus
                 ))
                 .background(RecorderDestinationAccessibilityMarker(
                     identifier: "\(RecorderActionID.storagePendingStatus).text",
-                    label: publicationStatusText(publication)
+                    label: pendingStatusAccessibilityLabel(publication)
                 ))
             Button(
                 model.recordingDestinationState == .needsFolderAccess
@@ -235,11 +249,13 @@ struct RecorderSettingsView: View {
                 ))
             if publication.retainedLocalCount > 0 {
                 HStack {
-                    Button("Retry Now", action: model.retryPendingRecordings)
-                        .accessibilityIdentifier(RecorderActionID.storageRetry)
-                        .background(RecorderSettingsAccessibilityMarker(
-                            identifier: RecorderActionID.storageRetry
-                        ))
+                    if publication.pendingCount + publication.waitingCount > 0 {
+                        Button("Retry Now", action: model.retryPendingRecordings)
+                            .accessibilityIdentifier(RecorderActionID.storageRetry)
+                            .background(RecorderSettingsAccessibilityMarker(
+                                identifier: RecorderActionID.storageRetry
+                            ))
+                    }
                     Button("Open Local Copies", action: model.openPendingRecordingsFolder)
                         .accessibilityIdentifier(RecorderActionID.storageOpenLocal)
                         .background(RecorderSettingsAccessibilityMarker(
@@ -259,19 +275,14 @@ struct RecorderSettingsView: View {
         }
     }
 
-    private func publicationStatusText(
+    private func pendingStatusAccessibilityLabel(
         _ publication: RecordingPublicationPresentation
     ) -> String {
-        let count = publication.retainedLocalCount
-        guard count > 0 else { return publication.stateText }
-        let noun = count == 1 ? "recording" : "recordings"
-        let detail: String
-        if publication.needsAttentionCount > 0 {
-            detail = "\(publication.needsAttentionCount) \(publication.needsAttentionCount == 1 ? "recording" : "recordings") needs attention"
-        } else {
-            detail = "\(count) \(noun) retained locally"
-        }
-        return "\(detail) · \(publication.stateText)"
+        "Local pending copies: \(model.pendingRecordingsFolderURL.path). "
+            + "\(publication.stateText). "
+            + "Publishing / Pending: \(publication.pendingCount). "
+            + "Waiting: \(publication.waitingCount). "
+            + "Needs attention: \(publication.needsAttentionCount)."
     }
 
     private var autoMeetingPresentation: TeamsAutoMeetingPresentation {

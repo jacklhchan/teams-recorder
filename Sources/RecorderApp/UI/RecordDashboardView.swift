@@ -158,11 +158,13 @@ private struct RecordDashboardPendingPublicationBanner: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Button("Retry Now", action: model.retryPendingRecordings)
-                    .accessibilityIdentifier(RecorderActionID.storageRetry)
-                    .background(RecorderDestinationAccessibilityMarker(
-                        identifier: RecorderActionID.storageRetry
-                    ))
+                if publication.pendingCount + publication.waitingCount > 0 {
+                    Button("Retry Now", action: model.retryPendingRecordings)
+                        .accessibilityIdentifier(RecorderActionID.storageRetry)
+                        .background(RecorderDestinationAccessibilityMarker(
+                            identifier: RecorderActionID.storageRetry
+                        ))
+                }
                 Button("Open Local Copies", action: model.openPendingRecordingsFolder)
                     .accessibilityIdentifier(RecorderActionID.storageOpenLocal)
                     .background(RecorderDestinationAccessibilityMarker(

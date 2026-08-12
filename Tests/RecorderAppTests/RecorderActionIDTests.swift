@@ -24,6 +24,20 @@ final class RecorderActionIDTests: XCTestCase {
             RecorderActionID.openOutputFolder,
             "recorder.action.open-output-folder"
         )
+        XCTAssertEqual(
+            RecorderActionID.storagePendingBanner,
+            "recorder.storage.pending-banner"
+        )
+        XCTAssertEqual(RecorderActionID.storageRetry, "recorder.storage.retry")
+        XCTAssertEqual(RecorderActionID.storageOpenLocal, "recorder.storage.open-local")
+        XCTAssertEqual(
+            RecorderActionID.storageDestinationStatus,
+            "recorder.storage.destination-status"
+        )
+        XCTAssertEqual(
+            RecorderActionID.storagePendingStatus,
+            "recorder.storage.pending-status"
+        )
         XCTAssertEqual(RecorderActionID.uploadAudio, "recorder.action.upload-audio")
         XCTAssertEqual(RecorderActionID.refreshRecordings, "recorder.action.refresh-recordings")
         XCTAssertEqual(

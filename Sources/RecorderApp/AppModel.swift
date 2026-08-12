@@ -89,6 +89,10 @@ final class AppModel: ObservableObject {
         recordingSessionCoordinator.isWorking
     }
 
+    var pendingRecordingsFolderURL: URL {
+        pendingRecordingStore.root
+    }
+
     var recordingLifecycleOperation: CaptureLifecycleOperation? {
         recordingSessionCoordinator.activeOperation
     }

@@ -57,9 +57,58 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertEqual(fixture.model.recordingDestinationState, .needsFolderAccess)
         XCTAssertEqual(fixture.model.recordingPublicationPresentation.needsAttentionCount, 1)
         XCTAssertTrue(host.containsText("Needs folder access"))
-        XCTAssertTrue(host.containsText("1 recording needs attention"))
+        XCTAssertTrue(host.containsText("Publishing / Pending: 0"))
+        XCTAssertTrue(host.containsText("Waiting: 0"))
+        XCTAssertTrue(host.containsText("Needs attention: 1"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.destination-status"))
         XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.pending-status"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.storage.retry"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.open-local"))
+    }
+
+    func testRecordWorkspaceNeedsAttentionOnlyShowsOpenLocalWithoutRetry() throws {
+        let fixture = makeWorkspaceFixture(
+            publication: .init(
+                stateText: "Publish failed",
+                pendingCount: 0,
+                waitingCount: 0,
+                needsAttentionCount: 1
+            )
+        )
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.pending-banner"))
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.storage.retry"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.open-local"))
+    }
+
+    func testStorageSettingsShowsPendingRootMixedCountsAndBothActions() throws {
+        let fixture = makeWorkspaceFixture(
+            publication: .init(
+                stateText: "Publishing",
+                pendingCount: 2,
+                waitingCount: 3,
+                needsAttentionCount: 1
+            )
+        )
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.storage-shortcuts"))
+
+        XCTAssertTrue(host.containsText(fixture.pendingRoot.path))
+        XCTAssertTrue(host.containsText("Publishing / Pending: 2"))
+        XCTAssertTrue(host.containsText("Waiting: 3"))
+        XCTAssertTrue(host.containsText("Needs attention: 1"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.retry"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.open-local"))
     }
 
     func testReadyWithNoRetainedSessionsDoesNotRenderPendingBanner() throws {
@@ -1918,8 +1967,17 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             state: destinationState
         )
         let coordinator = RenderPublicationCoordinator(presentation: publication)
+        let testRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "recorder-storage-render-paths-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let appPaths = AppPaths(
+            homeDirectory: testRoot,
+            applicationSupportRoot: testRoot
+        )
         let model = AppModel(
             defaults: defaults,
+            appPaths: appPaths,
             recordingDestinationStore: destinationStore,
             recordingPublicationCoordinator: coordinator,
             inputDevices: { [] },
@@ -1928,7 +1986,11 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
-        return .init(model: model, defaults: defaults)
+        return .init(
+            model: model,
+            defaults: defaults,
+            pendingRoot: appPaths.pendingRecordingsDirectory
+        )
     }
 
     private func makeFixtureWithOneSession() -> SessionFixture {
@@ -2053,6 +2115,7 @@ private struct SessionFixture {
 private struct StoragePresentationFixture {
     let model: AppModel
     let defaults: UserDefaults
+    let pendingRoot: URL
 }
 
 private extension RecordingPublicationPresentation {

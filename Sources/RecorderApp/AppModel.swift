@@ -449,7 +449,8 @@ final class AppModel: ObservableObject {
                         audioPreparer: transcriptionAudioPreparer,
                         service: activeTranscriptionService,
                         mutationGate: transcriptMutationGate
-                    )
+                    ),
+                    thirdPartyProcessingAdmission: activePrivacyModePolicy
                 )
             }
             precondition(
@@ -469,7 +470,8 @@ final class AppModel: ObservableObject {
                     coordinator: Self.makeMeetingIntelligenceCoordinator(
                         repository: activeProviderRepository,
                         expectedPublicationSourceID: self.transcriptionFeature.publicationSourceID,
-                        mutationGate: transcriptMutationGate
+                        mutationGate: transcriptMutationGate,
+                        thirdPartyProcessingAdmission: activePrivacyModePolicy
                     )
                 )
             }
@@ -654,7 +656,8 @@ final class AppModel: ObservableObject {
     private static func makeMeetingIntelligenceCoordinator(
         repository: any OpenAICompatibleProviderManaging,
         expectedPublicationSourceID: UUID,
-        mutationGate: RecordingSessionMutationGate
+        mutationGate: RecordingSessionMutationGate,
+        thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting
     ) -> MeetingIntelligenceJobCoordinator {
         let client = OpenAICompatibleMeetingIntelligenceClient()
         let transcriptReader = SecureTranscriptDocumentReader()
@@ -690,7 +693,8 @@ final class AppModel: ObservableObject {
             titleApplier: MeetingIntelligenceSuggestedTitleApplier(
                 mutationGate: mutationGate,
                 transcriptReader: transcriptReader
-            )
+            ),
+            thirdPartyProcessingAdmission: thirdPartyProcessingAdmission
         )
     }
 

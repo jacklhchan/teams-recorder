@@ -15,6 +15,7 @@ struct TranscriptionFeaturePresentation: Equatable {
 @MainActor
 final class TranscriptionFeatureModel: ObservableObject {
     private let coordinator: TranscriptionJobCoordinator
+    private let thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)?
     let publicationSourceID: UUID
 
     var onStatusMessage: ((String) -> Void)? {
@@ -30,8 +31,12 @@ final class TranscriptionFeatureModel: ObservableObject {
     private var successfulPublicationToken: UUID?
     private var successfulPublicationCallback: ((TranscriptPublished) -> Void)?
 
-    init(coordinator: TranscriptionJobCoordinator) {
+    init(
+        coordinator: TranscriptionJobCoordinator,
+        thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)? = nil
+    ) {
         self.coordinator = coordinator
+        self.thirdPartyProcessingAdmission = thirdPartyProcessingAdmission
         publicationSourceID = coordinator.publicationSourceID
         coordinator.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
@@ -49,6 +54,12 @@ final class TranscriptionFeatureModel: ObservableObject {
         coordinator.providerRepositoryIdentity
     }
 
+    /// Composition-only identity used to verify that AppModel shares one
+    /// policy owner across all third-party processing boundaries.
+    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier? {
+        thirdPartyProcessingAdmission.map { ObjectIdentifier($0 as AnyObject) }
+    }
+
     var presentation: TranscriptionFeaturePresentation {
         .init(
             transcribingSessionID: coordinator.transcribingSessionID,
@@ -64,6 +75,10 @@ final class TranscriptionFeatureModel: ObservableObject {
 
     func start(session: RecordingSession, providerIsConfigured: Bool) {
         guard !isShutdown else { return }
+        if thirdPartyProcessingAdmission?.admitThirdPartyProcessing() == .blockedLocalOnly {
+            onStatusMessage?(PrivacyModePolicy.localOnlyMessage)
+            return
+        }
         guard providerIsConfigured else {
             onStatusMessage?("Configure and save an AI provider before starting transcription.")
             return

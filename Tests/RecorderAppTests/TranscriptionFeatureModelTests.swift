@@ -3,6 +3,39 @@ import XCTest
 
 @MainActor
 final class TranscriptionFeatureModelTests: XCTestCase {
+    func testPrivacyModeBlocksTranscriptionBeforePreparingAudioAndDisablingRestoresIt() async throws {
+        let fixture = try FeatureFixture.make()
+        defer { fixture.remove() }
+        let admission = FeaturePrivacyAdmission(blocked: true)
+        let preparer = FeaturePreparer(audioURL: fixture.audioURL)
+        let service = FeatureCapturingService(result: .init(
+            transcriptURL: fixture.transcriptURL,
+            rawTranscriptURL: nil,
+            manifestURL: nil,
+            logURL: fixture.logURL,
+            committedTranscriptRevision: fixture.revision
+        ))
+        let feature = fixture.makeFeature(
+            preparer: preparer,
+            service: service,
+            thirdPartyProcessingAdmission: admission
+        )
+        var messages: [String] = []
+        feature.onStatusMessage = { messages.append($0) }
+
+        feature.start(session: fixture.session, providerIsConfigured: true)
+
+        XCTAssertEqual(messages, [PrivacyModePolicy.localOnlyMessage])
+        XCTAssertEqual(preparer.prepareCount, 0)
+        XCTAssertTrue(service.requests.isEmpty)
+        XCTAssertNil(feature.presentation.transcribingSessionID)
+
+        admission.blocked = false
+        feature.start(session: fixture.session, providerIsConfigured: true)
+        await eventually { service.requests.count == 1 }
+
+        XCTAssertEqual(preparer.prepareCount, 1)
+    }
     func testPublicationObserverTokenCannotRemoveReplacementAndShutdownClearsIt() async throws {
         let fixture = try FeatureFixture.make()
         defer { fixture.remove() }
@@ -289,7 +322,8 @@ private struct FeatureFixture {
     func makeFeature(
         repository: FeatureRepository? = nil,
         preparer: (any TranscriptionAudioPreparing)? = nil,
-        service: (any TranscriptionServicing)? = nil
+        service: (any TranscriptionServicing)? = nil,
+        thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)? = nil
     ) -> TranscriptionFeatureModel {
         let actualPreparer = preparer ?? FeaturePreparer(audioURL: audioURL)
         let actualService = service ?? FeatureService(result: .init(
@@ -303,7 +337,7 @@ private struct FeatureFixture {
             providerRepository: repository ?? FeatureRepository(snapshot: try! snapshot()),
             audioPreparer: actualPreparer,
             service: actualService
-        ))
+        ), thirdPartyProcessingAdmission: thirdPartyProcessingAdmission)
     }
 
     func snapshot() throws -> OpenAICompatibleProviderSnapshot {
@@ -317,6 +351,15 @@ private struct FeatureFixture {
     }
 
     func remove() { try? FileManager.default.removeItem(at: root) }
+}
+
+@MainActor
+private final class FeaturePrivacyAdmission: ThirdPartyProcessingAdmitting, @unchecked Sendable {
+    var blocked: Bool
+    init(blocked: Bool) { self.blocked = blocked }
+    func admitThirdPartyProcessing() -> PrivacyModeAdmission {
+        blocked ? .blockedLocalOnly : .allowed
+    }
 }
 
 private final class FeatureRepository: OpenAICompatibleProviderManaging, @unchecked Sendable {

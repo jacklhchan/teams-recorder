@@ -240,6 +240,10 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private let generator: any MeetingIntelligenceGenerating
     private let titleApplier: MeetingIntelligenceSuggestedTitleApplier?
     private let publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling
+    private let thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)?
+    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier? {
+        thirdPartyProcessingAdmission.map { ObjectIdentifier($0 as AnyObject) }
+    }
     private let now: DateNow
 
     private var tasksBySessionID: [RecordingSession.ID: Task<Void, Never>] = [:]
@@ -274,6 +278,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         titleApplier: MeetingIntelligenceSuggestedTitleApplier? = nil,
         stateSaveScheduler: any MeetingIntelligenceStateSaveScheduling = ImmediateMeetingIntelligenceStateSaveScheduler(),
         publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling = ImmediateMeetingIntelligencePublicationDeliveryScheduler(),
+        thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)? = nil,
         now: @escaping DateNow = { Date() }
     ) {
         self.expectedPublicationSourceID = expectedPublicationSourceID
@@ -293,6 +298,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         self.generator = generator
         self.titleApplier = titleApplier
         self.publicationDeliveryScheduler = publicationDeliveryScheduler
+        self.thirdPartyProcessingAdmission = thirdPartyProcessingAdmission
         self.now = now
     }
 
@@ -343,6 +349,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
               receivedTranscriptPath == normalizedReceivedTranscriptURL.path,
               normalizedReceivedTranscriptURL.path == normalizedExpectedTranscriptURL.path
         else { return }
+        guard admitsThirdPartyProcessing() else { return }
         let canonicalEvent = TranscriptPublished(
             session: session,
             canonicalURL: normalizedExpectedTranscriptURL,
@@ -369,6 +376,10 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     func checkAvailability(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) {
         guard !isShutDown, let canonicalSession = canonicalSession(for: session) else { return }
         sessionsByID[canonicalSession.id] = canonicalSession
+        guard admitsThirdPartyProcessing() else {
+            setPrivacyModeUnavailable(for: canonicalSession)
+            return
+        }
         let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
         tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -650,6 +661,10 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     ) {
         guard !isShutDown, let canonicalSession = canonicalSession(for: session) else { return }
         sessionsByID[canonicalSession.id] = canonicalSession
+        guard admitsThirdPartyProcessing() else {
+            setPrivacyModeUnavailable(for: canonicalSession)
+            return
+        }
         let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
         tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -877,6 +892,24 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                               suggestedTitle: presentation(for: session).suggestedTitle, statusMessage: "Automatic generation is unavailable.",
                               model: snapshot.profile.llmModel, titleIsProtected: titleIsProtected(session), unavailableReason: reason), for: session)
         if let ticket { await persist(.completed, message: "Automatic generation is unavailable.", revision: nil, ticket: ticket, for: session) }
+    }
+
+    private func admitsThirdPartyProcessing() -> Bool {
+        thirdPartyProcessingAdmission?.admitThirdPartyProcessing() != .blockedLocalOnly
+    }
+
+    private func setPrivacyModeUnavailable(for session: RecordingSession) {
+        let current = presentation(for: session)
+        setPresentation(.init(
+            phase: current.phase,
+            summary: current.summary,
+            suggestedTitle: current.suggestedTitle,
+            statusMessage: PrivacyModePolicy.localOnlyMessage,
+            model: current.model,
+            titleIsProtected: titleIsProtected(session),
+            unavailableReason: .privacyModeEnabled,
+            editableContent: current.editableContent
+        ), for: session)
     }
 
     private func loadPresentation(for session: RecordingSession) {

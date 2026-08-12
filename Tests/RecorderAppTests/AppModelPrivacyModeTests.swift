@@ -19,6 +19,14 @@ final class AppModelPrivacyModeTests: XCTestCase {
         defer { observation.cancel() }
 
         XCTAssertTrue(model.privacyModePolicy === policy)
+        XCTAssertEqual(
+            model.transcriptionFeature.thirdPartyProcessingAdmissionIdentity,
+            ObjectIdentifier(policy)
+        )
+        XCTAssertEqual(
+            model.meetingIntelligenceFeature.thirdPartyProcessingAdmissionIdentity,
+            ObjectIdentifier(policy)
+        )
         XCTAssertFalse(model.privacyModeEnabled)
 
         model.setPrivacyModeEnabled(true)

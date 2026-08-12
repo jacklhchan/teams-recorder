@@ -5,6 +5,55 @@ import XCTest
 
 @MainActor
 final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
+    func testPrivacyModeBlocksAvailabilityAndManualCommandsUntilDisabled() async throws {
+        let admission = CoordinatorPrivacyAdmission(blocked: true)
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            thirdPartyProcessingAdmission: admission
+        )
+
+        fixture.coordinator.checkAvailability(for: fixture.session)
+        await fixture.waitForIdle()
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).unavailableReason, .privacyModeEnabled)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).statusMessage, PrivacyModePolicy.localOnlyMessage)
+
+        let commands: [(MeetingIntelligenceJobCoordinator) -> Void] = [
+            { $0.generate(for: fixture.session) },
+            { $0.regenerate(for: fixture.session) },
+            { $0.retryGeneration(for: fixture.session) }
+        ]
+        for command in commands {
+            command(fixture.coordinator)
+            await fixture.waitForIdle()
+        }
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.generator.requests, 0)
+
+        admission.blocked = false
+        fixture.coordinator.generate(for: fixture.session)
+        await fixture.waitForIdle()
+        XCTAssertEqual(fixture.generator.requests, 1)
+    }
+
+    func testPrivacyModeBlocksAutomaticPublicationAndPreservesExistingArtifact() async throws {
+        let admission = CoordinatorPrivacyAdmission(blocked: true)
+        let fixture = try CoordinatorFixture(
+            availability: .confirmed,
+            thirdPartyProcessingAdmission: admission
+        )
+        let artifact = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        fixture.artifactStore.loaded = artifact
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+
+        fixture.coordinator.handleTranscriptPublished(fixture.event(generation: 1))
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.availability.requests, 0)
+        XCTAssertEqual(fixture.generator.requests, 0)
+        XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact, artifact)
+    }
     func testSaveEditPublishesExactlyOncePreservesMetadataAndUpdatesEditedProjection() async throws {
         let editedAt = Date(timeIntervalSince1970: 123)
         let fixture = try CoordinatorFixture(
@@ -1516,6 +1565,7 @@ private final class CoordinatorFixture {
          titleApplierOverride: Bool = false,
          publicationDeliveryOverride: (any MeetingIntelligencePublicationDeliveryScheduling)? = nil,
          artifactEditorOverride: (any MeetingIntelligenceArtifactEditing)? = nil,
+         thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)? = nil,
          sessionMetadata: RecordingSessionMetadata = .init(),
          now: @escaping MeetingIntelligenceJobCoordinator.DateNow = { .distantPast }) throws {
         root = RecordingLibraryURLIdentity.normalized(
@@ -1561,6 +1611,7 @@ private final class CoordinatorFixture {
                             titleApplier: titleApplier,
                             stateSaveScheduler: resolvedStateSaveScheduler,
                             publicationDeliveryScheduler: resolvedPublicationDelivery,
+                            thirdPartyProcessingAdmission: thirdPartyProcessingAdmission,
                             now: now)
     }
 
@@ -1615,6 +1666,15 @@ private final class CoordinatorFixture {
     private static func makeSnapshot(llmModel: String) throws -> OpenAICompatibleProviderSnapshot {
         try .validated(profile: .validated(baseURLText: "http://127.0.0.1:8080", asrModel: "asr", llmModel: llmModel,
                                             language: "en", prompt: ""), apiKey: nil)
+    }
+}
+
+@MainActor
+private final class CoordinatorPrivacyAdmission: ThirdPartyProcessingAdmitting, @unchecked Sendable {
+    var blocked: Bool
+    init(blocked: Bool) { self.blocked = blocked }
+    func admitThirdPartyProcessing() -> PrivacyModeAdmission {
+        blocked ? .blockedLocalOnly : .allowed
     }
 }
 

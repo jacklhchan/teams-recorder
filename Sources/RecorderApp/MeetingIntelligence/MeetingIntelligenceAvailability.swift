@@ -6,6 +6,7 @@ enum MeetingIntelligenceAvailability: Equatable, Sendable {
 }
 
 enum MeetingIntelligenceUnavailableReason: Equatable, Sendable {
+    case privacyModeEnabled
     case missingProfile
     case placeholderModel
     case discoveryUnsupported

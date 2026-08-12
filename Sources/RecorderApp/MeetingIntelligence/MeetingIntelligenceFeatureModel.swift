@@ -51,6 +51,12 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
         coordinator.providerRepositoryIdentity
     }
 
+    /// Composition-only identity used to verify that AppModel shares one
+    /// policy owner across all third-party processing boundaries.
+    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier? {
+        coordinator.thirdPartyProcessingAdmissionIdentity
+    }
+
     var snapshot: MeetingIntelligenceFeatureSnapshot { coordinator.snapshot }
 
     func presentation(for session: RecordingSession) -> MeetingIntelligencePresentation {

@@ -1261,6 +1261,11 @@ private struct StorageFixture {
 private final class ScreenCapturePublicationCoordinator: RecordingPublicationCoordinating {
     var presentation = RecordingPublicationPresentation(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0)
     var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
+    var recoveryCenterSnapshot = RecoveryCenterSnapshot(
+        presentation: .init(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0),
+        items: []
+    )
+    var onRecoveryCenterSnapshotChange: ((RecoveryCenterSnapshot) -> Void)?
     var onCompleted: ((RecordingPublicationCompleted) -> Void)?
     func enqueue(_: RecordingPublicationRequest) {}
     func resume() {}

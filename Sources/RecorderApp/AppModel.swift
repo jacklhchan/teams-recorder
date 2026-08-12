@@ -46,6 +46,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
     @Published private(set) var recordingDestinationState: RecordingDestinationState = .ready
     @Published private(set) var recordingPublicationPresentation = RecordingPublicationPresentation(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0)
+    @Published private(set) var recoveryCenterSnapshot = RecoveryCenterSnapshot(
+        presentation: .init(
+            stateText: "Up to date",
+            pendingCount: 0,
+            waitingCount: 0,
+            needsAttentionCount: 0
+        ),
+        items: []
+    )
     @Published private(set) var privacyModeEnabled: Bool
     @Published var statusMessage = "Ready"
     @Published var lastHealthReport: RecordingHealthReport?
@@ -583,9 +592,13 @@ final class AppModel: ObservableObject {
         prbFeatureBridge = bridge
         bridge.start()
         self.recordingPublicationPresentation = self.recordingPublicationCoordinator.presentation
+        self.recoveryCenterSnapshot = self.recordingPublicationCoordinator.recoveryCenterSnapshot
         self.recordingPublicationCoordinator.onPresentationChange = { [weak self] presentation in
             self?.recordingPublicationPresentation = presentation
             self?.projectRecordingPublicationStatus(presentation)
+        }
+        self.recordingPublicationCoordinator.onRecoveryCenterSnapshotChange = { [weak self] snapshot in
+            self?.recoveryCenterSnapshot = snapshot
         }
         self.recordingPublicationCoordinator.onCompleted = { [weak self] completion in
             self?.acceptRecordingPublicationCompletion(completion)

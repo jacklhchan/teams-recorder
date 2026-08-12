@@ -2169,6 +2169,11 @@ private extension RecordingPublicationPresentation {
 private final class RenderPublicationCoordinator: RecordingPublicationCoordinating {
     var presentation: RecordingPublicationPresentation
     var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
+    var recoveryCenterSnapshot = RecoveryCenterSnapshot(
+        presentation: .init(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0),
+        items: []
+    )
+    var onRecoveryCenterSnapshotChange: ((RecoveryCenterSnapshot) -> Void)?
     var onCompleted: ((RecordingPublicationCompleted) -> Void)?
 
     init(presentation: RecordingPublicationPresentation) {

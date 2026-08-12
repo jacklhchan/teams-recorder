@@ -4,6 +4,91 @@ import XCTest
 
 @MainActor
 final class AppModelRecordingPublicationTests: XCTestCase {
+    func testCoordinatorRecoverySnapshotIsProjectedWithoutPendingStoreRead() throws {
+        let fixture = try AppModelPublicationFixture()
+        let snapshot = RecoveryCenterSnapshot(
+            presentation: .init(
+                stateText: "Needs attention",
+                pendingCount: 1,
+                waitingCount: 1,
+                needsAttentionCount: 1
+            ),
+            items: [
+                .init(
+                    id: UUID(), source: .manual,
+                    createdAt: Date(timeIntervalSince1970: 1),
+                    state: .publishingOrPending,
+                    safeStatusText: "Publishing local copy", canRetry: false
+                ),
+                .init(
+                    id: UUID(), source: .teamsAutomatic,
+                    createdAt: Date(timeIntervalSince1970: 2),
+                    state: .waitingForDestination,
+                    safeStatusText: "Destination access is needed", canRetry: true
+                ),
+                .init(
+                    id: UUID(), source: .manual,
+                    createdAt: Date(timeIntervalSince1970: 3),
+                    state: .needsAttention,
+                    safeStatusText: "This local recording needs attention before it can be published.",
+                    canRetry: false
+                )
+            ]
+        )
+
+        fixture.publication.emitRecoveryCenterSnapshot(snapshot)
+
+        XCTAssertEqual(fixture.model.recoveryCenterSnapshot, snapshot)
+    }
+
+    func testRetryPendingRecordingsDelegatesOnceWithoutSnapshotMutation() throws {
+        let fixture = try AppModelPublicationFixture()
+        let snapshot = RecoveryCenterSnapshot(
+            presentation: .init(
+                stateText: "Waiting for destination",
+                pendingCount: 0,
+                waitingCount: 1,
+                needsAttentionCount: 0
+            ),
+            items: [.init(
+                id: UUID(), source: .manual,
+                createdAt: Date(timeIntervalSince1970: 4),
+                state: .waitingForDestination,
+                safeStatusText: "Destination access is needed", canRetry: true
+            )]
+        )
+        fixture.publication.emitRecoveryCenterSnapshot(snapshot)
+
+        fixture.model.retryPendingRecordings()
+
+        XCTAssertEqual(fixture.publication.retryNowCalls, 1)
+        XCTAssertEqual(fixture.model.recoveryCenterSnapshot, snapshot)
+    }
+
+    func testLegacyNeedsAttentionSnapshotRemainsVisibleAfterProjection() throws {
+        let fixture = try AppModelPublicationFixture()
+        let legacyItem = RecoveryCenterItem(
+            id: UUID(), source: .manual,
+            createdAt: Date(timeIntervalSince1970: 5),
+            state: .needsAttention,
+            safeStatusText: "This local recording needs attention before it can be published.",
+            canRetry: false
+        )
+        let snapshot = RecoveryCenterSnapshot(
+            presentation: .init(
+                stateText: "Needs attention",
+                pendingCount: 0,
+                waitingCount: 0,
+                needsAttentionCount: 1
+            ),
+            items: [legacyItem]
+        )
+
+        fixture.publication.emitRecoveryCenterSnapshot(snapshot)
+
+        XCTAssertEqual(fixture.model.recoveryCenterSnapshot.items, [legacyItem])
+    }
+
     func testRestoredDestinationIsLibraryWorkspaceButRecordingStartsInPendingRoot() async throws {
         let fixture = try AppModelPublicationFixture()
 
@@ -293,13 +378,23 @@ private final class AppModelPublicationFixture {
 private final class PublicationCoordinatorSpy: RecordingPublicationCoordinating {
     var presentation = RecordingPublicationPresentation(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0)
     var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
+    var recoveryCenterSnapshot = RecoveryCenterSnapshot(
+        presentation: .init(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0),
+        items: []
+    )
+    var onRecoveryCenterSnapshotChange: ((RecoveryCenterSnapshot) -> Void)?
     var onCompleted: ((RecordingPublicationCompleted) -> Void)?
     private(set) var requests: [RecordingPublicationRequest] = []
+    private(set) var retryNowCalls = 0
     func enqueue(_ request: RecordingPublicationRequest) { requests.append(request) }
     func resume() {}
-    func retryNow() {}
+    func retryNow() { retryNowCalls += 1 }
     func shutdown() {}
     func complete(with completion: RecordingPublicationCompleted) { onCompleted?(completion) }
+    func emitRecoveryCenterSnapshot(_ snapshot: RecoveryCenterSnapshot) {
+        recoveryCenterSnapshot = snapshot
+        onRecoveryCenterSnapshotChange?(snapshot)
+    }
 }
 
 private final class PublicationDestinationStore: RecordingDestinationStoring {

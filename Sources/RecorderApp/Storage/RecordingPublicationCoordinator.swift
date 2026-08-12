@@ -160,7 +160,14 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
             let old = items; items.removeAll { $0.id == item.id }
             guard persist() else { items = old; return }
             destinationStore.prune(keeping: Set(items.map(\.destinationIdentity))); publishPresentation()
-        } catch { guard current(workerGeneration) else { return }; _ = recordFailure(item.id, error: error) }
+        } catch {
+            guard current(workerGeneration) else { return }
+            if case RecordingPublicationError.destinationUnavailable = error {
+                _ = recordPublishedDestinationUnavailable(item.id)
+            } else {
+                _ = recordFailure(item.id, error: error)
+            }
+        }
     }
 
     private func transitionToPublishing(_ id: UUID, generation: UInt64) -> Bool {

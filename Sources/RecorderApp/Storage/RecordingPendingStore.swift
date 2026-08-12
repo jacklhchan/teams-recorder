@@ -57,7 +57,10 @@ struct RecordingPendingStore: Sendable {
         let rootDescriptor = try openRootDescriptor()
         let rootIdentity = try directoryIdentity(of: rootDescriptor)
         let descriptor = openat(rootDescriptor, directoryName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else { throw RecordingPendingStoreError.unsafeSession }
+        guard descriptor >= 0 else {
+            Darwin.close(rootDescriptor)
+            throw RecordingPendingStoreError.unsafeSession
+        }
         do {
             let identity = try directoryIdentity(of: descriptor)
             return RecordingPendingSession(

@@ -297,6 +297,26 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.coordinator.presentation.needsAttentionCount, 1)
         XCTAssertTrue(fixture.sourceExists)
     }
+
+    func testPublishedValidationDestinationUnavailableRemainsTerminalUntilManualRetry() async throws {
+        let fixture = try CoordinatorFixture(manifestState: .published)
+        fixture.publisher.validationErrors = [.destinationUnavailable]
+        fixture.coordinator.resume()
+        await fixture.waitForIdle()
+
+        let waiting = try XCTUnwrap(fixture.persistedItems.first)
+        XCTAssertEqual(waiting.state, .published)
+        XCTAssertEqual(waiting.failureCategory, "destinationUnavailable")
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+
+        fixture.coordinator.retryNow()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.validationIDs, [fixture.request.id, fixture.request.id])
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+        XCTAssertEqual(fixture.completions.values.map(\.itemID), [fixture.request.id])
+        XCTAssertFalse(fixture.sourceExists)
+    }
 }
 
 private final class FailingCoordinatorManifestStore: RecordingPublicationManifestStoring, @unchecked Sendable {
@@ -416,6 +436,7 @@ private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked
     private(set) var validationIDs: [UUID] = []
     var beforeSuccess: (() -> Void)?
     var validationError: RecordingPublicationError?
+    var validationErrors: [RecordingPublicationError] = []
     var afterSourceOpened: (() throws -> Void)?
     private(set) var admittedRootInode: ino_t = 0
     var suspendNextPublish = false
@@ -460,6 +481,7 @@ private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked
     func validatePublished(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
         withLock { validationIDs.append(item.id) }
         if let validationError { throw validationError }
+        if let error = withLockResult({ validationErrors.isEmpty ? nil : validationErrors.removeFirst() }) { throw error }
         guard let device = item.publishedSourceDevice, let inode = item.publishedSourceInode,
               let rootDevice = item.publishedSourceRootDevice, let rootInode = item.publishedSourceRootInode,
               let folder = item.publishedFolderName, let recording = item.publishedRecordingName else { throw RecordingPublicationError.verificationMismatch }

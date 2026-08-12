@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -21,13 +22,23 @@ class AccessibilityAPIAuditTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents, encoding="utf-8")
 
-    def run_audit(self):
+    def run_audit(self, extra_environment=None):
+        environment = os.environ.copy()
+        if extra_environment:
+            environment.update(extra_environment)
         return subprocess.run(
             ["/bin/bash", str(AUDIT), str(self.root)],
             text=True,
             capture_output=True,
             check=False,
+            env=environment,
         )
+
+    def make_failing_tool(self, name):
+        tool = self.root / name
+        tool.write_text("#!/bin/bash\nexit 2\n", encoding="utf-8")
+        tool.chmod(0o755)
+        return tool
 
     def test_allows_swiftui_identifier_and_ignored_fixture_locations(self):
         self.write("Sources/RecorderApp/ContentView.swift", 'Text("Record").accessibilityIdentifier("record")\n')
@@ -61,6 +72,36 @@ class AccessibilityAPIAuditTests(unittest.TestCase):
             result.stderr,
             "Accessibility API prohibited: Package.swift: ApplicationServices\n",
         )
+
+    def test_fails_closed_when_grep_errors(self):
+        self.write("Sources/RecorderApp/ContentView.swift", 'Text("Record")\n')
+        grep = self.make_failing_tool("fake-grep")
+
+        result = self.run_audit(
+            {
+                "ACCESSIBILITY_AUDIT_TEST_MODE": "1",
+                "ACCESSIBILITY_AUDIT_ALLOW_TOOL_OVERRIDES": "1",
+                "ACCESSIBILITY_AUDIT_GREP_BIN": str(grep),
+            }
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("grep failed", result.stderr)
+
+    def test_fails_closed_when_find_errors(self):
+        self.write("Sources/RecorderApp/ContentView.swift", 'Text("Record")\n')
+        find = self.make_failing_tool("fake-find")
+
+        result = self.run_audit(
+            {
+                "ACCESSIBILITY_AUDIT_TEST_MODE": "1",
+                "ACCESSIBILITY_AUDIT_ALLOW_TOOL_OVERRIDES": "1",
+                "ACCESSIBILITY_AUDIT_FIND_BIN": str(find),
+            }
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("find failed", result.stderr)
 
 
 if __name__ == "__main__":

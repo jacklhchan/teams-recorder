@@ -20,6 +20,7 @@ protocol RecordingSessionPublishing: Sendable {
 
 struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendable {
     typealias MediaValidator = (Int32, String) -> Bool
+    typealias WriteOperation = (Int32, UnsafeRawPointer, Int) -> Int
 
     enum EntryContext: Equatable { case source, staging, published }
 
@@ -39,15 +40,18 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
     private let pendingStore: RecordingPendingStore
     private let mediaValidator: MediaValidator
     private let hooks: Hooks
+    private let writeOperation: WriteOperation
 
     init(
         pendingStore: RecordingPendingStore,
         mediaValidator: @escaping MediaValidator = Self.liveMediaValidator,
-        hooks: Hooks = .init()
+        hooks: Hooks = .init(),
+        writeOperation: @escaping WriteOperation = { Darwin.write($0, $1, $2) }
     ) {
         self.pendingStore = pendingStore
         self.mediaValidator = mediaValidator
         self.hooks = hooks
+        self.writeOperation = writeOperation
     }
 
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
@@ -60,11 +64,8 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         }
         let sourceDigest = aggregateDigest(sourceInventory)
 
-        let (destinationParentFD, destinationFD) = try openDestination(destination.url)
-        defer {
-            Darwin.close(destinationFD)
-            Darwin.close(destinationParentFD)
-        }
+        let destinationFD = try openDestination(destination.url)
+        defer { Darwin.close(destinationFD) }
         if let existing = try publishedMatch(
             in: destinationFD,
             destinationURL: destination.url,
@@ -179,32 +180,42 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         }
     }
 
-    private func openDestination(_ url: URL) throws -> (Int32, Int32) {
-        let standardized = url.standardizedFileURL
-        let name = standardized.lastPathComponent
-        guard !name.isEmpty, name != ".", name != ".." else {
+    private func openDestination(_ url: URL) throws -> Int32 {
+        let path = url.path
+        guard path.hasPrefix("/") else { throw RecordingPublicationError.destinationUnavailable }
+        let rawComponents = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard rawComponents.first?.isEmpty == true, rawComponents.count > 1 else {
             throw RecordingPublicationError.destinationUnavailable
         }
-        let parentFD = open(standardized.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        guard parentFD >= 0 else { throw RecordingPublicationError.destinationUnavailable }
-        var observation = stat()
-        guard fstatat(parentFD, name, &observation, AT_SYMLINK_NOFOLLOW) == 0,
-              (observation.st_mode & S_IFMT) == S_IFDIR else {
-            Darwin.close(parentFD)
+        let components = rawComponents.dropFirst()
+        guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
             throw RecordingPublicationError.destinationUnavailable
         }
-        let descriptor = openat(parentFD, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else {
-            Darwin.close(parentFD)
-            throw RecordingPublicationError.destinationUnavailable
+
+        var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard current >= 0 else { throw RecordingPublicationError.destinationUnavailable }
+        for component in components {
+            var observation = stat()
+            guard fstatat(current, String(component), &observation, AT_SYMLINK_NOFOLLOW) == 0,
+                  (observation.st_mode & S_IFMT) == S_IFDIR else {
+                Darwin.close(current)
+                throw RecordingPublicationError.destinationUnavailable
+            }
+            let next = openat(current, String(component), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard next >= 0 else {
+                Darwin.close(current)
+                throw RecordingPublicationError.destinationUnavailable
+            }
+            var opened = stat()
+            guard fstat(next, &opened) == 0, sameIdentity(observation, opened) else {
+                Darwin.close(next)
+                Darwin.close(current)
+                throw RecordingPublicationError.destinationUnavailable
+            }
+            Darwin.close(current)
+            current = next
         }
-        var opened = stat()
-        guard fstat(descriptor, &opened) == 0, sameIdentity(observation, opened) else {
-            Darwin.close(descriptor)
-            Darwin.close(parentFD)
-            throw RecordingPublicationError.destinationUnavailable
-        }
-        return (parentFD, descriptor)
+        return current
     }
 
     private func finalizedRecording(in inventory: [InventoryEntry]) throws -> String {
@@ -366,7 +377,9 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
     }
 
     private func aggregateDigest(_ inventory: [InventoryEntry]) -> String {
-        let data = (try? JSONEncoder().encode(inventory)) ?? Data()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(inventory)) ?? Data()
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -453,11 +466,19 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         )
         guard descriptor >= 0 else { throw RecordingPublicationError.ioFailure("marker") }
         defer { Darwin.close(descriptor) }
-        try data.withUnsafeBytes {
-            guard Darwin.write(descriptor, $0.baseAddress!, $0.count) == $0.count else {
-                throw RecordingPublicationError.ioFailure("marker")
+        try data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < bytes.count {
+                let written = writeOperation(descriptor, baseAddress.advanced(by: offset), bytes.count - offset)
+                if written < 0, errno == EINTR { continue }
+                guard written > 0, written <= bytes.count - offset else {
+                    throw RecordingPublicationError.ioFailure("marker")
+                }
+                offset += written
             }
         }
+        guard fsync(descriptor) == 0 else { throw RecordingPublicationError.ioFailure("marker") }
     }
 
     private func destinationName(preferred: String, itemID: UUID, in directory: Int32) throws -> String {

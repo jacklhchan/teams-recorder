@@ -17,6 +17,7 @@ internal static class RecorderAppSettingsTests
             CaptureSource = RecorderPersistedCaptureSource.SelectedApplication,
             SelectedApplicationExecutable = "custom-recorder-target",
             LocalTeamsHeuristicAutoStartEnabled = true,
+            FollowTeamsMuteEnabled = true,
         }).GetAwaiter().GetResult();
 
         var loaded = store.LoadAsync().GetAwaiter().GetResult()
@@ -27,7 +28,7 @@ internal static class RecorderAppSettingsTests
             loaded.CaptureSource != RecorderPersistedCaptureSource.SelectedApplication ||
             loaded.SelectedApplicationExecutable != "custom-recorder-target.exe" ||
             loaded.TeamsMuteSyncEnabled || !loaded.TeamsAutomaticRecordingEnabled ||
-            !loaded.LocalTeamsHeuristicAutoStartEnabled)
+            !loaded.LocalTeamsHeuristicAutoStartEnabled || !loaded.FollowTeamsMuteEnabled)
             throw new InvalidOperationException("Public app settings did not round trip.");
 
         var json = File.ReadAllText(path);
@@ -63,10 +64,19 @@ internal static class RecorderAppSettingsTests
         var legacy = new JsonRecorderAppSettingsStore(legacyPath).LoadAsync().GetAwaiter().GetResult()
             ?? throw new InvalidOperationException("Expected legacy settings.");
         if (legacy.TeamsMuteSyncEnabled || legacy.TeamsAutomaticRecordingEnabled ||
-            legacy.LocalTeamsHeuristicAutoStartEnabled)
+            legacy.LocalTeamsHeuristicAutoStartEnabled || legacy.FollowTeamsMuteEnabled)
             throw new InvalidOperationException("Legacy settings must require fresh local-monitoring consent.");
 
-        Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { SchemaVersion = 4 }));
+        var schemaThree = RecorderAppSettings.Validate(new RecorderAppSettings
+        {
+            SchemaVersion = 3,
+            LocalTeamsHeuristicAutoStartEnabled = true,
+            FollowTeamsMuteEnabled = true,
+        });
+        if (!schemaThree.LocalTeamsHeuristicAutoStartEnabled || schemaThree.FollowTeamsMuteEnabled)
+            throw new InvalidOperationException("Schema 3 must preserve auto-recording consent but require fresh mute-follow consent.");
+
+        Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { SchemaVersion = 5 }));
         Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings { RenderEndpointId = "unsafe\u0001id" }));
         Throws<RecorderAppSettingsException>(() => RecorderAppSettings.Validate(new RecorderAppSettings
         {

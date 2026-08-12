@@ -41,6 +41,23 @@ internal static class InputMuteTests
             throw new InvalidOperationException("Hotkey registration was not disposed.");
     }
 
+    public static void TeamsMuteIsIndependentAndNeverClearsManualMute()
+    {
+        var coordinator = new InputMuteCoordinator();
+        var transitions = new List<bool>();
+        coordinator.Changed += transitions.Add;
+
+        coordinator.SetTeamsMuted(true);
+        coordinator.SetLocalMuted(true);
+        coordinator.SetTeamsMuted(false);
+        if (!coordinator.IsMuted || !coordinator.IsLocalMuted || coordinator.IsTeamsMuted)
+            throw new InvalidOperationException("Clearing Teams mute must not clear the user's Recorder mute.");
+
+        coordinator.SetLocalMuted(false);
+        if (coordinator.IsMuted || !transitions.SequenceEqual([true, false]))
+            throw new InvalidOperationException("Teams mute must participate in effective transitions exactly once.");
+    }
+
     private sealed class FakeRegistrar : IGlobalHotKeyRegistrar
     {
         public FakeRegistration Registration { get; } = new();

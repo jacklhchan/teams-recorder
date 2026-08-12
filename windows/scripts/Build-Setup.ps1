@@ -85,6 +85,13 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory "Recorder.AsrWorke
     throw "Self-contained publish did not include Recorder.AsrWorker.exe."
 }
 
+& $dotnet restore $controlProject `
+    --runtime win-x64 `
+    --tl:off
+if ($LASTEXITCODE -ne 0) {
+    throw "Self-contained recorderctl restore failed with exit code $LASTEXITCODE."
+}
+
 & $dotnet publish $controlProject `
     --configuration Release `
     --runtime win-x64 `

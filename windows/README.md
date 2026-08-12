@@ -63,9 +63,11 @@ The Windows product no longer connects to the retired Teams Third-party App API,
 does not request pairing, and does not consume or persist a Teams WebSocket
 token. Automatic recording is an explicit, local-only heuristic opt-in and must
 not be presented as authoritative meeting state. Upgrading from a legacy API
-setting does not grant consent to local monitoring. Recorder microphone mute is
-always independent: the app neither reads nor guesses Teams mute and never
-changes Teams mute. Exact Teams-window video capture is available as a Draft
+setting does not grant consent to local monitoring. A separate, explicit
+Preview opt-in can read the exact Teams `microphone-button` and gate only the
+Recorder physical-microphone mix; it never invokes or changes Teams mute and
+fails closed while an active Teams audio session cannot be confirmed. Exact
+Teams-window video capture is available as a Draft
 feature, but real Teams hardware acceptance remains a release gate. A virtual
 microphone driver remains preview-only.
 

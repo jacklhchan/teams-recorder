@@ -14,6 +14,10 @@ _Static_assert(RECORDER_NATIVE_SELECTED_AUDIO_SYSTEM_LOOPBACK == 0, "selected-au
 _Static_assert(RECORDER_NATIVE_SELECTED_AUDIO_PROCESS_TREE_LOOPBACK == 1, "selected-audio process-tree source ABI changed");
 _Static_assert(RECORDER_NATIVE_STATE_STARTING == 4, "state ABI changed");
 _Static_assert(RECORDER_NATIVE_STATE_STOPPING == 5, "state ABI changed");
+_Static_assert(RECORDER_NATIVE_TEAMS_MUTE_BUTTON_NOT_FOUND == 0, "Teams mute state ABI changed");
+_Static_assert(RECORDER_NATIVE_TEAMS_MUTE_BUTTON_MUTED == 1, "Teams mute state ABI changed");
+_Static_assert(RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNMUTED == 2, "Teams mute state ABI changed");
+_Static_assert(RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE == 3, "Teams mute state ABI changed");
 _Static_assert(RECORDER_NATIVE_ENDPOINT_FLOW_RENDER == 0u, "render flow ABI changed");
 _Static_assert(RECORDER_NATIVE_ENDPOINT_FLOW_CAPTURE == 1u, "capture flow ABI changed");
 _Static_assert(RECORDER_NATIVE_ENDPOINT_DEFAULT_CONSOLE == 1u, "console default ABI changed");
@@ -116,6 +120,10 @@ int main(void) {
         !expect(recorder_native_probe_teams_render_endpoints(NULL, &endpoint_list) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "Teams render probe(NULL) must reject the handle") ||
         !expect(endpoint_list == NULL, "failed Teams render probe must clear the output list") ||
+        !expect(recorder_native_read_teams_mute_button_state(0U, &endpoint_count) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "Teams mute probe must reject a NULL HWND") ||
+        !expect(recorder_native_read_teams_mute_button_state(1U, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,
+                "Teams mute probe must reject a NULL output") ||
         !expect(recorder_native_endpoint_list_get_count(NULL, &endpoint_count) == RECORDER_NATIVE_INVALID_ARGUMENT,
                 "endpoint count(NULL) must reject the list") ||
         !expect(recorder_native_endpoint_list_get(NULL, 0U, NULL, NULL, NULL, NULL) == RECORDER_NATIVE_INVALID_ARGUMENT,

@@ -56,6 +56,14 @@ typedef enum RecorderNativeState {
     RECORDER_NATIVE_STATE_STOPPING = 5
 } RecorderNativeState;
 
+/* Read-only projection of one exact Teams microphone-button UIA control. */
+typedef enum RecorderNativeTeamsMuteButtonState {
+    RECORDER_NATIVE_TEAMS_MUTE_BUTTON_NOT_FOUND = 0,
+    RECORDER_NATIVE_TEAMS_MUTE_BUTTON_MUTED = 1,
+    RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNMUTED = 2,
+    RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE = 3
+} RecorderNativeTeamsMuteButtonState;
+
 typedef enum RecorderNativeCaptureMode {
     RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK = 0,
     RECORDER_NATIVE_CAPTURE_MICROPHONE = 1,
@@ -385,6 +393,15 @@ RECORDER_NATIVE_API RecorderNativeResult recorder_native_enumerate_endpoints(
 RECORDER_NATIVE_API RecorderNativeResult recorder_native_probe_teams_render_endpoints(
     RecorderNativeBridge* bridge,
     RecorderNativeEndpointList** out_list);
+
+/*
+ * Reads only AutomationId=microphone-button under one already-admitted Teams
+ * top-level HWND. It never invokes UIA and never changes Teams state. The
+ * current action Name is interpreted natively and is not returned to callers.
+ */
+RECORDER_NATIVE_API RecorderNativeResult recorder_native_read_teams_mute_button_state(
+    uint64_t window_handle,
+    uint32_t* out_state);
 
 /* Releases an endpoint snapshot. NULL is accepted. */
 RECORDER_NATIVE_API void recorder_native_endpoint_list_destroy(

@@ -92,6 +92,7 @@ void MacParitySurfacesRemainWired()
         "SettingsHktGroupIdTextBox",
         "SettingsHktResolvedUrlTextBox",
         "SettingsMeetingIntelligencePromptTextBox",
+        "SettingsFollowTeamsMuteCheckBox",
     }) AssertDocumentContains(settings, automationId);
     Contains("StartAutomaticAsync(providerProcessingAllowed: true)", viewModelCode,
         "A confirmed ASR request must wire automatic Meeting Intelligence.");
@@ -101,6 +102,12 @@ void MacParitySurfacesRemainWired()
         "Live low-storage monitoring must retain audio while disabling video.");
     Contains("WindowsInputMuteMonitor", viewModelCode,
         "The selected Windows input endpoint must contribute hardware mute state.");
+    Contains("WindowsTeamsMuteFollowProbe", viewModelCode,
+        "The opt-in read-only Teams mute observer must remain wired.");
+    Contains("recorderMicrophoneMute.SetTeamsMuted", viewModelCode,
+        "Teams observation must gate only Recorder's microphone contribution.");
+    Contains("ProbeTeamsRenderEndpoints", viewModelCode,
+        "A hidden Teams toolbar during an active audio session must fail closed rather than look like call exit.");
     Contains("CaptureOpenAiProviderDraft", viewModelCode,
         "Switching provider must preserve independent unsaved drafts.");
     Contains("OpenAiApiKeyReplacement", settings.ToString(),

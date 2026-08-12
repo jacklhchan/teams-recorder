@@ -117,6 +117,7 @@ target_link_libraries(Recorder.WasapiCapture PUBLIC ole32 uuid mf mfplat mfreadw
             mfreadwrite
             mfuuid
             ole32
+            uiautomationcore
     )
 
     add_executable(Recorder.AudioProbe tools/audio_probe_main.cpp)
@@ -177,6 +178,12 @@ if(RECORDER_NATIVE_BUILD_TESTS)
     target_link_libraries(Recorder.NativeBridge.CAbiSmokeTests PRIVATE Recorder.NativeBridge)
     recorder_enable_strict_warnings(Recorder.NativeBridge.CAbiSmokeTests)
     add_test(NAME Recorder.NativeBridge.CAbiSmokeTests COMMAND Recorder.NativeBridge.CAbiSmokeTests)
+
+    add_executable(Recorder.TeamsMuteButtonState.Tests tests/teams_mute_button_state_tests.cpp)
+    target_compile_features(Recorder.TeamsMuteButtonState.Tests PRIVATE cxx_std_17)
+    target_include_directories(Recorder.TeamsMuteButtonState.Tests PRIVATE src include)
+    recorder_enable_strict_warnings(Recorder.TeamsMuteButtonState.Tests)
+    add_test(NAME Recorder.TeamsMuteButtonState.Tests COMMAND Recorder.TeamsMuteButtonState.Tests)
 
     add_executable(Recorder.Wav.Tests wav/tests/wav_writer_tests.cpp)
     target_compile_features(Recorder.Wav.Tests PRIVATE cxx_std_17)

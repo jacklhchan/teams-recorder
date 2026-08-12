@@ -5,6 +5,7 @@
 #include "capture_session.h"
 #include "mixed_capture_session.h"
 #include "mp4_decode_validator.h"
+#include "teams_mute_button_state.h"
 #include "wasapi_capture.h"
 
 #include <propkey.h>
@@ -13,11 +14,15 @@
 #include <mmdeviceapi.h>
 #include <propvarutil.h>
 #include <windows.h>
+#include <oleauto.h>
+#include <uiautomation.h>
+#include <wrl/client.h>
 #endif
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <iterator>
 #include <limits>
@@ -32,6 +37,102 @@
 namespace {
 
 #if defined(_WIN32)
+RecorderNativeTeamsMuteButtonState ReadTeamsMuteButtonState(HWND window) noexcept {
+    class ScopedComApartment final {
+    public:
+        ScopedComApartment() noexcept : result_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
+        ~ScopedComApartment() { if (result_ == S_OK || result_ == S_FALSE) CoUninitialize(); }
+        HRESULT result() const noexcept { return result_; }
+    private:
+        HRESULT result_;
+    } apartment;
+    if (FAILED(apartment.result()) && apartment.result() != RPC_E_CHANGED_MODE) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    Microsoft::WRL::ComPtr<IUIAutomation> automation;
+    HRESULT hr = CoCreateInstance(
+        CLSID_CUIAutomation8,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&automation));
+    if (FAILED(hr)) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    Microsoft::WRL::ComPtr<IUIAutomationElement> root;
+    hr = automation->ElementFromHandle(window, &root);
+    if (FAILED(hr) || !root) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    VARIANT value;
+    VariantInit(&value);
+    value.vt = VT_BSTR;
+    value.bstrVal = SysAllocString(L"microphone-button");
+    if (value.bstrVal == nullptr) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    Microsoft::WRL::ComPtr<IUIAutomationCondition> condition;
+    hr = automation->CreatePropertyCondition(UIA_AutomationIdPropertyId, value, &condition);
+    VariantClear(&value);
+    if (FAILED(hr) || !condition) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    Microsoft::WRL::ComPtr<IUIAutomationElementArray> matches;
+    hr = root->FindAll(TreeScope_Subtree, condition.Get(), &matches);
+    if (FAILED(hr) || !matches) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    int count = 0;
+    hr = matches->get_Length(&count);
+    if (FAILED(hr) || count < 0) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+    if (count == 0) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_NOT_FOUND;
+    }
+    if (count != 1) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    Microsoft::WRL::ComPtr<IUIAutomationElement> button;
+    hr = matches->GetElement(0, &button);
+    if (FAILED(hr) || !button) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    CONTROLTYPEID control_type = 0;
+    BOOL enabled = FALSE;
+    BOOL offscreen = TRUE;
+    if (FAILED(button->get_CurrentControlType(&control_type)) ||
+        FAILED(button->get_CurrentIsEnabled(&enabled)) ||
+        FAILED(button->get_CurrentIsOffscreen(&offscreen)) ||
+        control_type != UIA_ButtonControlTypeId || enabled == FALSE || offscreen != FALSE) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    BSTR automation_id = nullptr;
+    hr = button->get_CurrentAutomationId(&automation_id);
+    const bool exact_id = SUCCEEDED(hr) && automation_id != nullptr &&
+        std::wcscmp(automation_id, L"microphone-button") == 0;
+    SysFreeString(automation_id);
+    if (!exact_id) {
+        return RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    }
+
+    BSTR action_name = nullptr;
+    hr = button->get_CurrentName(&action_name);
+    const RecorderNativeTeamsMuteButtonState state = SUCCEEDED(hr) && action_name != nullptr
+        ? recorder::teams::InterpretMicrophoneButtonAction(action_name)
+        : RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    SysFreeString(action_name);
+    return state;
+}
+
 class MediaFoundationRuntime final {
 public:
     MediaFoundationRuntime() = default;
@@ -987,6 +1088,27 @@ extern "C" RecorderNativeResult recorder_native_start_with_options(
             "Starting the native capture session failed unexpectedly.");
         return RECORDER_NATIVE_INTERNAL_ERROR;
     }
+#endif
+}
+
+extern "C" RecorderNativeResult recorder_native_read_teams_mute_button_state(
+    uint64_t window_handle,
+    uint32_t* out_state) {
+    if (window_handle == 0 || out_state == nullptr) {
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+
+#if !defined(_WIN32)
+    *out_state = RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+    return RECORDER_NATIVE_NOT_IMPLEMENTED;
+#else
+    const auto window = reinterpret_cast<HWND>(static_cast<uintptr_t>(window_handle));
+    if (!IsWindow(window)) {
+        *out_state = RECORDER_NATIVE_TEAMS_MUTE_BUTTON_UNAVAILABLE;
+        return RECORDER_NATIVE_INVALID_ARGUMENT;
+    }
+    *out_state = static_cast<uint32_t>(ReadTeamsMuteButtonState(window));
+    return RECORDER_NATIVE_OK;
 #endif
 }
 

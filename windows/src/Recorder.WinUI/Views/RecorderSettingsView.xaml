@@ -104,7 +104,7 @@
                     <StackPanel Spacing="12">
                         <StackPanel Spacing="2">
                             <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="本機 Teams 自動錄音" />
-                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="完全在本機根據 Teams 播放活動推測會議狀態；不會連線至 Teams 服務或同步 Teams 靜音。" TextWrapping="Wrap" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="完全在本機根據 Teams 播放活動推測會議狀態；不會連線至 Teams 服務。" TextWrapping="Wrap" />
                         </StackPanel>
                         <CheckBox
                             AutomationProperties.AutomationId="SettingsEnableLocalTeamsHeuristicCheckBox"
@@ -116,6 +116,26 @@
                             <Button AutomationProperties.AutomationId="SettingsEnableTeamsAutomaticRecordingButton" Command="{Binding EnableTeamsAutomaticRecordingCommand}" Content="啟用自動錄音" />
                             <Button AutomationProperties.AutomationId="SettingsDisableTeamsAutomaticRecordingButton" Command="{Binding DisableTeamsAutomaticRecordingCommand}" Content="停用自動錄音" />
                         </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12">
+                    <StackPanel Spacing="12">
+                        <StackPanel Spacing="2">
+                            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="跟隨 Teams 麥克風靜音" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="只讀取目前 Teams 通話的麥克風按鈕；只控制 Recorder 是否混入實體麥克風。" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <CheckBox
+                            AutomationProperties.AutomationId="SettingsFollowTeamsMuteCheckBox"
+                            Content="啟用單向 Teams 靜音跟隨（Preview）"
+                            IsChecked="{Binding IsFollowTeamsMuteEnabled, Mode=TwoWay}" />
+                        <InfoBar
+                            IsClosable="False"
+                            IsOpen="True"
+                            Message="不需要 Teams API 或 Virtual Mic，也不會按下或改變 Teams 靜音。若 Teams 更新令狀態無法確認，Recorder 會基於隱私暫停混入實體麥克風；系統輸出仍繼續錄製。"
+                            Severity="Informational"
+                            Title="單向、唯讀" />
+                        <TextBlock Text="{Binding TeamsMuteFollowStatusText}" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
 

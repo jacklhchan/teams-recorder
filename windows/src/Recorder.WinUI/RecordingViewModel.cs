@@ -41,6 +41,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private readonly DispatcherQueueTimer playbackTimer;
     private readonly DispatcherQueueTimer teamsLocalHeuristicTimer;
     private readonly DispatcherQueueTimer inputMuteTimer;
+    private readonly DispatcherQueueTimer teamsMuteFollowTimer;
     // RecordingLifecycleService keeps native capture, the temporary session plan,
     // and final publication in the Application layer.  This VM only maps that
     // state to WinUI properties and commands.
@@ -128,6 +129,11 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private readonly WindowsInputMuteMonitor inputMuteMonitor = new();
     private bool isInputMuteRefreshInProgress;
     private string? monitoredInputEndpointId;
+    private readonly ITeamsMuteFollowProbe teamsMuteFollowProbe = new WindowsTeamsMuteFollowProbe();
+    private bool isTeamsMuteFollowRefreshInProgress;
+    private bool isFollowTeamsMuteEnabled;
+    private int teamsMuteFollowRevision;
+    private TeamsMuteFollowObservation teamsMuteFollowObservation = TeamsMuteFollowObservation.NotInCall;
     private TeamsAutomaticRecordingController? teamsAutomaticRecorder;
     private TeamsLocalHeuristicAutoStartHost? teamsLocalHeuristicHost;
     private TeamsLocalMeetingSnapshot? teamsLocalHeuristicSnapshot;
@@ -198,6 +204,9 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         inputMuteTimer = dispatcherQueue.CreateTimer();
         inputMuteTimer.Interval = TimeSpan.FromMilliseconds(500);
         inputMuteTimer.Tick += OnInputMuteTimerTick;
+        teamsMuteFollowTimer = dispatcherQueue.CreateTimer();
+        teamsMuteFollowTimer.Interval = TimeSpan.FromMilliseconds(500);
+        teamsMuteFollowTimer.Tick += OnTeamsMuteFollowTimerTick;
 
         outputFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -342,6 +351,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
     public string RecordingMicrophoneMuteText => SelectedMicrophoneEndpoint?.EndpointId is null
         ? "未選取錄音麥克風；靜音設定會在下一次選取麥克風後套用。"
+        : recorderMicrophoneMute.IsTeamsMuted
+            ? teamsMuteFollowObservation.State == TeamsMuteFollowState.Muted
+                ? "Teams 目前為靜音；Recorder 已停止混入實體麥克風，系統輸出錄音不受影響。"
+                : "暫時無法確認 Teams 靜音；Recorder 依隱私保護停止混入實體麥克風。"
         : recorderMicrophoneMute.IsInputMuted
             ? "Windows 輸入裝置目前為靜音；錄音與虛擬麥克風都保持靜音。"
         : IsRecordingMicrophoneMuted
@@ -349,6 +362,57 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             : "錄音中的麥克風未靜音。";
 
     public string GlobalMuteHotKeyStatus => globalMuteHotKeyStatus;
+
+    /// <summary>
+    /// Explicit opt-in for a read-only Teams UI Automation observation. It
+    /// changes only Recorder's physical-microphone contribution and never
+    /// invokes, clicks, or writes a Teams control.
+    /// </summary>
+    public bool IsFollowTeamsMuteEnabled
+    {
+        get => isFollowTeamsMuteEnabled;
+        set
+        {
+            if (!SetProperty(ref isFollowTeamsMuteEnabled, value))
+            {
+                return;
+            }
+
+            Interlocked.Increment(ref teamsMuteFollowRevision);
+            if (value)
+            {
+                // Do not leak microphone audio between opt-in and the first
+                // verified observation.
+                teamsMuteFollowObservation = new(TeamsMuteFollowState.Unavailable);
+                recorderMicrophoneMute.SetTeamsMuted(true);
+                if (isInitialized && !isShuttingDown)
+                {
+                    teamsMuteFollowTimer.Start();
+                }
+            }
+            else
+            {
+                teamsMuteFollowTimer.Stop();
+                teamsMuteFollowObservation = TeamsMuteFollowObservation.NotInCall;
+                recorderMicrophoneMute.SetTeamsMuted(false);
+            }
+
+            OnPropertyChanged(nameof(TeamsMuteFollowStatusText));
+            OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
+            PersistAppSettingsInBackground();
+            NotifyRecordingOverlayStateChanged();
+        }
+    }
+
+    public string TeamsMuteFollowStatusText => !IsFollowTeamsMuteEnabled
+        ? "未啟用。Recorder 麥克風只受本機按鈕、Ctrl+Alt+M 與 Windows 輸入裝置狀態控制。"
+        : teamsMuteFollowObservation.State switch
+        {
+            TeamsMuteFollowState.NotInCall => "未找到 Teams 通話麥克風按鈕；Recorder 不套用 Teams 靜音。",
+            TeamsMuteFollowState.Muted => "Teams 已靜音；Recorder 已停止混入實體麥克風。",
+            TeamsMuteFollowState.Unmuted => "Teams 未靜音；Recorder 可混入已選取的實體麥克風。",
+            _ => "暫時無法確認 Teams 靜音；基於隱私，Recorder 暫停混入實體麥克風。",
+        };
 
     /// <summary>Explicit opt-in for bounded local Teams render-session detection.</summary>
     public bool IsLocalHeuristicAutoStartEnabled
@@ -1847,6 +1911,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 ? "已還原「指定應用程式」模式；請選取目前正在執行的應用程式。"
                 : $"正在尋找已儲存的應用程式 {pendingSelectedApplicationExecutable}。";
         }
+        IsFollowTeamsMuteEnabled = saved.FollowTeamsMuteEnabled;
         StatusText = "已還原本機錄音設定。";
     }
 
@@ -1886,6 +1951,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         TeamsMuteSyncEnabled = false,
         TeamsAutomaticRecordingEnabled = IsLocalHeuristicAutoStartEnabled,
         LocalTeamsHeuristicAutoStartEnabled = IsLocalHeuristicAutoStartEnabled,
+        FollowTeamsMuteEnabled = IsFollowTeamsMuteEnabled,
     };
 
     private void PersistAppSettingsInBackground()
@@ -2031,6 +2097,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             await InitializeLocalTeamsAutomationAsync();
             ApplySnapshot(recordingLifecycle.Snapshot);
             inputMuteTimer.Start();
+            if (IsFollowTeamsMuteEnabled)
+            {
+                teamsMuteFollowTimer.Start();
+            }
             _ = RefreshLibraryAfterInitializationAsync();
             StatusText = "錄音器已就緒。";
         }
@@ -2070,6 +2140,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         playbackTimer.Stop();
         teamsLocalHeuristicTimer.Stop();
         inputMuteTimer.Stop();
+        teamsMuteFollowTimer.Stop();
         UpdateCommandStates();
 
         // Close the local control endpoint before finalization.  A pipe request
@@ -3777,6 +3848,54 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     }
 
+    private async void OnTeamsMuteFollowTimerTick(DispatcherQueueTimer _, object __)
+    {
+        if (isShuttingDown || !IsFollowTeamsMuteEnabled || isTeamsMuteFollowRefreshInProgress)
+        {
+            return;
+        }
+
+        var revision = Volatile.Read(ref teamsMuteFollowRevision);
+        isTeamsMuteFollowRefreshInProgress = true;
+        try
+        {
+            var observed = await Task.Run(() =>
+            {
+                var mute = teamsMuteFollowProbe.Observe();
+                if (mute.State == TeamsMuteFollowState.NotInCall && recordingLifecycle is not null)
+                {
+                    // Teams can temporarily remove its toolbar from the UIA
+                    // tree while a call remains active. An active Teams WASAPI
+                    // render session makes that absence ambiguous, not proof
+                    // that the call ended. Fail closed until the exact button
+                    // is visible again; system-output capture is unaffected.
+                    var audio = recordingLifecycle.ProbeTeamsRenderEndpoints();
+                    if (audio.IsSuccess && audio.ActiveEndpoints.Count > 0)
+                    {
+                        return TeamsMuteFollowObservation.Unavailable(
+                            TeamsUiAutomationFailure.ControlNotFound);
+                    }
+                }
+                return mute;
+            });
+            if (isShuttingDown || !IsFollowTeamsMuteEnabled ||
+                revision != Volatile.Read(ref teamsMuteFollowRevision))
+            {
+                return;
+            }
+
+            teamsMuteFollowObservation = observed;
+            recorderMicrophoneMute.SetTeamsMuted(observed.ShouldMuteRecorder);
+            OnPropertyChanged(nameof(TeamsMuteFollowStatusText));
+            OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
+            NotifyRecordingOverlayStateChanged();
+        }
+        finally
+        {
+            isTeamsMuteFollowRefreshInProgress = false;
+        }
+    }
+
     private async Task RefreshTelemetryAsync()
     {
         if (isShuttingDown ||
@@ -4230,6 +4349,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         OnPropertyChanged(nameof(IsRecordingMicrophoneMuted));
         OnPropertyChanged(nameof(RecordingMicrophoneMuteText));
         OnPropertyChanged(nameof(GlobalMuteHotKeyStatus));
+        OnPropertyChanged(nameof(TeamsMuteFollowStatusText));
         OnPropertyChanged(nameof(IsOpenAiProviderAvailable));
         OnPropertyChanged(nameof(CanSaveOpenAiProvider));
         OnPropertyChanged(nameof(CanTestOpenAiProvider));

@@ -11,7 +11,7 @@ namespace TeamsRecorder.Windows.Application.Settings;
 /// </summary>
 public sealed record RecorderAppSettings
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
 
     [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; init; } = CurrentSchemaVersion;
     [JsonPropertyName("outputFolder")] public string? OutputFolder { get; init; }
@@ -30,6 +30,7 @@ public sealed record RecorderAppSettings
     [JsonPropertyName("teamsMuteSyncEnabled")] public bool TeamsMuteSyncEnabled { get; init; }
     [JsonPropertyName("teamsAutomaticRecordingEnabled")] public bool TeamsAutomaticRecordingEnabled { get; init; }
     [JsonPropertyName("localTeamsHeuristicAutoStartEnabled")] public bool LocalTeamsHeuristicAutoStartEnabled { get; init; }
+    [JsonPropertyName("followTeamsMuteEnabled")] public bool FollowTeamsMuteEnabled { get; init; }
 
     public static RecorderAppSettings Validate(RecorderAppSettings value)
     {
@@ -50,12 +51,15 @@ public sealed record RecorderAppSettings
                 : null,
             // Retired Teams API flags never grant consent to the replacement
             // local heuristic. Upgrades must be explicitly enabled again in a
-            // schema-v3 build.
+            // schema-v3 build. The separate read-only mute follower requires
+            // fresh consent from a schema-v4 build.
             TeamsMuteSyncEnabled = false,
-            LocalTeamsHeuristicAutoStartEnabled = value.SchemaVersion == CurrentSchemaVersion &&
+            LocalTeamsHeuristicAutoStartEnabled = value.SchemaVersion >= 3 &&
                 value.LocalTeamsHeuristicAutoStartEnabled,
-            TeamsAutomaticRecordingEnabled = value.SchemaVersion == CurrentSchemaVersion &&
+            TeamsAutomaticRecordingEnabled = value.SchemaVersion >= 3 &&
                 value.LocalTeamsHeuristicAutoStartEnabled,
+            FollowTeamsMuteEnabled = value.SchemaVersion == CurrentSchemaVersion &&
+                value.FollowTeamsMuteEnabled,
         };
     }
 

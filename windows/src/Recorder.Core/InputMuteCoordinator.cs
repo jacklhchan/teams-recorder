@@ -1,28 +1,33 @@
 namespace Recorder.Core;
 
-/// <summary>Combines independent local and hardware/input mute causes without toggling state.</summary>
+/// <summary>Combines independent local, hardware/input, and Teams-observation mute causes.</summary>
 public sealed class InputMuteCoordinator
 {
     private readonly object gate = new();
     private bool localMuted;
     private bool inputMuted;
+    private bool teamsMuted;
 
-    public bool IsMuted { get { lock (gate) return localMuted || inputMuted; } }
+    public bool IsMuted { get { lock (gate) return EffectiveMuted; } }
     public bool IsLocalMuted { get { lock (gate) return localMuted; } }
     public bool IsInputMuted { get { lock (gate) return inputMuted; } }
+    public bool IsTeamsMuted { get { lock (gate) return teamsMuted; } }
     public event Action<bool>? Changed;
 
     public void SetLocalMuted(bool muted) => Set(ref localMuted, muted);
     public void SetInputMuted(bool muted) => Set(ref inputMuted, muted);
+    public void SetTeamsMuted(bool muted) => Set(ref teamsMuted, muted);
+
+    private bool EffectiveMuted => localMuted || inputMuted || teamsMuted;
 
     private void Set(ref bool target, bool value)
     {
         bool? changed = null;
         lock (gate)
         {
-            var before = localMuted || inputMuted;
+            var before = EffectiveMuted;
             target = value;
-            var after = localMuted || inputMuted;
+            var after = EffectiveMuted;
             if (before != after) changed = after;
         }
         if (changed is { } muted) Changed?.Invoke(muted);

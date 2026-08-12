@@ -4,6 +4,20 @@ import XCTest
 @testable import RecorderApp
 
 final class IncompleteSessionRecoveryTests: XCTestCase {
+    func testDescriptorRecoveryPromotesBackupWithoutReopeningDisplayURL() throws {
+        let root = try makeRoot()
+        let folder = try makeFolder(in: root, name: "meeting-descriptor")
+        try Data("descriptor backup".utf8).write(to: folder.appendingPathComponent("recording.audio-backup.m4a"))
+        let handle = try RecordingPendingStore(root: root).openSession(for: "meeting-descriptor")
+        try FileManager.default.moveItem(at: folder, to: root.appendingPathComponent("retained-session", isDirectory: true))
+        try FileManager.default.createSymbolicLink(at: folder, withDestinationURL: root)
+
+        IncompleteSessionRecovery(descriptorBackupValidator: { _ in true }).recover(in: handle)
+
+        var value = stat()
+        XCTAssertEqual(fstatat(handle.fileDescriptor, "recording.m4a", &value, AT_SYMLINK_NOFOLLOW), 0)
+        XCTAssertEqual(value.st_mode & S_IFMT, S_IFREG)
+    }
     func testPromotesValidBackupAndWritesRecoveryMetadata() throws {
         let root = try makeRoot()
         let folder = try makeFolder(in: root, name: "meeting-interrupted")

@@ -12,6 +12,7 @@ struct RecordingPublicationRequest: Equatable, Sendable {
 
 struct RecordingPublicationCompleted: Equatable, Sendable {
     let itemID: UUID
+    let destinationIdentity: RecordingDestinationIdentity
     let folderURL: URL
     let recordingURL: URL
     let workspaceFence: WorkspacePublicationFence
@@ -154,7 +155,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
                 try pendingStore.removeRetainedSession(session)
             }
             guard current(workerGeneration) else { return }
-            let completed = RecordingPublicationCompleted(itemID: item.id, folderURL: validated.folderURL, recordingURL: validated.folderURL.appendingPathComponent(recording).standardizedFileURL, workspaceFence: .init(revision: item.workspaceFenceRevision), source: item.recordingSource, health: item.health, metadataWarning: item.metadataWarning)
+            let completed = RecordingPublicationCompleted(itemID: item.id, destinationIdentity: item.destinationIdentity, folderURL: validated.folderURL, recordingURL: validated.folderURL.appendingPathComponent(recording).standardizedFileURL, workspaceFence: .init(revision: item.workspaceFenceRevision), source: item.recordingSource, health: item.health, metadataWarning: item.metadataWarning)
             if deliveredIDs.insert(item.id).inserted { onCompleted?(completed) }
             guard current(workerGeneration) else { return }
             let old = items; items.removeAll { $0.id == item.id }

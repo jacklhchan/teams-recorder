@@ -6,6 +6,21 @@ import XCTest
 @MainActor
 final class RecordingEngineStateTests: XCTestCase {
     // Coordinator-path regression matrix. Every test emits a real frame or event.
+    func testNewRecordingSessionFolderIsOwnerOnly() async throws {
+        let (engine, _, _) = coordinatorEngine()
+        let folder = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: temporaryFolder()
+        )
+        let permissions = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: folder.path)[.posixPermissions] as? NSNumber
+        ).intValue
+
+        XCTAssertEqual(permissions & 0o777, 0o700)
+        _ = await engine.stop()
+    }
+
     func testNewRecordingRequestsPartialMP4AndAudioBackupURLs() async throws {
         let (engine, coordinator, _) = coordinatorEngine()
         let folder = try await engine.start(selection: .allSystemAudio, microphoneUID: nil, baseFolder: temporaryFolder())

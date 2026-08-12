@@ -15,6 +15,11 @@ enum RecorderControlActionOutcome: Equatable {
     case rejected(code: String, message: String)
 }
 
+private struct ActiveRecordingPublicationContext {
+    let destinationIdentity: RecordingDestinationIdentity
+    let workspaceFence: WorkspacePublicationFence
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     typealias TranscriptionFeatureFactory = (
@@ -38,6 +43,8 @@ final class AppModel: ObservableObject {
     @Published var microphonePermission: CapturePermissionState = .notDetermined
     @Published private(set) var captureConnectionState: CaptureConnectionState = .connected
     @Published private(set) var outputFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: "\(NSHomeDirectory())/Downloads")
+    @Published private(set) var recordingDestinationState: RecordingDestinationState = .ready
+    @Published private(set) var recordingPublicationPresentation = RecordingPublicationPresentation(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0)
     @Published var statusMessage = "Ready"
     @Published var lastHealthReport: RecordingHealthReport?
     @Published private(set) var lastRecordingSavedAsM4A = false
@@ -71,6 +78,11 @@ final class AppModel: ObservableObject {
     let meetingIntelligenceFeature: MeetingIntelligenceFeatureModel
     private var prbFeatureBridge: PRBFeatureBridge?
     private let recordingSourceMetadataUpdater: RecordingSourceMetadataUpdater
+    private let recordingDestinationStore: any RecordingDestinationStoring
+    private let recordingPublicationCoordinator: any RecordingPublicationCoordinating
+    private let pendingRecordingStore: RecordingPendingStore
+    private(set) var recordingDestinationIdentity: RecordingDestinationIdentity?
+    private var activeRecordingPublicationContext: ActiveRecordingPublicationContext?
 
     var isCaptureLifecycleWorking: Bool {
         recordingSessionCoordinator.isWorking
@@ -206,6 +218,8 @@ final class AppModel: ObservableObject {
         providerRepository: (any OpenAICompatibleProviderManaging)? = nil,
         appPaths: AppPaths = .live,
         recorder: RecordingEngine? = nil,
+        recordingDestinationStore: (any RecordingDestinationStoring)? = nil,
+        recordingPublicationCoordinator: (any RecordingPublicationCoordinating)? = nil,
         inputDevices: @escaping () -> [AudioDevice] = AudioDeviceManager.inputDevices,
         defaultInputDeviceID: @escaping () -> AudioDeviceID? = AudioDeviceManager.defaultInputDeviceID,
         performStartupWork: Bool = true,
@@ -279,9 +293,75 @@ final class AppModel: ObservableObject {
         },
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil
     ) {
+        let activeDestinationStore = recordingDestinationStore
+            ?? RecordingDestinationStore(defaults: defaults)
+        let destinationSelection: RecordingDestinationSelection
         if let initialOutputFolder {
-            outputFolder = initialOutputFolder
+            do {
+                try activeDestinationStore.save(initialOutputFolder)
+                destinationSelection = .init(
+                    identity: activeDestinationStore.currentIdentity,
+                    url: initialOutputFolder,
+                    state: activeDestinationStore.currentIdentity == nil
+                        ? .unavailable
+                        : .ready
+                )
+            } catch {
+                destinationSelection = .init(
+                    identity: activeDestinationStore.currentIdentity,
+                    url: initialOutputFolder,
+                    state: .unavailable
+                )
+            }
+        } else {
+            let restored = activeDestinationStore.restore(
+                defaultURL: appPaths.recordingsDirectory
+            )
+            if restored.identity != nil {
+                destinationSelection = restored
+            } else {
+                do {
+                    try activeDestinationStore.save(restored.url)
+                    if let identity = activeDestinationStore.currentIdentity {
+                        destinationSelection = .init(
+                            identity: identity,
+                            url: restored.url,
+                            state: restored.state
+                        )
+                    } else {
+                        destinationSelection = .init(
+                            identity: nil,
+                            url: restored.url,
+                            state: .unavailable
+                        )
+                    }
+                } catch {
+                    destinationSelection = .init(
+                        identity: nil,
+                        url: restored.url,
+                        state: .unavailable
+                    )
+                }
+            }
         }
+        outputFolder = destinationSelection.url
+        recordingDestinationState = destinationSelection.state
+        recordingDestinationIdentity = destinationSelection.identity
+        let pendingStore = RecordingPendingStore(
+            root: appPaths.pendingRecordingsDirectory,
+            manifestURL: appPaths.recordingPublicationManifestURL
+        )
+        pendingRecordingStore = pendingStore
+        self.recordingDestinationStore = activeDestinationStore
+        self.recordingPublicationCoordinator = recordingPublicationCoordinator
+            ?? RecordingPublicationCoordinator(
+                manifestStore: RecordingPublicationManifestStore(
+                    manifestURL: appPaths.recordingPublicationManifestURL
+                ),
+                destinationStore: activeDestinationStore,
+                publisher: RecordingSessionPublisher(pendingStore: pendingStore),
+                pendingStore: pendingStore
+            )
         let activeRecorder = recorder ?? RecordingEngine()
         let autoCoordinator = teamsAutoMeetingCoordinator
             ?? TeamsAutoMeetingCoordinator()
@@ -482,6 +562,14 @@ final class AppModel: ObservableObject {
         )
         prbFeatureBridge = bridge
         bridge.start()
+        self.recordingPublicationPresentation = self.recordingPublicationCoordinator.presentation
+        self.recordingPublicationCoordinator.onPresentationChange = { [weak self] presentation in
+            self?.recordingPublicationPresentation = presentation
+            self?.projectRecordingPublicationStatus(presentation)
+        }
+        self.recordingPublicationCoordinator.onCompleted = { [weak self] completion in
+            self?.acceptRecordingPublicationCompletion(completion)
+        }
         autoCoordinator.onStateChange = { [weak self] state in
             self?.teamsAutoMeetingState = state
         }
@@ -528,6 +616,7 @@ final class AppModel: ObservableObject {
         refreshPermissionPreflight()
         refreshCaptureApplications()
         refreshSessions()
+        self.recordingPublicationCoordinator.resume()
         aiProviderSettingsModel.performStartupMigration(
             settingsURL: appPaths.omlxSettingsURL
         )
@@ -659,6 +748,7 @@ final class AppModel: ObservableObject {
         isShutDown = true
         invalidateTeamsScreenRefresh()
         teamsApplicationLifecycleCancellables.removeAll()
+        recordingPublicationCoordinator.shutdown()
         prbFeatureBridge?.shutdown()
         playbackFeature.shutdown()
         transcriptionFeature.shutdown()
@@ -1183,7 +1273,7 @@ final class AppModel: ObservableObject {
             await completeRecordingStartAttempt(attempt)
             return
         }
-        let recordingFolder = outputFolder
+        let recordingFolder = pendingRecordingStore.root
         guard await prepareStorageForNewRecording(in: recordingFolder) else {
             if acceptedRecordingAttempt(matching: attempt)?.ownership
                 == .teamsAutomatic {
@@ -1196,20 +1286,15 @@ final class AppModel: ObservableObject {
             await completeRecordingStartAttempt(attempt)
             return
         }
-        guard outputFolder == recordingFolder else {
-            if let currentAttempt = acceptedRecordingAttempt(
-                matching: attempt
-            ) {
-                statusMessage = "Output folder changed. Start recording again."
-                if currentAttempt.ownership == .teamsAutomatic {
-                    teamsAutoMeetingCoordinator.automaticStartFailed(
-                        statusMessage
-                    )
-                }
-            }
+        guard let destinationIdentity = recordingDestinationIdentity else {
+            statusMessage = "Recording destination needs folder access."
             await completeRecordingStartAttempt(attempt)
             return
         }
+        activeRecordingPublicationContext = .init(
+            destinationIdentity: destinationIdentity,
+            workspaceFence: workspacePublicationFence
+        )
 
         do {
             try await recorder.start(
@@ -1251,6 +1336,7 @@ final class AppModel: ObservableObject {
                 teamsAutoMeetingCoordinator.automaticStartSucceeded()
             }
         } catch {
+            activeRecordingPublicationContext = nil
             if let currentAttempt = acceptedRecordingAttempt(
                 matching: attempt
             ) {
@@ -1352,17 +1438,21 @@ final class AppModel: ObservableObject {
                 statusMessage = readinessMessage
                 return
             }
-            let recordingFolder = outputFolder
+            let recordingFolder = pendingRecordingStore.root
             guard await prepareStorageForNewRecording(in: recordingFolder) else {
                 isRunningTestRecording = false
                 return
             }
             guard recordingSessionCoordinator.accepts(token) else { return }
-            guard outputFolder == recordingFolder else {
+            guard let destinationIdentity = recordingDestinationIdentity else {
                 isRunningTestRecording = false
-                statusMessage = "Output folder changed. Start recording again."
+                statusMessage = "Recording destination needs folder access."
                 return
             }
+            activeRecordingPublicationContext = .init(
+                destinationIdentity: destinationIdentity,
+                workspaceFence: workspacePublicationFence
+            )
             do {
                 try await recorder.start(
                     selection: resolvedCaptureSelection,
@@ -1397,6 +1487,7 @@ final class AppModel: ObservableObject {
                 statusMessage = "Test recording: 10 seconds"
                 startStorageMonitoring(folder: recordingFolder)
             } catch {
+                activeRecordingPublicationContext = nil
                 clearTestRecordingRuntimeState()
                 guard recordingSessionCoordinator.accepts(token) else { return }
                 statusMessage = error.localizedDescription
@@ -1443,7 +1534,15 @@ final class AppModel: ObservableObject {
     }
 
     func setOutputFolder(_ folder: URL) {
+        do {
+            try recordingDestinationStore.save(folder)
+        } catch {
+            statusMessage = "Cannot save recording destination: \(error.localizedDescription)"
+            return
+        }
         outputFolder = folder
+        recordingDestinationIdentity = recordingDestinationStore.currentIdentity
+        recordingDestinationState = .ready
         workspacePublicationFence = workspacePublicationFence.advanced()
         prbFeatureBridge?.workspaceDidChange(
             .init(workspace: .init(
@@ -1451,6 +1550,19 @@ final class AppModel: ObservableObject {
                 fence: workspacePublicationFence
             ))
         )
+    }
+
+    func retryPendingRecordings() {
+        recordingPublicationCoordinator.retryNow()
+    }
+
+    func openPendingRecordingsFolder() {
+        do {
+            try pendingRecordingStore.prepareRoot()
+            NSWorkspace.shared.open(pendingRecordingStore.root)
+        } catch {
+            statusMessage = "Cannot open local recordings: \(error.localizedDescription)"
+        }
     }
 
     func chooseAudioFileForTranscription() {
@@ -1770,9 +1882,10 @@ final class AppModel: ObservableObject {
         automaticStopToken: CaptureLifecycleToken? = nil,
         recordingSource: RecordingSource = .manual
     ) async {
-        let finalizationFence = workspacePublicationFence
+        let publicationContext = activeRecordingPublicationContext
         let result = await recorder.stop()
         isRunningTestRecording = false
+        activeRecordingPublicationContext = nil
         if let result {
             lastHealthReport = result.health
             lastRecordingSavedAsM4A =
@@ -1787,46 +1900,75 @@ final class AppModel: ObservableObject {
             } catch {
                 metadataSaveError = error
             }
-            prbFeatureBridge?.recordingDidFinalize(.init(
-                finalizationID: UUID(),
-                folder: RecordingLibraryURLIdentity.normalized(
-                    result.folderURL
-                ),
-                workspaceFence: finalizationFence,
-                recordingURL: RecordingLibraryURLIdentity.normalized(
-                    result.recordingURL
-                ),
+            guard let publicationContext,
+                  let sessionDirectoryName = admittedPendingSessionName(
+                    for: result
+                  ) else {
+                statusMessage = "Recording saved locally, but publication needs attention"
+                if let automaticStopToken, !recorder.isRecording {
+                    completeAutomaticStopIntent(automaticStopToken)
+                }
+                return
+            }
+            let request = RecordingPublicationRequest(
+                id: UUID(),
+                sessionDirectoryName: sessionDirectoryName,
+                destinationIdentity: publicationContext.destinationIdentity,
+                workspaceFence: publicationContext.workspaceFence,
+                source: recordingSource,
                 health: result.health,
-                metadataOutcome: metadataSaveError.map {
-                    .warning($0.localizedDescription)
-                } ?? .saved,
-                source: recordingSource
-            ))
-            if let metadataSaveError {
-                statusMessage =
-                    "Recording saved, but source metadata could not be written: "
-                    + metadataSaveError.localizedDescription
-            } else {
-                statusMessage = "Recording saved: \(result.health.summary)"
-            }
-
-            if playAfterStop {
-                let session = RecordingSessionStore.session(
-                    for: result.folderURL,
-                    recordingURL: result.recordingURL
-                )
-                playbackFeature.play(
-                    session,
-                    successStatus:
-                        "Test saved and playing: \(result.health.summary)"
-                )
-            }
+                metadataWarning: metadataSaveError?.localizedDescription
+            )
+            recordingPublicationCoordinator.enqueue(request)
+            statusMessage = "Recording saved locally; publishing"
         } else if automaticStopToken == nil {
             statusMessage = "No active recording."
         }
         if let automaticStopToken, !recorder.isRecording {
             completeAutomaticStopIntent(automaticStopToken)
         }
+    }
+
+    private func admittedPendingSessionName(for result: RecordingResult) -> String? {
+        let folder = result.folderURL.standardizedFileURL
+        guard folder.deletingLastPathComponent() == pendingRecordingStore.root.standardizedFileURL,
+              result.recordingURL.standardizedFileURL.deletingLastPathComponent() == folder else {
+            return nil
+        }
+        let name = folder.lastPathComponent
+        guard let admitted = try? pendingRecordingStore.openSession(for: name),
+              admitted.displayURL.standardizedFileURL == folder,
+              admitted.directoryName == name else {
+            return nil
+        }
+        return name
+    }
+
+    private func projectRecordingPublicationStatus(
+        _ presentation: RecordingPublicationPresentation
+    ) {
+        if presentation.needsAttentionCount > 0 {
+            statusMessage = "Recording saved locally; publication needs attention"
+        } else if presentation.waitingCount > 0 {
+            statusMessage = "Recording saved locally; waiting for OneDrive"
+        }
+    }
+
+    private func acceptRecordingPublicationCompletion(
+        _ completion: RecordingPublicationCompleted
+    ) {
+        guard completion.destinationIdentity == recordingDestinationIdentity,
+              completion.workspaceFence == workspacePublicationFence else { return }
+        prbFeatureBridge?.recordingDidFinalize(.init(
+            finalizationID: completion.itemID,
+            folder: RecordingLibraryURLIdentity.normalized(completion.folderURL),
+            workspaceFence: completion.workspaceFence,
+            recordingURL: RecordingLibraryURLIdentity.normalized(completion.recordingURL),
+            health: completion.health,
+            metadataOutcome: completion.metadataWarning.map { .warning($0) } ?? .saved,
+            source: completion.source
+        ))
+        statusMessage = "Recording published: \(completion.health.summary)"
     }
 
     private func completeAutomaticStopIntent(

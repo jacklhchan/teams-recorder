@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class AppModelRecordingFinalizationTests: XCTestCase {
-    func testFinishRecordingPublishesOneFinalizationOnlyAfterSourceMetadataAttempt() async throws {
+    func testFinishRecordingDoesNotFinalizeLibraryForResultOutsidePendingRoot() async throws {
         let ordering = FinalizationOrder()
         let fixture = try makeFixture { _, _, _ in
             ordering.append("metadata")
@@ -14,12 +14,13 @@ final class AppModelRecordingFinalizationTests: XCTestCase {
 
         try await start(fixture)
         await fixture.model.finishRecording(playAfterStop: false)
-        await waitUntil { ordering.values.contains("refresh") }
+        for _ in 0 ..< 20 { await Task.yield() }
 
-        XCTAssertEqual(ordering.values, ["metadata", "refresh"])
+        XCTAssertEqual(ordering.values, ["metadata"])
+        XCTAssertEqual(fixture.model.statusMessage, "Recording saved locally, but publication needs attention")
     }
 
-    func testFinishRecordingMetadataWarningStillPublishesOneFinalizationAndRefresh() async throws {
+    func testFinishRecordingMetadataWarningOutsidePendingRootDoesNotRefreshLibrary() async throws {
         let updates = FinalizationCounter()
         let refreshes = FinalizationCounter()
         let fixture = try makeFixture { _, _, _ in
@@ -31,13 +32,13 @@ final class AppModelRecordingFinalizationTests: XCTestCase {
 
         try await start(fixture)
         await fixture.model.finishRecording(playAfterStop: false)
-        await waitUntil { refreshes.value == 1 }
+        for _ in 0 ..< 20 { await Task.yield() }
 
         XCTAssertEqual(updates.value, 1)
-        XCTAssertEqual(refreshes.value, 1)
+        XCTAssertEqual(refreshes.value, 0)
         XCTAssertEqual(
             fixture.model.statusMessage,
-            "Recording saved, but source metadata could not be written: metadata write failed"
+            "Recording saved locally, but publication needs attention"
         )
     }
 
@@ -84,7 +85,7 @@ final class AppModelRecordingFinalizationTests: XCTestCase {
         )
     }
 
-    func testFinalizationFromWorkspaceSymlinkPublishesOnePhysicalCanonicalSession() async throws {
+    func testFinalizationFromWorkspaceSymlinkOutsidePendingRootIsNotAdmitted() async throws {
         let fixture = try makeFixture(initialOutputFolder: { physicalWorkspace in
             let alias = physicalWorkspace.deletingLastPathComponent()
                 .appendingPathComponent("workspace-alias-\(UUID().uuidString)", isDirectory: true)
@@ -102,21 +103,10 @@ final class AppModelRecordingFinalizationTests: XCTestCase {
 
         try await start(fixture)
         await fixture.model.finishRecording(playAfterStop: false)
-        await waitUntil { refreshes.count == 1 }
+        for _ in 0 ..< 20 { await Task.yield() }
 
-        XCTAssertEqual(refreshes.count, 1)
-        let session = try XCTUnwrap(fixture.library.sessions.first)
-        let physicalFolder = RecordingLibraryURLIdentity.normalized(
-            session.folderURL
-        )
-        let physicalRecording = RecordingLibraryURLIdentity.normalized(
-            session.recordingURL
-        )
-        XCTAssertEqual(session.folderURL, physicalFolder)
-        XCTAssertEqual(session.recordingURL, physicalRecording)
-        XCTAssertEqual(physicalFolder.deletingLastPathComponent(), fixture.workspace)
-        XCTAssertEqual(physicalRecording.deletingLastPathComponent(), physicalFolder)
-        XCTAssertEqual(refreshes.allFolders, [physicalFolder])
+        XCTAssertEqual(refreshes.count, 0)
+        XCTAssertTrue(fixture.library.sessions.isEmpty)
     }
 
     private func makeFixture(

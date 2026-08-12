@@ -816,7 +816,7 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
-    func testPreflightQueriesSelectedOutputFolderBeforeStarting() async throws {
+    func testPreflightQueriesPendingRecordingRootBeforeStarting() async throws {
         let provider = StorageCapacityTestProvider(results: [.success(6 * gibibyte)])
         let fixture = makeFixture(provider: provider)
         let selectedFolder = temporaryFolder().appendingPathComponent("External", isDirectory: true)
@@ -825,7 +825,7 @@ final class AppModelScreenCaptureTests: XCTestCase {
         fixture.model.startOrStop()
         await waitUntil { fixture.engine.isRecording }
 
-        XCTAssertEqual(provider.queriedURLs, [selectedFolder])
+        XCTAssertEqual(provider.queriedURLs, [fixture.pendingRoot])
         fixture.model.startOrStop()
         await waitUntil { !fixture.engine.isRecording }
     }
@@ -929,7 +929,7 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
 
         XCTAssertEqual(fixture.source.stopCount, 1)
-        XCTAssertTrue(fixture.model.statusMessage.hasPrefix("Recording saved:"))
+        XCTAssertEqual(fixture.model.statusMessage, "Recording saved locally; publishing")
     }
 
     func testRuntimeProviderErrorWarnsAndKeepsRecording() async throws {
@@ -953,7 +953,7 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
-    func testChangingOutputFolderDuringPreflightCannotStartOnUncheckedVolume() async throws {
+    func testChangingOutputFolderDuringPreflightStillStartsOnCheckedPendingVolume() async throws {
         let provider = StorageCapacityTestProvider(results: [
             .blocked(.success(6 * gibibyte))
         ])
@@ -968,13 +968,12 @@ final class AppModelScreenCaptureTests: XCTestCase {
         provider.resumeBlockedRequest()
         await waitUntil { !fixture.model.isCaptureLifecycleWorking }
 
-        XCTAssertFalse(fixture.engine.isRecording)
-        XCTAssertEqual(fixture.source.startCount, 0)
-        XCTAssertEqual(provider.queriedURLs, [originalFolder])
-        XCTAssertEqual(
-            fixture.model.statusMessage,
-            "Output folder changed. Start recording again."
-        )
+        XCTAssertTrue(fixture.engine.isRecording)
+        XCTAssertEqual(fixture.source.startCount, 1)
+        XCTAssertEqual(provider.queriedURLs, [fixture.pendingRoot])
+        XCTAssertEqual(fixture.model.statusMessage, "Recording")
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
     }
 
     func testLateOldStorageResultCannotStopNewRecordingOrReplaceItsStatus() async throws {
@@ -1085,6 +1084,15 @@ final class AppModelScreenCaptureTests: XCTestCase {
             Task { @MainActor in await operation() }
         }
     ) -> StorageFixture {
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageRoot) }
+        let appPaths = AppPaths(homeDirectory: storageRoot, applicationSupportRoot: storageRoot)
+        let destinationStore = ScreenCaptureDestinationStore(
+            url: storageRoot.appendingPathComponent("Destination", isDirectory: true)
+        )
+        let publication = ScreenCapturePublicationCoordinator()
         let source = StorageTestCaptureSource()
         source.windows = windows
         source.applications = [teamsApplication]
@@ -1110,7 +1118,10 @@ final class AppModelScreenCaptureTests: XCTestCase {
         )
         let model = AppModel(
             defaults: defaults,
+            appPaths: appPaths,
             recorder: engine,
+            recordingDestinationStore: destinationStore,
+            recordingPublicationCoordinator: publication,
             inputDevices: inputDevices ?? { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
@@ -1128,7 +1139,8 @@ final class AppModelScreenCaptureTests: XCTestCase {
             model: model,
             engine: engine,
             source: source,
-            defaults: defaults
+            defaults: defaults,
+            pendingRoot: appPaths.pendingRecordingsDirectory
         )
     }
 
@@ -1242,6 +1254,29 @@ private struct StorageFixture {
     let engine: RecordingEngine
     let source: StorageTestCaptureSource
     let defaults: UserDefaults
+    let pendingRoot: URL
+}
+
+@MainActor
+private final class ScreenCapturePublicationCoordinator: RecordingPublicationCoordinating {
+    var presentation = RecordingPublicationPresentation(stateText: "Up to date", pendingCount: 0, waitingCount: 0, needsAttentionCount: 0)
+    var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
+    var onCompleted: ((RecordingPublicationCompleted) -> Void)?
+    func enqueue(_: RecordingPublicationRequest) {}
+    func resume() {}
+    func retryNow() {}
+    func shutdown() {}
+}
+
+private final class ScreenCaptureDestinationStore: RecordingDestinationStoring {
+    let identity = RecordingDestinationIdentity(id: UUID())
+    let url: URL
+    init(url: URL) { self.url = url }
+    var currentIdentity: RecordingDestinationIdentity? { identity }
+    func restore(defaultURL _: URL) -> RecordingDestinationSelection { .init(identity: identity, url: url, state: .ready) }
+    func save(_: URL) throws {}
+    func access(identity _: RecordingDestinationIdentity) throws -> RecordingDestinationAccess { .init(url: url, close: {}) }
+    func prune(keeping _: Set<RecordingDestinationIdentity>) {}
 }
 
 private enum StorageTestError: LocalizedError {

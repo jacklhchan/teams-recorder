@@ -422,7 +422,11 @@ final class RecordingEngine: ObservableObject {
             atPath: folder.path
         )
         do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: folder,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
         } catch {
             await rollbackFailedStart(
                 folder: folder,

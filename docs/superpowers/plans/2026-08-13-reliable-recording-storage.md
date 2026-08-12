@@ -25,7 +25,7 @@
 ## File Structure
 
 - `Sources/RecorderApp/Storage/RecordingDestinationStore.swift`: adaptive bookmark catalog, restoration, destination history, identity, and balanced scoped access.
-- `Sources/RecorderApp/Storage/RecordingPendingStore.swift`: pending-root creation, canonical direct-child validation, permissions, and safe scanning.
+- `Sources/RecorderApp/Storage/RecordingPendingStore.swift`: pending-root creation, retained descriptor-relative session handles, permissions, and safe name scanning.
 - `Sources/RecorderApp/Storage/RecordingPublicationManifest.swift`: versioned queue records and atomic manifest persistence.
 - `Sources/RecorderApp/Storage/RecordingSessionPublisher.swift`: secure copy, inventory/digest/media verification, no-replace publication, and staging cleanup.
 - `Sources/RecorderApp/Storage/RecordingPublicationCoordinator.swift`: one durable serial queue, retry transitions, relaunch reconciliation, and presentation state.
@@ -277,7 +277,10 @@ git commit -m "feat: persist recording destination access"
 **Interfaces:**
 - Consumes: `WorkspacePublicationFence` and `RecordingDestinationIdentity`.
 - Produces: `RecordingPublicationItem`, `RecordingPublicationState`, `RecordingPublicationManifestStore`, and `RecordingPendingStore`.
-- Later tasks receive validated direct-child URLs only through `RecordingPendingStore.sessionURL(for:)`.
+- Later tasks open pending sessions only through
+  `RecordingPendingStore.openSession(for:)` and retain the returned directory
+  descriptor for the complete operation; a path-only pending-session API is
+  intentionally absent.
 
 - [ ] **Step 1: Write failing pending-root, containment, and recovery tests**
 
@@ -390,7 +393,12 @@ struct RecordingPublicationManifest: Codable, Equatable, Sendable {
 Add `Codable` to `RecordingHealthReport`; its focused manifest round-trip test
 must assert every counter and timestamp survives relaunch.
 
-`RecordingPendingStore.prepareRoot()` creates the root with `0o700` and verifies it is a real directory. `sessionURL(for:)` rejects separators, `.`/`..`, symlinks, non-direct children, and canonical paths outside the root. `scanSessions()` skips the manifest and hidden publisher staging names.
+`RecordingPendingStore.prepareRoot()` creates the root with `0o700` and verifies
+it through `O_DIRECTORY | O_NOFOLLOW`. `openSession(for:)` rejects separators,
+`.`/`..`, hidden names, symlinks, and non-direct children, then returns a handle
+that retains the `openat` directory descriptor plus its `fstat` device/inode.
+`scanSessionNames()` returns only names for which a retained handle can be
+opened and skips the manifest and hidden publisher staging names.
 
 `RecordingPublicationManifestStore.save(_:)` encodes `{version: 1, items: ...}` to an owner-only temporary sibling, synchronizes it, and renames it over the owned manifest. `loadOrRebuild(from:)` converts persisted `.publishing` to `.pending`. Decode/version failure scans valid session folders into `.needsAttention` items without deleting any file.
 
@@ -411,10 +419,13 @@ git commit -m "feat: add durable pending recording store"
 
 **Files:**
 - Create: `Sources/RecorderApp/Storage/RecordingSessionPublisher.swift`
+- Modify: `Sources/RecorderApp/Recovery/IncompleteSessionRecovery.swift`
 - Create: `Tests/RecorderAppTests/RecordingSessionPublisherTests.swift`
+- Modify: `Tests/RecorderAppTests/IncompleteSessionRecoveryTests.swift`
 
 **Interfaces:**
-- Consumes: a validated `RecordingPublicationItem`, `RecordingPendingStore`, and `RecordingDestinationAccess`.
+- Consumes: a `RecordingPublicationItem`, `RecordingPendingStore`, retained
+  `RecordingPendingSession`, and `RecordingDestinationAccess`.
 - Produces: `RecordingPublicationSuccess` through `RecordingSessionPublishing.publish(item:destination:) async throws`.
 - The publisher does not mutate the queue manifest or AppModel.
 
@@ -542,9 +553,18 @@ protocol RecordingSessionPublishing: Sendable {
 
 The production publisher must:
 
-1. ask `RecordingPendingStore` for the validated direct child;
-2. call `IncompleteSessionRecovery().recover(in: source)`;
-3. enumerate with `lstat`, accepting directories and regular files only and rejecting every symlink;
+1. open and retain the source through
+   `RecordingPendingStore.openSession(for:)`; all source enumeration, reads,
+   hashing, and recovery are relative to this descriptor with
+   `openat`/`fstatat(AT_SYMLINK_NOFOLLOW)` and `O_NOFOLLOW`;
+2. add a descriptor-relative overload to `IncompleteSessionRecovery` and use
+   it for pending sources. It may promote only the exact backup/final names
+   inside the retained directory and must preserve the existing URL-based API
+   for existing Library callers;
+3. enumerate direct entries from a duplicated directory descriptor, accepting
+   directories and regular files only and rejecting every symlink. Recursive
+   descent opens each directory through `openat`; no source read reopens the
+   display URL;
 4. require exactly one supported finalized recording with non-zero bytes and finite duration greater than zero;
 5. search only valid direct destination children for
    `.lmr-publication-v1.json`; a matching item UUID and source-inventory digest
@@ -560,7 +580,9 @@ The production publisher must:
 12. revalidate the published media and return its canonical URLs;
 13. remove only the exact owned hidden staging directory on failure.
 
-Use `CryptoKit.SHA256` with `FileHandle.read(upToCount: 1_048_576)` so large recordings are not loaded into memory.
+Use `CryptoKit.SHA256` with descriptor reads in 1,048,576-byte chunks so large
+recordings are not loaded into memory. `displayURL` is for user presentation
+only and must not be reopened for source I/O.
 
 - [ ] **Step 4: Run publisher tests and verify GREEN**
 
@@ -569,7 +591,7 @@ Run the Step 2 command. Expected: all publisher tests pass with zero failures.
 - [ ] **Step 5: Commit Task 3**
 
 ```bash
-git add Sources/RecorderApp/Storage/RecordingSessionPublisher.swift Tests/RecorderAppTests/RecordingSessionPublisherTests.swift
+git add Sources/RecorderApp/Storage/RecordingSessionPublisher.swift Sources/RecorderApp/Recovery/IncompleteSessionRecovery.swift Tests/RecorderAppTests/RecordingSessionPublisherTests.swift Tests/RecorderAppTests/IncompleteSessionRecoveryTests.swift
 git commit -m "feat: publish verified recording sessions"
 ```
 
@@ -1072,6 +1094,8 @@ After the installed 346 bundle and all UAT rows pass, remove only the exact uniq
 - Publisher tests cover zero-byte, symlink, hash mismatch, existing destination, late collision, and successful verification.
 - Queue tests cover offline retry, crash resume, needs-attention non-retry, and stale completion after shutdown.
 - Publisher retry after destination rename is idempotent through an exact marker.
+- Publisher source and pending recovery use only retained descriptor-relative
+  operations; pending display URLs are never reopened for source I/O.
 - Queue manifests preserve health, source, warning, destination identity, and fence across relaunch.
 - AppModel tests cover pending routing, no premature Library admission, captured fence, and destination changes.
 - UI tests cover retained-local visibility without blocking recording.

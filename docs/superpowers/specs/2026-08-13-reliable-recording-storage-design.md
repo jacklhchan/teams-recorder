@@ -117,10 +117,13 @@ Every new recording is written beneath:
 `Application Support/Local Meeting Recorder/Pending Recordings`
 
 The root and newly created session content use owner-only permissions. A
-`RecordingPendingStore` owns this root and accepts only direct, regular session
-directories whose canonical paths remain below the canonical pending root.
+`RecordingPendingStore` owns this root and opens direct session directories
+relative to a trusted root descriptor with `O_DIRECTORY | O_NOFOLLOW`. It
+returns a retained directory handle; publishers enumerate, recover, read, and
+hash source content relative to that descriptor rather than reopening a path.
 Symbolic links, aliases that resolve outside the root, unexpected file types,
-and path traversal are rejected.
+path traversal, and replacement of the visible directory name after admission
+are rejected or remain unable to redirect the retained handle.
 
 `AppModel` continues to expose the selected destination as `outputFolder` for
 the workspace and UI, but passes the pending root to `RecordingEngine.start`.
@@ -166,8 +169,11 @@ session.
 The publisher performs these operations away from capture callbacks and the
 main actor:
 
-1. Validate that the source is a direct, non-symbolic child of the pending root.
-2. Run existing incomplete-session recovery within that session.
+1. Open and retain the source as a direct, non-symbolic child of the pending
+   root using descriptor-relative no-follow operations.
+2. Run a descriptor-relative overload of existing incomplete-session recovery
+   within that retained session; the existing URL-based Library recovery API
+   remains available to its current callers.
 3. Validate that the finalized recording is a regular non-empty file and can
    be opened as media with a finite duration greater than zero.
 4. Resolve and temporarily access the selected destination bookmark.
@@ -274,7 +280,9 @@ automatically retried. The UI never claims that it was published or deletes it.
   are pruned only after neither the current selection nor any manifest item
   references their identity.
 - Pending files, manifests, and destination staging directories are owner-only.
-- All recursive operations validate canonical containment and reject symlinks.
+- All pending-source recursive operations are descriptor-relative and reject
+  symlinks with `O_NOFOLLOW`/`AT_SYMLINK_NOFOLLOW`; a display URL is never
+  reopened as a source-I/O authority.
 - Publication never follows an attacker-controlled link or overwrites an
   existing destination.
 - Queue errors and logs contain session identifiers and failure categories, not

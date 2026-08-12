@@ -258,12 +258,17 @@ typedef struct RecorderNativeStats {
     uint64_t video_durable_checkpoint_sequence;
     uint64_t video_durable_checkpoint_bytes;
     uint64_t video_durable_checkpoint_100ns;
+    /* Additive v5 exact-window evidence. This counts only WGC frames that
+       passed the current HWND/PID/creation-time fence and were successfully
+       written to the MP4. Privacy-black continuity frames never increment it. */
+    uint64_t captured_window_frames;
 } RecorderNativeStats;
 
 #define RECORDER_NATIVE_STATS_V1_SIZE 96u
 #define RECORDER_NATIVE_STATS_V2_SIZE 192u
 #define RECORDER_NATIVE_STATS_V3_SIZE 208u
 #define RECORDER_NATIVE_STATS_V4_SIZE 256u
+#define RECORDER_NATIVE_STATS_V5_SIZE 264u
 
 RECORDER_NATIVE_API RecorderNativeBridge* recorder_native_create(void);
 

@@ -964,6 +964,14 @@ private:
                     MarkVideoFailure("Writing the privacy-safe MP4 video frame failed.");
                     break;
                 }
+                // This is intentionally recorded only after the exact-window
+                // frame has reached the muxer. A committed WGC target alone,
+                // or any privacy-black continuity frame, is not evidence that
+                // the completed MP4 contains captured Teams pixels.
+                if (use_target_frame) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ++stats_.captured_window_frames;
+                }
                 video_sample_written_.store(true, std::memory_order_release);
                 next_timestamp += frame_duration;
             }

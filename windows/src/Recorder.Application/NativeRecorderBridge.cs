@@ -15,7 +15,7 @@ public sealed class NativeRecorderInteropException : Exception
 
 public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativeRecorderMicrophoneMuteControl, INativeMicrophonePcmSource, INativeSelectedAudioRecorderBridge, INativeSelectedWindowAvRecorderBridge, INativeDynamicWindowVideoRecorderBridge, INativeTeamsRenderEndpointProbe
 {
-    private const string RequiredAbiVersion = "0.10.0";
+    private const string RequiredAbiVersion = "0.11.0";
     private readonly object gate = new();
     private readonly NativeBridgeHandle handle;
     private readonly NativeMicrophonePcmCallback nativeMicrophonePcmCallback;
@@ -457,7 +457,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
             Marshal.SizeOf<NativeSelectedAudioStartOptions>() != 56 ||
             Marshal.SizeOf<NativeSelectedWindowAvStartOptions>() != 104 ||
             Marshal.SizeOf<NativeVideoTargetOptions>() != 32 ||
-            Marshal.SizeOf<NativeStats>() != 256)
+            Marshal.SizeOf<NativeStats>() != 264)
         {
             throw new NativeRecorderInteropException(
                 "The managed native-bridge layouts do not match the x64 C ABI.");
@@ -470,7 +470,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         if (!Version.TryParse(version, out var parsedVersion) ||
             parsedVersion is null ||
             parsedVersion.Major != 0 ||
-            parsedVersion.CompareTo(new Version(0, 10)) < 0)
+            parsedVersion.CompareTo(new Version(0, 11)) < 0)
         {
             throw new NativeRecorderInteropException(
                 $"Recorder.NativeBridge {RequiredAbiVersion} or newer is required.");
@@ -535,6 +535,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
             stats.VideoDurableCheckpointSequence,
             stats.VideoDurableCheckpointBytes,
             stats.VideoDurableCheckpoint100Nanoseconds),
+        CapturedWindowFrames = stats.CapturedWindowFrames,
     };
 
     private static string? NormalizeError(string? error) =>
@@ -747,6 +748,7 @@ public sealed partial class NativeRecorderBridge : INativeRecorderBridge, INativ
         public ulong VideoDurableCheckpointSequence;
         public ulong VideoDurableCheckpointBytes;
         public ulong VideoDurableCheckpoint100Nanoseconds;
+        public ulong CapturedWindowFrames;
     }
 
     private sealed class NativeBridgeHandle : SafeHandleZeroOrMinusOneIsInvalid

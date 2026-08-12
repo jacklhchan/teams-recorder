@@ -46,12 +46,16 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
         IRecordingDiagnostics? diagnostics = null,
         IVideoCaptureTargetCatalog? videoTargets = null,
         bool verifiedVideoCapturePipeline = false,
-        IAudioBackupValidator? audioValidator = null)
+        IAudioBackupValidator? audioValidator = null,
+        IVideoMediaValidator? videoValidator = null)
     {
         this.nativeBridge = nativeBridge ?? throw new ArgumentNullException(nameof(nativeBridge));
         coordinator = new RecordingCoordinator(nativeBridge, recordingDelay);
         coordinator.SnapshotChanged += OnSnapshotChanged;
-        storage = new SessionStorageService(storageRoot, audioValidator: audioValidator);
+        storage = new SessionStorageService(
+            storageRoot,
+            videoValidator: videoValidator,
+            audioValidator: audioValidator);
         captureSourcePolicy = new CaptureSourceSelectionPolicy(processCatalog);
         this.diagnostics = diagnostics ?? LocalDiagnosticLog.CreateDefault();
         this.videoTargets = videoTargets ?? new WindowsVideoCaptureTargetCatalog();
@@ -439,15 +443,26 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
         {
             SessionStorageService current;
             WindowsCaptureMetadata? capture;
-            bool video;
+            bool videoWasEnabled;
+            bool capturedWindowFrames;
             lock (stateGate)
             {
                 current = storage;
                 capture = activeWindowsCapture;
-                video = activeWindowVideo;
+                // A successful WGC target setup only authorizes privacy-black
+                // continuity frames. Publish a video session only once native
+                // evidence confirms that at least one current exact-window
+                // frame was actually muxed. Otherwise preserve the black-only
+                // work MP4 as evidence and promote the independent audio-safe
+                // recording as the library item.
+                videoWasEnabled = activeWindowVideo;
+                capturedWindowFrames = coordinator.Snapshot.Stats.CapturedWindowFrames > 0;
             }
-            if (video)
+            if (videoWasEnabled && capturedWindowFrames)
                 await current.PublishCompletedVideoAsync(plan, title: null, windowsCapture: capture).ConfigureAwait(false);
+            else if (videoWasEnabled)
+                await current.PublishVideoFailureAudioFallbackAsync(
+                    plan, title: null, windowsCapture: capture).ConfigureAwait(false);
             else
                 await current.PublishCompletedMediaAsync(plan, title: null, windowsCapture: capture).ConfigureAwait(false);
             return new RecordingSessionPublicationResult(plan, true, null);

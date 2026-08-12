@@ -32,6 +32,7 @@ var tests = new (string Name, Action Run)[]
     ("macOS parity surfaces remain wired", MacParitySurfacesRemainWired),
     ("Teams runtime uses local monitoring and retires WebSocket construction", TeamsRuntimeUsesLocalMonitoring),
     ("recording overlay owns a safe dynamic Teams video toggle", OverlayVideoToggleIsSafe),
+    ("Teams window capture refreshes an exact target at the start boundary", TeamsWindowTargetRefreshIsBounded),
     ("recording overlay supports active countdown and finalizing states", OverlayStatesAreComplete),
     ("recording overlay scales for DPI and remains user-resizable", OverlayIsDpiAwareAndResizable),
     ("pipe control joins the UI lifecycle and stops before finalization", ControlRuntimeLifecycleIsBounded),
@@ -452,6 +453,32 @@ void OverlayStatesAreComplete()
     Contains("presentation.Mode == RecordingOverlayMode.Recording", overlayCode,
         "The lifecycle action must route by state rather than localized button text.");
     Contains("TeamsWindowCaptureToggle.IsEnabled = isRecording", overlayCode, "Capture toggle must be editable only while active.");
+}
+
+void TeamsWindowTargetRefreshIsBounded()
+{
+    var toggleStart = viewModelCode.IndexOf("SetTeamsWindowCaptureDuringRecordingAsync", StringComparison.Ordinal);
+    var toggleEnd = viewModelCode.IndexOf("public bool IsTeamsAutomaticRecordingCountdownVisible", toggleStart, StringComparison.Ordinal);
+    if (toggleStart < 0 || toggleEnd < toggleStart)
+        throw new InvalidOperationException("The dynamic Teams capture action is missing.");
+    var toggle = viewModelCode[toggleStart..toggleEnd];
+    Contains("await RefreshTeamsWindowsCoreAsync();", toggle,
+        "Turning on capture during a recording must refresh a newly-created Teams meeting window first.");
+    Contains("SetVideoTargetAsync(selected)", toggle,
+        "The refreshed target must still receive lifecycle exact-identity validation.");
+
+    var start = viewModelCode.IndexOf("private async Task<RecordingCoordinatorSnapshot> StartRecordingAsync", StringComparison.Ordinal);
+    var resolve = viewModelCode.IndexOf("private VideoCaptureTarget? SelectedVideoTargetOrNull", start, StringComparison.Ordinal);
+    if (start < 0 || resolve < start)
+        throw new InvalidOperationException("The recording start path is missing.");
+    var recordingStart = viewModelCode[start..resolve];
+    var refresh = recordingStart.IndexOf("await RefreshTeamsWindowsCoreAsync();", StringComparison.Ordinal);
+    var target = recordingStart.IndexOf("SelectedVideoTargetOrNull()", StringComparison.Ordinal);
+    if (refresh < 0 || target < refresh)
+        throw new InvalidOperationException("Recording start must refresh Teams windows before resolving the exact capture target.");
+
+    Contains("RetainOrSelectCurrent(previous, targets)", viewModelCode,
+        "A stale selected HWND must be replaced only from the admitted current Teams catalog.");
 }
 
 void OverlayIsDpiAwareAndResizable()

@@ -495,8 +495,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         !isTeamsWindowCaptureToggleInProgress &&
         (isTeamsWindowCaptureEnabled ||
             storageCapacity?.Decision is not RecordingStorageDecision.AudioOnly and
-                not RecordingStorageDecision.Stop &&
-            SelectedVideoCaptureWindow is not null);
+                not RecordingStorageDecision.Stop);
 
     public async Task SetTeamsWindowCaptureDuringRecordingAsync(bool enabled)
     {
@@ -526,19 +525,23 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             NativeOperationResult result;
             if (enabled)
             {
+                // A Meet Now window can be created or replaced after recording
+                // starts. Refresh at the last UI boundary so we do not pass a
+                // stale HWND from the initial page load to native WGC.
+                await RefreshTeamsWindowsCoreAsync();
                 var selected = SelectedVideoCaptureWindow?.Target;
-                var current = selected is null
-                    ? null
-                    : VideoCaptureTargetSelection.Resolve(selected, videoTargetCatalog.ListTargets());
-                if (current is null)
+                if (selected is null)
                 {
                     result = NativeOperationResult.Failure(
                         NativeRecorderResult.CaptureError,
-                        "所選 Teams 視窗已無法使用；請在主視窗重新整理並選擇視窗。");
+                        "找不到可擷取的 Teams 會議視窗；請先開啟會議視窗後再試。");
                 }
                 else
                 {
-                    result = await GetRecordingLifecycle().SetVideoTargetAsync(current);
+                    // The lifecycle performs the final exact HWND/PID/creation
+                    // time check immediately before native capture and still
+                    // fails closed if this target disappears in the meantime.
+                    result = await GetRecordingLifecycle().SetVideoTargetAsync(selected);
                 }
             }
             else
@@ -2897,10 +2900,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         var targets = await Task.Run(videoTargetCatalog.ListTargets);
         TeamsCaptureWindows.Clear();
         foreach (var target in targets) TeamsCaptureWindows.Add(new VideoCaptureWindowChoice(target));
-        SelectedVideoCaptureWindow = previous is null
-            ? TeamsCaptureWindows.FirstOrDefault()
-            : TeamsCaptureWindows.FirstOrDefault(choice =>
-                VideoCaptureTargetSelection.Resolve(previous, [choice.Target]) is not null);
+        var current = VideoCaptureTargetSelection.RetainOrSelectCurrent(previous, targets);
+        SelectedVideoCaptureWindow = current is null
+            ? null
+            : TeamsCaptureWindows.FirstOrDefault(choice => choice.Target == current);
     }
 
     internal RecorderCrashContext CaptureCrashContext() => new(
@@ -3377,6 +3380,13 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         await RefreshTeamsPlaybackEndpointObservationAsync();
         RefreshStorageReadiness();
+        if (IsSharedContentCaptureEnabled)
+        {
+            // Meet Now often creates its top-level window after app startup.
+            // Refresh now; RecordingLifecycleService revalidates the exact
+            // result once more before asking native WGC to begin capture.
+            await RefreshTeamsWindowsCoreAsync();
+        }
         var lifecycle = GetRecordingLifecycle();
         var requestedVideoTarget = SelectedVideoTargetOrNull();
         RecordingLifecycleStartResult started;

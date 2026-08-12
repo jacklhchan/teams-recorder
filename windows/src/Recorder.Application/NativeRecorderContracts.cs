@@ -369,6 +369,12 @@ public sealed record NativeCaptureStats(
     /// bytes merely accepted by Media Foundation.
     /// </summary>
     public NativeDurableCheckpoint VideoDurableCheckpoint { get; init; } = NativeDurableCheckpoint.None;
+    /// <summary>
+    /// Number of exact-window WGC frames that passed the current identity fence
+    /// and were successfully muxed. Privacy-black continuity frames do not
+    /// contribute, so zero means no captured window pixels reached the MP4.
+    /// </summary>
+    public ulong CapturedWindowFrames { get; init; }
 
     public static NativeCaptureStats Empty(RecordingCaptureMode mode) => new(
         mode,

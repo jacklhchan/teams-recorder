@@ -73,6 +73,100 @@ internal static class RecordingLibraryServiceTests
         }
     }
 
+    public static void RefreshReusesValidationForUnchangedMedia()
+    {
+        using var root = new TestRoot();
+        var validator = new CountingAudioValidator();
+        var storage = new SessionStorageService(root.Path, audioValidator: validator);
+        var plans = Enumerable.Range(0, 4)
+            .Select(_ => storage.CreateSessionPlan(RecordingSessionKind.Manual))
+            .ToArray();
+        foreach (var plan in plans) File.WriteAllBytes(plan.FinalAudioPath, [1, 2, 3]);
+
+        if (storage.ListSessions().Count != plans.Length || validator.Count != plans.Length)
+            throw new InvalidOperationException("Initial library validation did not inspect each published file exactly once.");
+        if (storage.ListSessions().Count != plans.Length || validator.Count != plans.Length)
+            throw new InvalidOperationException("An unchanged refresh decoded the complete library again.");
+
+        File.AppendAllBytes(plans[0].FinalAudioPath, [4]);
+        if (storage.ListSessions().Count != plans.Length || validator.Count != plans.Length + 1)
+            throw new InvalidOperationException("The validation cache did not invalidate exactly the changed media file.");
+    }
+
+    public static void CanonicalResolutionValidatesOnlyTheSelectedSession()
+    {
+        using var root = new TestRoot();
+        var listingStorage = new SessionStorageService(root.Path, audioValidator: new AlwaysValidAudio());
+        var plans = Enumerable.Range(0, 5)
+            .Select(_ => listingStorage.CreateSessionPlan(RecordingSessionKind.Manual))
+            .ToArray();
+        foreach (var plan in plans) File.WriteAllBytes(plan.FinalAudioPath, [1, 2, 3]);
+        var selected = listingStorage.ListSessions()[2];
+        var identity = RecordingLibrarySessionIdentity.Create(selected);
+
+        var validator = new CountingAudioValidator();
+        var resolver = new RecordingLibraryService(new SessionStorageService(root.Path, audioValidator: validator));
+        var resolved = resolver.ResolveCanonicalSession(identity);
+        if (resolved is null || !identity.Matches(resolved) || validator.Count != 1)
+            throw new InvalidOperationException("Playback revalidation scanned more than the selected canonical session.");
+    }
+
+    public static void CanonicalVideoResolutionDecodesEachSelectedArtifactOnce()
+    {
+        using var root = new TestRoot();
+        var listingStorage = new SessionStorageService(
+            root.Path,
+            videoValidator: new AlwaysValidVideo(),
+            audioValidator: new AlwaysValidAudio());
+        var plan = listingStorage.CreateSessionPlan(RecordingSessionKind.Meeting);
+        File.WriteAllBytes(plan.FinalVideoPath, [1, 2, 3]);
+        File.WriteAllBytes(plan.FinalAudioPath, [4, 5, 6]);
+        File.WriteAllText(
+            plan.MetadataPath,
+            "{\"schemaVersion\":1,\"mediaKind\":\"video\",\"source\":\"teamsAutomatic\",\"participants\":[],\"screenIntervals\":[]}");
+        var identity = RecordingLibrarySessionIdentity.Create(listingStorage.ListSessions().Single());
+
+        var video = new CountingVideoValidator();
+        var audio = new CountingAudioValidator();
+        var resolver = new RecordingLibraryService(new SessionStorageService(
+            root.Path,
+            videoValidator: video,
+            audioValidator: audio));
+        var resolved = resolver.ResolveCanonicalSession(identity);
+
+        if (resolved is null || !identity.Matches(resolved) || video.Count != 1 || audio.Count != 1)
+        {
+            throw new InvalidOperationException(
+                $"A selected video action decoded an artifact more than once: video={video.Count}, audio={audio.Count}.");
+        }
+    }
+
+    public static void NestedSessionLikeFoldersAreNeverOwned()
+    {
+        using var root = new TestRoot();
+        var nestedParent = Path.Combine(root.Path, "foreign-container");
+        var nestedSession = Path.Combine(nestedParent, "manual-20260812-120000000");
+        Directory.CreateDirectory(nestedSession);
+        File.WriteAllBytes(Path.Combine(nestedSession, RecordingSessionLayout.FinalAudioFileName), [1, 2, 3]);
+
+        var library = new RecordingLibraryService(new SessionStorageService(
+            root.Path,
+            audioValidator: new AlwaysValidAudio()));
+        if (library.ListSessions().Any(item =>
+                string.Equals(item.FolderPath, nestedSession, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException("A nested foreign folder was treated as an owned recording session.");
+        }
+
+        Throws<InvalidOperationException>(() =>
+            library.UpdateMetadataAsync(nestedSession, "must not change", [], false)
+                .GetAwaiter().GetResult());
+        Throws<InvalidOperationException>(() =>
+            library.RecycleSession(nestedSession, userConfirmed: true));
+        if (!Directory.Exists(nestedSession))
+            throw new InvalidOperationException("A nested foreign folder was removed by an owned-session action.");
+    }
+
     private static void WriteM4a(string path)
     {
         using var stream = File.Create(path);
@@ -106,5 +200,32 @@ internal static class RecordingLibraryServiceTests
     private sealed class AlwaysValidAudio : IAudioBackupValidator
     {
         public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
+    }
+
+    private sealed class AlwaysValidVideo : IVideoMediaValidator
+    {
+        public bool IsValidNonEmptyVideo(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
+    }
+
+    private sealed class CountingVideoValidator : IVideoMediaValidator
+    {
+        public int Count { get; private set; }
+
+        public bool IsValidNonEmptyVideo(string path)
+        {
+            Count++;
+            return File.Exists(path) && new FileInfo(path).Length > 0;
+        }
+    }
+
+    private sealed class CountingAudioValidator : IAudioBackupValidator
+    {
+        public int Count { get; private set; }
+
+        public bool IsValidNonEmptyAudio(string path)
+        {
+            Count++;
+            return File.Exists(path) && new FileInfo(path).Length > 0;
+        }
     }
 }

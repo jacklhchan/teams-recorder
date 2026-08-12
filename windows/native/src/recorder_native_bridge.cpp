@@ -280,7 +280,7 @@ struct RecorderNativeEndpointList {
 
 namespace {
 
-constexpr char kVersion[] = "0.10.0";
+constexpr char kVersion[] = "0.11.0";
 constexpr char kInvalidHandleError[] = "RecorderNativeBridge handle is null.";
 
 RecorderNativeStats EmptyStats(RecorderNativeCaptureMode mode) {

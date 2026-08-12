@@ -40,7 +40,11 @@ public sealed class RecordingLibraryService
     public RecordingSessionLibraryItem? ResolveCanonicalSession(RecordingLibrarySessionIdentity expected)
     {
         ArgumentNullException.ThrowIfNull(expected);
-        return storage.ListSessions().SingleOrDefault(expected.Matches);
+        var current = storage.ResolvePublishedSession(
+            expected.FolderPath,
+            expected.MediaPath,
+            expected.IsManaged);
+        return current is not null && expected.Matches(current) ? current : null;
     }
 
     /// <summary>

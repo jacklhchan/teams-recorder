@@ -15,7 +15,7 @@ static_assert(sizeof(RecorderNativeStartOptions) == 32U, "x64 start options layo
 static_assert(offsetof(RecorderNativeStartOptions, output_path_utf8) == 8U, "output path offset changed");
 static_assert(offsetof(RecorderNativeStartOptions, endpoint_id_utf8) == 16U, "endpoint ID offset changed");
 static_assert(offsetof(RecorderNativeStartOptions, target_process_id) == 24U, "target PID offset changed");
-static_assert(sizeof(RecorderNativeStats) == RECORDER_NATIVE_STATS_V4_SIZE, "x64 stats layout changed");
+static_assert(sizeof(RecorderNativeStats) == RECORDER_NATIVE_STATS_V5_SIZE, "x64 stats layout changed");
 static_assert(offsetof(RecorderNativeStats, packets) == 32U, "packet counter offset changed");
 static_assert(offsetof(RecorderNativeStats, peak) == 88U, "peak offset changed");
 static_assert(offsetof(RecorderNativeStats, render_drift_corrections) == 96U, "timeline stats must be additive");
@@ -23,6 +23,7 @@ static_assert(RECORDER_NATIVE_STATS_V1_SIZE == 96U, "v1 stats prefix changed");
 static_assert(RECORDER_NATIVE_STATS_V2_SIZE == 192U, "v2 stats prefix changed");
 static_assert(offsetof(RecorderNativeStats, primary_level_peak) == RECORDER_NATIVE_STATS_V2_SIZE, "live levels must be additive");
 static_assert(offsetof(RecorderNativeStats, audio_durable_checkpoint_sequence) == RECORDER_NATIVE_STATS_V3_SIZE, "durable checkpoints must be additive");
+static_assert(offsetof(RecorderNativeStats, captured_window_frames) == RECORDER_NATIVE_STATS_V4_SIZE, "real video evidence must be additive");
 static_assert(RECORDER_NATIVE_CAPTURE_SYSTEM_LOOPBACK == 0, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_MICROPHONE == 1, "capture mode ABI value changed");
 static_assert(RECORDER_NATIVE_CAPTURE_PROCESS_LOOPBACK == 2, "capture mode ABI value changed");
@@ -87,7 +88,7 @@ int main() {
     uint32_t endpoint_count = 0;
     recorder_native_endpoint_list_destroy(nullptr);
 
-    if (!Expect(std::strcmp(recorder_native_version(), "0.10.0") == 0) ||
+    if (!Expect(std::strcmp(recorder_native_version(), "0.11.0") == 0) ||
         !Expect(recorder_native_start(nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_with_options(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||
         !Expect(recorder_native_start_selected_audio(nullptr, nullptr) == RECORDER_NATIVE_INVALID_ARGUMENT) ||

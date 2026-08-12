@@ -34,6 +34,23 @@ internal static class VideoCaptureTests
             throw new InvalidOperationException("Invalid target was accepted.");
     }
 
+    public static void RefreshRetainsLiveTargetOrSelectsReplacement()
+    {
+        var selected = new VideoCaptureTarget(42, (nint)0x1234, 101, "ms-teams.exe", "Old meeting");
+        var renamed = selected with { WindowTitle = "Renamed meeting" };
+        var retained = VideoCaptureTargetSelection.RetainOrSelectCurrent(selected, [renamed]);
+        if (retained != renamed)
+            throw new InvalidOperationException("A refresh must retain the same live Teams window.");
+
+        var replacement = new VideoCaptureTarget(42, (nint)0x5678, 101, "ms-teams.exe", "Meet now");
+        var refreshed = VideoCaptureTargetSelection.RetainOrSelectCurrent(selected, [replacement]);
+        if (refreshed != replacement)
+            throw new InvalidOperationException("A stale meeting HWND must be replaced with the current admitted Teams window.");
+
+        if (VideoCaptureTargetSelection.RetainOrSelectCurrent(selected, []) is not null)
+            throw new InvalidOperationException("No target must be invented when Teams has no admitted meeting window.");
+    }
+
     public static void TargetAdmissionFailsClosedForUnsafeOrUnrelatedWindows()
     {
         var valid = Candidate();

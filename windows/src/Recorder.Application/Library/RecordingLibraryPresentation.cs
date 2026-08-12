@@ -10,7 +10,7 @@ namespace TeamsRecorder.Windows.Application.Library;
 /// <summary>
 /// Immutable identity captured when a library row is projected.  It is deliberately
 /// more specific than a path: every action re-resolves this fingerprint against a
-/// fresh library enumeration before it opens, changes, or recycles a session.
+/// fresh targeted storage lookup before it opens, changes, or recycles a session.
 /// </summary>
 public sealed record RecordingLibrarySessionIdentity(
     string FolderPath,

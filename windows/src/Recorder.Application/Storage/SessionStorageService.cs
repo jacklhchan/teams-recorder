@@ -256,6 +256,8 @@ public sealed class SessionStorageService
         WriteIndented = true,
     };
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> MetadataWriteGates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, MediaValidationCacheEntry> mediaValidationCache =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly string rootPath;
     private readonly RecordingStoragePolicy policy;
     private readonly IStorageCapacityProvider capacityProvider;
@@ -861,47 +863,10 @@ public sealed class SessionStorageService
         {
             foreach (var folder in Directory.EnumerateDirectories(rootPath))
             {
-                if (!TryOwnedFolder(folder, out var kind) || IsReparsePoint(folder)) continue;
-                var metadata = ReadMetadata(Path.Combine(folder, RecordingSessionLayout.MetadataFileName));
-                if (metadata.MediaKind == "video")
+                if (TryCreateManagedLibraryItem(folder, useValidationCache: true, out var item))
                 {
-                    // Do not surface legacy/imported target identity in the
-                    // Windows library even before a user makes an edit.
-                    metadata = RecordingInfoJson.CreateVideo(
-                        metadata.Document,
-                        metadata.Title,
-                        metadata.RecoveryState,
-                        kind);
-                    // A stale/invalid MP4 must not make its associated M4A
-                    // look like a playable video recording.  Recovery will
-                    // persist this same downgrade, but the library fails
-                    // closed even if it is queried before recovery runs.
-                    var finalAudio = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
-                    var finalVideo = Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName);
-                    if ((!IsSafeCompletedVideo(finalVideo) || !IsSafeCompletedAudio(finalAudio)) &&
-                        IsSafeCompletedAudio(finalAudio))
-                    {
-                        metadata = RecordingInfoJson.CreateAudioOnly(
-                            metadata.Document,
-                            metadata.Title,
-                            RecordingRecoveryState.VideoLostAudioPreserved,
-                            kind);
-                    }
+                    result.Add(item);
                 }
-                // A video record is discoverable only when its publisher has
-                // written both explicit video metadata and the final MP4. A
-                // partial MP4 is always recovery evidence, never library media.
-                if (!TryGetPublishedMediaPath(folder, metadata, out var final)) continue;
-                var backup = Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName);
-                var safety = Path.Combine(folder, RecordingSessionLayout.AudioSafetyPartialFileName);
-                result.Add(new(
-                    kind,
-                    folder,
-                    final,
-                    new FileInfo(final).Length,
-                    metadata,
-                    (IsSafeFile(backup) && new FileInfo(backup).Length > 0) ||
-                    (IsSafeFile(safety) && new FileInfo(safety).Length > 0)));
             }
 
             // Early Windows builds wrote M4A files directly beneath the chosen
@@ -929,9 +894,117 @@ public sealed class SessionStorageService
             .ToArray();
     }
 
+    /// <summary>
+    /// Revalidates exactly one action target. This intentionally bypasses the
+    /// refresh cache so a replaced file cannot inherit a previous decode
+    /// decision, while avoiding a full-library scan before playback.
+    /// </summary>
+    internal RecordingSessionLibraryItem? ResolvePublishedSession(
+        string expectedFolderPath,
+        string expectedMediaPath,
+        bool isManaged)
+    {
+        try
+        {
+            var folder = Path.GetFullPath(expectedFolderPath);
+            var media = Path.GetFullPath(expectedMediaPath);
+            if (isManaged)
+            {
+                if (!PathEquals(Path.GetDirectoryName(folder) ?? string.Empty, rootPath) ||
+                    !TryCreateManagedLibraryItem(folder, useValidationCache: false, out var item) ||
+                    !PathEquals(item.MediaPath, media))
+                {
+                    return null;
+                }
+
+                return item;
+            }
+
+            if (!PathEquals(folder, rootPath) ||
+                !PathEquals(Path.GetDirectoryName(media) ?? string.Empty, rootPath) ||
+                !string.Equals(Path.GetExtension(media), ".m4a", StringComparison.OrdinalIgnoreCase) ||
+                !IsSafeFile(media))
+            {
+                return null;
+            }
+
+            var info = new FileInfo(media);
+            return new RecordingSessionLibraryItem(
+                RecordingSessionKind.Manual,
+                rootPath,
+                media,
+                info.Length,
+                RecordingInfo.AudioOnly(Path.GetFileNameWithoutExtension(media)),
+                HasRecoverableBackup: false,
+                IsManaged: false);
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (ArgumentException) { return null; }
+    }
+
+    private bool TryCreateManagedLibraryItem(
+        string folder,
+        bool useValidationCache,
+        out RecordingSessionLibraryItem item)
+    {
+        item = null!;
+        if (!TryOwnedFolder(folder, out var kind) || IsReparsePoint(folder)) return false;
+        // A user action must bypass the cross-refresh cache, but the same
+        // selected artifact must still be decoded at most once during this
+        // resolution. Video sessions otherwise validated the MP4 twice (and
+        // the safety audio more than once) before playback could begin.
+        var actionValidation = useValidationCache
+            ? null
+            : new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        var metadata = ReadMetadata(Path.Combine(folder, RecordingSessionLayout.MetadataFileName));
+        if (metadata.MediaKind == "video")
+        {
+            // Do not surface legacy/imported target identity in the Windows
+            // library even before a user makes an edit.
+            metadata = RecordingInfoJson.CreateVideo(
+                metadata.Document,
+                metadata.Title,
+                metadata.RecoveryState,
+                kind);
+            // A stale/invalid MP4 must not make its associated M4A look like a
+            // playable video recording. Recovery persists this downgrade.
+            var finalAudio = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
+            var finalVideo = Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName);
+            if ((!IsSafeCompletedVideo(finalVideo, useValidationCache, actionValidation) ||
+                 !IsSafeCompletedAudio(finalAudio, useValidationCache, actionValidation)) &&
+                IsSafeCompletedAudio(finalAudio, useValidationCache, actionValidation))
+            {
+                metadata = RecordingInfoJson.CreateAudioOnly(
+                    metadata.Document,
+                    metadata.Title,
+                    RecordingRecoveryState.VideoLostAudioPreserved,
+                    kind);
+            }
+        }
+
+        if (!TryGetPublishedMediaPath(
+                folder, metadata, out var final, useValidationCache, actionValidation)) return false;
+        var backup = Path.Combine(folder, RecordingSessionLayout.BackupAudioFileName);
+        var safety = Path.Combine(folder, RecordingSessionLayout.AudioSafetyPartialFileName);
+        item = new RecordingSessionLibraryItem(
+            kind,
+            folder,
+            final,
+            new FileInfo(final).Length,
+            metadata,
+            (IsSafeFile(backup) && new FileInfo(backup).Length > 0) ||
+            (IsSafeFile(safety) && new FileInfo(safety).Length > 0));
+        return true;
+    }
+
     internal RecordingInfo ReadMetadata(string metadataPath)
     {
-        try { return RecordingInfoJson.Parse(File.ReadAllText(metadataPath)); }
+        try
+        {
+            if (!IsSafeFile(metadataPath)) return RecordingInfoJson.Parse(null);
+            return RecordingInfoJson.Parse(File.ReadAllText(metadataPath));
+        }
         catch (IOException) { return RecordingInfoJson.Parse(null); }
         catch (UnauthorizedAccessException) { return RecordingInfoJson.Parse(null); }
     }
@@ -1047,12 +1120,70 @@ public sealed class SessionStorageService
     internal bool IsSafeFile(string path) => IsDescendant(path) && File.Exists(path) && !IsReparsePoint(path);
 
     /// <summary>Shared by publication and startup recovery; a final MP4 must pass the bounded structural guard.</summary>
-    internal bool IsSafeCompletedVideo(string path) => IsSafeNonEmptyFile(path) && videoValidator.IsValidNonEmptyVideo(path);
+    internal bool IsSafeCompletedVideo(string path) => IsSafeCompletedVideo(path, useValidationCache: false);
+
+    private bool IsSafeCompletedVideo(
+        string path,
+        bool useValidationCache,
+        IDictionary<string, bool>? actionValidation = null) =>
+        IsSafeNonEmptyFile(path) && ValidateMedia(
+            path, "video", useValidationCache, videoValidator.IsValidNonEmptyVideo, actionValidation);
 
     /// <summary>A final M4A must have a decodable AAC sample, not merely bytes or BMFF atom names.</summary>
     internal bool IsSafeCompletedAudio(string path)
     {
-        return IsSafeNonEmptyFile(path) && audioValidator.IsValidNonEmptyAudio(path);
+        return IsSafeCompletedAudio(path, useValidationCache: false);
+    }
+
+    private bool IsSafeCompletedAudio(
+        string path,
+        bool useValidationCache,
+        IDictionary<string, bool>? actionValidation = null) =>
+        IsSafeNonEmptyFile(path) && ValidateMedia(
+            path, "audio", useValidationCache, audioValidator.IsValidNonEmptyAudio, actionValidation);
+
+    private bool ValidateMedia(
+        string path,
+        string mediaKind,
+        bool useValidationCache,
+        Func<string, bool> validate,
+        IDictionary<string, bool>? actionValidation = null)
+    {
+        if (!useValidationCache)
+        {
+            var fullPath = Path.GetFullPath(path);
+            var key = $"{mediaKind}:{fullPath}";
+            if (actionValidation is not null && actionValidation.TryGetValue(key, out var prior))
+                return prior;
+            var result = validate(fullPath);
+            actionValidation?[key] = result;
+            return result;
+        }
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var info = new FileInfo(fullPath);
+            if (mediaValidationCache.TryGetValue(fullPath, out var cached) &&
+                cached.MediaKind == mediaKind &&
+                cached.Length == info.Length &&
+                cached.CreationUtcTicks == info.CreationTimeUtc.Ticks &&
+                cached.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks)
+            {
+                return cached.IsValid;
+            }
+
+            var isValid = validate(fullPath);
+            mediaValidationCache[fullPath] = new(
+                mediaKind,
+                info.Length,
+                info.CreationTimeUtc.Ticks,
+                info.LastWriteTimeUtc.Ticks,
+                isValid);
+            return isValid;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (ArgumentException) { return false; }
     }
 
     internal bool IsSafeNonEmptyFile(string path)
@@ -1062,11 +1193,17 @@ public sealed class SessionStorageService
         catch (UnauthorizedAccessException) { return false; }
     }
 
-    private bool TryGetPublishedMediaPath(string folder, RecordingInfo metadata, out string mediaPath)
+    private bool TryGetPublishedMediaPath(
+        string folder,
+        RecordingInfo metadata,
+        out string mediaPath,
+        bool useValidationCache = false,
+        IDictionary<string, bool>? actionValidation = null)
     {
         var finalVideo = Path.Combine(folder, RecordingSessionLayout.FinalVideoFileName);
         var finalAudio = Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
-        if (metadata.MediaKind == "video" && IsSafeCompletedVideo(finalVideo))
+        if (metadata.MediaKind == "video" && IsSafeCompletedVideo(
+                finalVideo, useValidationCache, actionValidation))
         {
             mediaPath = finalVideo;
             return true;
@@ -1074,13 +1211,14 @@ public sealed class SessionStorageService
 
         // New audio-safety recovery is AAC in fragmented MP4. Legacy sessions
         // continue to use recording.m4a below.
-        if (metadata.MediaKind == "audio" && IsSafeCompletedAudio(finalVideo))
+        if (metadata.MediaKind == "audio" && IsSafeCompletedAudio(
+                finalVideo, useValidationCache, actionValidation))
         {
             mediaPath = finalVideo;
             return true;
         }
 
-        if (IsSafeCompletedAudio(finalAudio))
+        if (IsSafeCompletedAudio(finalAudio, useValidationCache, actionValidation))
         {
             mediaPath = finalAudio;
             return true;
@@ -1100,6 +1238,13 @@ public sealed class SessionStorageService
         mediaPath = string.Empty;
         return false;
     }
+
+    private sealed record MediaValidationCacheEntry(
+        string MediaKind,
+        long Length,
+        long CreationUtcTicks,
+        long LastWriteUtcTicks,
+        bool IsValid);
 
     private bool TryGetImportedAudioPath(string folder, out string mediaPath)
     {
@@ -1154,8 +1299,12 @@ public sealed class SessionStorageService
     private bool TryOwnedFolder(string folder, out RecordingSessionKind kind)
     {
         kind = default;
-        return IsDescendant(folder) &&
-            RecordingSessionLayout.TryGetKind(Path.GetFileName(folder), out kind);
+        string fullPath;
+        try { fullPath = Path.GetFullPath(folder); }
+        catch (ArgumentException) { return false; }
+        return IsDescendant(fullPath) &&
+            PathEquals(Path.GetDirectoryName(fullPath) ?? string.Empty, rootPath) &&
+            RecordingSessionLayout.TryGetKind(Path.GetFileName(fullPath), out kind);
     }
     private void EnsurePlan(RecordingSessionPlan plan)
     {

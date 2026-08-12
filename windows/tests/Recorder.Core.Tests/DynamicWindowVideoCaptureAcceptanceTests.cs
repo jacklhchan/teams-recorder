@@ -180,6 +180,88 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
         Equal(RecordingRecoveryState.None, metadata.RecoveryState);
     }
 
+    // A WGC target can be committed yet deliver no accepted frame before stop
+    // (for example the Teams meeting window was replaced). The native A/V
+    // work file then contains privacy-black continuity only. It must remain
+    // evidence, while the independent audio-safe MP4 is the sole library
+    // item rather than falsely claiming captured video.
+    public static void EnabledButBlackOnlyTargetPublishesAudioSafetyMp4()
+    {
+        using var root = new TemporaryRoot();
+        var requested = Target(0x6789, 92, 322);
+        var bridge = new LifecycleAudioSafetyBridge();
+        using var lifecycle = new RecordingLifecycleService(
+            bridge,
+            root.Path,
+            videoTargets: new SingleVideoTargetCatalog(requested),
+            verifiedVideoCapturePipeline: true,
+            audioValidator: new AlwaysValidAudio());
+
+        var started = lifecycle.StartAsync(new RecordingStartRequest(
+            RecordingSessionKind.Manual,
+            RecordingAudioSource.SystemLoopback,
+            VideoTarget: requested)).GetAwaiter().GetResult();
+        Equal(RecordingCoordinatorState.Recording, started.Snapshot.State);
+        if (bridge.LastRequest?.WindowTarget is null)
+            throw new InvalidOperationException("The admitted target was not passed to native capture.");
+
+        lifecycle.StopAsync().GetAwaiter().GetResult();
+        var publication = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
+        if (!publication.Published || !File.Exists(started.Session.FinalVideoPath) ||
+            !File.Exists(started.Session.PartialVideoPath) ||
+            File.Exists(started.Session.AudioSafetyPartialPath))
+        {
+            throw new InvalidOperationException("Black-only video did not preserve evidence and publish the audio-safe recording.");
+        }
+
+        var metadata = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
+        Equal("audio", metadata.MediaKind);
+        Equal(RecordingRecoveryState.VideoLostAudioPreserved, metadata.RecoveryState);
+
+        // A later startup sees the retained partial as evidence, but must not
+        // promote it over the completed audio-safe MP4. This simulated decoder
+        // accepts only the known final audio artifact.
+        var recoveryStorage = new SessionStorageService(root.Path, audioValidator: new AlwaysValidAudio());
+        var recovery = new SessionRecoveryService(
+            recoveryStorage,
+            recoveryMediaValidator: new AudioOnlyRecoveryValidator());
+        var recoveryResult = recovery.RecoverAsync().GetAwaiter().GetResult().Single();
+        if (recoveryResult.Recovered || recoveryResult.RecoveryState != RecordingRecoveryState.VideoLostAudioPreserved)
+            throw new InvalidOperationException("Startup recovery promoted black-only partial video over the audio-safe recording.");
+        metadata = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
+        Equal("audio", metadata.MediaKind);
+    }
+
+    public static void CapturedWindowFramePublishesVideo()
+    {
+        using var root = new TemporaryRoot();
+        var requested = Target(0x789A, 93, 323);
+        var bridge = new LifecycleAudioSafetyBridge(capturedWindowFrames: 1);
+        using var lifecycle = new RecordingLifecycleService(
+            bridge,
+            root.Path,
+            videoTargets: new SingleVideoTargetCatalog(requested),
+            verifiedVideoCapturePipeline: true,
+            audioValidator: new AlwaysValidAudio(),
+            videoValidator: new AlwaysValidVideo());
+
+        var started = lifecycle.StartAsync(new RecordingStartRequest(
+            RecordingSessionKind.Manual,
+            RecordingAudioSource.SystemLoopback,
+            VideoTarget: requested)).GetAwaiter().GetResult();
+        lifecycle.StopAsync().GetAwaiter().GetResult();
+        var publication = lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
+        if (!publication.Published || !File.Exists(started.Session.FinalVideoPath) ||
+            File.Exists(started.Session.PartialVideoPath) ||
+            !File.Exists(started.Session.AudioSafetyPartialPath))
+        {
+            throw new InvalidOperationException("A captured exact-window frame did not publish the A/V MP4.");
+        }
+
+        var metadata = RecordingInfoJson.Parse(File.ReadAllText(started.Session.MetadataPath));
+        Equal("video", metadata.MediaKind);
+    }
+
     private static VideoCaptureTarget Target(nint hwnd, int pid, long created) =>
         new(pid, hwnd, created, "ms-teams.exe", "Transient target");
 
@@ -303,12 +385,30 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
         public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
     }
 
+    private sealed class AlwaysValidVideo : IVideoMediaValidator
+    {
+        public bool IsValidNonEmptyVideo(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
+    }
+
+    private sealed class AudioOnlyRecoveryValidator : IRecoveryMediaValidator
+    {
+        public RecoveryMediaValidationResult ValidateToEnd(string path, RecoveryMediaKind mediaKind) =>
+            mediaKind == RecoveryMediaKind.AudioOnlyMp4 && File.Exists(path)
+                ? RecoveryMediaValidationResult.Valid
+                : RecoveryMediaValidationResult.Invalid("Only the final audio-safe MP4 is accepted in this test.");
+    }
+
     private sealed class EmptyVideoTargetCatalog : IVideoCaptureTargetCatalog
     {
         public IReadOnlyList<VideoCaptureTarget> ListTargets() => [];
     }
 
-    private sealed class LifecycleAudioSafetyBridge : INativeRecorderBridge,
+    private sealed class SingleVideoTargetCatalog(VideoCaptureTarget target) : IVideoCaptureTargetCatalog
+    {
+        public IReadOnlyList<VideoCaptureTarget> ListTargets() => [target];
+    }
+
+    private sealed class LifecycleAudioSafetyBridge(ulong capturedWindowFrames = 0) : INativeRecorderBridge,
         INativeSelectedWindowAvRecorderBridge
     {
         private NativeRecorderState state = NativeRecorderState.Ready;
@@ -326,6 +426,8 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
             request.Validate();
             LastRequest = request;
             File.WriteAllBytes(request.AudioRecoveryPath, [1, 2, 3, 4]);
+            if (request.WindowTarget is not null)
+                File.WriteAllBytes(request.VideoOutputPath, [5, 6, 7, 8]);
             state = NativeRecorderState.Recording;
             return NativeOperationResult.Success();
         }
@@ -339,7 +441,10 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
         public NativeRecorderSnapshot GetSnapshot() => new(
             NativeRecorderResult.Ok,
             state,
-            NativeCaptureStats.Empty(RecordingCaptureMode.SelectedWindowAv),
+            NativeCaptureStats.Empty(RecordingCaptureMode.SelectedWindowAv) with
+            {
+                CapturedWindowFrames = capturedWindowFrames,
+            },
             null);
 
         public NativeEndpointEnumerationResult EnumerateEndpoints() =>

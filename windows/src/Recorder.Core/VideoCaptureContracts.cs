@@ -126,6 +126,18 @@ public static class VideoCaptureTargetSelection
             candidate.WindowHandle == selected.WindowHandle &&
             candidate.ProcessCreationTimeFileTimeUtc == selected.ProcessCreationTimeFileTimeUtc);
     }
+
+    /// <summary>
+    /// Retains the selected exact window when it is still current. If Teams
+    /// replaced the meeting window after the chooser last refreshed, the
+    /// catalog contains only admitted Teams top-level windows, so select its
+    /// current entry instead of carrying a stale HWND into WGC. Lifecycle code
+    /// must still validate the result immediately before native capture.
+    /// </summary>
+    public static VideoCaptureTarget? RetainOrSelectCurrent(
+        VideoCaptureTarget? selected,
+        IReadOnlyList<VideoCaptureTarget> available) =>
+        Resolve(selected, available) ?? available.FirstOrDefault(candidate => candidate.IsUsable);
 }
 
 public interface IVideoCaptureTargetCatalog

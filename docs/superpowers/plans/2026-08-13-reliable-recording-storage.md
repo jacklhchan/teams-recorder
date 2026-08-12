@@ -789,7 +789,10 @@ func testStopEnqueuesLocalResultAndDoesNotFinalizeLibraryBeforePublication() asy
     await fixture.model.finishRecording(playAfterStop: false)
 
     XCTAssertEqual(fixture.publication.requests.count, 1)
-    XCTAssertEqual(fixture.publication.requests[0].localFolderURL, fixture.localResult.folderURL)
+    XCTAssertEqual(
+        fixture.publication.requests[0].sessionDirectoryName,
+        fixture.localResult.folderURL.lastPathComponent
+    )
     XCTAssertTrue(fixture.libraryFinalizations.isEmpty)
     XCTAssertEqual(fixture.model.statusMessage, "Recording saved locally; publishing")
 }
@@ -887,6 +890,12 @@ completion whose fence and destination still match the active workspace, emit
 `RecordingFinalizationOutcome` using destination URLs and
 `finalizationID: completion.itemID`; a stale completion
 remains on disk but does not mutate the current Library projection.
+
+Before enqueueing, require the recorder result to be an identity-validated
+direct child of `appPaths.pendingRecordingsDirectory`, and pass only its direct
+child `sessionDirectoryName` into the coordinator. A result outside that root,
+or a replaced/symlink session entry, is a local-finalization failure and must
+not be queued through a path-only fallback.
 
 Status copy:
 

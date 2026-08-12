@@ -14,6 +14,65 @@ private enum RecordingsSurfaceTestMarker {
 
 @MainActor
 final class RecorderWorkspaceRenderTests: XCTestCase {
+    func testRecordWorkspaceShowsPendingPublicationBannerActions() throws {
+        let fixture = makeWorkspaceFixture(
+            publication: .init(
+                stateText: "Waiting for OneDrive",
+                pendingCount: 0,
+                waitingCount: 2,
+                needsAttentionCount: 0
+            )
+        )
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        XCTAssertEqual(fixture.model.recordingPublicationPresentation.waitingCount, 2)
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.pending-banner"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.retry"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.open-local"))
+        XCTAssertTrue(host.containsText("2 recordings retained locally"))
+    }
+
+    func testStorageSettingsExposeDestinationAccessAndNeedsAttention() throws {
+        let fixture = makeWorkspaceFixture(
+            destinationState: .needsFolderAccess,
+            publication: .init(
+                stateText: "Publish failed",
+                pendingCount: 0,
+                waitingCount: 0,
+                needsAttentionCount: 1
+            )
+        )
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.storage-shortcuts"))
+
+        XCTAssertEqual(fixture.model.recordingDestinationState, .needsFolderAccess)
+        XCTAssertEqual(fixture.model.recordingPublicationPresentation.needsAttentionCount, 1)
+        XCTAssertTrue(host.containsText("Needs folder access"))
+        XCTAssertTrue(host.containsText("1 recording needs attention"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.destination-status"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.storage.pending-status"))
+    }
+
+    func testReadyWithNoRetainedSessionsDoesNotRenderPendingBanner() throws {
+        let fixture = makeWorkspaceFixture(publication: .emptyReady)
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        XCTAssertFalse(host.containsAccessibilityIdentifier("recorder.storage.pending-banner"))
+    }
+
     func testDirectionARecordingsOpensCanonicalDetailAndFailsClosedWhenRemoved() throws {
         let fixture = try RecordingsMeetingIntelligenceRenderFixture()
         defer { fixture.remove() }
@@ -1843,6 +1902,35 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
+    private func makeWorkspaceFixture(
+        destinationState: RecordingDestinationState = .ready,
+        publication: RecordingPublicationPresentation
+    ) -> StoragePresentationFixture {
+        let suiteName = "RecorderWorkspaceRenderTests.storage.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let destination = URL(
+            fileURLWithPath: "/tmp/recorder-storage-render-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let destinationStore = RenderDestinationStore(
+            url: destination,
+            state: destinationState
+        )
+        let coordinator = RenderPublicationCoordinator(presentation: publication)
+        let model = AppModel(
+            defaults: defaults,
+            recordingDestinationStore: destinationStore,
+            recordingPublicationCoordinator: coordinator,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false
+        )
+        model.systemAudioPermission = .granted
+        model.microphonePermission = .granted
+        return .init(model: model, defaults: defaults)
+    }
+
     private func makeFixtureWithOneSession() -> SessionFixture {
         let fixture = makeStartupDisabledFixture(
             systemPermission: .granted,
@@ -1959,6 +2047,63 @@ private struct SessionFixture {
     let model: AppModel
     let defaults: UserDefaults
     let session: RecordingSession
+}
+
+@MainActor
+private struct StoragePresentationFixture {
+    let model: AppModel
+    let defaults: UserDefaults
+}
+
+private extension RecordingPublicationPresentation {
+    static let emptyReady = RecordingPublicationPresentation(
+        stateText: "Up to date",
+        pendingCount: 0,
+        waitingCount: 0,
+        needsAttentionCount: 0
+    )
+}
+
+@MainActor
+private final class RenderPublicationCoordinator: RecordingPublicationCoordinating {
+    var presentation: RecordingPublicationPresentation
+    var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
+    var onCompleted: ((RecordingPublicationCompleted) -> Void)?
+
+    init(presentation: RecordingPublicationPresentation) {
+        self.presentation = presentation
+    }
+
+    func enqueue(_: RecordingPublicationRequest) {}
+    func resume() {}
+    func retryNow() {}
+    func shutdown() {}
+}
+
+private final class RenderDestinationStore: RecordingDestinationStoring {
+    private(set) var currentIdentity: RecordingDestinationIdentity? = .init(id: UUID())
+    private var url: URL
+    private var state: RecordingDestinationState
+
+    init(url: URL, state: RecordingDestinationState) {
+        self.url = url
+        self.state = state
+    }
+
+    func restore(defaultURL _: URL) -> RecordingDestinationSelection {
+        .init(identity: currentIdentity, url: url, state: state)
+    }
+
+    func save(_ url: URL) throws {
+        self.url = url
+        state = .ready
+    }
+
+    func access(identity _: RecordingDestinationIdentity) throws -> RecordingDestinationAccess {
+        .init(url: url, close: {})
+    }
+
+    func prune(keeping _: Set<RecordingDestinationIdentity>) {}
 }
 
 /// This fixture deliberately mounts the production workspace and opens the
@@ -2214,6 +2359,15 @@ final class WorkspaceHost {
 
     func containsAccessibilityLabel(_ label: String) -> Bool {
         view(withAccessibilityLabel: label) != nil
+    }
+
+    func containsText(_ text: String) -> Bool {
+        renderedRoots.flatMap { allViews(startingAt: $0) }.contains { view in
+            if let textField = view as? NSTextField {
+                return textField.stringValue.contains(text) && !textField.isHidden
+            }
+            return view.accessibilityLabel()?.contains(text) == true && !view.isHidden
+        }
     }
 
     func containsView(named className: String) -> Bool {

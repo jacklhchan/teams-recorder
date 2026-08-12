@@ -36,6 +36,9 @@ struct RecordDashboardView: View {
                     openCaptureSettings: openCaptureSettings
                 )
             }
+            if model.recordingPublicationPresentation.retainedLocalCount > 0 {
+                RecordDashboardPendingPublicationBanner(model: model)
+            }
             RecordDashboardMeters(model: model, recorder: model.recorder)
             RecordDashboardControls(model: model, presentation: presentation)
             RecordDashboardHealth(model: model)
@@ -140,6 +143,49 @@ struct RecordDashboardView: View {
             return "The selected application is disconnected. Review Capture settings."
         }
         return nil
+    }
+}
+
+private struct RecordDashboardPendingPublicationBanner: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        let publication = model.recordingPublicationPresentation
+        VStack(alignment: .leading, spacing: 8) {
+            Label("\(retainedCopyText(for: publication.retainedLocalCount))", systemImage: "externaldrive.badge.exclamationmark")
+                .font(.callout.weight(.semibold))
+            Text(publication.stateText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Retry Now", action: model.retryPendingRecordings)
+                    .accessibilityIdentifier(RecorderActionID.storageRetry)
+                    .background(RecorderDestinationAccessibilityMarker(
+                        identifier: RecorderActionID.storageRetry
+                    ))
+                Button("Open Local Copies", action: model.openPendingRecordingsFolder)
+                    .accessibilityIdentifier(RecorderActionID.storageOpenLocal)
+                    .background(RecorderDestinationAccessibilityMarker(
+                        identifier: RecorderActionID.storageOpenLocal
+                    ))
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(10)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.orange.opacity(0.45), lineWidth: 1))
+        .accessibilityIdentifier(RecorderActionID.storagePendingBanner)
+        .background(RecorderDestinationAccessibilityMarker(
+            identifier: RecorderActionID.storagePendingBanner
+        ))
+        .background(RecorderDestinationAccessibilityMarker(
+            identifier: "\(RecorderActionID.storagePendingBanner).retained-copy",
+            label: retainedCopyText(for: publication.retainedLocalCount)
+        ))
+    }
+
+    private func retainedCopyText(for count: Int) -> String {
+        "\(count) recording\(count == 1 ? "" : "s") retained locally"
     }
 }
 

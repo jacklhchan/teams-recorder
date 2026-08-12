@@ -195,18 +195,83 @@ struct RecorderSettingsView: View {
     }
 
     private var storageAndShortcutsSectionContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let publication = model.recordingPublicationPresentation
+        return VStack(alignment: .leading, spacing: 12) {
             Label("Recording Storage", systemImage: "internaldrive")
                 .font(.headline)
+            Text(destinationStatusText)
+                .font(.callout.weight(.medium))
+                .accessibilityIdentifier(RecorderActionID.storageDestinationStatus)
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: RecorderActionID.storageDestinationStatus
+                ))
+                .background(RecorderDestinationAccessibilityMarker(
+                    identifier: "\(RecorderActionID.storageDestinationStatus).text",
+                    label: destinationStatusText
+                ))
             Text(model.outputFolder.path)
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
-            Button("Choose Output Folder", action: model.chooseOutputFolder)
+            Text(publicationStatusText(publication))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(RecorderActionID.storagePendingStatus)
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: RecorderActionID.storagePendingStatus
+                ))
+                .background(RecorderDestinationAccessibilityMarker(
+                    identifier: "\(RecorderActionID.storagePendingStatus).text",
+                    label: publicationStatusText(publication)
+                ))
+            Button(
+                model.recordingDestinationState == .needsFolderAccess
+                    ? "Restore Folder Access"
+                    : "Choose Output Folder",
+                action: model.chooseOutputFolder
+            )
                 .accessibilityIdentifier(RecorderActionID.chooseOutputFolder)
                 .background(RecorderSettingsAccessibilityMarker(
                     identifier: RecorderActionID.chooseOutputFolder
                 ))
+            if publication.retainedLocalCount > 0 {
+                HStack {
+                    Button("Retry Now", action: model.retryPendingRecordings)
+                        .accessibilityIdentifier(RecorderActionID.storageRetry)
+                        .background(RecorderSettingsAccessibilityMarker(
+                            identifier: RecorderActionID.storageRetry
+                        ))
+                    Button("Open Local Copies", action: model.openPendingRecordingsFolder)
+                        .accessibilityIdentifier(RecorderActionID.storageOpenLocal)
+                        .background(RecorderSettingsAccessibilityMarker(
+                            identifier: RecorderActionID.storageOpenLocal
+                        ))
+                }
+                .buttonStyle(.bordered)
+            }
         }
+    }
+
+    private var destinationStatusText: String {
+        switch model.recordingDestinationState {
+        case .ready: "Ready"
+        case .needsFolderAccess: "Needs folder access"
+        case .unavailable: "Unavailable"
+        }
+    }
+
+    private func publicationStatusText(
+        _ publication: RecordingPublicationPresentation
+    ) -> String {
+        let count = publication.retainedLocalCount
+        guard count > 0 else { return publication.stateText }
+        let noun = count == 1 ? "recording" : "recordings"
+        let detail: String
+        if publication.needsAttentionCount > 0 {
+            detail = "\(publication.needsAttentionCount) \(publication.needsAttentionCount == 1 ? "recording" : "recordings") needs attention"
+        } else {
+            detail = "\(count) \(noun) retained locally"
+        }
+        return "\(detail) · \(publication.stateText)"
     }
 
     private var autoMeetingPresentation: TeamsAutoMeetingPresentation {

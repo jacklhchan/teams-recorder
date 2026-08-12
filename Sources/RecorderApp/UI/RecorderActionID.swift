@@ -8,6 +8,11 @@ enum RecorderActionID {
     static let moreRecordActions = "recorder.action.more-record-actions"
     static let chooseOutputFolder = "recorder.action.choose-output-folder"
     static let openOutputFolder = "recorder.action.open-output-folder"
+    static let storagePendingBanner = "recorder.storage.pending-banner"
+    static let storageRetry = "recorder.storage.retry"
+    static let storageOpenLocal = "recorder.storage.open-local"
+    static let storageDestinationStatus = "recorder.storage.destination-status"
+    static let storagePendingStatus = "recorder.storage.pending-status"
     static let uploadAudio = "recorder.action.upload-audio"
     static let refreshRecordings = "recorder.action.refresh-recordings"
     static let filterFavorites = "recorder.action.filter-favorites"
@@ -70,6 +75,11 @@ enum RecorderActionID {
         moreRecordActions,
         chooseOutputFolder,
         openOutputFolder,
+        storagePendingBanner,
+        storageRetry,
+        storageOpenLocal,
+        storageDestinationStatus,
+        storagePendingStatus,
         uploadAudio,
         refreshRecordings,
         filterFavorites,

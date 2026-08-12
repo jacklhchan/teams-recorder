@@ -5,6 +5,73 @@ import XCTest
 
 @MainActor
 final class RecordingPublicationCoordinatorTests: XCTestCase {
+    func testRecoverySnapshotGroupsMixedDurableStatesAndRetainedCount() throws {
+        let fixture = try CoordinatorFixture()
+        let pending = recoveryItem(from: fixture.request, name: "private-pending", state: .pending)
+        let waiting = recoveryItem(from: fixture.request, name: "private-waiting", state: .waitingForDestination, category: "destinationUnavailable")
+        let attention = recoveryItem(from: fixture.request, name: "private-attention", state: .needsAttention, category: "invalidSource")
+        let coordinator = RecordingPublicationCoordinator(
+            manifestStore: ScriptedCoordinatorManifestStore(items: [pending, waiting, attention]),
+            destinationStore: fixture.destination,
+            publisher: fixture.publisher,
+            pendingStore: fixture.pending,
+            retryDelays: [300]
+        )
+        var publishedSnapshots: [RecoveryCenterSnapshot] = []
+        coordinator.onRecoveryCenterSnapshotChange = { publishedSnapshots.append($0) }
+
+        coordinator.resume()
+
+        let snapshot = coordinator.recoveryCenterSnapshot
+        XCTAssertEqual(snapshot.presentation.retainedLocalCount, 3)
+        XCTAssertEqual(snapshot.items.map(\.state), [.publishingOrPending, .waitingForDestination, .needsAttention])
+        XCTAssertEqual(snapshot.items.map(\.safeStatusText), ["Publishing local copy", "Destination access is needed", "This local recording needs attention before it can be published."])
+        XCTAssertEqual(publishedSnapshots.last, snapshot)
+        XCTAssertFalse(String(describing: snapshot).contains("private-pending"))
+        XCTAssertFalse(String(describing: snapshot).contains("private-waiting"))
+        XCTAssertFalse(String(describing: snapshot).contains("private-attention"))
+    }
+
+    func testRecoverySnapshotMapsLegacyMissingIdentityToNeedsAttention() throws {
+        let fixture = try CoordinatorFixture()
+        let legacy = RecordingPublicationItem(
+            id: UUID(), sessionDirectoryName: fixture.request.sessionDirectoryName,
+            destinationIdentity: fixture.request.destinationIdentity,
+            workspaceFenceRevision: fixture.request.workspaceFence.revision,
+            recordingSource: fixture.request.source, health: fixture.request.health,
+            metadataWarning: "private metadata", createdAt: Date(), lastAttemptAt: nil,
+            attemptCount: 0, state: .pending, failureCategory: nil
+        )
+        let coordinator = RecordingPublicationCoordinator(
+            manifestStore: ScriptedCoordinatorManifestStore(items: [legacy]),
+            destinationStore: fixture.destination, publisher: fixture.publisher,
+            pendingStore: fixture.pending, retryDelays: [300]
+        )
+
+        coordinator.resume()
+
+        let item = try XCTUnwrap(coordinator.recoveryCenterSnapshot.items.first)
+        XCTAssertEqual(item.state, .needsAttention)
+        XCTAssertEqual(item.safeStatusText, "This local recording needs attention before it can be published.")
+        XCTAssertFalse(item.canRetry)
+        XCTAssertTrue(fixture.sourceExists)
+    }
+
+    func testRecoverySnapshotMarksOnlyWaitingDestinationItemRetryable() throws {
+        let fixture = try CoordinatorFixture()
+        let waiting = recoveryItem(from: fixture.request, name: "private-waiting", state: .waitingForDestination, category: "destinationUnavailable")
+        let pending = recoveryItem(from: fixture.request, name: "private-pending", state: .pending)
+        let coordinator = RecordingPublicationCoordinator(
+            manifestStore: ScriptedCoordinatorManifestStore(items: [waiting, pending]),
+            destinationStore: fixture.destination, publisher: fixture.publisher,
+            pendingStore: fixture.pending, retryDelays: [300]
+        )
+
+        coordinator.resume()
+
+        XCTAssertEqual(coordinator.recoveryCenterSnapshot.items.map(\.canRetry), [true, false])
+    }
+
     @MainActor
     func testManifestSaveFailureBeforePublishingRetainsSourceAndDoesNotInvokePublisherOrCompletion() async throws {
         let fixture = try CoordinatorFixture()
@@ -336,6 +403,19 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.completions.values.map(\.itemID), [fixture.request.id])
         XCTAssertFalse(fixture.sourceExists)
     }
+}
+
+private func recoveryItem(from request: RecordingPublicationRequest, name: String, state: RecordingPublicationState, category: String? = nil) -> RecordingPublicationItem {
+    RecordingPublicationItem(
+        id: UUID(), sessionDirectoryName: name,
+        destinationIdentity: request.destinationIdentity,
+        workspaceFenceRevision: request.workspaceFence.revision,
+        recordingSource: request.source, health: request.health,
+        metadataWarning: "private metadata", sourceIdentity: request.sourceIdentity,
+        sourceRootIdentity: request.sourceRootIdentity, createdAt: Date(),
+        lastAttemptAt: state == .pending ? Date() : nil, attemptCount: 1,
+        state: state, failureCategory: category
+    )
 }
 
 private final class FailingCoordinatorManifestStore: RecordingPublicationManifestStoring, @unchecked Sendable {

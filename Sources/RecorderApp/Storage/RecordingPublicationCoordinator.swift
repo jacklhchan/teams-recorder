@@ -35,10 +35,32 @@ struct RecordingPublicationPresentation: Equatable, Sendable {
     var retainedLocalCount: Int { pendingCount + waitingCount + needsAttentionCount }
 }
 
+enum RecoveryCenterItemState: Equatable, Sendable {
+    case publishingOrPending
+    case waitingForDestination
+    case needsAttention
+}
+
+struct RecoveryCenterItem: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let source: RecordingSource
+    let createdAt: Date
+    let state: RecoveryCenterItemState
+    let safeStatusText: String
+    let canRetry: Bool
+}
+
+struct RecoveryCenterSnapshot: Equatable, Sendable {
+    let presentation: RecordingPublicationPresentation
+    let items: [RecoveryCenterItem]
+}
+
 @MainActor
 protocol RecordingPublicationCoordinating: AnyObject {
     var presentation: RecordingPublicationPresentation { get }
     var onPresentationChange: ((RecordingPublicationPresentation) -> Void)? { get set }
+    var recoveryCenterSnapshot: RecoveryCenterSnapshot { get }
+    var onRecoveryCenterSnapshotChange: ((RecoveryCenterSnapshot) -> Void)? { get set }
     var onCompleted: ((RecordingPublicationCompleted) -> Void)? { get set }
     func enqueue(_ request: RecordingPublicationRequest)
     func resume()
@@ -62,6 +84,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
     private var deliveredIDs = Set<UUID>()
 
     var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
+    var onRecoveryCenterSnapshotChange: ((RecoveryCenterSnapshot) -> Void)?
     var onCompleted: ((RecordingPublicationCompleted) -> Void)?
 
     init(manifestStore: any RecordingPublicationManifestStoring, destinationStore: RecordingDestinationStoring, publisher: RecordingSessionPublishing, pendingStore: RecordingPendingStore, retryDelays: [TimeInterval] = [2, 10, 30, 60, 300], sleeper: @escaping @Sendable (TimeInterval) async throws -> Void = { delay in try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }) {
@@ -74,6 +97,9 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
     }
 
     var presentation: RecordingPublicationPresentation { presentation(for: items) }
+    var recoveryCenterSnapshot: RecoveryCenterSnapshot {
+        .init(presentation: presentation, items: loaded ? items.map(recoveryCenterItem(for:)) : [])
+    }
 
     func enqueue(_ request: RecordingPublicationRequest) {
         guard loadIfNeeded(), !items.contains(where: { $0.id == request.id }) else { publishPresentation(); return }
@@ -237,6 +263,27 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
     private func persist() -> Bool { do { try manifestStore.save(items); persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }
     private func current(_ candidate: UInt64) -> Bool { generation == candidate && !Task.isCancelled }
     private func presentation(for items: [RecordingPublicationItem]) -> RecordingPublicationPresentation { let pending = items.filter { $0.state == .pending || $0.state == .publishing || ($0.state == .published && $0.failureCategory != "destinationUnavailable") }.count; let waiting = items.filter { $0.state == .waitingForDestination || ($0.state == .published && $0.failureCategory == "destinationUnavailable") }.count; let attention = items.filter { $0.state == .needsAttention }.count; let text = persistenceFailed ? "Publish failed" : attention > 0 ? "Needs attention" : waiting > 0 ? "Waiting for destination" : pending > 0 ? "Publishing" : "Up to date"; return .init(stateText: text, pendingCount: pending, waitingCount: waiting, needsAttentionCount: attention) }
-    private func publishPresentation() { onPresentationChange?(presentation) }
+    private func recoveryCenterItem(for item: RecordingPublicationItem) -> RecoveryCenterItem {
+        let needsAttention = item.sourceIdentity == nil || item.sourceRootIdentity == nil || item.state == .needsAttention
+        if needsAttention {
+            return .init(id: item.id, source: item.recordingSource, createdAt: item.createdAt,
+                         state: .needsAttention,
+                         safeStatusText: "This local recording needs attention before it can be published.",
+                         canRetry: false)
+        }
+        if item.state == .waitingForDestination || (item.state == .published && item.failureCategory == "destinationUnavailable") {
+            return .init(id: item.id, source: item.recordingSource, createdAt: item.createdAt,
+                         state: .waitingForDestination, safeStatusText: "Destination access is needed", canRetry: true)
+        }
+        return .init(id: item.id, source: item.recordingSource, createdAt: item.createdAt,
+                     state: .publishingOrPending,
+                     safeStatusText: item.failureCategory == "transient" ? "Waiting to retry" : "Publishing local copy",
+                     canRetry: false)
+    }
+    private func publishPresentation() {
+        let snapshot = recoveryCenterSnapshot
+        onPresentationChange?(snapshot.presentation)
+        onRecoveryCenterSnapshotChange?(snapshot)
+    }
     private func simpleName(_ name: String) -> Bool { !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\\") && !name.hasPrefix(".") }
 }

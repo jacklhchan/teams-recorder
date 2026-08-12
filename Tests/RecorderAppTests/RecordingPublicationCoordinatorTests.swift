@@ -239,6 +239,64 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         XCTAssertEqual(store.loadCalls, 2)
         XCTAssertEqual(fixture.publisher.publishedIDs, [fixture.request.id])
     }
+
+    func testRootReplacementMovingSameSessionInodeFailsClosedBeforeCallback() async throws {
+        let fixture = try CoordinatorFixture()
+        fixture.publisher.afterSourceOpened = {
+            let originalRoot = fixture.pending.root
+            let oldRoot = fixture.temporaryRoot.appendingPathComponent("old-pending", isDirectory: true)
+            let originalSession = originalRoot.appendingPathComponent("meeting", isDirectory: true)
+            var original = stat()
+            XCTAssertEqual(lstat(originalSession.path, &original), 0)
+            try FileManager.default.moveItem(at: originalRoot, to: oldRoot)
+            try FileManager.default.createDirectory(at: originalRoot, withIntermediateDirectories: false)
+            let movedSession = oldRoot.appendingPathComponent("meeting", isDirectory: true)
+            let replacement = originalRoot.appendingPathComponent("meeting", isDirectory: true)
+            try FileManager.default.moveItem(at: movedSession, to: replacement)
+            var moved = stat(); var replacementRoot = stat()
+            XCTAssertEqual(lstat(replacement.path, &moved), 0)
+            XCTAssertEqual(lstat(originalRoot.path, &replacementRoot), 0)
+            XCTAssertEqual(moved.st_ino, original.st_ino)
+            XCTAssertNotEqual(replacementRoot.st_ino, fixture.publisher.admittedRootInode)
+        }
+
+        fixture.coordinator.enqueue(fixture.request)
+        await fixture.waitForIdle()
+
+        XCTAssertTrue(fixture.completions.values.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.pending.root.appendingPathComponent("meeting").path))
+        XCTAssertEqual(fixture.coordinator.presentation.needsAttentionCount, 1)
+    }
+
+    func testRetryNowMovesRetryableItemAheadOfNeedsAttentionAndWakesSuspendedWorker() async throws {
+        let fixture = try CoordinatorFixture(manifestState: .published)
+        var retry = try XCTUnwrap(fixture.persistedItems.first)
+        retry.state = .pending; retry.failureCategory = "transient"; retry.lastAttemptAt = Date(); retry.attemptCount = 1
+        let blocked = RecordingPublicationItem(id: UUID(), sessionDirectoryName: retry.sessionDirectoryName, destinationIdentity: retry.destinationIdentity, workspaceFenceRevision: retry.workspaceFenceRevision, recordingSource: retry.recordingSource, health: retry.health, metadataWarning: retry.metadataWarning, createdAt: retry.createdAt, lastAttemptAt: retry.lastAttemptAt, attemptCount: retry.attemptCount, state: .needsAttention, failureCategory: "invalidSource", publishedFolderName: retry.publishedFolderName, publishedRecordingName: retry.publishedRecordingName, publishedSourceDevice: retry.publishedSourceDevice, publishedSourceInode: retry.publishedSourceInode, publishedSourceRootDevice: retry.publishedSourceRootDevice, publishedSourceRootInode: retry.publishedSourceRootInode)
+        let store = ScriptedCoordinatorManifestStore(items: [blocked, retry])
+        let sleeper = SuspendedSleeper()
+        let coordinator = RecordingPublicationCoordinator(manifestStore: store, destinationStore: fixture.destination, publisher: fixture.publisher, pendingStore: fixture.pending, retryDelays: [300], sleeper: { _ in try await sleeper.sleep() })
+
+        coordinator.resume()
+        await sleeper.waitUntilSleeping()
+        coordinator.retryNow()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.publishedIDs.first, retry.id)
+        XCTAssertEqual(fixture.publisher.publishedIDs.count, 1)
+    }
+
+    func testDestinationCollisionNeedsAttentionAndDoesNotAutoRetry() async throws {
+        let fixture = try CoordinatorFixture(publisherError: .destinationCollision)
+        fixture.coordinator.enqueue(fixture.request)
+        await fixture.waitForIdle()
+        fixture.coordinator.resume()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.attemptCount, 1)
+        XCTAssertEqual(fixture.coordinator.presentation.needsAttentionCount, 1)
+        XCTAssertTrue(fixture.sourceExists)
+    }
 }
 
 private final class FailingCoordinatorManifestStore: RecordingPublicationManifestStoring, @unchecked Sendable {
@@ -269,6 +327,12 @@ private final class ScriptedCoordinatorManifestStore: RecordingPublicationManife
         if failingSaveCalls.contains(saveCalls) { throw RecordingPublicationManifestStoreError.writeFailed(EIO) }
         self.items = items
     }
+}
+
+private final class SuspendedSleeper: @unchecked Sendable {
+    private let lock = NSLock(); private var continuation: CheckedContinuation<Void, Error>?
+    func sleep() async throws { try await withCheckedThrowingContinuation { continuation in lock.lock(); self.continuation = continuation; lock.unlock() } }
+    func waitUntilSleeping() async { for _ in 0..<100 where continuation == nil { await Task.yield() } }
 }
 
 @MainActor
@@ -352,6 +416,8 @@ private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked
     private(set) var validationIDs: [UUID] = []
     var beforeSuccess: (() -> Void)?
     var validationError: RecordingPublicationError?
+    var afterSourceOpened: (() throws -> Void)?
+    private(set) var admittedRootInode: ino_t = 0
     var suspendNextPublish = false
     private var suspendedContinuation: CheckedContinuation<RecordingPublicationSuccess, Error>?
     init(error: RecordingPublicationError?, errors: [RecordingPublicationError], destination: URL, pending: RecordingPendingStore) { self.error = error; self.errors = errors; self.destination = destination; self.pending = pending }
@@ -360,6 +426,8 @@ private final class CoordinatorPublisher: RecordingSessionPublishing, @unchecked
         if let error { throw error }
         if let error = withLockResult({ errors.isEmpty ? nil : errors.removeFirst() }) { throw error }
         let source = try pending.openSession(for: item.sessionDirectoryName)
+        admittedRootInode = ino_t(source.rootIdentity.inode)
+        try afterSourceOpened?()
         withLock { publishedIDs.append(item.id) }
         if suspendNextPublish {
             return try await withCheckedThrowingContinuation { continuation in

@@ -27,7 +27,8 @@ final class AppModel: ObservableObject {
         any OpenAICompatibleProviderManaging,
         any TranscriptionAudioPreparing,
         any TranscriptionServicing,
-        RecordingSessionMutationGate
+        RecordingSessionMutationGate,
+        any ThirdPartyProcessingAdmitting
     ) -> TranscriptionFeatureModel
     typealias RecordingSourceMetadataUpdater = (
         RecordingSource,
@@ -418,7 +419,18 @@ final class AppModel: ObservableObject {
         // supplied.  This makes aggregate injection a strict construction
         // boundary rather than a second set of parallel feature objects.
         let selectedFeatureBoundaries = featureBoundaries
-            ?? defaultFeatureBoundariesFactory?()
+            ?? defaultFeatureBoundariesFactory?(activePrivacyModePolicy)
+        if let selectedFeatureBoundaries {
+            precondition(
+                selectedFeatureBoundaries.transcription
+                    .thirdPartyProcessingAdmissionIdentity
+                    == ObjectIdentifier(activePrivacyModePolicy)
+                    && selectedFeatureBoundaries.meetingIntelligence
+                        .thirdPartyProcessingAdmissionIdentity
+                        == ObjectIdentifier(activePrivacyModePolicy),
+                "Injected feature boundaries must share AppModel's Privacy Mode policy."
+            )
+        }
         let transcriptMutationGate = selectedFeatureBoundaries?.library.mutationGate
             ?? libraryFeature?.mutationGate
             ?? RecordingSessionMutationGate()
@@ -449,7 +461,8 @@ final class AppModel: ObservableObject {
                     activeProviderRepository,
                     transcriptionAudioPreparer,
                     activeTranscriptionService,
-                    transcriptMutationGate
+                    transcriptMutationGate,
+                    activePrivacyModePolicy
                 )
             } else {
                 self.transcriptionFeature = TranscriptionFeatureModel(
@@ -472,7 +485,8 @@ final class AppModel: ObservableObject {
                 self.meetingIntelligenceFeature = meetingIntelligenceFeatureFactory(
                     activeProviderRepository,
                     self.transcriptionFeature.publicationSourceID,
-                    transcriptMutationGate
+                    transcriptMutationGate,
+                    activePrivacyModePolicy
                 )
             } else {
                 self.meetingIntelligenceFeature = MeetingIntelligenceFeatureModel(
@@ -564,10 +578,12 @@ final class AppModel: ObservableObject {
         )
         precondition(
             retainedFeatureBoundaries.isCompatible(
-                with: activeProviderRepository.compositionIdentity
+                with: activeProviderRepository.compositionIdentity,
+                thirdPartyProcessingAdmissionIdentity:
+                    ObjectIdentifier(activePrivacyModePolicy)
             ) && aiProviderSettingsModel.providerRepositoryIdentity
                 == activeProviderRepository.compositionIdentity,
-            "PR B boundaries and Provider Settings must share one provider repository, one mutation gate, and compatible ASR/meeting-intelligence publication sources."
+            "PR B boundaries and Provider Settings must share one provider repository, one mutation gate, one Privacy Mode policy, and compatible ASR/meeting-intelligence publication sources."
         )
         let bridge = PRBFeatureBridge(
             boundaries: retainedFeatureBoundaries,

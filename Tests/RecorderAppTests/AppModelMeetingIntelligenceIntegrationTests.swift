@@ -16,7 +16,7 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             audioPreparer: IntegrationAudioPreparer(),
             service: asrService,
             mutationGate: gate
-        ))
+        ), thirdPartyProcessingAdmission: AlwaysAllowThirdPartyProcessing.shared)
         let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
         let meeting = MeetingIntelligenceFeatureModel(coordinator: .init(
             providerRepository: repository,
@@ -29,7 +29,8 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
                 artifactStore: artifacts
             ),
             artifactStore: artifacts,
-            stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
+            stateStore: MeetingIntelligenceStateStore(mutationGate: gate),
+            thirdPartyProcessingAdmission: AlwaysAllowThirdPartyProcessing.shared
         ))
         let settings = AIProviderSettingsModel(repository: repository, loadImmediately: false)
 
@@ -96,14 +97,15 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             providerRepository: IntegrationRepository(),
             performStartupWork: false,
             initialOutputFolder: fixture.workspace,
-            meetingIntelligenceFeatureFactory: { repository, transcriptionPublicationSourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, transcriptionPublicationSourceID, gate, admission in
                 factoryCalls += 1
                 receivedTranscriptionPublicationSourceID = transcriptionPublicationSourceID
                 let coordinator = fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: transcriptionPublicationSourceID,
                     mutationGate: gate,
-                    availability: .confirmed
+                    availability: .confirmed,
+                    thirdPartyProcessingAdmission: admission
                 )
                 let feature = MeetingIntelligenceFeatureModel(coordinator: coordinator)
                 returnedCoordinator = coordinator
@@ -326,12 +328,13 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             providerRepository: IntegrationRepository(),
             performStartupWork: false,
             initialOutputFolder: fixture.workspace,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
                 let createdCoordinator = fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
                     mutationGate: gate,
-                    availability: .confirmed
+                    availability: .confirmed,
+                    thirdPartyProcessingAdmission: admission
                 )
                 let createdFeature = MeetingIntelligenceFeatureModel(
                     coordinator: createdCoordinator
@@ -365,13 +368,14 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let generator = IntegrationGenerator()
         var coordinator: MeetingIntelligenceJobCoordinator!
         let model = fixture.transcribingModel(
-            coordinatorFactory: { repository, sourceID, gate in
+            coordinatorFactory: { repository, sourceID, gate, admission in
                 let created = fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
                     mutationGate: gate,
                     availability: .confirmed,
-                    generator: generator
+                    generator: generator,
+                    thirdPartyProcessingAdmission: admission
                 )
                 coordinator = created
                 return created
@@ -401,13 +405,14 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         defer { fixture.remove() }
         let generator = IntegrationGenerator()
         var coordinator: MeetingIntelligenceJobCoordinator!
-        let model = fixture.transcribingModel(coordinatorFactory: { repository, sourceID, gate in
+        let model = fixture.transcribingModel(coordinatorFactory: { repository, sourceID, gate, admission in
             let created = fixture.coordinator(
                 providerRepository: repository,
                 expectedPublicationSourceID: sourceID,
                 mutationGate: gate,
                 availability: .unconfirmed(.modelNotAdvertised),
-                generator: generator
+                generator: generator,
+                thirdPartyProcessingAdmission: admission
             )
             coordinator = created
             return created
@@ -444,14 +449,15 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let generator = IntegrationGenerator()
         var coordinator: MeetingIntelligenceJobCoordinator!
         let model = fixture.transcribingModel(
-            coordinatorFactory: { repository, sourceID, gate in
+            coordinatorFactory: { repository, sourceID, gate, admission in
                 let created = fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
                     mutationGate: gate,
                     availability: .confirmed,
                     generator: generator,
-                    availabilityChecker: availability
+                    availabilityChecker: availability,
+                    thirdPartyProcessingAdmission: admission
                 )
                 coordinator = created
                 return created
@@ -519,14 +525,15 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         )
         let generator = IntegrationGenerator()
         let model = fixture.transcribingModel(
-            coordinatorFactory: { repository, sourceID, gate in
+            coordinatorFactory: { repository, sourceID, gate, admission in
                 fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
                     mutationGate: gate,
                     availability: .confirmed,
                     generator: generator,
-                    availabilityChecker: availability
+                    availabilityChecker: availability,
+                    thirdPartyProcessingAdmission: admission
                 )
             },
             searchLoader: { [searchLoader] session in
@@ -560,13 +567,14 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         defer { fixture.remove() }
         let generator = IntegrationGenerator()
         let composition = fixture.model(
-            coordinatorFactory: { repository, sourceID, gate in
+            coordinatorFactory: { repository, sourceID, gate, admission in
                 fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
                     mutationGate: gate,
                     availability: .confirmed,
-                    generator: generator
+                    generator: generator,
+                    thirdPartyProcessingAdmission: admission
                 )
             },
             reloader: { $0 }
@@ -607,11 +615,12 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let indexedReloaded = fixture.indexed(reloaded)
         let reloader = SessionReloader(result: reloaded)
         let composition = fixture.model(
-            coordinatorFactory: { repository, sourceID, gate in
+            coordinatorFactory: { repository, sourceID, gate, admission in
                 fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
-                    mutationGate: gate
+                    mutationGate: gate,
+                    thirdPartyProcessingAdmission: admission
                 )
             },
             reloader: { [reloader] session in reloader.reload(session) }
@@ -638,11 +647,12 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         defer { fixture.remove() }
         let reloader = SessionReloader(result: fixture.session())
         let composition = fixture.model(
-            coordinatorFactory: { repository, sourceID, gate in
+            coordinatorFactory: { repository, sourceID, gate, admission in
                 fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
-                    mutationGate: gate
+                    mutationGate: gate,
+                    thirdPartyProcessingAdmission: admission
                 )
             },
             reloader: { [reloader] session in reloader.reload(session) }
@@ -664,11 +674,12 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         defer { fixture.remove() }
         let reloader = SessionReloader(result: fixture.session())
         let composition = fixture.model(
-            coordinatorFactory: { repository, sourceID, gate in
+            coordinatorFactory: { repository, sourceID, gate, admission in
                 fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
-                    mutationGate: gate
+                    mutationGate: gate,
+                    thirdPartyProcessingAdmission: admission
                 )
             },
             reloader: { [reloader] session in reloader.reload(session) }
@@ -692,11 +703,12 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         let indexedLatest = fixture.indexed(latest)
         let reloader = SequencedSessionReloader(first: first, latest: latest)
         let composition = fixture.model(
-            coordinatorFactory: { repository, sourceID, gate in
+            coordinatorFactory: { repository, sourceID, gate, admission in
                 fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
-                    mutationGate: gate
+                    mutationGate: gate,
+                    thirdPartyProcessingAdmission: admission
                 )
             },
             reloader: { [reloader] session in reloader.reload(session) }
@@ -860,7 +872,9 @@ private final class IntegrationFixture {
         mutationGate: RecordingSessionMutationGate = .init(),
         availability: MeetingIntelligenceAvailability = .unconfirmed(.connectionFailed),
         generator: IntegrationGenerator = .init(),
-        availabilityChecker: (any MeetingIntelligenceAvailabilityChecking)? = nil
+        availabilityChecker: (any MeetingIntelligenceAvailabilityChecking)? = nil,
+        thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting =
+            AlwaysAllowThirdPartyProcessing.shared
     ) -> MeetingIntelligenceJobCoordinator {
         let checker: any MeetingIntelligenceAvailabilityChecking =
             availabilityChecker ?? IntegrationAvailability(result: availability)
@@ -869,7 +883,8 @@ private final class IntegrationFixture {
             mutationGate: mutationGate,
             availabilityChecker: checker, generator: generator,
             publisher: MeetingIntelligencePublisher(mutationGate: mutationGate, artifactStore: MeetingIntelligenceArtifactStore(mutationGate: mutationGate)), artifactStore: MeetingIntelligenceArtifactStore(mutationGate: mutationGate),
-            stateStore: MeetingIntelligenceStateStore(mutationGate: mutationGate)
+            stateStore: MeetingIntelligenceStateStore(mutationGate: mutationGate),
+            thirdPartyProcessingAdmission: thirdPartyProcessingAdmission
         )
     }
 
@@ -892,7 +907,8 @@ private final class IntegrationFixture {
         coordinatorFactory: @escaping (
             any OpenAICompatibleProviderManaging,
             UUID,
-            RecordingSessionMutationGate
+            RecordingSessionMutationGate,
+            any ThirdPartyProcessingAdmitting
         ) -> MeetingIntelligenceJobCoordinator,
         reloader: @escaping @Sendable (RecordingSession) -> RecordingSession
     ) -> (model: AppModel, coordinator: MeetingIntelligenceJobCoordinator) {
@@ -902,8 +918,8 @@ private final class IntegrationFixture {
             performStartupWork: false,
             initialOutputFolder: workspace,
             recordingSessionReloader: reloader,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
-                let coordinator = coordinatorFactory(repository, sourceID, gate)
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
+                let coordinator = coordinatorFactory(repository, sourceID, gate, admission)
                 retainedCoordinator = coordinator
                 return MeetingIntelligenceFeatureModel(coordinator: coordinator)
             }
@@ -915,7 +931,8 @@ private final class IntegrationFixture {
         coordinatorFactory: @escaping (
             any OpenAICompatibleProviderManaging,
             UUID,
-            RecordingSessionMutationGate
+            RecordingSessionMutationGate,
+            any ThirdPartyProcessingAdmitting
         ) -> MeetingIntelligenceJobCoordinator,
         searchLoader: @escaping @Sendable (RecordingSession) -> RecordingLibrarySearchDocument = { session in
             RecordingLibrarySearchDocument.load(folderURL: session.folderURL, displayName: session.displayName, createdAt: session.createdAt, metadata: session.metadata)
@@ -929,9 +946,9 @@ private final class IntegrationFixture {
             recordingSearchDocumentLoader: searchLoader,
             transcriptionAudioPreparer: IntegrationAudioPreparer(),
             transcriptionService: transcriptionService,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
                 MeetingIntelligenceFeatureModel(
-                    coordinator: coordinatorFactory(repository, sourceID, gate)
+                    coordinator: coordinatorFactory(repository, sourceID, gate, admission)
                 )
             }
         )

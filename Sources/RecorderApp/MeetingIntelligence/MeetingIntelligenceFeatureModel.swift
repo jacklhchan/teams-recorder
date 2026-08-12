@@ -4,7 +4,8 @@ import Foundation
 typealias MeetingIntelligenceFeatureFactory = (
     any OpenAICompatibleProviderManaging,
     UUID,
-    RecordingSessionMutationGate
+    RecordingSessionMutationGate,
+    any ThirdPartyProcessingAdmitting
 ) -> MeetingIntelligenceFeatureModel
 
 /// Main-actor UI boundary for meeting intelligence.  The coordinator remains
@@ -53,7 +54,7 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
 
     /// Composition-only identity used to verify that AppModel shares one
     /// policy owner across all third-party processing boundaries.
-    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier? {
+    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier {
         coordinator.thirdPartyProcessingAdmissionIdentity
     }
 

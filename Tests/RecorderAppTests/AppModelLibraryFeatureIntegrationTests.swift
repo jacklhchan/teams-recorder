@@ -219,7 +219,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
             providerRepository: ImportTestProvider(),
             performStartupWork: false, initialOutputFolder: root,
             libraryFeature: feature,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 coordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,
@@ -232,7 +232,8 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
                         mutationGate: gate, artifactStore: artifacts
                     ),
                     artifactStore: artifacts,
-                    stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
+                    stateStore: MeetingIntelligenceStateStore(mutationGate: gate),
+                    thirdPartyProcessingAdmission: admission
                 )
                 return MeetingIntelligenceFeatureModel(coordinator: coordinator)
             }
@@ -472,7 +473,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
             providerRepository: ImportTestProvider(),
             performStartupWork: false, initialOutputFolder: linkedWorkspace,
             libraryFeature: feature,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 coordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,
@@ -485,7 +486,8 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
                         mutationGate: gate, artifactStore: artifacts
                     ),
                     artifactStore: artifacts,
-                    stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
+                    stateStore: MeetingIntelligenceStateStore(mutationGate: gate),
+                    thirdPartyProcessingAdmission: admission
                 )
                 return MeetingIntelligenceFeatureModel(coordinator: coordinator)
             }

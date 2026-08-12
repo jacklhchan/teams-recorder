@@ -1565,7 +1565,8 @@ private final class CoordinatorFixture {
          titleApplierOverride: Bool = false,
          publicationDeliveryOverride: (any MeetingIntelligencePublicationDeliveryScheduling)? = nil,
          artifactEditorOverride: (any MeetingIntelligenceArtifactEditing)? = nil,
-         thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)? = nil,
+         thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting =
+             AlwaysAllowThirdPartyProcessing.shared,
          sessionMetadata: RecordingSessionMetadata = .init(),
          now: @escaping MeetingIntelligenceJobCoordinator.DateNow = { .distantPast }) throws {
         root = RecordingLibraryURLIdentity.normalized(

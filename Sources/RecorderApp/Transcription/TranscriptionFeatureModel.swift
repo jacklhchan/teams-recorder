@@ -15,7 +15,7 @@ struct TranscriptionFeaturePresentation: Equatable {
 @MainActor
 final class TranscriptionFeatureModel: ObservableObject {
     private let coordinator: TranscriptionJobCoordinator
-    private let thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)?
+    private let thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting
     let publicationSourceID: UUID
 
     var onStatusMessage: ((String) -> Void)? {
@@ -33,7 +33,7 @@ final class TranscriptionFeatureModel: ObservableObject {
 
     init(
         coordinator: TranscriptionJobCoordinator,
-        thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)? = nil
+        thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting
     ) {
         self.coordinator = coordinator
         self.thirdPartyProcessingAdmission = thirdPartyProcessingAdmission
@@ -56,8 +56,8 @@ final class TranscriptionFeatureModel: ObservableObject {
 
     /// Composition-only identity used to verify that AppModel shares one
     /// policy owner across all third-party processing boundaries.
-    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier? {
-        thirdPartyProcessingAdmission.map { ObjectIdentifier($0 as AnyObject) }
+    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier {
+        ObjectIdentifier(thirdPartyProcessingAdmission as AnyObject)
     }
 
     var presentation: TranscriptionFeaturePresentation {
@@ -75,7 +75,7 @@ final class TranscriptionFeatureModel: ObservableObject {
 
     func start(session: RecordingSession, providerIsConfigured: Bool) {
         guard !isShutdown else { return }
-        if thirdPartyProcessingAdmission?.admitThirdPartyProcessing() == .blockedLocalOnly {
+        if thirdPartyProcessingAdmission.admitThirdPartyProcessing() == .blockedLocalOnly {
             onStatusMessage?(PrivacyModePolicy.localOnlyMessage)
             return
         }

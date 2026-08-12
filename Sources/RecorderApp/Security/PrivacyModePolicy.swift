@@ -11,6 +11,18 @@ protocol ThirdPartyProcessingAdmitting: Sendable {
     func admitThirdPartyProcessing() -> PrivacyModeAdmission
 }
 
+/// Explicit compatibility policy for standalone features that intentionally
+/// preserve the pre-Privacy-Mode behavior. Production AppModel composition
+/// always injects its retained PrivacyModePolicy instead.
+@MainActor
+final class AlwaysAllowThirdPartyProcessing: ThirdPartyProcessingAdmitting, @unchecked Sendable {
+    static let shared = AlwaysAllowThirdPartyProcessing()
+
+    private init() {}
+
+    func admitThirdPartyProcessing() -> PrivacyModeAdmission { .allowed }
+}
+
 @MainActor
 final class PrivacyModePolicy: ObservableObject, ThirdPartyProcessingAdmitting {
     static let defaultsKey = "privacyModeEnabled"

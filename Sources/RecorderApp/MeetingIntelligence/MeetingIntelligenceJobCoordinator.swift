@@ -240,9 +240,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private let generator: any MeetingIntelligenceGenerating
     private let titleApplier: MeetingIntelligenceSuggestedTitleApplier?
     private let publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling
-    private let thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)?
-    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier? {
-        thirdPartyProcessingAdmission.map { ObjectIdentifier($0 as AnyObject) }
+    private let thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting
+    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier {
+        ObjectIdentifier(thirdPartyProcessingAdmission as AnyObject)
     }
     private let now: DateNow
 
@@ -278,7 +278,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         titleApplier: MeetingIntelligenceSuggestedTitleApplier? = nil,
         stateSaveScheduler: any MeetingIntelligenceStateSaveScheduling = ImmediateMeetingIntelligenceStateSaveScheduler(),
         publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling = ImmediateMeetingIntelligencePublicationDeliveryScheduler(),
-        thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)? = nil,
+        thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting,
         now: @escaping DateNow = { Date() }
     ) {
         self.expectedPublicationSourceID = expectedPublicationSourceID
@@ -895,7 +895,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     }
 
     private func admitsThirdPartyProcessing() -> Bool {
-        thirdPartyProcessingAdmission?.admitThirdPartyProcessing() != .blockedLocalOnly
+        thirdPartyProcessingAdmission.admitThirdPartyProcessing() != .blockedLocalOnly
     }
 
     private func setPrivacyModeUnavailable(for session: RecordingSession) {

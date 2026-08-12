@@ -48,10 +48,16 @@ struct PRBFeatureBoundaries {
             == meetingIntelligence.providerRepositoryIdentity
     }
 
+    var hasCompatibleThirdPartyProcessingAdmissions: Bool {
+        transcription.thirdPartyProcessingAdmissionIdentity
+            == meetingIntelligence.thirdPartyProcessingAdmissionIdentity
+    }
+
     var isCompatible: Bool {
         hasCompatiblePublicationSources
             && hasCompatibleMutationGates
             && hasCompatibleProviderRepositories
+            && hasCompatibleThirdPartyProcessingAdmissions
     }
 
     /// The single aggregate compatibility predicate used by both aggregate
@@ -59,6 +65,15 @@ struct PRBFeatureBoundaries {
     func isCompatible(with settingsRepositoryIdentity: ObjectIdentifier) -> Bool {
         isCompatible
             && transcription.providerRepositoryIdentity == settingsRepositoryIdentity
+    }
+
+    func isCompatible(
+        with settingsRepositoryIdentity: ObjectIdentifier,
+        thirdPartyProcessingAdmissionIdentity: ObjectIdentifier
+    ) -> Bool {
+        isCompatible(with: settingsRepositoryIdentity)
+            && transcription.thirdPartyProcessingAdmissionIdentity
+                == thirdPartyProcessingAdmissionIdentity
     }
 
     static func arePublicationSourcesCompatible(
@@ -71,6 +86,7 @@ struct PRBFeatureBoundaries {
 
 /// An internal test seam for validating that aggregate injection suppresses
 /// fallback construction.  Production callers rely on the normal default
-/// construction path; the factory is deliberately zero-argument so it cannot
-/// become another state or dependency ownership surface.
-typealias PRBFeatureBoundariesFactory = @MainActor () -> PRBFeatureBoundaries
+/// construction path; the retained admission owner is its only dependency.
+typealias PRBFeatureBoundariesFactory = @MainActor (
+    any ThirdPartyProcessingAdmitting
+) -> PRBFeatureBoundaries

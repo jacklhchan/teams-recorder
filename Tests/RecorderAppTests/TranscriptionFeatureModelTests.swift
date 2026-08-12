@@ -323,7 +323,8 @@ private struct FeatureFixture {
         repository: FeatureRepository? = nil,
         preparer: (any TranscriptionAudioPreparing)? = nil,
         service: (any TranscriptionServicing)? = nil,
-        thirdPartyProcessingAdmission: (any ThirdPartyProcessingAdmitting)? = nil
+        thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting =
+            AlwaysAllowThirdPartyProcessing.shared
     ) -> TranscriptionFeatureModel {
         let actualPreparer = preparer ?? FeaturePreparer(audioURL: audioURL)
         let actualService = service ?? FeatureService(result: .init(

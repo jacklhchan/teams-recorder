@@ -22,7 +22,7 @@ final class AppModelTranscriptionTests: XCTestCase {
             transcriptionAudioPreparer: preparer,
             transcriptionProcessLauncher: launcher,
             transcriptionScriptURL: fixture.scriptURL,
-            transcriptionFeatureFactory: { provider, configuredPreparer, service, gate in
+            transcriptionFeatureFactory: { provider, configuredPreparer, service, gate, admission in
                 factoryCalls += 1
                 receivedRepository = provider as AnyObject
                 receivedGate = gate
@@ -33,7 +33,8 @@ final class AppModelTranscriptionTests: XCTestCase {
                         service: service,
                         mutationGate: gate,
                         coordinatorInstanceID: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
-                    )
+                    ),
+                    thirdPartyProcessingAdmission: admission
                 )
             }
         )

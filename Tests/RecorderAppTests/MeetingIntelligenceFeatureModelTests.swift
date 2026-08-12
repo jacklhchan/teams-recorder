@@ -519,6 +519,7 @@ private final class FeatureFixture {
                 mutationGate: RecordingSessionMutationGate(), transcriptReader: reader, metadataStore: metadata
             ),
             publicationDeliveryScheduler: publicationDeliveryScheduler,
+            thirdPartyProcessingAdmission: AlwaysAllowThirdPartyProcessing.shared,
             now: now
         )
     }

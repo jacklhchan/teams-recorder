@@ -16,7 +16,7 @@ final class PRBWorkspaceTransitionIntegrationTests: XCTestCase {
         var feature: MeetingIntelligenceFeatureModel?
         var coordinator: MeetingIntelligenceJobCoordinator?
         let model = fixture.makeModel(
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 let createdCoordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,
@@ -29,7 +29,8 @@ final class PRBWorkspaceTransitionIntegrationTests: XCTestCase {
                         artifactStore: artifacts
                     ),
                     artifactStore: artifacts,
-                    stateStore: MeetingIntelligenceStateStore(mutationGate: gate)
+                    stateStore: MeetingIntelligenceStateStore(mutationGate: gate),
+                    thirdPartyProcessingAdmission: admission
                 )
                 coordinator = createdCoordinator
                 let created = MeetingIntelligenceFeatureModel(
@@ -67,13 +68,22 @@ final class PRBWorkspaceTransitionIntegrationTests: XCTestCase {
         defer { fixture.remove() }
         let preparer = DelayedWorkspacePreparer()
         let service = OldWorkspaceTranscriptService()
-        let transcription = TranscriptionFeatureModel(coordinator: .init(
-            providerRepository: fixture.repository,
-            audioPreparer: preparer,
-            service: service,
-            mutationGate: fixture.gate
-        ))
-        let model = fixture.makeModel(transcriptionFeature: transcription)
+        var transcription: TranscriptionFeatureModel!
+        let model = fixture.makeModel(
+            transcriptionFeatureFactory: { repository, _, _, gate, admission in
+                let feature = TranscriptionFeatureModel(
+                    coordinator: .init(
+                        providerRepository: repository,
+                        audioPreparer: preparer,
+                        service: service,
+                        mutationGate: gate
+                    ),
+                    thirdPartyProcessingAdmission: admission
+                )
+                transcription = feature
+                return feature
+            }
+        )
         defer { model.shutdown() }
 
         model.setOutputFolder(fixture.workspace)
@@ -136,7 +146,7 @@ private final class WorkspaceTransitionFixture {
     }
 
     func makeModel(
-        transcriptionFeature: TranscriptionFeatureModel? = nil,
+        transcriptionFeatureFactory: AppModel.TranscriptionFeatureFactory? = nil,
         meetingIntelligenceFeatureFactory: MeetingIntelligenceFeatureFactory? = nil
     ) -> AppModel {
         let library = LibraryFeatureModel(
@@ -158,9 +168,7 @@ private final class WorkspaceTransitionFixture {
             providerRepository: repository,
             performStartupWork: false,
             initialOutputFolder: workspace,
-            transcriptionFeatureFactory: transcriptionFeature.map { feature in
-                { _, _, _, _ in feature }
-            },
+            transcriptionFeatureFactory: transcriptionFeatureFactory,
             libraryFeature: library,
             meetingIntelligenceFeatureFactory: meetingIntelligenceFeatureFactory
         )

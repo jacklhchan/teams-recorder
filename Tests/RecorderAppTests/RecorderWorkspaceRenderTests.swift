@@ -2309,7 +2309,7 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
             initialOutputFolder: workspace,
             transcriptionAudioPreparer: transcriptionPreparer,
             libraryFeature: injectedLibraryFeature,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
                 let coordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
@@ -2320,7 +2320,8 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
                     publisher: RenderMeetingIntelligencePublisher(published: published),
                     artifactStore: RenderMeetingIntelligenceArtifactStore(),
                     stateStore: RenderMeetingIntelligenceStateStore(),
-                    artifactEditor: artifactEditor
+                    artifactEditor: artifactEditor,
+                    thirdPartyProcessingAdmission: admission
                 )
                 let feature = MeetingIntelligenceFeatureModel(coordinator: coordinator)
                 retainedCoordinator = coordinator

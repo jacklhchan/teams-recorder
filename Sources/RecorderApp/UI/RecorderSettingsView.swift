@@ -478,13 +478,14 @@ private struct CaptureSourceControlsView: View {
                 ForEach(model.devices) { device in Text(device.displayName).tag(Optional(device)) }
             }
             .labelsHidden().frame(minWidth: 380)
-            .accessibilityIdentifier("recorder.settings.microphone-picker")
+            .accessibilityIdentifier(RecorderActionID.microphonePicker)
             .background(
                 RecorderSettingsAccessibilityMarker(
-                    identifier: "recorder.settings.microphone-picker"
+                    identifier: RecorderActionID.microphonePicker,
+                    label: model.selectedMicDevice?.displayName ?? "Choose microphone"
                 )
             )
-            .disabled(!model.sourceControlsEnabled)
+            .disabled(!model.microphoneSelectionEnabled)
             Button { model.refreshDevices() } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -492,8 +493,29 @@ private struct CaptureSourceControlsView: View {
             .help("Refresh microphones")
             .accessibilityLabel("Refresh microphones")
             .accessibilityIdentifier("recorder.settings.microphone-refresh")
-            Text(model.selectedMicDevice?.channelText ?? "Unavailable").foregroundStyle(.secondary)
+            .background(
+                RecorderSettingsAccessibilityMarker(
+                    identifier: "recorder.settings.microphone-refresh",
+                    label: "Refresh microphones"
+                )
+            )
+            Text(microphoneStatusText)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(microphoneStatusText)
+                .accessibilityIdentifier(RecorderActionID.microphoneSwitchStatus)
+                .background(
+                    RecorderSettingsAccessibilityMarker(
+                        identifier: RecorderActionID.microphoneSwitchStatus,
+                        label: microphoneStatusText
+                    )
+                )
         }
+    }
+
+    private var microphoneStatusText: String {
+        model.isMicrophoneSwitchPending
+            ? "Switching microphone…"
+            : (model.selectedMicDevice?.channelText ?? "Unavailable")
     }
 
     private var filteredApplications: [CaptureApplication] {

@@ -1983,10 +1983,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 
     func testMicrophoneRefreshRemainsEnabledWhileRecording() async throws {
         let fixture = makeLifecycleWorkingFixture()
-        let recordingFolder = URL(
-            fileURLWithPath: NSTemporaryDirectory(),
-            isDirectory: true
-        )
+        let recordingFolder = try makeTemporaryRecordingRoot()
         _ = try await fixture.model.recorder.start(
             selection: .allSystemAudio,
             microphoneUID: nil,
@@ -1995,6 +1992,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         defer {
             Task { @MainActor in
                 _ = await fixture.model.recorder.stop()
+                try? FileManager.default.removeItem(at: recordingFolder)
             }
         }
 
@@ -2004,9 +2002,95 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         defer { host.close() }
         host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.audio"))
 
         XCTAssertFalse(try host.isEnabled("recorder.settings.microphone-picker"))
         XCTAssertTrue(try host.isEnabled("recorder.settings.microphone-refresh"))
+    }
+
+    func testMicrophonePickerIsEnabledDuringRecordingWhenLiveSwitchIsSupported() async throws {
+        let fixture = makeLiveMicrophoneFixture(supportsLiveSwitch: true)
+        let recordingFolder = try await startLiveMicrophoneRecording(fixture)
+        defer { stopLiveMicrophoneRecording(fixture, root: recordingFolder) }
+
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.audio"))
+
+        XCTAssertTrue(RecorderActionID.all.contains(RecorderActionID.microphonePicker))
+        XCTAssertTrue(try host.isEnabled(RecorderActionID.microphonePicker))
+        XCTAssertTrue(try host.isEnabled("recorder.settings.microphone-refresh"))
+    }
+
+    func testMicrophonePickerIsDisabledDuringRecordingWhenLiveSwitchUnsupported() async throws {
+        let fixture = makeLiveMicrophoneFixture(supportsLiveSwitch: false)
+        let recordingFolder = try await startLiveMicrophoneRecording(fixture)
+        defer { stopLiveMicrophoneRecording(fixture, root: recordingFolder) }
+
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.audio"))
+
+        XCTAssertFalse(try host.isEnabled(RecorderActionID.microphonePicker))
+        XCTAssertTrue(try host.isEnabled("recorder.settings.microphone-refresh"))
+    }
+
+    func testPendingThenFailedLiveSwitchRestoresOldMicrophoneAndPicker() async throws {
+        let fixture = makeLiveMicrophoneFixture(
+            supportsLiveSwitch: true,
+            pauseSwitch: true
+        )
+        let recordingFolder = try await startLiveMicrophoneRecording(fixture)
+        defer { stopLiveMicrophoneRecording(fixture, root: recordingFolder) }
+        fixture.model.selectMicrophone(fixture.replacementMicrophone)
+        await waitUntilAsync(timeout: 1, message: "microphone switch to become pending") {
+            fixture.source.microphoneSwitchRequests == [fixture.replacementMicrophone.uid]
+                && fixture.model.isMicrophoneSwitchPending
+        }
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.audio"))
+
+        XCTAssertFalse(try host.isEnabled(RecorderActionID.microphonePicker))
+        XCTAssertTrue(RecorderActionID.all.contains(RecorderActionID.microphoneSwitchStatus))
+        XCTAssertTrue(
+            host.containsAccessibilityIdentifier(RecorderActionID.microphoneSwitchStatus)
+        )
+        XCTAssertEqual(
+            host.accessibilityLabel(for: RecorderActionID.microphoneSwitchStatus),
+            "Switching microphone…"
+        )
+
+        fixture.source.resumeMicrophoneSwitch(
+            with: .failed(
+                requestedUID: fixture.replacementMicrophone.uid,
+                message: "injected"
+            )
+        )
+        await waitUntilAsync(timeout: 1, message: "microphone switch failure") {
+            !fixture.model.isMicrophoneSwitchPending
+        }
+        host.render()
+
+        XCTAssertTrue(try host.isEnabled(RecorderActionID.microphonePicker))
+        XCTAssertEqual(fixture.model.selectedMicDevice, fixture.oldMicrophone)
+        XCTAssertEqual(fixture.model.statusMessage, "Microphone switch failed")
+        XCTAssertEqual(
+            host.accessibilityLabel(for: RecorderActionID.microphonePicker),
+            fixture.oldMicrophone.displayName
+        )
     }
 
     func testDirectionASettingsKeepsEveryExistingControlReachable() throws {
@@ -2227,6 +2311,84 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             selectedBundleIdentifier: "com.example.capture"
         )
         return .init(model: model, defaults: defaults, source: source)
+    }
+
+    private func makeLiveMicrophoneFixture(
+        supportsLiveSwitch: Bool,
+        pauseSwitch: Bool = false
+    ) -> LiveMicrophoneFixture {
+        let suiteName = "RecorderWorkspaceRenderTests.live-microphone.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let oldMicrophone = AudioDevice(
+            id: 1,
+            uid: "mic-a",
+            name: "Old microphone",
+            manufacturer: "Tests",
+            channelCount: 1
+        )
+        let replacementMicrophone = AudioDevice(
+            id: 2,
+            uid: "mic-b",
+            name: "Replacement microphone",
+            manufacturer: "Tests",
+            channelCount: 2
+        )
+        defaults.set(
+            oldMicrophone.uid,
+            forKey: CaptureSelectionPersistence.microphoneUIDKey
+        )
+        let source = PausedRefreshCaptureSource()
+        source.supportsLiveMicrophoneSwitch = supportsLiveSwitch
+        source.pauseMicrophoneSwitch = pauseSwitch
+        let recorder = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in RenderTestWriter() }
+        )
+        let model = AppModel(
+            defaults: defaults,
+            recorder: recorder,
+            inputDevices: { [oldMicrophone, replacementMicrophone] },
+            defaultInputDeviceID: { oldMicrophone.id },
+            performStartupWork: false
+        )
+        model.systemAudioPermission = .granted
+        model.microphonePermission = .granted
+        return .init(
+            model: model,
+            source: source,
+            oldMicrophone: oldMicrophone,
+            replacementMicrophone: replacementMicrophone
+        )
+    }
+
+    private func startLiveMicrophoneRecording(
+        _ fixture: LiveMicrophoneFixture
+    ) async throws -> URL {
+        let recordingRoot = try makeTemporaryRecordingRoot()
+        _ = try await fixture.model.recorder.start(
+            selection: .allSystemAudio,
+            microphoneUID: fixture.oldMicrophone.uid,
+            baseFolder: recordingRoot
+        )
+        return recordingRoot
+    }
+
+    private func stopLiveMicrophoneRecording(
+        _ fixture: LiveMicrophoneFixture,
+        root: URL
+    ) {
+        Task { @MainActor in
+            _ = await fixture.model.recorder.stop()
+            try? FileManager.default.removeItem(at: root)
+        }
+    }
+
+    private func makeTemporaryRecordingRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recorder-mic-render-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
     }
 
     private func makeReadyTeamsFixture() -> StartupDisabledFixture {
@@ -2505,6 +2667,14 @@ private struct LifecycleWorkingFixture {
     let model: AppModel
     let defaults: UserDefaults
     let source: PausedRefreshCaptureSource
+}
+
+@MainActor
+private struct LiveMicrophoneFixture {
+    let model: AppModel
+    let source: PausedRefreshCaptureSource
+    let oldMicrophone: AudioDevice
+    let replacementMicrophone: AudioDevice
 }
 
 @MainActor
@@ -3213,8 +3383,13 @@ private enum WorkspaceHostError: Error {
 @MainActor
 private final class PausedRefreshCaptureSource: CaptureSourceProtocol {
     let screenVideoFormat = ScreenVideoFormat(width: 1_600, height: 900, pixelFormat: 0)
+    nonisolated(unsafe) var supportsLiveMicrophoneSwitch = false
+    var pauseMicrophoneSwitch = false
     private(set) var refreshStarted = false
+    private(set) var microphoneSwitchRequests: [String?] = []
     private var refreshContinuation: CheckedContinuation<Void, Never>?
+    private var microphoneSwitchContinuation:
+        CheckedContinuation<MicrophoneSwitchOutcome, Never>?
 
     func refreshContent() async throws -> [CaptureApplication] {
         refreshStarted = true
@@ -3226,6 +3401,18 @@ private final class PausedRefreshCaptureSource: CaptureSourceProtocol {
     func reconnect(selection _: ResolvedCaptureSelection) async throws {}
     func updateVideoTarget(_: TeamsWindowIdentity?) async throws -> CaptureFilterRevision {
         .init(sessionGeneration: 0, revision: 0)
+    }
+    func switchMicrophone(
+        to microphoneUID: String?,
+        lifecycle _: MicrophoneSwitchLifecycleToken
+    ) async -> MicrophoneSwitchOutcome {
+        microphoneSwitchRequests.append(microphoneUID)
+        if pauseMicrophoneSwitch {
+            return await withCheckedContinuation {
+                microphoneSwitchContinuation = $0
+            }
+        }
+        return .failed(requestedUID: microphoneUID, message: "injected")
     }
     func start(
         selection _: ResolvedCaptureSelection,
@@ -3239,6 +3426,11 @@ private final class PausedRefreshCaptureSource: CaptureSourceProtocol {
     func resumeRefresh() {
         refreshContinuation?.resume()
         refreshContinuation = nil
+    }
+
+    func resumeMicrophoneSwitch(with outcome: MicrophoneSwitchOutcome) {
+        microphoneSwitchContinuation?.resume(returning: outcome)
+        microphoneSwitchContinuation = nil
     }
 }
 

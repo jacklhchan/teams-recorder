@@ -1071,6 +1071,152 @@ final class AppModelScreenCaptureTests: XCTestCase {
         await waitUntil { !fixture.engine.isRecording }
     }
 
+    func testLiveMicrophoneSwitchPersistsOnlyAfterSuccess() async {
+        let old = microphone(id: 1, uid: "mic-a")
+        let replacement = microphone(id: 2, uid: "mic-b")
+        let fixture = makeFixture(
+            provider: .normal,
+            inputDevices: { [old, replacement] },
+            persistedMicrophoneUID: old.uid
+        )
+        fixture.source.supportsLiveMicrophoneSwitch = true
+        fixture.source.pauseMicrophoneSwitches = true
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording && !fixture.model.isCaptureLifecycleWorking }
+
+        fixture.model.selectMicrophone(replacement)
+        await waitUntil {
+            fixture.source.microphoneSwitchRequests == [replacement.uid]
+                && fixture.model.isMicrophoneSwitchPending
+        }
+        XCTAssertEqual(fixture.model.selectedMicrophoneUID, old.uid)
+        XCTAssertEqual(
+            fixture.defaults.string(forKey: CaptureSelectionPersistence.microphoneUIDKey),
+            old.uid
+        )
+        fixture.source.resumeNextMicrophoneSwitch(
+            with: .switched(previousUID: old.uid, currentUID: replacement.uid)
+        )
+        await waitUntil { fixture.model.selectedMicrophoneUID == replacement.uid }
+
+        XCTAssertEqual(fixture.source.microphoneSwitchRequests, [replacement.uid])
+        XCTAssertEqual(fixture.model.selectedMicDevice, replacement)
+        XCTAssertEqual(
+            fixture.defaults.string(forKey: CaptureSelectionPersistence.microphoneUIDKey),
+            replacement.uid
+        )
+        XCTAssertTrue(fixture.engine.isRecording)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testUnavailableLiveMicrophoneKeepsOldSelectionAndRecording() async {
+        let old = microphone(id: 1, uid: "mic-a")
+        let unavailable = microphone(id: 2, uid: "mic-missing")
+        let fixture = makeFixture(
+            provider: .normal,
+            inputDevices: { [old, unavailable] },
+            persistedMicrophoneUID: old.uid
+        )
+        fixture.source.supportsLiveMicrophoneSwitch = true
+        fixture.source.microphoneSwitchOutcomes = [
+            .unavailable(requestedUID: unavailable.uid, reason: .deviceMissing)
+        ]
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording && !fixture.model.isCaptureLifecycleWorking }
+
+        fixture.model.selectMicrophone(unavailable)
+        await waitUntil { fixture.source.microphoneSwitchRequests.count == 1 && !fixture.model.isMicrophoneSwitchPending }
+
+        XCTAssertEqual(fixture.model.selectedMicDevice, old)
+        XCTAssertEqual(fixture.model.selectedMicrophoneUID, old.uid)
+        XCTAssertEqual(
+            fixture.defaults.string(forKey: CaptureSelectionPersistence.microphoneUIDKey),
+            old.uid
+        )
+        XCTAssertEqual(fixture.model.statusMessage, "Selected microphone is unavailable")
+        XCTAssertTrue(fixture.engine.isRecording)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testUnsupportedLiveMicrophoneSwitchDoesNotRequestOrPersist() async {
+        let old = microphone(id: 1, uid: "mic-a")
+        let replacement = microphone(id: 2, uid: "mic-b")
+        let fixture = makeFixture(
+            provider: .normal,
+            inputDevices: { [old, replacement] },
+            persistedMicrophoneUID: old.uid
+        )
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording && !fixture.model.isCaptureLifecycleWorking }
+
+        fixture.model.selectMicrophone(replacement)
+        await Task.yield()
+
+        XCTAssertTrue(fixture.source.microphoneSwitchRequests.isEmpty)
+        XCTAssertEqual(fixture.model.selectedMicrophoneUID, old.uid)
+        XCTAssertEqual(
+            fixture.defaults.string(forKey: CaptureSelectionPersistence.microphoneUIDKey),
+            old.uid
+        )
+        XCTAssertTrue(fixture.engine.isRecording)
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording }
+    }
+
+    func testSupersededAndStoppedSwitchCompletionsCannotPersistOrClearCurrentState() async {
+        let old = microphone(id: 1, uid: "mic-a")
+        let second = microphone(id: 2, uid: "mic-b")
+        let latest = microphone(id: 3, uid: "mic-c")
+        let stopped = microphone(id: 4, uid: "mic-d")
+        let fixture = makeFixture(
+            provider: .normal,
+            inputDevices: { [old, second, latest, stopped] },
+            persistedMicrophoneUID: old.uid
+        )
+        fixture.source.supportsLiveMicrophoneSwitch = true
+        fixture.source.pauseMicrophoneSwitches = true
+        fixture.model.startOrStop()
+        await waitUntil { fixture.engine.isRecording && !fixture.model.isCaptureLifecycleWorking }
+
+        fixture.model.selectMicrophone(second)
+        await waitUntil { fixture.source.microphoneSwitchRequests == [second.uid] }
+        fixture.model.selectMicrophone(latest)
+        fixture.source.resumeNextMicrophoneSwitch(
+            with: .switched(previousUID: old.uid, currentUID: second.uid)
+        )
+        await waitUntil { fixture.source.microphoneSwitchRequests == [second.uid, latest.uid] }
+
+        XCTAssertTrue(fixture.model.isMicrophoneSwitchPending)
+        XCTAssertEqual(fixture.model.selectedMicrophoneUID, old.uid)
+        XCTAssertEqual(
+            fixture.defaults.string(forKey: CaptureSelectionPersistence.microphoneUIDKey),
+            old.uid
+        )
+
+        fixture.source.resumeNextMicrophoneSwitch(
+            with: .switched(previousUID: old.uid, currentUID: latest.uid)
+        )
+        await waitUntil { fixture.model.selectedMicrophoneUID == latest.uid }
+        XCTAssertFalse(fixture.model.isMicrophoneSwitchPending)
+
+        fixture.model.selectMicrophone(stopped)
+        await waitUntil { fixture.source.microphoneSwitchRequests.last == stopped.uid }
+        fixture.model.startOrStop()
+        await waitUntil { !fixture.engine.isRecording && !fixture.model.isMicrophoneSwitchPending }
+        fixture.source.resumeNextMicrophoneSwitch(
+            with: .switched(previousUID: latest.uid, currentUID: stopped.uid)
+        )
+        await Task.yield()
+
+        XCTAssertEqual(fixture.model.selectedMicrophoneUID, latest.uid)
+        XCTAssertEqual(
+            fixture.defaults.string(forKey: CaptureSelectionPersistence.microphoneUIDKey),
+            latest.uid
+        )
+    }
+
     private func makeFixture(
         provider: StorageCapacityTestProvider,
         ticker: StorageTestTicker = StorageTestTicker(),
@@ -1078,6 +1224,7 @@ final class AppModelScreenCaptureTests: XCTestCase {
         windows: [TeamsWindowSnapshot] = [],
         autoMeetingEnabled: Bool = false,
         inputDevices: (() -> [AudioDevice])? = nil,
+        persistedMicrophoneUID: String? = nil,
         disconnectCleanupScheduler: @escaping (
             @escaping @MainActor @Sendable () async -> Void
         ) -> Void = { operation in
@@ -1105,6 +1252,10 @@ final class AppModelScreenCaptureTests: XCTestCase {
         defaultsSuiteNames.append(suiteName)
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(
+            persistedMicrophoneUID,
+            forKey: CaptureSelectionPersistence.microphoneUIDKey
+        )
         defaults.set(
             autoMeetingEnabled,
             forKey: "teamsAutoMeetingEnabled"
@@ -1146,6 +1297,16 @@ final class AppModelScreenCaptureTests: XCTestCase {
 
     private var teamsApplication: CaptureApplication {
         CaptureApplication(processID: 42, bundleIdentifier: "com.microsoft.teams2", name: "Microsoft Teams")
+    }
+
+    private func microphone(id: UInt32, uid: String) -> AudioDevice {
+        AudioDevice(
+            id: id,
+            uid: uid,
+            name: uid,
+            manufacturer: "Tests",
+            channelCount: 1
+        )
     }
 
     private var nonTeamsApplication: CaptureApplication {
@@ -1394,6 +1555,10 @@ private actor TeamsScreenTestTicker {
 
 private final class StorageTestCaptureSource: CaptureSourceProtocol {
     let screenVideoFormat = ScreenVideoFormat(width: 1_600, height: 900, pixelFormat: 0)
+    var supportsLiveMicrophoneSwitch = false
+    var pauseMicrophoneSwitches = false
+    var microphoneSwitchOutcomes: [MicrophoneSwitchOutcome] = []
+    private(set) var microphoneSwitchRequests: [String?] = []
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var teamsRefreshCount = 0
@@ -1413,6 +1578,9 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
     private var reconnectContinuation: CheckedContinuation<Void, Never>?
     private var reconnectWaiters: [CheckedContinuation<Void, Never>] = []
     private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var microphoneSwitchContinuations: [
+        CheckedContinuation<MicrophoneSwitchOutcome, Never>
+    ] = []
 
     var lastVideoRevision: CaptureFilterRevision? {
         guard !videoTargets.isEmpty else { return nil }
@@ -1448,6 +1616,21 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
             throw error
         }
         return .init(sessionGeneration: 0, revision: UInt64(videoTargets.count))
+    }
+    func switchMicrophone(
+        to microphoneUID: String?,
+        lifecycle _: MicrophoneSwitchLifecycleToken
+    ) async -> MicrophoneSwitchOutcome {
+        microphoneSwitchRequests.append(microphoneUID)
+        if pauseMicrophoneSwitches {
+            return await withCheckedContinuation {
+                microphoneSwitchContinuations.append($0)
+            }
+        }
+        guard !microphoneSwitchOutcomes.isEmpty else {
+            return .failed(requestedUID: microphoneUID, message: "injected")
+        }
+        return microphoneSwitchOutcomes.removeFirst()
     }
     func start(
         selection _: ResolvedCaptureSelection,
@@ -1502,6 +1685,13 @@ private final class StorageTestCaptureSource: CaptureSourceProtocol {
         pauseStop = false
         stopContinuation?.resume()
         stopContinuation = nil
+    }
+
+    func resumeNextMicrophoneSwitch(with outcome: MicrophoneSwitchOutcome) {
+        guard !microphoneSwitchContinuations.isEmpty else {
+            return
+        }
+        microphoneSwitchContinuations.removeFirst().resume(returning: outcome)
     }
 
     func emit(_ event: CaptureEvent) {

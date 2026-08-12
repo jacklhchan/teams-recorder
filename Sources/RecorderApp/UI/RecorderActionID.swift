@@ -21,6 +21,8 @@ enum RecorderActionID {
     static let recoveryCenterNeedsAttention = "recorder.recovery.needs-attention"
     static let privacyModeToggle = "recorder.settings.privacy-mode-toggle"
     static let privacyModeStatus = "recorder.settings.privacy-mode-status"
+    static let microphonePicker = "recorder.settings.microphone-picker"
+    static let microphoneSwitchStatus = "recorder.settings.microphone-switch-status"
     static let uploadAudio = "recorder.action.upload-audio"
     static let refreshRecordings = "recorder.action.refresh-recordings"
     static let filterFavorites = "recorder.action.filter-favorites"
@@ -96,6 +98,8 @@ enum RecorderActionID {
         recoveryCenterNeedsAttention,
         privacyModeToggle,
         privacyModeStatus,
+        microphonePicker,
+        microphoneSwitchStatus,
         uploadAudio,
         refreshRecordings,
         filterFavorites,

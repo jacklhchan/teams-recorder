@@ -38,6 +38,8 @@ final class AppModel: ObservableObject {
     @Published var devices: [AudioDevice] = []
     @Published var selectedMicDevice: AudioDevice?
     @Published private(set) var selectedMicrophoneUID: String?
+    @Published private(set) var isMicrophoneSwitchPending = false
+    private var microphoneSwitchGeneration: UInt64 = 0
     @Published var availableCaptureApplications: [CaptureApplication] = []
     @Published var captureSelection = CaptureSelection()
     @Published var resolvedCaptureSelection: ResolvedCaptureSelection = .allSystemAudio
@@ -882,6 +884,39 @@ final class AppModel: ObservableObject {
     }
 
     func selectMicrophone(_ device: AudioDevice?) {
+        if recorder.isRecording {
+            guard recorder.supportsLiveMicrophoneSwitch,
+                  !isCaptureLifecycleWorking else {
+                return
+            }
+            if let device,
+               !devices.contains(where: { $0.uid == device.uid }) {
+                statusMessage = "Selected microphone is unavailable"
+                return
+            }
+            microphoneSwitchGeneration &+= 1
+            let generation = microphoneSwitchGeneration
+            isMicrophoneSwitchPending = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let outcome = await recorder.switchMicrophone(to: device?.uid)
+                guard generation == self.microphoneSwitchGeneration else { return }
+                self.isMicrophoneSwitchPending = false
+                if case .switched(_, let currentUID) = outcome,
+                   currentUID == device?.uid {
+                    self.selectedMicDevice = device
+                    self.selectedMicrophoneUID = device?.uid
+                    self.capturePersistence.saveMicrophoneUID(device?.uid)
+                } else if case .failed = outcome {
+                    self.statusMessage = "Microphone switch failed"
+                } else if case .unavailable = outcome {
+                    self.statusMessage = "Selected microphone is unavailable"
+                } else if case .switched = outcome {
+                    self.statusMessage = "Microphone switch failed"
+                }
+            }
+            return
+        }
         guard sourceControlsEnabled else { return }
         selectedMicDevice = device
         selectedMicrophoneUID = device?.uid
@@ -891,6 +926,13 @@ final class AppModel: ObservableObject {
 
     var sourceControlsEnabled: Bool {
         !recorder.isRecording && !isCaptureLifecycleWorking
+    }
+
+    var microphoneSelectionEnabled: Bool {
+        if recorder.isRecording {
+            return recorder.supportsLiveMicrophoneSwitch && !isMicrophoneSwitchPending
+        }
+        return sourceControlsEnabled
     }
 
     var captureReadiness: CaptureReadiness {
@@ -2193,6 +2235,8 @@ final class AppModel: ObservableObject {
         guard let token = recordingSessionCoordinator.cancelAndBeginStop() else {
             return
         }
+        microphoneSwitchGeneration &+= 1
+        isMicrophoneSwitchPending = false
         let endingOwnership = recordingOwnership
             ?? pendingRecordingAttempt?.ownership
         if let pendingAttempt = pendingRecordingAttempt {

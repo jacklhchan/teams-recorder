@@ -222,6 +222,8 @@ final class RecordingEngine: ObservableObject {
         )
     }
 
+    var supportsLiveMicrophoneSwitch: Bool { captureSource.supportsLiveMicrophoneSwitch }
+
     func switchMicrophone(to microphoneUID: String?) async -> MicrophoneSwitchOutcome {
         if activeMicrophoneUID == microphoneUID {
             return .unchanged(currentUID: activeMicrophoneUID)

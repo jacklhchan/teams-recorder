@@ -30,6 +30,10 @@ final class AppModel: ObservableObject {
         RecordingSessionMutationGate,
         any ThirdPartyProcessingAdmitting
     ) -> TranscriptionFeatureModel
+    typealias TranscriptionArtifactPublisherFactory = (
+        RecordingSessionMutationGate,
+        @escaping () -> RecordingDataLifecyclePolicy
+    ) -> TranscriptionArtifactPublisher
     typealias RecordingSourceMetadataUpdater = (
         RecordingSource,
         RecordingPendingSession,
@@ -300,6 +304,13 @@ final class AppModel: ObservableObject {
         transcriptionProcessLauncher: any TranscriptionProcessLaunching = FoundationTranscriptionProcessLauncher(),
         transcriptionScriptURL: URL? = nil,
         transcriptionService: (any TranscriptionServicing)? = nil,
+        transcriptionArtifactPublisherFactory: @escaping TranscriptionArtifactPublisherFactory = {
+            gate, policyProvider in
+            TranscriptionArtifactPublisher(
+                mutationGate: gate,
+                lifecyclePolicyProvider: policyProvider
+            )
+        },
         transcriptionFeatureFactory: TranscriptionFeatureFactory? = nil,
         libraryFeature: LibraryFeatureModel? = nil,
         meetingIntelligenceFeature: MeetingIntelligenceFeatureModel? = nil,
@@ -324,6 +335,9 @@ final class AppModel: ObservableObject {
         let activeLifecyclePolicyStore = RecordingDataLifecyclePolicyStore(defaults: defaults)
         recordingDataLifecyclePolicyStore = activeLifecyclePolicyStore
         let activeLifecyclePolicy = activeLifecyclePolicyStore.load()
+        let activeLifecyclePolicyProvider = {
+            activeLifecyclePolicyStore.load()
+        }
         recordingDataLifecyclePolicy = activeLifecyclePolicy
         let activeLocalRecorderControlPolicy = localRecorderControlPolicy
             ?? LocalRecorderControlPolicy(defaults: defaults)
@@ -466,12 +480,9 @@ final class AppModel: ObservableObject {
                 )
             } else {
                 activeTranscriptionService = NativeOpenAICompatibleTranscriptionService(
-                    publisher: TranscriptionArtifactPublisher(
-                        mutationGate: transcriptMutationGate,
-                        lifecyclePolicy: activeLifecyclePolicy,
-                        lifecyclePolicyProvider: {
-                            activeLifecyclePolicyStore.load()
-                        }
+                    publisher: transcriptionArtifactPublisherFactory(
+                        transcriptMutationGate,
+                        activeLifecyclePolicyProvider
                     )
                 )
             }
@@ -490,12 +501,9 @@ final class AppModel: ObservableObject {
                         audioPreparer: transcriptionAudioPreparer,
                         service: activeTranscriptionService,
                         mutationGate: transcriptMutationGate,
-                        failureDiagnosticPublisher: TranscriptionArtifactPublisher(
-                            mutationGate: transcriptMutationGate,
-                            lifecyclePolicy: activeLifecyclePolicy,
-                            lifecyclePolicyProvider: {
-                                activeLifecyclePolicyStore.load()
-                            }
+                        failureDiagnosticPublisher: transcriptionArtifactPublisherFactory(
+                            transcriptMutationGate,
+                            activeLifecyclePolicyProvider
                         )
                     ),
                     thirdPartyProcessingAdmission: activePrivacyModePolicy

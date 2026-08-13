@@ -153,6 +153,10 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
     private let modeMutation: (Int32, mode_t) -> Int32
     private let onOwnerOnlyCapability: (OwnerOnlyArtifactCapability) -> Void
 
+    var activeLifecyclePolicy: RecordingDataLifecyclePolicy {
+        lifecyclePolicyProvider()
+    }
+
     init(
         maximumBackupsPerArtifact: Int = 3,
         fileManager: FileManager = .default,

@@ -3,6 +3,66 @@ import XCTest
 
 @MainActor
 final class AppModelTranscriptionTests: XCTestCase {
+    func testLifecyclePolicyStoreComposesBothDiagnosticWriterBoundaries() throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let suiteName = "AppModelTranscriptionTests.lifecycle.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let repository = RecordingProviderRepository()
+        var publishers: [TranscriptionArtifactPublisher] = []
+
+        func makeModel() -> AppModel {
+            publishers = []
+            return AppModel(
+                defaults: defaults,
+                providerRepository: repository,
+                appPaths: .init(
+                    homeDirectory: fixture.root,
+                    applicationSupportRoot: fixture.root
+                ),
+                inputDevices: { [] },
+                defaultInputDeviceID: { nil },
+                performStartupWork: false,
+                initialOutputFolder: fixture.root,
+                transcriptionArtifactPublisherFactory: { gate, policyProvider in
+                    let publisher = TranscriptionArtifactPublisher(
+                        mutationGate: gate,
+                        lifecyclePolicyProvider: policyProvider
+                    )
+                    publishers.append(publisher)
+                    return publisher
+                }
+            )
+        }
+
+        var model = makeModel()
+        XCTAssertEqual(publishers.count, 2)
+        XCTAssertEqual(publishers.map(\.activeLifecyclePolicy), [.safeDefault, .safeDefault])
+
+        model.setOwnerOnlyForNewLocalArtifacts(false)
+        model.setRedactGeneratedDiagnostics(false)
+        let disabled = RecordingDataLifecyclePolicy(
+            ownerOnlyForNewLocalArtifacts: false,
+            redactGeneratedDiagnostics: false
+        )
+        XCTAssertEqual(RecordingDataLifecyclePolicyStore(defaults: defaults).load(), disabled)
+        XCTAssertEqual(publishers.map(\.activeLifecyclePolicy), [disabled, disabled])
+
+        defaults.set(Data("corrupt".utf8), forKey: RecordingDataLifecyclePolicyStore.defaultsKey)
+        model = makeModel()
+        XCTAssertEqual(model.recordingDataLifecyclePolicy, .safeDefault)
+        XCTAssertEqual(publishers.map(\.activeLifecyclePolicy), [.safeDefault, .safeDefault])
+
+        defaults.set(
+            Data(#"{"schemaVersion":99,"ownerOnlyForNewLocalArtifacts":false,"redactGeneratedDiagnostics":false,"retention":{"kind":"disabled"}}"#.utf8),
+            forKey: RecordingDataLifecyclePolicyStore.defaultsKey
+        )
+        model = makeModel()
+        XCTAssertEqual(model.recordingDataLifecyclePolicy, .safeDefault)
+        XCTAssertEqual(publishers.map(\.activeLifecyclePolicy), [.safeDefault, .safeDefault])
+    }
+
     func testTranscriptionFeatureFactoryReceivesTheActiveRepositoryAndMutationGateOnce() throws {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }

@@ -31,6 +31,7 @@ ad-hoc build is a production distribution artifact.
 | Teams auto-meeting suite | PASS — 31/31 | Uses isolated AppPaths and validates admitted pending metadata rather than the destination before publication. |
 | Provider Settings render suite | PASS — 5/5 | Disabled rendered controls no longer bypass SwiftUI disabled semantics in the test harness. |
 | Verified test-recording autoplay + double-stop gate | PASS — 14/14 | Autoplay waits for a matching verified publication completion; stale completion consumes the one-shot intent and cannot play later. Double-stop still performs one source stop and one writer close. |
+| Installed-347 OneDrive bookmark | PASS | Selected the exact `Meeting Recording` folder through NSOpenPanel. After Quit and GUI relaunch, the app still showed the full path and `Ready to save recordings here`; no Downloads fallback occurred. |
 | Full Swift package suite | NOT PASS | The initial run exposed three independently reproducible regressions and hung later. A post-fix run exposed the autoplay and stale double-stop expectation, then also hung later in the Engine suite; both are now focused-green. No clean full-suite completion is claimed. |
 
 The session-name production fix retains no-overwrite admission: each readable
@@ -69,33 +70,32 @@ The following are deliberately not marked as passed:
    bundle and embedded CLI target.
 2. Re-authorize macOS capture/microphone access if the new ad-hoc signature
    causes TCC to require it.
-3. Select
-   `/Users/apple/Library/CloudStorage/OneDrive-pccw.com/Work/Meeting Recording`
-   through the app's folder picker, verify the persisted bookmark after app
-   relaunch, and confirm there is no Downloads fallback.
-4. Run bounded staging checks for: Recording Health; Re-arm Now after manual
+3. Run bounded staging checks for: Recording Health; Re-arm Now after manual
    suppression; Privacy Mode local-only/zero-provider-work; Recovery Center;
    CLI default-off then explicit opt-in; rapid Meet now end/restart; floating
    local microphone mute then unmute; and publication while OneDrive is
    available/unavailable.
-5. The live microphone switch remains fail-closed in production source
+4. The live microphone switch remains fail-closed in production source
    (`supportsLiveMicrophoneSwitch == false`). It may be enabled only after a
    physical A→B→A switch preserves one recording and passes source/generation
    fences.
-6. The sandbox bookmark spike still needs a visible, user-confirmed NSOpenPanel
+5. The sandbox bookmark spike still needs a visible, user-confirmed NSOpenPanel
    selection and a second-process verification. Automation did not expose the
    panel, and no coordinate guess or automatic folder selection was used.
-7. Retention needs the product-owner choice already identified by the design:
+6. Retention needs the product-owner choice already identified by the design:
    keep it disabled/unavailable (recommended for the current architecture), or
    add a new app-owned diagnostic storage class. Scanning/deleting the selected
    OneDrive destination is not acceptable.
-8. Production release-manifest operation needs a named release owner, active
+7. Production release-manifest operation needs a named release owner, active
    key ID/public key, private-key custody and rotation/revocation procedure,
    authoritative distribution channel, and rollback floor. No production key
    material is generated or inferred by this UAT.
 
 ## Acceptance status
 
-**In progress.** The code/security review gates and build 349 verification are
-complete, but installation, output bookmark, bounded runtime UAT, retention
-choice, sandbox bookmark, and release-key operational handoff remain open.
+**In progress.** The code/security review gates, build 350 verification, and
+installed-347 OneDrive bookmark persistence check are complete. The app still
+reported 30 retained local recordings and 13 items needing attention after the
+destination change, so publication is not claimed complete. Installation of
+350, bounded runtime UAT, retention choice, sandbox bookmark, and release-key
+operational handoff remain open.

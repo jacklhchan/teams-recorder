@@ -2,13 +2,15 @@
 
 ## Candidate under test
 
-- Repository HEAD: `89fda66` (`fix: keep rapid recording restarts collision free`)
-- Candidate: `Local Meeting Recorder Staging` `0.2.0 (349)`
+- Repository HEAD at the latest product fix: `d325604`
+  (`fix: autoplay verified test recordings`)
+- Candidate: `Local Meeting Recorder Staging` `0.2.0 (350)`, built from
+  `d325604`.
 - Bundle ID: `local.meeting.recorder.staging`
 - Signature: ad-hoc staging signature
 - Bundle verification: Info.plist, PrivacyInfo.xcprivacy, and
   `codesign --verify --deep --strict` passed.
-- Installed staging app remains build 347. Build 349 has **not** been installed
+- Installed staging app remains build 347. Build 350 has **not** been installed
   pending explicit approval for the recoverable `/Applications` replacement.
 - The separate build 348 live-microphone experiment is retained only under
   `/private/tmp/recorder-live-mic-uat-348/`; it is not the release candidate.
@@ -28,7 +30,8 @@ ad-hoc build is a production distribution artifact.
 | RecordingEngine state suite | PASS — 83/83 | Reported by the focused implementation run. |
 | Teams auto-meeting suite | PASS — 31/31 | Uses isolated AppPaths and validates admitted pending metadata rather than the destination before publication. |
 | Provider Settings render suite | PASS — 5/5 | Disabled rendered controls no longer bypass SwiftUI disabled semantics in the test harness. |
-| Full Swift package suite | NOT PASS | The single run exposed the three independently reproducible regressions above and was stopped after later inactivity (exit 130). The regressions are now focused-green; no second full-suite pass is claimed. |
+| Verified test-recording autoplay + double-stop gate | PASS — 14/14 | Autoplay waits for a matching verified publication completion; stale completion consumes the one-shot intent and cannot play later. Double-stop still performs one source stop and one writer close. |
+| Full Swift package suite | NOT PASS | The initial run exposed three independently reproducible regressions and hung later. A post-fix run exposed the autoplay and stale double-stop expectation, then also hung later in the Engine suite; both are now focused-green. No clean full-suite completion is claimed. |
 
 The session-name production fix retains no-overwrite admission: each readable
 timestamp now has a UUID suffix, while `RecordingPendingStore` continues to
@@ -62,7 +65,7 @@ reject an existing direct child.
 
 The following are deliberately not marked as passed:
 
-1. Recoverably install build 349 over build 347, then re-verify the installed
+1. Recoverably install build 350 over build 347, then re-verify the installed
    bundle and embedded CLI target.
 2. Re-authorize macOS capture/microphone access if the new ad-hoc signature
    causes TCC to require it.

@@ -10,12 +10,17 @@ let package = Package(
     products: [
         .library(name: "RecorderControl", targets: ["RecorderControl"]),
         .executable(name: "recorderctl", targets: ["RecorderControlCLI"]),
+        .executable(name: "ReleaseManifestTool", targets: ["ReleaseManifestTool"]),
         .executable(name: "LocalMeetingRecorder", targets: ["RecorderApp"])
     ],
     targets: [
         .target(name: "RecorderControl"),
         .executableTarget(
             name: "RecorderControlCLI",
+            dependencies: ["RecorderControl"]
+        ),
+        .executableTarget(
+            name: "ReleaseManifestTool",
             dependencies: ["RecorderControl"]
         ),
         .target(

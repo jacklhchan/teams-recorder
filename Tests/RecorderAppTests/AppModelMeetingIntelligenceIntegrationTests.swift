@@ -4,6 +4,90 @@ import XCTest
 
 @MainActor
 final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
+    func testPrivacyTransitionCancelsActualASRAndMeetingJobsAndRequiresExplicitRestart() async throws {
+        let fixture = try IntegrationFixture()
+        defer { fixture.remove() }
+        let suiteName = "app-privacy-transition-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let policy = PrivacyModePolicy(defaults: defaults)
+        let asrService = SharedSnapshotBlockingTranscriptionService()
+        let meetingGenerator = SharedSnapshotBlockingGenerator()
+        var meetingCoordinator: MeetingIntelligenceJobCoordinator?
+        let model = AppModel(
+            defaults: defaults,
+            privacyModePolicy: policy,
+            providerRepository: IntegrationRepository(),
+            performStartupWork: false,
+            initialOutputFolder: fixture.workspace,
+            transcriptionAudioPreparer: IntegrationAudioPreparer(),
+            transcriptionService: asrService,
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
+                let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
+                let coordinator = MeetingIntelligenceJobCoordinator(
+                    providerRepository: repository,
+                    expectedPublicationSourceID: sourceID,
+                    mutationGate: gate,
+                    availabilityChecker: IntegrationAvailability(result: .confirmed),
+                    generator: meetingGenerator,
+                    publisher: MeetingIntelligencePublisher(
+                        mutationGate: gate,
+                        artifactStore: artifacts
+                    ),
+                    artifactStore: artifacts,
+                    stateStore: MeetingIntelligenceStateStore(mutationGate: gate),
+                    thirdPartyProcessingAdmission: admission
+                )
+                meetingCoordinator = coordinator
+                return MeetingIntelligenceFeatureModel(coordinator: coordinator)
+            }
+        )
+        defer { model.shutdown() }
+        let session = fixture.session()
+        model.meetingIntelligenceFeature.reload(sessions: [session])
+
+        model.transcriptionFeature.start(session: session, providerIsConfigured: true)
+        model.meetingIntelligenceFeature.generate(for: session)
+        await asrService.waitForRequestCount(1)
+        await meetingGenerator.waitForRequestCount(1)
+
+        model.setPrivacyModeEnabled(true)
+
+        XCTAssertNil(model.transcriptionFeature.presentation.transcribingSessionID)
+        XCTAssertEqual(
+            model.transcriptionFeature.presentation.transcriptionStatesBySessionID[session.id]?.phase,
+            .cancelled
+        )
+        XCTAssertEqual(
+            model.meetingIntelligenceFeature.presentation(for: session).unavailableReason,
+            .privacyModeEnabled
+        )
+        XCTAssertEqual(model.aiProviderSettingsModel.status, PrivacyModePolicy.localOnlyMessage)
+        XCTAssertFalse(model.aiProviderSettingsModel.isTesting)
+        XCTAssertEqual(meetingCoordinator?.presentation(for: session).unavailableReason, .privacyModeEnabled)
+
+        asrService.releaseNext(for: session)
+        await meetingGenerator.releaseNext()
+        await Task.yield()
+
+        model.setPrivacyModeEnabled(false)
+        await Task.yield()
+        XCTAssertEqual(asrService.models.count, 1)
+        XCTAssertEqual(meetingGenerator.models.count, 1)
+        XCTAssertEqual(model.aiProviderSettingsModel.status, PrivacyModePolicy.localOnlyMessage)
+
+        model.transcriptionFeature.start(session: session, providerIsConfigured: true)
+        model.meetingIntelligenceFeature.generate(for: session)
+        await asrService.waitForRequestCount(2)
+        await meetingGenerator.waitForRequestCount(2)
+
+        XCTAssertEqual(asrService.models.count, 2)
+        XCTAssertEqual(meetingGenerator.models.count, 2)
+        model.transcriptionFeature.cancelForPrivacyMode()
+        model.meetingIntelligenceFeature.cancelThirdPartyProcessingForPrivacyMode()
+    }
+
     func testOneProviderSaveChangesOnlyFutureSharedASRAndMeetingIntelligenceSnapshots() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }

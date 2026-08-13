@@ -345,6 +345,46 @@ final class RecordingSessionPublisherTests: XCTestCase {
         XCTAssertNotEqual(second.folderURL, first.folderURL)
         XCTAssertEqual(fixture.publishedFolders.count, 2)
     }
+
+    func testBlockedDestinationOpenTimesOutWithoutWritingAndQueuedRetryDoesNotStartAnotherOpen() async throws {
+        let opener = BlockingDestinationOpener()
+        let fixture = try PublisherFixture(
+            destinationOpenDeadline: .milliseconds(50),
+            destinationOpener: opener.open
+        )
+
+        let first = Task { () -> Error? in
+            do {
+                _ = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+                return nil
+            } catch {
+                return error
+            }
+        }
+        await fulfillment(of: [opener.started], timeout: 1)
+
+        let second = Task { () -> Error? in
+            do {
+                _ = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        let firstError = await first.value
+        let secondError = await second.value
+        XCTAssertEqual(firstError as? RecordingPublicationError, .destinationUnavailable)
+        XCTAssertEqual(secondError as? RecordingPublicationError, .destinationUnavailable)
+        XCTAssertEqual(opener.callCount, 1)
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertTrue(fixture.destinationIsEmpty)
+
+        opener.release()
+        await fulfillment(of: [opener.returned], timeout: 1)
+        XCTAssertEqual(opener.callCount, 1)
+        XCTAssertTrue(fixture.destinationIsEmpty)
+    }
 }
 
 private final class PublisherFixture {
@@ -367,6 +407,10 @@ private final class PublisherFixture {
         hooks: RecordingSessionPublisher.Hooks = .init(),
         markerWriter: @escaping RecordingSessionPublisher.WriteOperation = { descriptor, bytes, count in
             Darwin.write(descriptor, bytes, count)
+        },
+        destinationOpenDeadline: Duration = .seconds(2),
+        destinationOpener: @escaping RecordingSessionPublisher.DestinationOpener = { parent, name, flags in
+            openat(parent, name, flags)
         }
     ) throws {
         temporaryRoot = try realDirectoryURL(FileManager.default.temporaryDirectory)
@@ -388,7 +432,9 @@ private final class PublisherFixture {
             pendingStore: store,
             mediaValidator: mediaValidator,
             hooks: hooks,
-            writeOperation: markerWriter
+            writeOperation: markerWriter,
+            destinationOpenDeadline: destinationOpenDeadline,
+            destinationOpener: destinationOpener
         )
     }
 
@@ -402,6 +448,32 @@ private final class PublisherFixture {
     var publishedFolders: [URL] {
         (try? FileManager.default.contentsOfDirectory(at: destinationURL, includingPropertiesForKeys: nil).filter { !$0.lastPathComponent.hasPrefix(".") }) ?? []
     }
+}
+
+private final class BlockingDestinationOpener: @unchecked Sendable {
+    let started = XCTestExpectation(description: "destination open started")
+    let returned = XCTestExpectation(description: "blocked destination open returned")
+    private let lock = NSLock()
+    private let releaseSignal = DispatchSemaphore(value: 0)
+    private var calls = 0
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+
+    func open(parent: Int32, name: String, flags: Int32) -> Int32 {
+        lock.lock()
+        calls += 1
+        lock.unlock()
+        started.fulfill()
+        releaseSignal.wait()
+        returned.fulfill()
+        return openat(parent, name, flags)
+    }
+
+    func release() { releaseSignal.signal() }
 }
 
 private func realDirectoryURL(_ url: URL) throws -> URL {

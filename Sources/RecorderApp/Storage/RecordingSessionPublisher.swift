@@ -18,6 +18,58 @@ enum RecordingPublicationError: Error, Equatable, Sendable {
     case ioFailure(String)
 }
 
+private final class DestinationOpenRequest: @unchecked Sendable {
+    private enum State {
+        case pending(CheckedContinuation<Int32, Error>)
+        case opening(CheckedContinuation<Int32, Error>)
+        case resolved
+    }
+
+    private let lock = NSLock()
+    private var state: State?
+
+    func install(_ continuation: CheckedContinuation<Int32, Error>) {
+        lock.lock()
+        state = .pending(continuation)
+        lock.unlock()
+    }
+
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case let .pending(continuation) = state else { return false }
+        state = .opening(continuation)
+        return true
+    }
+
+    func finish(descriptor: Int32) {
+        lock.lock()
+        guard case let .opening(continuation) = state else {
+            lock.unlock()
+            if descriptor >= 0 { Darwin.close(descriptor) }
+            return
+        }
+        state = .resolved
+        lock.unlock()
+        continuation.resume(returning: descriptor)
+    }
+
+    func timeout() {
+        lock.lock()
+        let continuation: CheckedContinuation<Int32, Error>
+        switch state {
+        case let .pending(value), let .opening(value):
+            continuation = value
+        case .resolved, .none:
+            lock.unlock()
+            return
+        }
+        state = .resolved
+        lock.unlock()
+        continuation.resume(throwing: RecordingPublicationError.destinationUnavailable)
+    }
+}
+
 protocol RecordingSessionPublishing: Sendable {
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess
     func validatePublished(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess
@@ -32,6 +84,7 @@ extension RecordingSessionPublishing {
 struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendable {
     typealias MediaValidator = (Int32, String) -> Bool
     typealias WriteOperation = (Int32, UnsafeRawPointer, Int) -> Int
+    typealias DestinationOpener = (Int32, String, Int32) -> Int32
 
     enum EntryContext: Equatable { case source, staging, published }
 
@@ -47,22 +100,31 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
     private static let maximumMarkerBytes: Int64 = 65_536
     private static let maximumDepth = 32
     private static let maximumEntries = 4_096
+    private static let destinationOpenExecutor = DispatchQueue(label: "RecorderApp.destination-open")
 
     private let pendingStore: RecordingPendingStore
     private let mediaValidator: MediaValidator
     private let hooks: Hooks
     private let writeOperation: WriteOperation
+    private let destinationOpenDeadline: Duration
+    private let destinationOpener: DestinationOpener
 
     init(
         pendingStore: RecordingPendingStore,
         mediaValidator: @escaping MediaValidator = Self.liveMediaValidator,
         hooks: Hooks = .init(),
-        writeOperation: @escaping WriteOperation = { Darwin.write($0, $1, $2) }
+        writeOperation: @escaping WriteOperation = { Darwin.write($0, $1, $2) },
+        destinationOpenDeadline: Duration = .seconds(2),
+        destinationOpener: @escaping DestinationOpener = { parent, name, flags in
+            openat(parent, name, flags)
+        }
     ) {
         self.pendingStore = pendingStore
         self.mediaValidator = mediaValidator
         self.hooks = hooks
         self.writeOperation = writeOperation
+        self.destinationOpenDeadline = destinationOpenDeadline
+        self.destinationOpener = destinationOpener
     }
 
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
@@ -83,7 +145,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         }
         let sourceDigest = aggregateDigest(sourceInventory)
 
-        let destinationFD = try openDestination(destination.url)
+        let destinationFD = try await openDestination(destination.url)
         defer { Darwin.close(destinationFD) }
         if let existing = try publishedMatch(
             in: destinationFD,
@@ -173,7 +235,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
               isSimpleName(folderName), isSimpleName(recordingName) else {
             throw RecordingPublicationError.verificationMismatch
         }
-        let destinationFD = try openDestination(destination.url)
+        let destinationFD = try await openDestination(destination.url)
         defer { Darwin.close(destinationFD) }
         var observation = stat()
         guard fstatat(destinationFD, folderName, &observation, AT_SYMLINK_NOFOLLOW) == 0,
@@ -236,7 +298,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         }
     }
 
-    private func openDestination(_ url: URL) throws -> Int32 {
+    private func openDestination(_ url: URL) async throws -> Int32 {
         let path = url.path
         guard path.hasPrefix("/") else { throw RecordingPublicationError.destinationUnavailable }
         let rawComponents = path.split(separator: "/", omittingEmptySubsequences: false)
@@ -257,7 +319,11 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
                 Darwin.close(current)
                 throw RecordingPublicationError.destinationUnavailable
             }
-            let next = openat(current, String(component), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            let next = try await boundedDestinationOpen(
+                parent: current,
+                name: String(component),
+                flags: O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
             guard next >= 0 else {
                 Darwin.close(current)
                 throw RecordingPublicationError.destinationUnavailable
@@ -272,6 +338,21 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
             current = next
         }
         return current
+    }
+
+    private func boundedDestinationOpen(parent: Int32, name: String, flags: Int32) async throws -> Int32 {
+        let request = DestinationOpenRequest()
+        return try await withCheckedThrowingContinuation { continuation in
+            request.install(continuation)
+            Self.destinationOpenExecutor.async {
+                guard request.begin() else { return }
+                request.finish(descriptor: self.destinationOpener(parent, name, flags))
+            }
+            Task {
+                try? await Task.sleep(for: destinationOpenDeadline)
+                request.timeout()
+            }
+        }
     }
 
     private func finalizedRecording(in inventory: [InventoryEntry]) throws -> String {

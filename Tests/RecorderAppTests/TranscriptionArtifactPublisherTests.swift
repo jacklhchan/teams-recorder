@@ -4,6 +4,44 @@ import XCTest
 @testable import RecorderApp
 
 final class TranscriptionArtifactPublisherTests: XCTestCase {
+    func testDisabledDiagnosticRedactionPersistsNoDiagnosticContent() throws {
+        let folder = try makeFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let publisher = TranscriptionArtifactPublisher(
+            lifecyclePolicy: .init(redactGeneratedDiagnostics: false)
+        )
+
+        let artifacts = try publisher.publish(
+            rawText: "raw", finalText: "final",
+            manifest: .init(model: "model", language: "yue", chunkCount: 1, responseFormats: []),
+            logEvents: [.started], sessionFolder: folder
+        )
+        _ = try publisher.publishFailureDiagnostic(
+            .init(stage: .upload, errorCode: .providerTransportFailure),
+            sessionFolder: folder
+        )
+
+        XCTAssertTrue(try Data(contentsOf: artifacts.logURL).isEmpty)
+        XCTAssertTrue(try Data(contentsOf: folder.appendingPathComponent("transcription.failure.json")).isEmpty)
+    }
+
+    func testModeMutationFailurePreservesArtifactAndReportsFixedCapability() throws {
+        let folder = try makeFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var capabilities: [OwnerOnlyArtifactCapability] = []
+        let publisher = TranscriptionArtifactPublisher(
+            modeMutation: { _, _ in -1 },
+            onOwnerOnlyCapability: { capabilities.append($0) }
+        )
+
+        let diagnostic = try publisher.publishFailureDiagnostic(
+            .init(stage: .upload, errorCode: .providerTransportFailure),
+            sessionFolder: folder
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: diagnostic.path))
+        XCTAssertEqual(capabilities, [.ownerOnlyUnavailable])
+    }
     func testPublicationLogContainsOnlyFixedSafeDiagnostic() throws {
         let folder = try makeFolder()
         defer { try? FileManager.default.removeItem(at: folder) }

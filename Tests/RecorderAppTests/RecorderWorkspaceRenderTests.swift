@@ -1961,6 +1961,17 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             host.accessibilityLabel(for: RecorderActionID.lifecycleOwnerOnlyStatus),
             "New app-owned local artifacts use owner-only permissions when supported."
         )
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.lifecycleRedactionToggle))
+        XCTAssertTrue(host.pressAccessibilityElement(RecorderActionID.lifecycleRedactionToggle))
+        XCTAssertFalse(fixture.model.recordingDataLifecyclePolicy.redactGeneratedDiagnostics)
+        XCTAssertFalse(
+            RecordingDataLifecyclePolicyStore(defaults: fixture.defaults).load()
+                .redactGeneratedDiagnostics
+        )
+        XCTAssertEqual(
+            host.accessibilityLabel(for: RecorderActionID.lifecycleRedactionStatus),
+            "Generated diagnostics are not persisted."
+        )
     }
 
     func testMinimumSettingsRendersCaptureAndTeamsControls() throws {

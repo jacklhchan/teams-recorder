@@ -296,6 +296,29 @@ struct RecorderSettingsView: View {
                     )
                 )
                 .accessibilityIdentifier(RecorderActionID.lifecycleRedactionToggle)
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: RecorderActionID.lifecycleRedactionToggle,
+                    label: "Redact generated diagnostics",
+                    onPress: {
+                        model.setRedactGeneratedDiagnostics(
+                            !model.recordingDataLifecyclePolicy.redactGeneratedDiagnostics
+                        )
+                    }
+                ))
+                Text(
+                    model.recordingDataLifecyclePolicy.redactGeneratedDiagnostics
+                        ? "Generated diagnostics use a fixed safe record."
+                        : "Generated diagnostics are not persisted."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(RecorderActionID.lifecycleRedactionStatus)
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: RecorderActionID.lifecycleRedactionStatus,
+                    label: model.recordingDataLifecyclePolicy.redactGeneratedDiagnostics
+                        ? "Generated diagnostics use a fixed safe record."
+                        : "Generated diagnostics are not persisted."
+                ))
             }
             Label("Recording Storage", systemImage: "internaldrive")
                 .font(.headline)

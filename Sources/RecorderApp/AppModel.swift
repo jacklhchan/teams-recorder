@@ -489,7 +489,14 @@ final class AppModel: ObservableObject {
                         providerRepository: activeProviderRepository,
                         audioPreparer: transcriptionAudioPreparer,
                         service: activeTranscriptionService,
-                        mutationGate: transcriptMutationGate
+                        mutationGate: transcriptMutationGate,
+                        failureDiagnosticPublisher: TranscriptionArtifactPublisher(
+                            mutationGate: transcriptMutationGate,
+                            lifecyclePolicy: activeLifecyclePolicy,
+                            lifecyclePolicyProvider: {
+                                activeLifecyclePolicyStore.load()
+                            }
+                        )
                     ),
                     thirdPartyProcessingAdmission: activePrivacyModePolicy
                 )
@@ -698,16 +705,24 @@ final class AppModel: ObservableObject {
         guard recordingDataLifecyclePolicy.ownerOnlyForNewLocalArtifacts != enabled else {
             return
         }
-        recordingDataLifecyclePolicy.ownerOnlyForNewLocalArtifacts = enabled
-        try? recordingDataLifecyclePolicyStore.save(recordingDataLifecyclePolicy)
+        var candidate = recordingDataLifecyclePolicy
+        candidate.ownerOnlyForNewLocalArtifacts = enabled
+        guard (try? recordingDataLifecyclePolicyStore.save(candidate)) != nil else {
+            return
+        }
+        recordingDataLifecyclePolicy = candidate
     }
 
     func setRedactGeneratedDiagnostics(_ enabled: Bool) {
         guard recordingDataLifecyclePolicy.redactGeneratedDiagnostics != enabled else {
             return
         }
-        recordingDataLifecyclePolicy.redactGeneratedDiagnostics = enabled
-        try? recordingDataLifecyclePolicyStore.save(recordingDataLifecyclePolicy)
+        var candidate = recordingDataLifecyclePolicy
+        candidate.redactGeneratedDiagnostics = enabled
+        guard (try? recordingDataLifecyclePolicyStore.save(candidate)) != nil else {
+            return
+        }
+        recordingDataLifecyclePolicy = candidate
     }
 
     func setLocalRecorderControlEnabled(_ enabled: Bool) {

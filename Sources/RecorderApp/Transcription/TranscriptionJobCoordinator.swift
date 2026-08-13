@@ -47,6 +47,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
         audioPreparer: any TranscriptionAudioPreparing,
         service: any TranscriptionServicing,
         mutationGate: RecordingSessionMutationGate = .init(),
+        failureDiagnosticPublisher: TranscriptionArtifactPublisher? = nil,
         transcriptReader: any TranscriptDocumentReading =
             SecureTranscriptDocumentReader(),
         coordinatorInstanceID: UUID = UUID(),
@@ -57,7 +58,8 @@ final class TranscriptionJobCoordinator: ObservableObject {
         self.audioPreparer = audioPreparer
         self.service = service
         self.mutationGate = mutationGate
-        failureDiagnosticPublisher = .init(mutationGate: mutationGate)
+        self.failureDiagnosticPublisher = failureDiagnosticPublisher
+            ?? .init(mutationGate: mutationGate)
         self.transcriptReader = transcriptReader
         self.coordinatorInstanceID = coordinatorInstanceID
         self.attemptIDFactory = attemptIDFactory

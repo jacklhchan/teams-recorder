@@ -132,6 +132,11 @@ enum TranscriptionArtifactPublicationError:
     }
 }
 
+enum OwnerOnlyArtifactCapability: Equatable, Sendable {
+    case ownerOnlyApplied
+    case ownerOnlyUnavailable
+}
+
 struct TranscriptionArtifactPublisher: @unchecked Sendable {
     static let failureDiagnosticFileName = "transcription.failure.json"
     static let canonicalNames = [
@@ -145,13 +150,17 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
     private let lifecyclePolicyProvider: () -> RecordingDataLifecyclePolicy
     private let fileManager: FileManager
     private let mutationGate: RecordingSessionMutationGate
+    private let modeMutation: (Int32, mode_t) -> Int32
+    private let onOwnerOnlyCapability: (OwnerOnlyArtifactCapability) -> Void
 
     init(
         maximumBackupsPerArtifact: Int = 3,
         fileManager: FileManager = .default,
         mutationGate: RecordingSessionMutationGate = .init(),
         lifecyclePolicy: RecordingDataLifecyclePolicy = .safeDefault,
-        lifecyclePolicyProvider: (() -> RecordingDataLifecyclePolicy)? = nil
+        lifecyclePolicyProvider: (() -> RecordingDataLifecyclePolicy)? = nil,
+        modeMutation: @escaping (Int32, mode_t) -> Int32 = fchmod,
+        onOwnerOnlyCapability: @escaping (OwnerOnlyArtifactCapability) -> Void = { _ in }
     ) {
         self.maximumBackupsPerArtifact = max(
             0,
@@ -160,6 +169,8 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         self.fileManager = fileManager
         self.mutationGate = mutationGate
         self.lifecyclePolicyProvider = lifecyclePolicyProvider ?? { lifecyclePolicy }
+        self.modeMutation = modeMutation
+        self.onOwnerOnlyCapability = onOwnerOnlyCapability
     }
 
     func publish(
@@ -178,7 +189,9 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         )
         try OwnerOnlyArtifactWriter.createDirectory(
             at: staging,
-            enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
+            enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts,
+            modeMutation: modeMutation,
+            onOwnerOnlyCapability: onOwnerOnlyCapability
         )
         defer { try? fileManager.removeItem(at: staging) }
 
@@ -198,7 +211,9 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             try OwnerOnlyArtifactWriter.writeAtomically(
                 data,
                 to: staging.appendingPathComponent(name),
-                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
+                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts,
+                modeMutation: modeMutation,
+                onOwnerOnlyCapability: onOwnerOnlyCapability
             )
         }
 
@@ -212,7 +227,9 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
                 try OwnerOnlyArtifactWriter.writeAtomically(
                     OwnerOnlyArtifactWriter.readRegularFile(at: destination),
                     to: backup,
-                    enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
+                    enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts,
+                    modeMutation: modeMutation,
+                    onOwnerOnlyCapability: onOwnerOnlyCapability
                 )
             }
         }
@@ -223,7 +240,9 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             try OwnerOnlyArtifactWriter.writeAtomically(
                 data,
                 to: destination,
-                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
+                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts,
+                modeMutation: modeMutation,
+                onOwnerOnlyCapability: onOwnerOnlyCapability
             )
             try pruneBackups(for: name, in: sessionFolder)
         }
@@ -263,7 +282,9 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         try validateSessionFolder(safeSessionFolder)
         return try mutationGate.withMutation(for: safeSessionFolder) {
             let lifecyclePolicy = lifecyclePolicyProvider()
-            let data = try JSONEncoder().encode(safeFailureDiagnostic(diagnostic))
+            let data = lifecyclePolicy.redactGeneratedDiagnostics
+                ? try JSONEncoder().encode(safeFailureDiagnostic(diagnostic))
+                : Data()
             guard data.count <= TranscriptionFailureDiagnostic.maximumBytes else {
                 throw TranscriptionArtifactPublicationError.diagnosticTooLarge
             }
@@ -274,7 +295,9 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             try OwnerOnlyArtifactWriter.writeAtomically(
                 data,
                 to: destination,
-                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
+                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts,
+                modeMutation: modeMutation,
+                onOwnerOnlyCapability: onOwnerOnlyCapability
             )
             return destination
         }
@@ -438,7 +461,9 @@ private extension TranscriptionFailureDiagnosticCode {
 private enum OwnerOnlyArtifactWriter {
     static func createDirectory(
         at url: URL,
-        enforceOwnerOnly: Bool = true
+        enforceOwnerOnly: Bool = true,
+        modeMutation: (Int32, mode_t) -> Int32 = fchmod,
+        onOwnerOnlyCapability: (OwnerOnlyArtifactCapability) -> Void = { _ in }
     ) throws {
         guard mkdir(url.path, 0o700) == 0 else {
             throw TranscriptionArtifactPublicationError.artifactWriteFailed
@@ -456,14 +481,16 @@ private enum OwnerOnlyArtifactWriter {
         // usable and the publication continues with the mode requested at
         // creation instead of deleting an otherwise valid result.
         if enforceOwnerOnly {
-            _ = fchmod(descriptor, 0o700)
+            onOwnerOnlyCapability(modeMutation(descriptor, 0o700) == 0 ? .ownerOnlyApplied : .ownerOnlyUnavailable)
         }
     }
 
     static func writeAtomically(
         _ data: Data,
         to destination: URL,
-        enforceOwnerOnly: Bool = true
+        enforceOwnerOnly: Bool = true,
+        modeMutation: (Int32, mode_t) -> Int32 = fchmod,
+        onOwnerOnlyCapability: (OwnerOnlyArtifactCapability) -> Void = { _ in }
     ) throws {
         let directoryURL = destination.deletingLastPathComponent()
         let directory = open(
@@ -493,7 +520,7 @@ private enum OwnerOnlyArtifactWriter {
         // Keep the successful write when mode mutation is unsupported. The
         // open mode is already owner-only on POSIX-capable filesystems.
         if enforceOwnerOnly {
-            _ = fchmod(descriptor, 0o600)
+            onOwnerOnlyCapability(modeMutation(descriptor, 0o600) == 0 ? .ownerOnlyApplied : .ownerOnlyUnavailable)
         }
         try writeAll(data, to: descriptor)
         guard fsync(descriptor) == 0,

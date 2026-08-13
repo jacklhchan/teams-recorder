@@ -1938,6 +1938,31 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
+    func testLifecycleSafetySettingsDefaultOnAndPersist() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.storage-shortcuts"))
+        XCTAssertTrue(fixture.model.recordingDataLifecyclePolicy.ownerOnlyForNewLocalArtifacts)
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.lifecycleOwnerOnlyToggle))
+        XCTAssertTrue(host.pressAccessibilityElement(RecorderActionID.lifecycleOwnerOnlyToggle))
+
+        XCTAssertFalse(fixture.model.recordingDataLifecyclePolicy.ownerOnlyForNewLocalArtifacts)
+        XCTAssertFalse(
+            RecordingDataLifecyclePolicyStore(defaults: fixture.defaults).load()
+                .ownerOnlyForNewLocalArtifacts
+        )
+        XCTAssertEqual(
+            host.accessibilityLabel(for: RecorderActionID.lifecycleOwnerOnlyStatus),
+            "New app-owned local artifacts use owner-only permissions when supported."
+        )
+    }
+
     func testMinimumSettingsRendersCaptureAndTeamsControls() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(

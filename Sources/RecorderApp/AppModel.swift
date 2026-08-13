@@ -59,6 +59,7 @@ final class AppModel: ObservableObject {
         items: []
     )
     @Published private(set) var privacyModeEnabled: Bool
+    @Published private(set) var recordingDataLifecyclePolicy: RecordingDataLifecyclePolicy
     @Published private(set) var localRecorderControlEnabled: Bool
     @Published var statusMessage = "Ready"
     @Published var lastHealthReport: RecordingHealthReport?
@@ -81,6 +82,7 @@ final class AppModel: ObservableObject {
 
     let recorder: RecordingEngine
     let privacyModePolicy: PrivacyModePolicy
+    private let recordingDataLifecyclePolicyStore: RecordingDataLifecyclePolicyStore
     let localRecorderControlPolicy: LocalRecorderControlPolicy
     let aiProviderSettingsModel: AIProviderSettingsModel
     private let recordingSessionCoordinator:
@@ -319,6 +321,10 @@ final class AppModel: ObservableObject {
             ?? PrivacyModePolicy(defaults: defaults)
         self.privacyModePolicy = activePrivacyModePolicy
         privacyModeEnabled = activePrivacyModePolicy.isEnabled
+        let activeLifecyclePolicyStore = RecordingDataLifecyclePolicyStore(defaults: defaults)
+        recordingDataLifecyclePolicyStore = activeLifecyclePolicyStore
+        let activeLifecyclePolicy = activeLifecyclePolicyStore.load()
+        recordingDataLifecyclePolicy = activeLifecyclePolicy
         let activeLocalRecorderControlPolicy = localRecorderControlPolicy
             ?? LocalRecorderControlPolicy(defaults: defaults)
         self.localRecorderControlPolicy = activeLocalRecorderControlPolicy
@@ -461,7 +467,11 @@ final class AppModel: ObservableObject {
             } else {
                 activeTranscriptionService = NativeOpenAICompatibleTranscriptionService(
                     publisher: TranscriptionArtifactPublisher(
-                        mutationGate: transcriptMutationGate
+                        mutationGate: transcriptMutationGate,
+                        lifecyclePolicy: activeLifecyclePolicy,
+                        lifecyclePolicyProvider: {
+                            activeLifecyclePolicyStore.load()
+                        }
                     )
                 )
             }
@@ -682,6 +692,22 @@ final class AppModel: ObservableObject {
 
     func setPrivacyModeEnabled(_ enabled: Bool) {
         privacyModePolicy.setEnabled(enabled)
+    }
+
+    func setOwnerOnlyForNewLocalArtifacts(_ enabled: Bool) {
+        guard recordingDataLifecyclePolicy.ownerOnlyForNewLocalArtifacts != enabled else {
+            return
+        }
+        recordingDataLifecyclePolicy.ownerOnlyForNewLocalArtifacts = enabled
+        try? recordingDataLifecyclePolicyStore.save(recordingDataLifecyclePolicy)
+    }
+
+    func setRedactGeneratedDiagnostics(_ enabled: Bool) {
+        guard recordingDataLifecyclePolicy.redactGeneratedDiagnostics != enabled else {
+            return
+        }
+        recordingDataLifecyclePolicy.redactGeneratedDiagnostics = enabled
+        try? recordingDataLifecyclePolicyStore.save(recordingDataLifecyclePolicy)
     }
 
     func setLocalRecorderControlEnabled(_ enabled: Bool) {

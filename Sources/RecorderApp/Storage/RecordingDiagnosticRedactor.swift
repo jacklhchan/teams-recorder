@@ -1,14 +1,15 @@
 import Foundation
 
 enum RecordingDiagnosticEvent: String, Codable, Sendable {
-    case transcriptionFailure
-    case meetingIntelligenceFailure
-    case storageFailure
+    case transcriptionSucceeded = "transcription_succeeded"
+    case transcriptionFailure = "transcription_failure"
+    case meetingIntelligenceFailure = "meeting_intelligence_failure"
+    case storageFailure = "storage_failure"
 }
 
 enum RecordingDiagnosticComponent: String, Codable, Sendable {
     case transcription
-    case meetingIntelligence
+    case meetingIntelligence = "meeting_intelligence"
     case storage
 }
 
@@ -26,16 +27,16 @@ enum RecordingDiagnosticOutcome: String, Codable, Sendable {
 
 enum RecordingDiagnosticErrorCode: String, Codable, Sendable {
     case unknown
-    case providerHTTPFailure
-    case providerTransportFailure
-    case publicationFailure
-    case invalidArtifact
+    case providerHTTPFailure = "provider_http_failure"
+    case providerTransportFailure = "provider_transport_failure"
+    case publicationFailure = "publication_failure"
+    case invalidArtifact = "invalid_artifact"
 }
 
 enum RecordingDiagnosticArtifactClass: String, Codable, Sendable {
-    case transcriptionLog
-    case transcriptionFailureDiagnostic
-    case meetingIntelligenceState
+    case transcriptionLog = "transcription_log"
+    case transcriptionFailureDiagnostic = "transcription_failure_diagnostic"
+    case meetingIntelligenceState = "meeting_intelligence_state"
 }
 
 struct RecordingDiagnosticEventInput: Sendable {

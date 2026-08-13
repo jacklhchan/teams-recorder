@@ -261,8 +261,12 @@ Native audio chunks use an isolated system temporary workspace that is removed
 after the job completes or is cancelled. `.transcription-runs` is a legacy
 workspace only: retention cleanup removes expired legacy run directories.
 Successful native jobs keep only the four canonical artifacts above plus
-bounded previous transcript backups. Logs and provider responses are capped,
-and credentials are not written to transcript artifacts.
+bounded previous transcript backups. `transcription.log` is a fixed,
+structured diagnostic record; it does not contain paths, prompts, transcript
+text, provider URLs, credentials, or raw errors. Failure diagnostics use the
+same typed allowlist. New app-owned transcription artifacts request owner-only
+permissions where supported. Logs and provider responses are capped, and
+credentials are not written to transcript artifacts.
 
 Existing local oMLX settings are read only for a one-time migration; oMLX is
 not required, launched, installed, or managed by the recorder.

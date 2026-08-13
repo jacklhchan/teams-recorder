@@ -142,13 +142,16 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
     ]
 
     let maximumBackupsPerArtifact: Int
+    private let lifecyclePolicyProvider: () -> RecordingDataLifecyclePolicy
     private let fileManager: FileManager
     private let mutationGate: RecordingSessionMutationGate
 
     init(
         maximumBackupsPerArtifact: Int = 3,
         fileManager: FileManager = .default,
-        mutationGate: RecordingSessionMutationGate = .init()
+        mutationGate: RecordingSessionMutationGate = .init(),
+        lifecyclePolicy: RecordingDataLifecyclePolicy = .safeDefault,
+        lifecyclePolicyProvider: (() -> RecordingDataLifecyclePolicy)? = nil
     ) {
         self.maximumBackupsPerArtifact = max(
             0,
@@ -156,6 +159,7 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         )
         self.fileManager = fileManager
         self.mutationGate = mutationGate
+        self.lifecyclePolicyProvider = lifecyclePolicyProvider ?? { lifecyclePolicy }
     }
 
     func publish(
@@ -167,11 +171,15 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         now: Date = Date()
     ) throws -> PublishedTranscriptionArtifacts {
         try mutationGate.withMutation(for: sessionFolder) {
+        let lifecyclePolicy = lifecyclePolicyProvider()
         let staging = sessionFolder.appendingPathComponent(
             ".transcription-publish-\(UUID().uuidString)",
             isDirectory: true
         )
-        try OwnerOnlyArtifactWriter.createDirectory(at: staging)
+        try OwnerOnlyArtifactWriter.createDirectory(
+            at: staging,
+            enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
+        )
         defer { try? fileManager.removeItem(at: staging) }
 
         let encoder = JSONEncoder()
@@ -183,18 +191,14 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             ("transcription.json", try encoder.encode(manifest)),
             (
                 "transcription.log",
-                Data(
-                    serializedLog(logEvents)
-                        .joined(separator: "\n")
-                        .appending("\n")
-                        .utf8
-                )
+                safeSuccessLog(now: now, policy: lifecyclePolicy)
             )
         ]
         for (name, data) in contents {
             try OwnerOnlyArtifactWriter.writeAtomically(
                 data,
-                to: staging.appendingPathComponent(name)
+                to: staging.appendingPathComponent(name),
+                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
             )
         }
 
@@ -207,7 +211,8 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
                 )
                 try OwnerOnlyArtifactWriter.writeAtomically(
                     OwnerOnlyArtifactWriter.readRegularFile(at: destination),
-                    to: backup
+                    to: backup,
+                    enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
                 )
             }
         }
@@ -215,7 +220,11 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
             let staged = staging.appendingPathComponent(name)
             let destination = sessionFolder.appendingPathComponent(name)
             let data = try OwnerOnlyArtifactWriter.readRegularFile(at: staged)
-            try OwnerOnlyArtifactWriter.writeAtomically(data, to: destination)
+            try OwnerOnlyArtifactWriter.writeAtomically(
+                data,
+                to: destination,
+                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
+            )
             try pruneBackups(for: name, in: sessionFolder)
         }
         try expireLegacyRuns(
@@ -253,9 +262,8 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         let safeSessionFolder = sessionFolder.standardizedFileURL
         try validateSessionFolder(safeSessionFolder)
         return try mutationGate.withMutation(for: safeSessionFolder) {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(diagnostic)
+            let lifecyclePolicy = lifecyclePolicyProvider()
+            let data = try JSONEncoder().encode(safeFailureDiagnostic(diagnostic))
             guard data.count <= TranscriptionFailureDiagnostic.maximumBytes else {
                 throw TranscriptionArtifactPublicationError.diagnosticTooLarge
             }
@@ -263,7 +271,11 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
                 Self.failureDiagnosticFileName
             )
             try validateExistingArtifact(destination)
-            try OwnerOnlyArtifactWriter.writeAtomically(data, to: destination)
+            try OwnerOnlyArtifactWriter.writeAtomically(
+                data,
+                to: destination,
+                enforceOwnerOnly: lifecyclePolicy.ownerOnlyForNewLocalArtifacts
+            )
             return destination
         }
     }
@@ -351,17 +363,41 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
         }
     }
 
-    private func serializedLog(_ events: [TranscriptionLogEvent]) -> [String] {
-        var retainedBytes = 0
-        var result: [String] = []
-        for event in events {
-            let line = event.line
-            let bytes = line.utf8.count + 1
-            guard retainedBytes + bytes <= 64 * 1_024 else { break }
-            retainedBytes += bytes
-            result.append(line)
-        }
-        return result
+    private func safeSuccessLog(
+        now: Date,
+        policy: RecordingDataLifecyclePolicy
+    ) -> Data {
+        guard policy.redactGeneratedDiagnostics else { return Data() }
+        let diagnostic = RecordingDiagnosticRedactor.redact(.init(
+            event: .transcriptionSucceeded,
+            component: .transcription,
+            stage: .publication,
+            outcome: .succeeded,
+            errorCode: .unknown,
+            httpStatus: nil,
+            attemptCount: 0,
+            timestamp: now,
+            artifactClass: .transcriptionLog,
+            byteCount: 0
+        ))
+        return (try? JSONEncoder().encode(diagnostic)) ?? Data()
+    }
+
+    private func safeFailureDiagnostic(
+        _ diagnostic: TranscriptionFailureDiagnostic
+    ) -> SafeRecordingDiagnostic {
+        RecordingDiagnosticRedactor.redact(.init(
+            event: .transcriptionFailure,
+            component: .transcription,
+            stage: diagnostic.stage.recordingDiagnosticStage,
+            outcome: .failed,
+            errorCode: diagnostic.errorCode.recordingDiagnosticCode,
+            httpStatus: diagnostic.httpStatus,
+            attemptCount: 0,
+            timestamp: Date(),
+            artifactClass: .transcriptionFailureDiagnostic,
+            byteCount: 0
+        ))
     }
 
     private func backupStamp(_ date: Date) -> String {
@@ -377,8 +413,33 @@ struct TranscriptionArtifactPublisher: @unchecked Sendable {
     }()
 }
 
+private extension TranscriptionFailureDiagnosticStage {
+    var recordingDiagnosticStage: RecordingDiagnosticStage {
+        switch self {
+        case .preparation: .preparation
+        case .upload: .upload
+        case .publication: .publication
+        }
+    }
+}
+
+private extension TranscriptionFailureDiagnosticCode {
+    var recordingDiagnosticCode: RecordingDiagnosticErrorCode {
+        switch self {
+        case .providerHTTPFailure: .providerHTTPFailure
+        case .providerTransportFailure: .providerTransportFailure
+        case .invalidArtifact: .invalidArtifact
+        case .publicationFailure: .publicationFailure
+        default: .unknown
+        }
+    }
+}
+
 private enum OwnerOnlyArtifactWriter {
-    static func createDirectory(at url: URL) throws {
+    static func createDirectory(
+        at url: URL,
+        enforceOwnerOnly: Bool = true
+    ) throws {
         guard mkdir(url.path, 0o700) == 0 else {
             throw TranscriptionArtifactPublicationError.artifactWriteFailed
         }
@@ -394,10 +455,16 @@ private enum OwnerOnlyArtifactWriter {
         // Some filesystems do not support POSIX modes. The directory remains
         // usable and the publication continues with the mode requested at
         // creation instead of deleting an otherwise valid result.
-        _ = fchmod(descriptor, 0o700)
+        if enforceOwnerOnly {
+            _ = fchmod(descriptor, 0o700)
+        }
     }
 
-    static func writeAtomically(_ data: Data, to destination: URL) throws {
+    static func writeAtomically(
+        _ data: Data,
+        to destination: URL,
+        enforceOwnerOnly: Bool = true
+    ) throws {
         let directoryURL = destination.deletingLastPathComponent()
         let directory = open(
             directoryURL.path,
@@ -425,7 +492,9 @@ private enum OwnerOnlyArtifactWriter {
 
         // Keep the successful write when mode mutation is unsupported. The
         // open mode is already owner-only on POSIX-capable filesystems.
-        _ = fchmod(descriptor, 0o600)
+        if enforceOwnerOnly {
+            _ = fchmod(descriptor, 0o600)
+        }
         try writeAll(data, to: descriptor)
         guard fsync(descriptor) == 0,
               renameat(

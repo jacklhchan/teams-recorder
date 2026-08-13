@@ -23,6 +23,9 @@ enum RecorderActionID {
     static let privacyModeStatus = "recorder.settings.privacy-mode-status"
     static let localRecorderControlToggle = "recorder.settings.local-recorder-control-toggle"
     static let localRecorderControlStatus = "recorder.settings.local-recorder-control-status"
+    static let lifecycleOwnerOnlyToggle = "recorder.settings.lifecycle-owner-only-toggle"
+    static let lifecycleOwnerOnlyStatus = "recorder.settings.lifecycle-owner-only-status"
+    static let lifecycleRedactionToggle = "recorder.settings.lifecycle-redaction-toggle"
     static let microphonePicker = "recorder.settings.microphone-picker"
     static let microphoneSwitchStatus = "recorder.settings.microphone-switch-status"
     static let uploadAudio = "recorder.action.upload-audio"
@@ -102,6 +105,9 @@ enum RecorderActionID {
         privacyModeStatus,
         localRecorderControlToggle,
         localRecorderControlStatus,
+        lifecycleOwnerOnlyToggle,
+        lifecycleOwnerOnlyStatus,
+        lifecycleRedactionToggle,
         microphonePicker,
         microphoneSwitchStatus,
         uploadAudio,

@@ -4,7 +4,7 @@ import XCTest
 @testable import RecorderApp
 
 final class TranscriptionArtifactPublisherTests: XCTestCase {
-    func testPublicationLogSchemaAcceptsOnlyTypedBoundedEvents() throws {
+    func testPublicationLogContainsOnlyFixedSafeDiagnostic() throws {
         let folder = try makeFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let events: [TranscriptionLogEvent] = [
@@ -27,16 +27,20 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
             sessionFolder: folder
         )
 
-        XCTAssertEqual(
-            try String(contentsOf: artifacts.logURL, encoding: .utf8),
-            """
-            Native transcription started
-            Prepared 10000 audio chunks
-            Completed chunk 0 of 10000
-            Native transcription completed
-
-            """
+        let data = try Data(contentsOf: artifacts.logURL)
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        let diagnostic = try JSONDecoder().decode(
+            SafeRecordingDiagnostic.self,
+            from: data
         )
+
+        XCTAssertEqual(diagnostic.event, .transcriptionSucceeded)
+        XCTAssertEqual(diagnostic.component, .transcription)
+        XCTAssertEqual(diagnostic.stage, .publication)
+        XCTAssertEqual(diagnostic.outcome, .succeeded)
+        XCTAssertEqual(diagnostic.artifactClass, .transcriptionLog)
+        XCTAssertFalse(text.contains("Native transcription started"))
+        XCTAssertFalse(text.contains("Prepared 10000 audio chunks"))
     }
 
     func testNewPublicationArtifactsAreOwnerOnly() throws {

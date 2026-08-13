@@ -262,6 +262,41 @@ struct RecorderSettingsView: View {
                         label: localRecorderControlStatusText
                     ))
             }
+            Section("Local Artifact Safety") {
+                Toggle(
+                    "Use owner-only permissions for new local artifacts",
+                    isOn: Binding(
+                        get: { model.recordingDataLifecyclePolicy.ownerOnlyForNewLocalArtifacts },
+                        set: { model.setOwnerOnlyForNewLocalArtifacts($0) }
+                    )
+                )
+                .accessibilityIdentifier(RecorderActionID.lifecycleOwnerOnlyToggle)
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: RecorderActionID.lifecycleOwnerOnlyToggle,
+                    label: "Use owner-only permissions for new local artifacts",
+                    onPress: {
+                        model.setOwnerOnlyForNewLocalArtifacts(
+                            !model.recordingDataLifecyclePolicy.ownerOnlyForNewLocalArtifacts
+                        )
+                    }
+                ))
+                Text("New app-owned local artifacts use owner-only permissions when supported.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(RecorderActionID.lifecycleOwnerOnlyStatus)
+                    .background(RecorderSettingsAccessibilityMarker(
+                        identifier: RecorderActionID.lifecycleOwnerOnlyStatus,
+                        label: "New app-owned local artifacts use owner-only permissions when supported."
+                    ))
+                Toggle(
+                    "Redact generated diagnostics",
+                    isOn: Binding(
+                        get: { model.recordingDataLifecyclePolicy.redactGeneratedDiagnostics },
+                        set: { model.setRedactGeneratedDiagnostics($0) }
+                    )
+                )
+                .accessibilityIdentifier(RecorderActionID.lifecycleRedactionToggle)
+            }
             Label("Recording Storage", systemImage: "internaldrive")
                 .font(.headline)
             Text(destinationStatusText)

@@ -32,17 +32,20 @@ final class RecordingRetentionCandidate: @unchecked Sendable {
     fileprivate let session: RecordingPendingSession
     fileprivate let name: String
     fileprivate let identity: RecordingPendingSessionIdentity
+    fileprivate let modificationDate: Date
 
     fileprivate init(
         artifactClass: RetainableArtifactClass,
         session: RecordingPendingSession,
         name: String,
-        identity: RecordingPendingSessionIdentity
+        identity: RecordingPendingSessionIdentity,
+        modificationDate: Date
     ) {
         self.artifactClass = artifactClass
         self.session = session
         self.name = name
         self.identity = identity
+        self.modificationDate = modificationDate
     }
 }
 
@@ -91,7 +94,8 @@ struct RecordingRetentionScanner: Sendable {
                     artifactClass: artifactClass,
                     session: session,
                     name: entry.name,
-                    identity: entry.identity
+                    identity: entry.identity,
+                    modificationDate: entry.modificationDate
                 ))
             }
         }
@@ -99,7 +103,16 @@ struct RecordingRetentionScanner: Sendable {
         return .init(candidates: candidates, aggregate: aggregate)
     }
 
-    func delete(_ candidate: RecordingRetentionCandidate) -> RecordingRetentionDeletionOutcome {
+    func delete(
+        _ candidate: RecordingRetentionCandidate,
+        policy: RecordingDataLifecyclePolicy,
+        now: Date
+    ) -> RecordingRetentionDeletionOutcome {
+        guard case let .enabled(classes, olderThanDays) = policy.retention,
+              olderThanDays > 0,
+              classes.contains(candidate.artifactClass) else {
+            return .rejected
+        }
         guard (try? RecordingPendingStore(root: candidate.session.displayURL.deletingLastPathComponent())
             .validateRetainedSession(candidate.session)) != nil else {
             return .rejected
@@ -108,6 +121,8 @@ struct RecordingRetentionScanner: Sendable {
         guard fstatat(candidate.session.fileDescriptor, candidate.name, &observed, AT_SYMLINK_NOFOLLOW) == 0,
               isEligibleRegularFile(observed),
               matches(observed, candidate.identity),
+              modificationDate(of: observed) == candidate.modificationDate,
+              modificationDate(of: observed) < now.addingTimeInterval(-TimeInterval(olderThanDays) * 86_400),
               unlinkat(candidate.session.fileDescriptor, candidate.name, 0) == 0 else {
             return .rejected
         }
@@ -135,7 +150,7 @@ struct RecordingRetentionScanner: Sendable {
             entries.append((
                 name,
                 .init(device: Int64(observed.st_dev), inode: Int64(observed.st_ino)),
-                Date(timeIntervalSince1970: TimeInterval(observed.st_mtimespec.tv_sec))
+                modificationDate(of: observed)
             ))
         }
         return (entries, skipped)
@@ -173,5 +188,9 @@ struct RecordingRetentionScanner: Sendable {
 
     private func matches(_ value: stat, _ identity: RecordingPendingSessionIdentity) -> Bool {
         Int64(value.st_dev) == identity.device && Int64(value.st_ino) == identity.inode
+    }
+
+    private func modificationDate(of value: stat) -> Date {
+        Date(timeIntervalSince1970: TimeInterval(value.st_mtimespec.tv_sec))
     }
 }

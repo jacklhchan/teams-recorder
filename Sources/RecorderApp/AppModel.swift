@@ -28,6 +28,11 @@ private struct TestRecordingAutoplayIntent {
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let supportedRetentionClasses: Set<RetainableArtifactClass> = [
+        .transcriptionLog,
+        .transcriptionFailureDiagnostic,
+        .transcriptionBackup
+    ]
     typealias TranscriptionFeatureFactory = (
         any OpenAICompatibleProviderManaging,
         any TranscriptionAudioPreparing,
@@ -94,6 +99,7 @@ final class AppModel: ObservableObject {
     let recorder: RecordingEngine
     let privacyModePolicy: PrivacyModePolicy
     private let recordingDataLifecyclePolicyStore: RecordingDataLifecyclePolicyStore
+    private let recordingRetentionAggregateStore: RecordingRetentionAggregateStore
     let localRecorderControlPolicy: LocalRecorderControlPolicy
     let aiProviderSettingsModel: AIProviderSettingsModel
     private let recordingSessionCoordinator:
@@ -342,11 +348,14 @@ final class AppModel: ObservableObject {
         privacyModeEnabled = activePrivacyModePolicy.isEnabled
         let activeLifecyclePolicyStore = RecordingDataLifecyclePolicyStore(defaults: defaults)
         recordingDataLifecyclePolicyStore = activeLifecyclePolicyStore
+        let activeRetentionAggregateStore = RecordingRetentionAggregateStore(defaults: defaults)
+        recordingRetentionAggregateStore = activeRetentionAggregateStore
         let activeLifecyclePolicy = activeLifecyclePolicyStore.load()
         let activeLifecyclePolicyProvider: @Sendable () -> RecordingDataLifecyclePolicy = {
             activeLifecyclePolicyStore.load()
         }
         recordingDataLifecyclePolicy = activeLifecyclePolicy
+        retentionScanAggregate = activeRetentionAggregateStore.load()
         let activeLocalRecorderControlPolicy = localRecorderControlPolicy
             ?? LocalRecorderControlPolicy(defaults: defaults)
         self.localRecorderControlPolicy = activeLocalRecorderControlPolicy
@@ -772,7 +781,7 @@ final class AppModel: ObservableObject {
     func setRetentionEnabled(_ enabled: Bool) {
         let retention: RetentionPolicy = enabled
             ? .enabled(
-                eligibleClasses: Set(RetainableArtifactClass.allCases),
+                eligibleClasses: Self.supportedRetentionClasses,
                 olderThanDays: 30
             )
             : .disabled
@@ -783,6 +792,7 @@ final class AppModel: ObservableObject {
         recordingDataLifecyclePolicy = candidate
         guard enabled else {
             retentionScanAggregate = .init()
+            recordingRetentionAggregateStore.save(retentionScanAggregate)
             return
         }
         let scanner = RecordingRetentionScanner()
@@ -794,12 +804,34 @@ final class AppModel: ObservableObject {
         )
         var aggregate = result.aggregate
         for item in result.candidates {
-            switch scanner.delete(item) {
+            switch scanner.delete(item, policy: candidate, now: Date()) {
             case .deleted: aggregate.deleted += 1
             case .rejected: aggregate.errors += 1
             }
         }
         retentionScanAggregate = aggregate
+        recordingRetentionAggregateStore.save(aggregate)
+    }
+
+    func setRetentionEligibleClass(_ artifactClass: RetainableArtifactClass, enabled: Bool) {
+        guard Self.supportedRetentionClasses.contains(artifactClass),
+              case let .enabled(existing, olderThanDays) = recordingDataLifecyclePolicy.retention else {
+            return
+        }
+        var classes = existing
+        if enabled {
+            classes.insert(artifactClass)
+        } else {
+            classes.remove(artifactClass)
+        }
+        let retention: RetentionPolicy = classes.isEmpty
+            ? .disabled
+            : .enabled(eligibleClasses: classes, olderThanDays: olderThanDays)
+        guard retention != recordingDataLifecyclePolicy.retention else { return }
+        var candidate = recordingDataLifecyclePolicy
+        candidate.retention = retention
+        guard (try? recordingDataLifecyclePolicyStore.save(candidate)) != nil else { return }
+        recordingDataLifecyclePolicy = candidate
     }
 
     func setLocalRecorderControlEnabled(_ enabled: Bool) {

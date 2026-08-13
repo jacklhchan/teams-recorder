@@ -76,6 +76,22 @@ final class RecordingDataLifecyclePolicyTests: XCTestCase {
         XCTAssertEqual(store.load(), .safeDefault)
     }
 
+    func testRetentionAggregateStorePersistsOnlySafeCounts() {
+        let defaults = makeDefaults()
+        defer { clear(defaults) }
+        let expected = RecordingRetentionAggregate(
+            eligible: 2,
+            skipped: 3,
+            deleted: 1,
+            errors: 0
+        )
+        let store = RecordingRetentionAggregateStore(defaults: defaults)
+
+        store.save(expected)
+
+        XCTAssertEqual(store.load(), expected)
+    }
+
     private func makeDefaults() -> UserDefaults {
         UserDefaults(suiteName: "RecordingDataLifecyclePolicyTests.\(UUID().uuidString)")!
     }

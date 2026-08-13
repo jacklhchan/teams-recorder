@@ -72,8 +72,71 @@ final class RecordingRetentionScannerTests: XCTestCase {
         try FileManager.default.removeItem(at: log)
         try Data("replacement".utf8).write(to: log)
 
-        XCTAssertEqual(scanner.delete(candidate), .rejected)
+        XCTAssertEqual(scanner.delete(candidate, policy: fixture.enabledPolicy, now: fixture.now), .rejected)
         XCTAssertEqual(try Data(contentsOf: log), Data("replacement".utf8))
+    }
+
+    func testDeleteRejectsCandidateAfterRetentionIsDisabled() throws {
+        let fixture = try RetentionFixture()
+        let session = try fixture.session(named: "published")
+        let log = session.displayURL.appendingPathComponent("transcription.log")
+        try Data("diagnostic".utf8).write(to: log)
+        try fixture.makeOld(log)
+        let scanner = RecordingRetentionScanner()
+        let candidate = try XCTUnwrap(scanner.scan(
+            policy: fixture.enabledPolicy,
+            publicationSnapshot: .init(publishedSessionDirectoryNames: ["published"]),
+            pendingStore: fixture.store,
+            now: fixture.now
+        ).candidates.first)
+
+        XCTAssertEqual(scanner.delete(candidate, policy: .safeDefault, now: fixture.now), .rejected)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path))
+    }
+
+    func testDeleteRejectsCandidateAfterClassIsDeselected() throws {
+        let fixture = try RetentionFixture()
+        let session = try fixture.session(named: "published")
+        let log = session.displayURL.appendingPathComponent("transcription.log")
+        try Data("diagnostic".utf8).write(to: log)
+        try fixture.makeOld(log)
+        let scanner = RecordingRetentionScanner()
+        let candidate = try XCTUnwrap(scanner.scan(
+            policy: fixture.enabledPolicy,
+            publicationSnapshot: .init(publishedSessionDirectoryNames: ["published"]),
+            pendingStore: fixture.store,
+            now: fixture.now
+        ).candidates.first)
+        let deselected = RecordingDataLifecyclePolicy(
+            retention: .enabled(
+                eligibleClasses: [.transcriptionFailureDiagnostic],
+                olderThanDays: 30
+            )
+        )
+
+        XCTAssertEqual(scanner.delete(candidate, policy: deselected, now: fixture.now), .rejected)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path))
+    }
+
+    func testDeleteRejectsCandidateWhenItNoLongerMeetsTheCurrentAge() throws {
+        let fixture = try RetentionFixture()
+        let session = try fixture.session(named: "published")
+        let log = session.displayURL.appendingPathComponent("transcription.log")
+        try Data("diagnostic".utf8).write(to: log)
+        try fixture.makeOld(log)
+        let scanner = RecordingRetentionScanner()
+        let candidate = try XCTUnwrap(scanner.scan(
+            policy: fixture.enabledPolicy,
+            publicationSnapshot: .init(publishedSessionDirectoryNames: ["published"]),
+            pendingStore: fixture.store,
+            now: fixture.now
+        ).candidates.first)
+        let stricterAge = RecordingDataLifecyclePolicy(
+            retention: .enabled(eligibleClasses: [.transcriptionLog], olderThanDays: 90)
+        )
+
+        XCTAssertEqual(scanner.delete(candidate, policy: stricterAge, now: fixture.now), .rejected)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path))
     }
 
     func testEligiblePublishedDiagnosticDeletesOnlyExactInode() throws {
@@ -93,7 +156,7 @@ final class RecordingRetentionScannerTests: XCTestCase {
             now: fixture.now
         ).candidates.first)
 
-        XCTAssertEqual(scanner.delete(candidate), .deleted)
+        XCTAssertEqual(scanner.delete(candidate, policy: fixture.enabledPolicy, now: fixture.now), .deleted)
         XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: media.path))
     }

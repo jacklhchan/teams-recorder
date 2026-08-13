@@ -321,62 +321,96 @@ struct RecorderSettingsView: View {
                 ))
             }
             Section("Data Retention") {
-                Toggle(
-                    "Automatically clean diagnostic files and old backups",
-                    isOn: Binding(
-                        get: { retentionEnabled },
-                        set: { enabled in
-                            if enabled {
-                                model.requestRetentionEnableConfirmation()
-                            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(
+                        "Enable bounded diagnostic retention",
+                        isOn: Binding(
+                            get: { retentionEnabled },
+                            set: { enabled in
+                                if enabled {
+                                    model.requestRetentionEnableConfirmation()
+                                } else {
+                                    model.setRetentionEnabled(false)
+                                }
+                            }
+                        )
+                    )
+                    .accessibilityIdentifier(RecorderActionID.retentionToggle)
+                    .background(RecorderSettingsAccessibilityMarker(
+                        identifier: RecorderActionID.retentionToggle,
+                        label: "Enable bounded diagnostic retention",
+                        onPress: {
+                            if retentionEnabled {
                                 model.setRetentionEnabled(false)
+                            } else {
+                                model.requestRetentionEnableConfirmation()
                             }
                         }
-                    )
-                )
-                .accessibilityIdentifier(RecorderActionID.retentionToggle)
-                .background(RecorderSettingsAccessibilityMarker(
-                    identifier: RecorderActionID.retentionToggle,
-                    label: "Automatically clean diagnostic files and old backups",
-                    onPress: {
-                        if retentionEnabled {
-                            model.setRetentionEnabled(false)
-                        } else {
-                            model.requestRetentionEnableConfirmation()
-                        }
-                    }
-                ))
-                Text(retentionStatusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier(RecorderActionID.retentionStatus)
-                    .background(RecorderSettingsAccessibilityMarker(
-                        identifier: RecorderActionID.retentionStatus,
-                        label: retentionStatusText
                     ))
-                if retentionEnabled {
-                    Text("Scope: transcription logs, failure diagnostics, and old diagnostic backups after 30 days. Legacy-run folders remain owned by the transcription publisher.")
+                    Text(retentionStatusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    let aggregate = model.retentionScanAggregate
-                    Text("Eligible: \(aggregate.eligible)  Skipped: \(aggregate.skipped)  Deleted: \(aggregate.deleted)  Errors: \(aggregate.errors)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .alert(
-                "Enable automatic diagnostic cleanup?",
-                isPresented: Binding(
-                    get: { model.retentionEnableConfirmationRequired },
-                    set: { visible in
-                        if !visible { model.cancelRetentionEnableConfirmation() }
+                        .accessibilityIdentifier(RecorderActionID.retentionStatus)
+                        .background(RecorderSettingsAccessibilityMarker(
+                            identifier: RecorderActionID.retentionStatus,
+                            label: retentionStatusText
+                        ))
+                    if retentionEnabled {
+                        Text("Retention period: 30 days (fixed).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier(RecorderActionID.retentionPeriod)
+                            .background(RecorderSettingsAccessibilityMarker(
+                                identifier: RecorderActionID.retentionPeriod,
+                                label: "Retention period: 30 days (fixed)."
+                            ))
+                        ForEach([
+                            RetainableArtifactClass.transcriptionLog,
+                            .transcriptionFailureDiagnostic,
+                            .transcriptionBackup
+                        ], id: \.self) { artifactClass in
+                            Toggle(
+                                retentionClassLabel(artifactClass),
+                                isOn: Binding(
+                                    get: { retentionClassEnabled(artifactClass) },
+                                    set: { model.setRetentionEligibleClass(artifactClass, enabled: $0) }
+                                )
+                            )
+                            .accessibilityIdentifier(retentionClassActionID(artifactClass))
+                            .background(RecorderSettingsAccessibilityMarker(
+                                identifier: retentionClassActionID(artifactClass),
+                                label: retentionClassLabel(artifactClass),
+                                onPress: {
+                                    model.setRetentionEligibleClass(
+                                        artifactClass,
+                                        enabled: !retentionClassEnabled(artifactClass)
+                                    )
+                                }
+                            ))
+                        }
+                        Text("Only these supported diagnostic classes are selectable. Legacy-run folders remain owned by the transcription publisher.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        let aggregate = model.retentionScanAggregate
+                        Text("Eligible: \(aggregate.eligible)  Skipped: \(aggregate.skipped)  Deleted: \(aggregate.deleted)  Errors: \(aggregate.errors)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                )
-            ) {
-                Button("Enable", role: .destructive, action: model.confirmRetentionEnabled)
-                Button("Cancel", role: .cancel, action: model.cancelRetentionEnableConfirmation)
-            } message: {
-                Text("Only listed diagnostic files and old backups are eligible. Recordings, transcripts, and recovery or publication data are never automatically deleted.")
+                }
+                .alert(
+                    "Enable bounded diagnostic retention?",
+                    isPresented: Binding(
+                        get: { model.retentionEnableConfirmationRequired },
+                        set: { visible in
+                            if !visible { model.cancelRetentionEnableConfirmation() }
+                        }
+                    )
+                ) {
+                    Button("Enable", role: .destructive, action: model.confirmRetentionEnabled)
+                    Button("Cancel", role: .cancel, action: model.cancelRetentionEnableConfirmation)
+                } message: {
+                    Text("Only listed diagnostic files and old backups are eligible. Recordings, transcripts, and recovery or publication data are never automatically deleted.")
+                }
             }
             Label("Recording Storage", systemImage: "internaldrive")
                 .font(.headline)
@@ -461,8 +495,28 @@ struct RecorderSettingsView: View {
 
     private var retentionStatusText: String {
         retentionEnabled
-            ? "Retention is on for diagnostic files and old backups only. Recordings, transcripts, and recovery or publication data are not automatically deleted."
+            ? "Enabled, but this architecture has no safely retained published pending sessions to clean. OneDrive and the recording destination are never scanned."
             : "Off by default. No files are scanned or deleted."
+    }
+
+    private func retentionClassEnabled(_ artifactClass: RetainableArtifactClass) -> Bool {
+        guard case let .enabled(classes, _) = model.recordingDataLifecyclePolicy.retention else {
+            return false
+        }
+        return classes.contains(artifactClass)
+    }
+
+    private func retentionClassLabel(_ artifactClass: RetainableArtifactClass) -> String {
+        switch artifactClass {
+        case .transcriptionLog: "Transcription logs"
+        case .transcriptionFailureDiagnostic: "Failure diagnostics"
+        case .transcriptionBackup: "Diagnostic backups"
+        case .legacyRun: "Legacy runs"
+        }
+    }
+
+    private func retentionClassActionID(_ artifactClass: RetainableArtifactClass) -> String {
+        "recorder.settings.retention-class.\(artifactClass.rawValue)"
     }
 
     private var destinationStatusText: String {

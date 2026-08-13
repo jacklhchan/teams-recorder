@@ -125,3 +125,54 @@ struct RecordingDataLifecyclePolicyStore: @unchecked Sendable {
         defaults.set(try JSONEncoder().encode(policy), forKey: Self.defaultsKey)
     }
 }
+
+/// Stores only bounded count aggregates from the last explicit retention scan.
+/// It intentionally has no paths, names, errors, dates, or candidate details.
+struct RecordingRetentionAggregateStore: @unchecked Sendable {
+    private struct Persisted: Codable {
+        let schemaVersion: Int
+        let eligible: Int
+        let skipped: Int
+        let deleted: Int
+        let errors: Int
+    }
+
+    private static let schemaVersion = 1
+    private static let maximumCount = 1_000_000
+    static let defaultsKey = "recordingRetentionAggregateV1"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func load() -> RecordingRetentionAggregate {
+        guard let data = defaults.data(forKey: Self.defaultsKey),
+              let value = try? JSONDecoder().decode(Persisted.self, from: data),
+              value.schemaVersion == Self.schemaVersion,
+              [value.eligible, value.skipped, value.deleted, value.errors].allSatisfy({
+                  (0...Self.maximumCount).contains($0)
+              }) else {
+            return .init()
+        }
+        return .init(
+            eligible: value.eligible,
+            skipped: value.skipped,
+            deleted: value.deleted,
+            errors: value.errors
+        )
+    }
+
+    func save(_ aggregate: RecordingRetentionAggregate) {
+        let counts = [aggregate.eligible, aggregate.skipped, aggregate.deleted, aggregate.errors]
+        guard counts.allSatisfy({ (0...Self.maximumCount).contains($0) }) else { return }
+        let value = Persisted(
+            schemaVersion: Self.schemaVersion,
+            eligible: aggregate.eligible,
+            skipped: aggregate.skipped,
+            deleted: aggregate.deleted,
+            errors: aggregate.errors
+        )
+        defaults.set(try? JSONEncoder().encode(value), forKey: Self.defaultsKey)
+    }
+}

@@ -29,6 +29,7 @@ enum RecorderActionID {
     static let lifecycleRedactionStatus = "recorder.settings.lifecycle-redaction-status"
     static let retentionToggle = "recorder.settings.retention-toggle"
     static let retentionStatus = "recorder.settings.retention-status"
+    static let retentionPeriod = "recorder.settings.retention-period"
     static let microphonePicker = "recorder.settings.microphone-picker"
     static let microphoneSwitchStatus = "recorder.settings.microphone-switch-status"
     static let uploadAudio = "recorder.action.upload-audio"
@@ -114,6 +115,7 @@ enum RecorderActionID {
         lifecycleRedactionStatus,
         retentionToggle,
         retentionStatus,
+        retentionPeriod,
         microphonePicker,
         microphoneSwitchStatus,
         uploadAudio,

@@ -1994,13 +1994,42 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertFalse(fixture.model.retentionEnableConfirmationRequired)
         XCTAssertEqual(
             fixture.model.recordingDataLifecyclePolicy.retention,
-            .enabled(eligibleClasses: Set(RetainableArtifactClass.allCases), olderThanDays: 30)
+            .enabled(
+                eligibleClasses: [.transcriptionLog, .transcriptionFailureDiagnostic, .transcriptionBackup],
+                olderThanDays: 30
+            )
         )
         host.select(.settings)
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.retentionPeriod))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.retention-class.transcriptionLog"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.retention-class.transcriptionFailureDiagnostic"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier("recorder.settings.retention-class.transcriptionBackup"))
         XCTAssertEqual(
             host.accessibilityLabel(for: RecorderActionID.retentionStatus),
-            "Retention is on for diagnostic files and old backups only. Recordings, transcripts, and recovery or publication data are not automatically deleted."
+            "Enabled, but this architecture has no safely retained published pending sessions to clean. OneDrive and the recording destination are never scanned."
         )
+    }
+
+    func testRetentionAggregateReloadsIntoAppModelWithoutDetails() throws {
+        let suiteName = "RecorderWorkspaceRenderTests.retentionAggregate.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let expected = RecordingRetentionAggregate(
+            eligible: 1,
+            skipped: 2,
+            deleted: 3,
+            errors: 4
+        )
+        RecordingRetentionAggregateStore(defaults: defaults).save(expected)
+
+        let model = AppModel(
+            defaults: defaults,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false
+        )
+
+        XCTAssertEqual(model.retentionScanAggregate, expected)
     }
 
     func testMinimumSettingsRendersCaptureAndTeamsControls() throws {

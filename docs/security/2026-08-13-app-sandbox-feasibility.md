@@ -9,6 +9,16 @@
 
 推薦先採用 **選項 1（不 sandbox、集中 capability 與既有 hardening）**，將下列最小驗證項排入獨立 spike；只有在產品接受移除／替換 CLI、虛擬麥克風與任何 AX 依賴後，才重新判斷選項 2 或 3。
 
+### 產品決策（2026-08-13）
+
+產品 owner 已批准 **選項 1** 作為目前架構：維持 non-sandbox app，集中
+capability 與既有 hardening。這項決策不啟用 App Sandbox entitlement，也不改動
+Developer ID、Hardened Runtime、notarization 或 staging 的 ad-hoc 簽章流程。
+隔離 bookmark spike 可繼續作為未來重新評估 sandbox 的研究證據，但不再是目前
+non-sandbox baseline 的 production acceptance gate。已確認失敗的 sandbox AF_UNIX
+路徑仍禁止被描述為相容；若日後重新選擇選項 2 或 3，必須重新開啟 bookmark、
+IPC、HAL 與 capture 的完整架構／runtime gate。
+
 ### 判讀方式與限制
 
 - **Observed（觀察到）**：本倉庫檔案直接可證明的現況，使用 `repo-relative/path:line` 引用。

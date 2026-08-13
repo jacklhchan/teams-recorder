@@ -2,19 +2,20 @@
 
 ## Candidates under test
 
-- Previous installed candidate: `Local Meeting Recorder Staging` `0.2.0 (350)`, built
-  from `d325604` (`fix: autoplay verified test recordings`).
-- Installed candidate: `Local Meeting Recorder Staging` `0.2.0 (351)`, built
-  from `3f176a0` (`fix: keep recovery actions visible`). Build 351 includes the
-  reviewed opt-in diagnostic-retention work and fixes the Recovery page so its
-  title, retained count, and actions remain visible while only the item list
-  scrolls.
+- Previous installed candidate: `Local Meeting Recorder Staging` `0.2.0 (351)`,
+  built from `3f176a0` (`fix: keep recovery actions visible`).
+- Installed candidate: `Local Meeting Recorder Staging` `0.2.0 (352)`, built
+  from `c7b6501` (`fix: close timed out publication descriptors`). Build 352
+  includes the reviewed bounded destination-open path in addition to the
+  diagnostic-retention and Recovery fixed-action work present in build 351.
 - Bundle ID: `local.meeting.recorder.staging`
 - Signature: ad-hoc staging signature
 - Bundle verification: Info.plist, PrivacyInfo.xcprivacy, and
   `codesign --verify --deep --strict` passed.
-- Installed staging app is build 351. The previously installed build 350 is
-  retained as the recoverable backup at
+- Installed staging app is build 352. The previously installed build 351 is
+  retained as the verified recoverable backup at
+  `/private/tmp/Local Meeting Recorder Staging old-351-before-352.app`; build
+  350 also remains recoverable at
   `/private/tmp/Local Meeting Recorder Staging old-350-before-351.app`.
 - The separate build 348 live-microphone experiment is retained only under
   `/private/tmp/recorder-live-mic-uat-348/`; it is not the release candidate.
@@ -43,6 +44,11 @@ ad-hoc build is a production distribution artifact.
 | Recoverable 351 installation | PASS | The app was normally quit, build 350 was moved to a verified recoverable backup, and build 351 was installed. Installed Info.plist, PrivacyInfo.xcprivacy, and strict codesign passed; the fixed CLI symlink resolves to the installed embedded helper. |
 | Installed-351 CLI default-off | PASS | `/usr/local/bin/recorderctl status --json` returned the finite `control_disabled` error and exit 3 without enabling local control. The installer recognized the existing owned fixed-path link as the correct no-op target; no interactive sudo mutation was required. |
 | Installed-351 Recovery layout | PASS | On the target Mac with 30 needs-attention items, fresh Accessibility state simultaneously exposed `Recovery`, `30 recordings retained locally`, the independently scrollable item list, and `Open Local Copies`. No Recovery action was invoked. |
+| Build-351 bounded manual recording | PASS with capture-health warning | A 33.3227-second MP4 was finalized locally and remained readable by `ffprobe`; the health projection reported no system or mic signal and 1,598 late frames, so this is retention/finalization evidence, not healthy microphone evidence. The exact pending source remained intact. |
+| Build-351 publication hang diagnosis | CONFIRMED | A process sample placed the publication worker in destination component `openat` before staging creation. The queue item remained retained with `attemptCount=2`; restart reset `publishing` to pending but retried the same blocking syscall. |
+| Destination-open deadline fix | PASS — 24/24 focused | `publish` and `validatePublished` now run each destination component open on one process-wide serial worker with a two-second deadline. Timeout maps to destination unavailable, writes no staging content, retains the pending source, prevents queued timed-out work from opening later, and closes parent/late descriptors. Independent review found no Critical or Important issue. |
+| Recoverable 352 installation | PASS | Build 351 was normally replaced with verified build 352 and retained as the backup above. Installed Info.plist/Privacy manifest and strict deep codesign passed; the installed bundle reports build 352. |
+| Installed-352 CLI default-off | PASS | `/usr/local/bin/recorderctl` resolves to build 352's embedded helper. `status --json` returned finite `control_disabled` and exit 3, without enabling local control or starting a control transport. |
 | GitHub main bounded CI | PASS | [Run 31674648708](https://github.com/jacklhchan/teams-recorder/actions/runs/31674648708) completed successfully at `ff96d51`: targeted transcription, the named storage gate, the full Swift package suite, workspace stability, Python scripts, the production-tree Accessibility audit, policy checks, app packaging, and virtual-microphone contracts all passed. |
 
 The session-name production fix retains no-overwrite admission: each readable
@@ -77,8 +83,8 @@ reject an existing direct child.
 
 The following are deliberately not marked as passed:
 
-1. Re-authorize macOS capture/microphone access if the new ad-hoc signature
-   causes TCC to require it.
+1. Re-authorize macOS capture/microphone access if build 352's new ad-hoc
+   signature causes TCC to require it.
 2. Run bounded staging checks for: Recording Health; Re-arm Now after manual
    suppression; Privacy Mode local-only/zero-provider-work; Recovery Center;
    CLI default-off then explicit opt-in; rapid Meet now end/restart; floating
@@ -88,9 +94,9 @@ The following are deliberately not marked as passed:
    (`supportsLiveMicrophoneSwitch == false`). It may be enabled only after a
    physical A→B→A switch preserves one recording and passes source/generation
    fences.
-4. The sandbox bookmark spike still needs a visible, user-confirmed NSOpenPanel
-   selection and a second-process verification. Automation did not expose the
-   panel, and no coordinate guess or automatic folder selection was used.
+4. The product owner selected the documented non-sandbox baseline. The
+   sandbox bookmark spike remains useful feasibility evidence but is not a
+   production-migration acceptance gate under that selected architecture.
 5. Production release-manifest operation needs a named release owner, active
    key ID/public key, private-key custody and rotation/revocation procedure,
    authoritative distribution channel, and rollback floor. No production key
@@ -98,12 +104,12 @@ The following are deliberately not marked as passed:
 
 ## Acceptance status
 
-**In progress.** The code/security review gates, green GitHub main CI,
-recoverable build 351 installation, installed CLI link/default-off check,
+**In progress.** The code/security review gates, destination-open deadline,
+recoverable build 352 installation, installed CLI link/default-off check,
 OneDrive bookmark persistence check, opt-in retention review, and Recovery
-fixed-actions runtime check are complete. Build 351 retained the exact OneDrive
-destination but macOS still requires Screen/System Audio permission; the
-microphone also has no selected device. The app reports 30 retained local
-recordings needing attention, so publication is not claimed complete. Remaining
-bounded capture/runtime UAT requires action-time permission consent. The sandbox
-bookmark and release-key operational activation also remain open.
+fixed-actions runtime check are complete. Build 351 reproduced the destination
+open hang while retaining the exact pending source; build 352 contains the
+reviewed fix. A final unlocked-session check must show that the retained item
+leaves `publishing`, either reaches `waitingForDestination` within the deadline
+or publishes exactly once when OneDrive responds, and never loses its local
+source. Release-key operational activation remains an external governance gate.

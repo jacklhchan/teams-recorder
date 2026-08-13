@@ -21,6 +21,11 @@ private struct ActiveRecordingPublicationContext {
     let retainedSession: RecordingPendingSession
 }
 
+private struct TestRecordingAutoplayIntent {
+    let destinationIdentity: RecordingDestinationIdentity
+    let workspaceFence: WorkspacePublicationFence
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     typealias TranscriptionFeatureFactory = (
@@ -106,6 +111,7 @@ final class AppModel: ObservableObject {
     private let pendingRecordingStore: RecordingPendingStore
     private(set) var recordingDestinationIdentity: RecordingDestinationIdentity?
     private var activeRecordingPublicationContext: ActiveRecordingPublicationContext?
+    private var testRecordingAutoplayIntents: [UUID: TestRecordingAutoplayIntent] = [:]
 
     var isCaptureLifecycleWorking: Bool {
         recordingSessionCoordinator.isWorking
@@ -2124,6 +2130,12 @@ final class AppModel: ObservableObject {
                 sourceIdentity: publicationContext.retainedSession.identity,
                 sourceRootIdentity: publicationContext.retainedSession.rootIdentity
             )
+            if playAfterStop {
+                testRecordingAutoplayIntents[request.id] = .init(
+                    destinationIdentity: request.destinationIdentity,
+                    workspaceFence: request.workspaceFence
+                )
+            }
             recordingPublicationCoordinator.enqueue(request)
             statusMessage = "Recording saved locally; publishing"
         } else if automaticStopToken == nil {
@@ -2163,6 +2175,9 @@ final class AppModel: ObservableObject {
     private func acceptRecordingPublicationCompletion(
         _ completion: RecordingPublicationCompleted
     ) {
+        let autoplayIntent = testRecordingAutoplayIntents.removeValue(
+            forKey: completion.itemID
+        )
         guard completion.destinationIdentity == recordingDestinationIdentity,
               completion.workspaceFence == workspacePublicationFence else { return }
         prbFeatureBridge?.recordingDidFinalize(.init(
@@ -2175,6 +2190,16 @@ final class AppModel: ObservableObject {
             source: completion.source
         ))
         statusMessage = "Recording published: \(completion.health.summary)"
+        guard let autoplayIntent,
+              autoplayIntent.destinationIdentity == completion.destinationIdentity,
+              autoplayIntent.workspaceFence == completion.workspaceFence else { return }
+        playbackFeature.play(
+            RecordingSessionStore.session(
+                for: completion.folderURL,
+                recordingURL: completion.recordingURL
+            ),
+            successStatus: "Test saved and playing: \(completion.health.summary)"
+        )
     }
 
     private func completeAutomaticStopIntent(

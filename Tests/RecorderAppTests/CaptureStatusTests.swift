@@ -367,7 +367,7 @@ final class CaptureStatusTests: XCTestCase {
     }
 
     @MainActor
-    func testDoubleStopCoalescesUntilRealFinalizationAndKeepsSavedStatus() async throws {
+    func testDoubleStopCoalescesUntilRealFinalizationAndKeepsRetainedLocalStatus() async throws {
         let source = PausedStopCaptureSource()
         let writer = AppModelStopWriter()
         let engine = RecordingEngine(
@@ -406,7 +406,10 @@ final class CaptureStatusTests: XCTestCase {
 
         XCTAssertEqual(source.stopCount, 1)
         XCTAssertEqual(writer.closeCount, 1)
-        XCTAssertTrue(model.statusMessage.hasPrefix("Recording saved:"))
+        XCTAssertEqual(
+            model.statusMessage,
+            "Recording saved locally, but publication needs attention"
+        )
     }
 
     func testDisconnectedCaptureMapsToWarning() {

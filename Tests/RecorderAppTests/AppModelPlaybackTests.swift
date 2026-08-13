@@ -413,6 +413,9 @@ final class AppModelPlaybackTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let appPaths = AppPaths(homeDirectory: root, applicationSupportRoot: root)
+        let destinationStore = PlaybackPublicationDestinationStore(url: root)
+        let publication = PlaybackPublicationCoordinatorSpy()
         let source = TestCaptureSource()
         let engine = RecordingEngine(
             captureSource: source,
@@ -424,7 +427,10 @@ final class AppModelPlaybackTests: XCTestCase {
         let microphone = AudioDevice(id: 1, uid: "test-mic", name: "Test Mic", manufacturer: "Tests", channelCount: 1)
         let model = AppModel(
             defaults: makeDefaults(),
+            appPaths: appPaths,
             recorder: engine,
+            recordingDestinationStore: destinationStore,
+            recordingPublicationCoordinator: publication,
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
@@ -446,6 +452,28 @@ final class AppModelPlaybackTests: XCTestCase {
             return
         }
         await delay.fire()
+        await waitUntil { publication.requests.count == 1 }
+        let request = try XCTUnwrap(publication.requests.first)
+        let publishedFolder = root.appendingPathComponent(
+            request.sessionDirectoryName,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: publishedFolder,
+            withIntermediateDirectories: true
+        )
+        let publishedRecording = publishedFolder.appendingPathComponent("recording.m4a")
+        try Data("verified completion".utf8).write(to: publishedRecording)
+        publication.complete(with: .init(
+            itemID: request.id,
+            destinationIdentity: request.destinationIdentity,
+            folderURL: publishedFolder,
+            recordingURL: publishedRecording,
+            workspaceFence: request.workspaceFence,
+            source: request.source,
+            health: request.health,
+            metadataWarning: request.metadataWarning
+        ))
         await waitUntil { coordinator.loadedSessionIDs.count == 1 }
         guard let savedSessionID = coordinator.loadedSessionIDs.first else {
             XCTFail("Test recording did not autoplay: \(model.statusMessage)")
@@ -456,6 +484,75 @@ final class AppModelPlaybackTests: XCTestCase {
         XCTAssertTrue(savedSessionID.lastPathComponent.hasPrefix("test-"))
         XCTAssertTrue(model.statusMessage.contains("Test saved and playing"))
         XCTAssertTrue(model.lastRecordingSavedAsM4A)
+    }
+
+    func testTestRecordingAutoplayConsumesIntentWhenCompletionFenceMismatches() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appPaths = AppPaths(homeDirectory: root, applicationSupportRoot: root)
+        let destinationStore = PlaybackPublicationDestinationStore(url: root)
+        let publication = PlaybackPublicationCoordinatorSpy()
+        let source = TestCaptureSource()
+        let engine = RecordingEngine(
+            captureSource: source,
+            writerFactory: { _ in TestWriter() },
+            mixerBlockFrames: 4
+        )
+        let coordinator = FakePlaybackCoordinator()
+        let delay = TestRecordingDelay()
+        let microphone = AudioDevice(id: 1, uid: "test-mic", name: "Test Mic", manufacturer: "Tests", channelCount: 1)
+        let model = AppModel(
+            defaults: makeDefaults(),
+            appPaths: appPaths,
+            recorder: engine,
+            recordingDestinationStore: destinationStore,
+            recordingPublicationCoordinator: publication,
+            inputDevices: { [microphone] },
+            defaultInputDeviceID: { microphone.id },
+            performStartupWork: false,
+            initialOutputFolder: root,
+            permissionRequestHandler: { _, _ in },
+            volumeCapacityProvider: TestCapacityProvider(),
+            storageMonitorTick: { try? await Task.sleep(for: .seconds(3_600)) },
+            testRecordingDelay: { await delay.wait() },
+            playbackCoordinator: coordinator
+        )
+        model.systemAudioPermission = .granted
+        model.microphonePermission = .granted
+
+        model.runTestRecording()
+        await waitUntil { source.startCount == 1 }
+        await delay.fire()
+        await waitUntil { publication.requests.count == 1 }
+        let request = try XCTUnwrap(publication.requests.first)
+        let completion = RecordingPublicationCompleted(
+            itemID: request.id,
+            destinationIdentity: request.destinationIdentity,
+            folderURL: root.appendingPathComponent(request.sessionDirectoryName, isDirectory: true),
+            recordingURL: root.appendingPathComponent(request.sessionDirectoryName).appendingPathComponent("recording.m4a"),
+            workspaceFence: request.workspaceFence,
+            source: request.source,
+            health: request.health,
+            metadataWarning: request.metadataWarning
+        )
+
+        publication.complete(with: .init(
+            itemID: completion.itemID,
+            destinationIdentity: completion.destinationIdentity,
+            folderURL: completion.folderURL,
+            recordingURL: completion.recordingURL,
+            workspaceFence: completion.workspaceFence.advanced(),
+            source: completion.source,
+            health: completion.health,
+            metadataWarning: completion.metadataWarning
+        ))
+        await Task.yield()
+        XCTAssertTrue(coordinator.loadedSessionIDs.isEmpty)
+
+        publication.complete(with: completion)
+        await Task.yield()
+        XCTAssertTrue(coordinator.loadedSessionIDs.isEmpty)
     }
 
     func testTestRecordingDelayDoesNotRetainReleasedAppModel() async throws {
@@ -777,4 +874,64 @@ private final class TestCaptureSource: CaptureSourceProtocol {
 private final class TestWriter: MixedAudioWriting {
     func write(_: MixedAudioBlock) throws {}
     func close() throws {}
+}
+
+@MainActor
+private final class PlaybackPublicationCoordinatorSpy: RecordingPublicationCoordinating {
+    var presentation = RecordingPublicationPresentation(
+        stateText: "Up to date",
+        pendingCount: 0,
+        waitingCount: 0,
+        needsAttentionCount: 0
+    )
+    var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
+    var recoveryCenterSnapshot = RecoveryCenterSnapshot(
+        presentation: .init(
+            stateText: "Up to date",
+            pendingCount: 0,
+            waitingCount: 0,
+            needsAttentionCount: 0
+        ),
+        items: []
+    )
+    var onRecoveryCenterSnapshotChange: ((RecoveryCenterSnapshot) -> Void)?
+    var onCompleted: ((RecordingPublicationCompleted) -> Void)?
+    private(set) var requests: [RecordingPublicationRequest] = []
+
+    func enqueue(_ request: RecordingPublicationRequest) {
+        requests.append(request)
+    }
+
+    func resume() {}
+    func retryNow() {}
+    func shutdown() {}
+
+    func complete(with completion: RecordingPublicationCompleted) {
+        onCompleted?(completion)
+    }
+}
+
+private final class PlaybackPublicationDestinationStore: RecordingDestinationStoring {
+    let identity = RecordingDestinationIdentity(id: UUID())
+    var url: URL
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    var currentIdentity: RecordingDestinationIdentity? { identity }
+
+    func restore(defaultURL _: URL) -> RecordingDestinationSelection {
+        .init(identity: identity, url: url, state: .ready)
+    }
+
+    func save(_ url: URL) throws {
+        self.url = url
+    }
+
+    func access(identity _: RecordingDestinationIdentity) throws -> RecordingDestinationAccess {
+        .init(url: url, close: {})
+    }
+
+    func prune(keeping _: Set<RecordingDestinationIdentity>) {}
 }

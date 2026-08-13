@@ -1,17 +1,21 @@
 # Security roadmap and staging UAT — 2026-08-13
 
-## Candidate under test
+## Candidates under test
 
-- Repository HEAD at the latest product fix: `d325604`
-  (`fix: autoplay verified test recordings`)
-- Candidate: `Local Meeting Recorder Staging` `0.2.0 (350)`, built from
-  `d325604`.
+- Installed candidate: `Local Meeting Recorder Staging` `0.2.0 (350)`, built
+  from `d325604` (`fix: autoplay verified test recordings`).
+- Successor candidate: `Local Meeting Recorder Staging` `0.2.0 (351)`, built
+  from `3f176a0` (`fix: keep recovery actions visible`). Build 351 includes the
+  reviewed opt-in diagnostic-retention work and fixes the Recovery page so its
+  title, retained count, and actions remain visible while only the item list
+  scrolls. It is verified but is not installed.
 - Bundle ID: `local.meeting.recorder.staging`
 - Signature: ad-hoc staging signature
 - Bundle verification: Info.plist, PrivacyInfo.xcprivacy, and
   `codesign --verify --deep --strict` passed.
-- Installed staging app remains build 347. Build 350 has **not** been installed
-  pending explicit approval for the recoverable `/Applications` replacement.
+- Installed staging app is build 350. The previously installed build 347 is
+  retained as the recoverable backup at
+  `/private/tmp/Local Meeting Recorder Staging old-347-before-350.app`.
 - The separate build 348 live-microphone experiment is retained only under
   `/private/tmp/recorder-live-mic-uat-348/`; it is not the release candidate.
 
@@ -32,6 +36,11 @@ ad-hoc build is a production distribution artifact.
 | Provider Settings render suite | PASS — 5/5 | Disabled rendered controls no longer bypass SwiftUI disabled semantics in the test harness. |
 | Verified test-recording autoplay + double-stop gate | PASS — 14/14 | Autoplay waits for a matching verified publication completion; stale completion consumes the one-shot intent and cannot play later. Double-stop still performs one source stop and one writer close. |
 | Installed-347 OneDrive bookmark | PASS | Selected the exact `Meeting Recording` folder through NSOpenPanel. After Quit and GUI relaunch, the app still showed the full path and `Ready to save recordings here`; no Downloads fallback occurred. |
+| Recoverable 350 installation | PASS | Installed bundle reports build 350; Info/Privacy and strict codesign verification passed. The CLI symlink resolves to its embedded helper, the build folder has no duplicate staging bundle, and build 347 remains recoverable. |
+| Installed-350 CLI default-off | PASS | `recorderctl status --json` returned the finite `control_disabled` error and exit 3. Local control was not enabled for this check. |
+| Opt-in diagnostic retention | PASS — 16/16 focused | Default-off scanner, current-policy/class/age revalidation before descriptor-bound deletion, persisted count-only aggregate, and truthful Settings scope. The current architecture exposes no safe retained published session, so it has zero candidates and never scans OneDrive or the destination. Independent review found no Critical or Important issue. |
+| Recovery fixed-actions layout | PASS — 5/5 focused | With 30 needs-attention items in an 860×680 host, the title, retained count, and `Open Local Copies` remain in the visible viewport; only item groups scroll. Independent review found no findings. |
+| Successor 351 bundle | PASS | Release build, Info.plist, PrivacyInfo.xcprivacy, and `codesign --verify --deep --strict` passed. Build 351 has not replaced installed build 350. |
 | Full Swift package suite | NOT PASS | The initial run exposed three independently reproducible regressions and hung later. A post-fix run exposed the autoplay and stale double-stop expectation, then also hung later in the Engine suite; both are now focused-green. No clean full-suite completion is claimed. |
 
 The session-name production fix retains no-overwrite admission: each readable
@@ -66,36 +75,33 @@ reject an existing direct child.
 
 The following are deliberately not marked as passed:
 
-1. Recoverably install build 350 over build 347, then re-verify the installed
-   bundle and embedded CLI target.
-2. Re-authorize macOS capture/microphone access if the new ad-hoc signature
+1. Re-authorize macOS capture/microphone access if the new ad-hoc signature
    causes TCC to require it.
-3. Run bounded staging checks for: Recording Health; Re-arm Now after manual
+2. Run bounded staging checks for: Recording Health; Re-arm Now after manual
    suppression; Privacy Mode local-only/zero-provider-work; Recovery Center;
    CLI default-off then explicit opt-in; rapid Meet now end/restart; floating
    local microphone mute then unmute; and publication while OneDrive is
    available/unavailable.
-4. The live microphone switch remains fail-closed in production source
+3. The live microphone switch remains fail-closed in production source
    (`supportsLiveMicrophoneSwitch == false`). It may be enabled only after a
    physical A→B→A switch preserves one recording and passes source/generation
    fences.
-5. The sandbox bookmark spike still needs a visible, user-confirmed NSOpenPanel
+4. The sandbox bookmark spike still needs a visible, user-confirmed NSOpenPanel
    selection and a second-process verification. Automation did not expose the
    panel, and no coordinate guess or automatic folder selection was used.
-6. Retention needs the product-owner choice already identified by the design:
-   keep it disabled/unavailable (recommended for the current architecture), or
-   add a new app-owned diagnostic storage class. Scanning/deleting the selected
-   OneDrive destination is not acceptable.
-7. Production release-manifest operation needs a named release owner, active
+5. Production release-manifest operation needs a named release owner, active
    key ID/public key, private-key custody and rotation/revocation procedure,
    authoritative distribution channel, and rollback floor. No production key
    material is generated or inferred by this UAT.
 
 ## Acceptance status
 
-**In progress.** The code/security review gates, build 350 verification, and
-installed-347 OneDrive bookmark persistence check are complete. The app still
-reported 30 retained local recordings and 13 items needing attention after the
-destination change, so publication is not claimed complete. Installation of
-350, bounded runtime UAT, retention choice, sandbox bookmark, and release-key
-operational handoff remain open.
+**In progress.** The code/security review gates, recoverable build 350
+installation, installed CLI link/default-off check, OneDrive bookmark
+persistence check, opt-in retention review, and Recovery fixed-actions review
+are complete. Verified build 351 is ready for a separately approved recoverable
+installation. On first launch, build 350 retained the exact OneDrive destination
+but macOS required Screen/System Audio permission again; the microphone also had
+no selected device. The app reported 30 retained local recordings needing
+attention, so publication is not claimed complete. Bounded runtime UAT, the
+sandbox bookmark, and release-key operational activation remain open.

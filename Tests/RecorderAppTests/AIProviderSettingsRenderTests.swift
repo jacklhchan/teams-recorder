@@ -826,7 +826,11 @@ private final class ProviderSettingsRenderedActionRegistry {
             XCTFail("Rendered control has no captured primitive action")
             throw RenderedActionError.missingAction
         }
-        return Action(isEnabled: entry.isEnabled, trigger: entry.trigger)
+        let isEnabled = entry.isEnabled
+        return Action(isEnabled: isEnabled, trigger: {
+            guard isEnabled else { return }
+            entry.trigger()
+        })
     }
 
     private enum RenderedActionError: Error { case missingAction }

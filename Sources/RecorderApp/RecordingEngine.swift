@@ -128,6 +128,7 @@ final class RecordingEngine: ObservableObject {
     private let coordinatorFactory: RecordingMediaCoordinatorFactory
     private let metadataWriter: RecordingMetadataWriter
     private let mixerBlockFrames: Int
+    private let sessionDateProvider: () -> Date
     private let onRecordingStopped: (RecordingResult?) -> Void
     private let callbackGate = RecordingCallbackGate()
     nonisolated private let microphoneAudioPaths: MicrophoneAudioPaths
@@ -179,11 +180,13 @@ final class RecordingEngine: ObservableObject {
                 .saveRecordingMetadata(metadata, in: session)
         },
         mixerBlockFrames: Int = 960,
+        sessionDateProvider: @escaping () -> Date = Date.init,
         virtualMicPublisher: VirtualMicPublishing = VirtualMicPublisher(),
         onRecordingStopped: @escaping (RecordingResult?) -> Void = { _ in }
     ) {
         self.captureSource = captureSource
         self.metadataWriter = metadataWriter
+        self.sessionDateProvider = sessionDateProvider
         self.onRecordingStopped = onRecordingStopped
         if let coordinatorFactory {
             self.coordinatorFactory = coordinatorFactory
@@ -519,7 +522,7 @@ final class RecordingEngine: ObservableObject {
         }
 
         let folder = baseFolder.appendingPathComponent(
-            "\(folderPrefix)-\(Self.folderStamp.string(from: Date()))",
+            "\(folderPrefix)-\(Self.folderStamp.string(from: sessionDateProvider()))-\(UUID().uuidString)",
             isDirectory: true
         )
         do {

@@ -110,6 +110,35 @@ final class RecordingEngineStateTests: XCTestCase {
     }
 
     // Coordinator-path regression matrix. Every test emits a real frame or event.
+    func testSequentialRecordingsWithSameTimestampUseDistinctPendingSessionFolders() async throws {
+        let source = FakeCaptureSource()
+        let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let engine = RecordingEngine(
+            captureSource: source,
+            coordinatorFactory: { _, _, _, _, _ in FakeMediaCoordinator() },
+            mixerBlockFrames: 4,
+            sessionDateProvider: { fixedDate }
+        )
+        let base = temporaryFolder()
+
+        let firstFolder = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: base
+        )
+        _ = await engine.stop()
+        let secondFolder = try await engine.start(
+            selection: .allSystemAudio,
+            microphoneUID: nil,
+            baseFolder: base
+        )
+
+        XCTAssertNotEqual(firstFolder, secondFolder)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstFolder.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secondFolder.path))
+        _ = await engine.stop()
+    }
+
     func testNewRecordingSessionFolderIsOwnerOnly() async throws {
         let (engine, _, _) = coordinatorEngine()
         let folder = try await engine.start(

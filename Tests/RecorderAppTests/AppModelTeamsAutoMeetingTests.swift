@@ -182,16 +182,7 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
     }
 
     func testAutomaticRecordingPersistsTeamsAutomaticSourceMetadata() async throws {
-        let outputFolder = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: outputFolder,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: outputFolder) }
-        let fixture = makeRecordingFixture(
-            initialOutputFolder: outputFolder
-        )
+        let fixture = makeRecordingFixture()
 
         await startAutomaticRecording(fixture)
         fixture.model.startOrStop()
@@ -200,11 +191,10 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
                 && !fixture.model.isCaptureLifecycleWorking
         }
 
-        let sessionFolder = try XCTUnwrap(
-            FileManager.default.contentsOfDirectory(
-                at: outputFolder,
-                includingPropertiesForKeys: nil
-            ).first
+        let request = try XCTUnwrap(fixture.publication.requests.first)
+        let sessionFolder = fixture.pendingRoot.appendingPathComponent(
+            request.sessionDirectoryName,
+            isDirectory: true
         )
         XCTAssertEqual(
             RecordingSessionMetadataStore.load(in: sessionFolder).source,
@@ -797,6 +787,24 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
                 try? FileManager.default.removeItem(at: fixtureOutputFolder)
             }
         }
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "AppModelTeamsAutoMeetingStorage-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try! FileManager.default.createDirectory(
+            at: storageRoot,
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: storageRoot)
+        }
+        let appPaths = AppPaths(
+            homeDirectory: storageRoot,
+            applicationSupportRoot: storageRoot
+        )
+        let destinationStore = AutoMeetingDestinationStore(url: fixtureOutputFolder)
+        let publication = AutoMeetingPublicationCoordinator()
         let source = AutoMeetingRecordingCaptureSource()
         let writer = AutoMeetingRecordingWriter()
         let engine = RecordingEngine(
@@ -824,7 +832,10 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
         )
         let model = AppModel(
             defaults: defaults,
+            appPaths: appPaths,
             recorder: engine,
+            recordingDestinationStore: destinationStore,
+            recordingPublicationCoordinator: publication,
             inputDevices: { [microphone] },
             defaultInputDeviceID: { microphone.id },
             performStartupWork: false,
@@ -848,7 +859,9 @@ final class AppModelTeamsAutoMeetingTests: XCTestCase {
             coordinator: coordinator,
             ticker: ticker,
             permissionRequestCount: permissionRequestCount,
-            defaults: defaults
+            defaults: defaults,
+            pendingRoot: appPaths.pendingRecordingsDirectory,
+            publication: publication
         )
     }
 
@@ -967,6 +980,55 @@ private struct AutoMeetingRecordingFixture {
     let ticker: AutoMeetingManualTicker
     let permissionRequestCount: AutoMeetingIntBox
     let defaults: UserDefaults
+    let pendingRoot: URL
+    let publication: AutoMeetingPublicationCoordinator
+}
+
+@MainActor
+private final class AutoMeetingPublicationCoordinator: RecordingPublicationCoordinating {
+    var presentation = RecordingPublicationPresentation(
+        stateText: "Up to date",
+        pendingCount: 0,
+        waitingCount: 0,
+        needsAttentionCount: 0
+    )
+    var onPresentationChange: ((RecordingPublicationPresentation) -> Void)?
+    var recoveryCenterSnapshot = RecoveryCenterSnapshot(
+        presentation: .init(
+            stateText: "Up to date",
+            pendingCount: 0,
+            waitingCount: 0,
+            needsAttentionCount: 0
+        ),
+        items: []
+    )
+    var onRecoveryCenterSnapshotChange: ((RecoveryCenterSnapshot) -> Void)?
+    var onCompleted: ((RecordingPublicationCompleted) -> Void)?
+    private(set) var requests: [RecordingPublicationRequest] = []
+
+    func enqueue(_ request: RecordingPublicationRequest) { requests.append(request) }
+    func resume() {}
+    func retryNow() {}
+    func shutdown() {}
+}
+
+private final class AutoMeetingDestinationStore: RecordingDestinationStoring {
+    private(set) var currentIdentity: RecordingDestinationIdentity? = .init(id: UUID())
+    private var url: URL
+
+    init(url: URL) { self.url = url }
+
+    func restore(defaultURL: URL) -> RecordingDestinationSelection {
+        .init(identity: currentIdentity, url: url, state: .ready)
+    }
+
+    func save(_ url: URL) throws { self.url = url }
+
+    func access(identity: RecordingDestinationIdentity) throws -> RecordingDestinationAccess {
+        RecordingDestinationAccess(url: url, close: {})
+    }
+
+    func prune(keeping identities: Set<RecordingDestinationIdentity>) {}
 }
 
 private final class AutoMeetingIntBox {

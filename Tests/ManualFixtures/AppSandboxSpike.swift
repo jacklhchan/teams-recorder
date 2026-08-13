@@ -30,6 +30,7 @@ struct AppSandboxSpike {
             case "capture-status": try await captureStatus()
             case "bookmark-select": try selectBookmark()
             case "bookmark-verify": try verifyBookmark()
+            case "bookmark-cleanup": try cleanupBookmark()
             case "pending-create": try pendingCreate()
             case "pending-recover": try pendingRecover()
             case "ipc-embedded": try embeddedIPC()
@@ -94,6 +95,14 @@ struct AppSandboxSpike {
         try Data("fixture".utf8).write(to: probe, options: .withoutOverwriting)
         try FileManager.default.removeItem(at: probe)
         print("bookmark.relaunch-access=true")
+    }
+
+    static func cleanupBookmark() throws {
+        let bookmark = try bookmarkURL()
+        if FileManager.default.fileExists(atPath: bookmark.path) {
+            try FileManager.default.removeItem(at: bookmark)
+        }
+        print("bookmark.cleaned=true")
     }
 
     static func pendingCreate() throws {

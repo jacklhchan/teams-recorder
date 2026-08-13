@@ -80,6 +80,10 @@ class AppSandboxFeasibilityFixtureContractTests(unittest.TestCase):
 
     def test_bookmark_mode_keeps_the_fixture_alive_for_select_and_relaunch(self) -> None:
         source = self.fixture_source()
+        probe_source = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "Tests/ManualFixtures/AppSandboxSpike.swift"
+        ).read_text()
 
         self.assertIn('MODE="passive"', source)
         self.assertIn('"--bookmark") MODE="bookmark"', source)
@@ -87,6 +91,8 @@ class AppSandboxFeasibilityFixtureContractTests(unittest.TestCase):
         self.assertIn('"$APP/Contents/MacOS/SandboxSpike" bookmark-select', source)
         self.assertIn('"$APP/Contents/MacOS/SandboxSpike" bookmark-verify', source)
         self.assertIn('if [[ "$MODE" == "bookmark" ]]; then', source)
+        self.assertIn('bookmark-cleanup', source)
+        self.assertIn('case "bookmark-cleanup": try cleanupBookmark()', probe_source)
         self.assertNotIn('manual-bookmark-select=', source)
         self.assertNotIn('manual-bookmark-relaunch=', source)
 

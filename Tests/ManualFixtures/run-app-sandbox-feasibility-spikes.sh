@@ -44,6 +44,9 @@ is_owned_output_root() {
 }
 
 cleanup_output_root() {
+  if [[ "${MODE:-passive}" == "bookmark" && -x "${APP:-}/Contents/MacOS/SandboxSpike" ]]; then
+    "$APP/Contents/MacOS/SandboxSpike" bookmark-cleanup >/dev/null 2>&1 || true
+  fi
   if is_owned_output_root; then
     rm -rf -- "$OUTPUT_ROOT"
   else

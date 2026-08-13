@@ -151,7 +151,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
                 _ = transition(item.id, to: .needsAttention, category: "missingSourceIdentity")
                 continue
             }
-            if item.state == .published { await finishPublished(item, generation: workerGeneration); continue }
+            if item.state == .published || hasPublishedEvidence(item) { await finishPublished(item, generation: workerGeneration); continue }
             guard transitionToPublishing(item.id, generation: workerGeneration) else { return }
             do {
                 let access: RecordingDestinationAccess
@@ -278,6 +278,14 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
         case .some(.invalidSource), .some(.unsafeEntry), .some(.invalidMedia), .some(.verificationMismatch), .some(.destinationCollision): return true
         default: return false
         }
+    }
+    private func hasPublishedEvidence(_ item: RecordingPublicationItem) -> Bool {
+        item.publishedFolderName != nil
+            || item.publishedRecordingName != nil
+            || item.publishedSourceDevice != nil
+            || item.publishedSourceInode != nil
+            || item.publishedSourceRootDevice != nil
+            || item.publishedSourceRootInode != nil
     }
     private func loadIfNeeded() -> Bool { guard !loaded else { return true }; do { items = try manifestStore.loadOrRebuild(from: pendingStore); loaded = true; persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }
     private func persist() -> Bool { do { try manifestStore.save(items); persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }

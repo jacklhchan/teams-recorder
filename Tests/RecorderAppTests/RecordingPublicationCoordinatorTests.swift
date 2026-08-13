@@ -310,7 +310,8 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         await fixture.waitForIdle()
 
         XCTAssertEqual(store.loadCalls, 2)
-        XCTAssertEqual(fixture.publisher.publishedIDs, [fixture.request.id])
+        XCTAssertEqual(fixture.publisher.publishedIDs, [])
+        XCTAssertEqual(fixture.publisher.validationIDs, [fixture.request.id])
     }
 
     func testRootReplacementMovingSameSessionInodeFailsClosedBeforeCallback() async throws {
@@ -355,8 +356,9 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         coordinator.retryNow()
         await fixture.waitForIdle()
 
-        XCTAssertEqual(fixture.publisher.publishedIDs.first, retry.id)
-        XCTAssertEqual(fixture.publisher.publishedIDs.count, 1)
+        XCTAssertEqual(fixture.publisher.publishedIDs, [])
+        XCTAssertEqual(fixture.publisher.validationIDs.first, retry.id)
+        XCTAssertEqual(fixture.publisher.validationIDs.count, 1)
     }
 
     func testDestinationCollisionNeedsAttentionAndDoesNotAutoRetry() async throws {
@@ -432,6 +434,63 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.completions.values.map(\.itemID), [fixture.request.id])
         XCTAssertFalse(fixture.sourceExists)
     }
+
+    func testLegacyPendingTransientWithPublishedEvidenceValidatesWithoutRepublishing() async throws {
+        let fixture = try CoordinatorFixture(manifestState: .pending, publishedEvidence: true, retryDelays: [300])
+        fixture.publisher.validationErrors = [.ioFailure("read")]
+        fixture.coordinator.resume()
+        await fixture.waitForIdle()
+
+        let retained = try XCTUnwrap(fixture.persistedItems.first)
+        XCTAssertEqual(retained.state, .published)
+        XCTAssertEqual(retained.failureCategory, "transient")
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+        XCTAssertEqual(fixture.publisher.validationIDs, [fixture.request.id])
+
+        fixture.coordinator.retryNow()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+        XCTAssertEqual(fixture.publisher.validationIDs, [fixture.request.id, fixture.request.id])
+        XCTAssertTrue(fixture.persistedItems.isEmpty)
+        XCTAssertEqual(fixture.completions.values.map(\.itemID), [fixture.request.id])
+        XCTAssertFalse(fixture.sourceExists)
+    }
+
+    func testLegacyPendingTransientPartialPublishedEvidenceFailsClosedWithoutRepublishing() async throws {
+        let cases: [(String, (inout RecordingPublicationItem) -> Void)] = [
+            ("folder only", { item in
+                item.publishedRecordingName = nil
+                item.publishedSourceDevice = nil
+                item.publishedSourceInode = nil
+                item.publishedSourceRootDevice = nil
+                item.publishedSourceRootInode = nil
+            }),
+            ("unsafe folder", { $0.publishedFolderName = "../unsafe" }),
+            ("unsafe recording", { $0.publishedRecordingName = ".hidden.m4a" }),
+            ("missing published source", { $0.publishedSourceInode = nil }),
+            ("missing published root", { $0.publishedSourceRootInode = nil })
+        ]
+
+        for (_, mutate) in cases {
+            let fixture = try CoordinatorFixture(manifestState: .pending, publishedEvidence: true)
+            var item = try XCTUnwrap(fixture.persistedItems.first)
+            mutate(&item)
+            let store = ScriptedCoordinatorManifestStore(items: [item])
+            let coordinator = RecordingPublicationCoordinator(manifestStore: store, destinationStore: fixture.destination, publisher: fixture.publisher, pendingStore: fixture.pending, retryDelays: [300])
+            let completions = CompletionBox()
+            coordinator.onCompleted = { completions.append($0) }
+
+            coordinator.resume()
+            await fixture.waitForIdle()
+
+            XCTAssertEqual(store.items.first?.state, .needsAttention)
+            XCTAssertEqual(fixture.publisher.attemptCount, 0)
+            XCTAssertTrue(fixture.sourceExists)
+            XCTAssertTrue(completions.values.isEmpty)
+        }
+    }
 }
 
 private func recoveryItem(from request: RecordingPublicationRequest, name: String, state: RecordingPublicationState, category: String? = nil) -> RecordingPublicationItem {
@@ -499,7 +558,7 @@ private final class CoordinatorFixture {
 
     var persistedItems: [RecordingPublicationItem] { (try? manifest.loadOrRebuild(from: pending)) ?? [] }
 
-    init(destinationAvailable: Bool = true, manifestState: RecordingPublicationState? = nil, publisherError: RecordingPublicationError? = nil, publisherErrors: [RecordingPublicationError] = [], retryDelays: [TimeInterval] = [0]) throws {
+    init(destinationAvailable: Bool = true, manifestState: RecordingPublicationState? = nil, publishedEvidence: Bool = false, publisherError: RecordingPublicationError? = nil, publisherErrors: [RecordingPublicationError] = [], retryDelays: [TimeInterval] = [0]) throws {
         temporaryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let root = temporaryRoot.appendingPathComponent("pending", isDirectory: true)
         pending = RecordingPendingStore(root: root)
@@ -517,7 +576,8 @@ private final class CoordinatorFixture {
         publisher = CoordinatorPublisher(error: publisherError, errors: publisherErrors, destination: destination.url, pending: pending)
         if let manifestState {
             let session = try pending.openSession(for: name)
-            try manifest.save([.init(id: request.id, sessionDirectoryName: name, destinationIdentity: identity, workspaceFenceRevision: 3, recordingSource: .manual, health: .init(), metadataWarning: nil, sourceIdentity: session.identity, sourceRootIdentity: session.rootIdentity, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: manifestState, failureCategory: nil, publishedFolderName: manifestState == .published ? "meeting" : nil, publishedRecordingName: manifestState == .published ? "recording.m4a" : nil, publishedSourceDevice: manifestState == .published ? session.identity.device : nil, publishedSourceInode: manifestState == .published ? session.identity.inode : nil, publishedSourceRootDevice: manifestState == .published ? session.rootIdentity.device : nil, publishedSourceRootInode: manifestState == .published ? session.rootIdentity.inode : nil)])
+            let hasPublishedEvidence = manifestState == .published || publishedEvidence
+            try manifest.save([.init(id: request.id, sessionDirectoryName: name, destinationIdentity: identity, workspaceFenceRevision: 3, recordingSource: .manual, health: .init(), metadataWarning: nil, sourceIdentity: session.identity, sourceRootIdentity: session.rootIdentity, createdAt: Date(), lastAttemptAt: nil, attemptCount: 0, state: manifestState, failureCategory: publishedEvidence ? "transient" : nil, publishedFolderName: hasPublishedEvidence ? "meeting" : nil, publishedRecordingName: hasPublishedEvidence ? "recording.m4a" : nil, publishedSourceDevice: hasPublishedEvidence ? session.identity.device : nil, publishedSourceInode: hasPublishedEvidence ? session.identity.inode : nil, publishedSourceRootDevice: hasPublishedEvidence ? session.rootIdentity.device : nil, publishedSourceRootInode: hasPublishedEvidence ? session.rootIdentity.inode : nil)])
         } else {
             try manifest.save([])
         }

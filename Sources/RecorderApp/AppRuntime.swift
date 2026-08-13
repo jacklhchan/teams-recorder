@@ -1,10 +1,16 @@
 import Foundation
 
 @MainActor
+protocol RecorderControlServerRunning: AnyObject {
+    func start() throws
+    func stop()
+}
+
+@MainActor
 final class AppRuntime {
     let model: AppModel
     private let recordingController: RecordingControllerCoordinator
-    private let controlServerRuntime: RecorderControlServerRuntime
+    private let controlServerRuntime: any RecorderControlServerRunning
     private var isControlServerRunning = false
 
     init(
@@ -12,7 +18,7 @@ final class AppRuntime {
         recordingControllerFactory:
             (any RecordingControllerPresenterFactory)? = nil,
         controlServerRuntimeFactory:
-            ((AppModel) -> RecorderControlServerRuntime)? = nil
+            ((AppModel) -> any RecorderControlServerRunning)? = nil
     ) {
         let model = model ?? AppModel()
         self.model = model

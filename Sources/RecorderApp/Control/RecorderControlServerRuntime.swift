@@ -1,7 +1,7 @@
 import RecorderControl
 
 @MainActor
-final class RecorderControlServerRuntime {
+final class RecorderControlServerRuntime: RecorderControlServerRunning {
     private let adapter: AppModelControlAdapter
     private let requestGate: RecorderControlRequestGate
     private let server: RecorderControlSocketServer

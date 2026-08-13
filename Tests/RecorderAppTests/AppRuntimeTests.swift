@@ -14,51 +14,70 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertTrue(LocalRecorderControlPolicy(defaults: defaults).isEnabled)
     }
 
-    func testDisabledRuntimeDoesNotStartControlServerAndEnableStartsIt() {
+    func testControlServerLifecycleStartsAndStopsExactlyOnce() {
         let suiteName = "AppRuntimeControlPolicyTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         let policy = LocalRecorderControlPolicy(defaults: defaults)
         let model = AppModel(defaults: defaults, localRecorderControlPolicy: policy, performStartupWork: false)
-        let socketPath = FileManager.default.temporaryDirectory.appendingPathComponent("control-\(UUID().uuidString).sock").path
-        defer { try? FileManager.default.removeItem(atPath: socketPath) }
-        let server = RecorderControlServerRuntime(model: model, serverFactory: { handler in
-            RecorderControlSocketServer(socketPath: socketPath, handler: handler)
-        })
+        let server = AppRuntimeControlServerSpy()
         let runtime = AppRuntime(model: model, controlServerRuntimeFactory: { _ in server })
         defer { runtime.shutdown() }
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
+        XCTAssertEqual(server.startCount, 0)
+        XCTAssertEqual(server.stopCount, 0)
         model.setLocalRecorderControlEnabled(true)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
+        XCTAssertEqual(server.startCount, 1)
+        XCTAssertEqual(server.stopCount, 0)
         model.setLocalRecorderControlEnabled(true)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
+        XCTAssertEqual(server.startCount, 1)
+        model.setLocalRecorderControlEnabled(false)
+        XCTAssertEqual(server.stopCount, 1)
+        model.setLocalRecorderControlEnabled(false)
+        XCTAssertEqual(server.stopCount, 1)
     }
 
-    func testDisablingControlStopsServerWithoutChangingModelState() {
+    func testDisablingControlPreservesAnActiveRecordingAutoModeSelectedMicAndMute() async throws {
         let suiteName = "AppRuntimeControlPolicyTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         let policy = LocalRecorderControlPolicy(defaults: defaults)
         policy.setEnabled(true)
-        let model = AppModel(defaults: defaults, localRecorderControlPolicy: policy, performStartupWork: false)
+        let device = AudioDevice(id: 1, uid: "selected-mic", name: "Selected Mic", manufacturer: "Test", channelCount: 1)
+        let recorder = RecordingEngine(
+            captureSource: AppRuntimeCaptureSource(),
+            writerFactory: { _ in AppRuntimeAudioWriter() },
+            mixerBlockFrames: 4
+        )
+        let model = AppModel(
+            defaults: defaults,
+            localRecorderControlPolicy: policy,
+            recorder: recorder,
+            inputDevices: { [device] },
+            defaultInputDeviceID: { device.id },
+            performStartupWork: false
+        )
+        model.selectMicrophone(device)
         model.setTeamsAutoMeetingEnabled(true)
         model.setRecorderMicMuted(true)
-        let socketPath = FileManager.default.temporaryDirectory.appendingPathComponent("control-\(UUID().uuidString).sock").path
-        defer { try? FileManager.default.removeItem(atPath: socketPath) }
-        let server = RecorderControlServerRuntime(model: model, serverFactory: { handler in
-            RecorderControlSocketServer(socketPath: socketPath, handler: handler)
-        })
+        _ = try await recorder.start(
+            selection: .allSystemAudio,
+            microphoneUID: device.uid,
+            baseFolder: temporaryFolder()
+        )
+        let server = AppRuntimeControlServerSpy()
         let runtime = AppRuntime(model: model, controlServerRuntimeFactory: { _ in server })
-        defer { runtime.shutdown() }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
+        XCTAssertTrue(recorder.isRecording)
 
         model.setLocalRecorderControlEnabled(false)
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
+        XCTAssertTrue(recorder.isRecording)
         XCTAssertTrue(model.teamsAutoMeetingEnabled)
         XCTAssertTrue(model.localMicMuted)
-        XCTAssertFalse(model.recorder.isRecording)
+        XCTAssertEqual(model.selectedMicrophoneUID, device.uid)
+
+        runtime.shutdown()
+        _ = await recorder.stop()
     }
 
     func testRuntimeShutsDownControllerAndPresenterBeforeModelExactlyOnce() {
@@ -231,4 +250,18 @@ private final class AppRuntimeCaptureSource: CaptureSourceProtocol {
 private final class AppRuntimeAudioWriter: MixedAudioWriting {
     func write(_: MixedAudioBlock) throws {}
     func close() throws {}
+}
+
+@MainActor
+private final class AppRuntimeControlServerSpy: RecorderControlServerRunning {
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+
+    func start() throws {
+        startCount += 1
+    }
+
+    func stop() {
+        stopCount += 1
+    }
 }

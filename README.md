@@ -141,6 +141,12 @@ rotation/revocation, and rollback-floor policy.  The committed keyring is
 intentionally empty; production manifest verification fails closed and this is
 not production-ready.
 
+The exact owner decisions, controlled activation sequence, and sign-off
+template are in
+[`docs/security/2026-08-13-release-manifest-operational-handoff.md`](docs/security/2026-08-13-release-manifest-operational-handoff.md).
+The current workflow uploads a verified candidate artifact; it does not itself
+make Actions artifacts an authoritative end-user channel.
+
 Before creating a public GitHub Release, an authorized QA user must pass the
 signed microphone acceptance gate with the exact notarized workflow artifact.
 Use the repository-pinned keyring and a release-owner supplied rollback floor:

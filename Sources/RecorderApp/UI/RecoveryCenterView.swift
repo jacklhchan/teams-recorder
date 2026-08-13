@@ -9,6 +9,12 @@ struct RecoveryCenterView: View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Recovery")
                 .font(.largeTitle.bold())
+                .background(
+                    RecorderDestinationAccessibilityMarker(
+                        identifier: "recorder.recovery.title",
+                        label: "Recovery"
+                    )
+                )
 
             if snapshot.items.isEmpty {
                 ContentUnavailableView(
@@ -17,12 +23,17 @@ struct RecoveryCenterView: View {
                 )
             } else {
                 retainedCopies
-                ForEach(RecoveryCenterGroup.allCases, id: \.self) { group in
-                    let items = snapshot.items.filter { group.contains($0) }
-                    if !items.isEmpty {
-                        itemGroup(group, items: items)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(RecoveryCenterGroup.allCases, id: \.self) { group in
+                            let items = snapshot.items.filter { group.contains($0) }
+                            if !items.isEmpty {
+                                itemGroup(group, items: items)
+                            }
+                        }
                     }
                 }
+                .frame(maxHeight: .infinity, alignment: .top)
             }
 
             actions

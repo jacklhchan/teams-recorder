@@ -38,6 +38,33 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertFalse(host.containsText("rawFailureCategory"))
     }
 
+    func testRecoveryCenterKeepsHeaderAndActionsVisibleWithManyNeedsAttentionItems() throws {
+        let fixture = makeWorkspaceFixture(
+            publication: .init(stateText: "Publish failed", pendingCount: 0, waitingCount: 0, needsAttentionCount: 30),
+            recoverySnapshot: recoverySnapshot(states: Array(repeating: .needsAttention, count: 30))
+        )
+        let host = try makeWorkspaceHost(model: fixture.model, size: .init(width: 860, height: 680))
+        defer { host.close() }
+
+        host.select(.recovery)
+        try waitUntil(timeout: 1) {
+            host.containsAccessibilityIdentifier(RecorderActionID.recoveryCenterOpenLocal)
+        }
+
+        for identifier in [
+            "recorder.recovery.title",
+            RecorderActionID.recoveryCenterRetainedCount,
+            RecorderActionID.recoveryCenterOpenLocal
+        ] {
+            XCTAssertTrue(
+                host.visibleContentRect.contains(
+                    try XCTUnwrap(host.frame(forAccessibilityIdentifier: identifier))
+                ),
+                "\(identifier) must remain reachable without scrolling through recovery items"
+            )
+        }
+    }
+
     func testRecoveryCenterWaitingItemShowsQueueRetryAndOpenLocalOnly() throws {
         let fixture = makeWorkspaceFixture(
             publication: .init(stateText: "Waiting", pendingCount: 0, waitingCount: 1, needsAttentionCount: 0),

@@ -41,7 +41,7 @@ ad-hoc build is a production distribution artifact.
 | Opt-in diagnostic retention | PASS — 16/16 focused | Default-off scanner, current-policy/class/age revalidation before descriptor-bound deletion, persisted count-only aggregate, and truthful Settings scope. The current architecture exposes no safe retained published session, so it has zero candidates and never scans OneDrive or the destination. Independent review found no Critical or Important issue. |
 | Recovery fixed-actions layout | PASS — 5/5 focused | With 30 needs-attention items in an 860×680 host, the title, retained count, and `Open Local Copies` remain in the visible viewport; only item groups scroll. Independent review found no findings. |
 | Successor 351 bundle | PASS | Release build, Info.plist, PrivacyInfo.xcprivacy, and `codesign --verify --deep --strict` passed. Build 351 has not replaced installed build 350. |
-| Full Swift package suite | NOT PASS | The initial run exposed three independently reproducible regressions and hung later. A post-fix run exposed the autoplay and stale double-stop expectation, then also hung later in the Engine suite; both are now focused-green. No clean full-suite completion is claimed. |
+| GitHub main bounded CI | PASS | [Run 31674648708](https://github.com/jacklhchan/teams-recorder/actions/runs/31674648708) completed successfully at `ff96d51`: targeted transcription, the named storage gate, the full Swift package suite, workspace stability, Python scripts, the production-tree Accessibility audit, policy checks, app packaging, and virtual-microphone contracts all passed. |
 
 The session-name production fix retains no-overwrite admission: each readable
 timestamp now has a UUID suffix, while `RecordingPendingStore` continues to
@@ -96,12 +96,13 @@ The following are deliberately not marked as passed:
 
 ## Acceptance status
 
-**In progress.** The code/security review gates, recoverable build 350
-installation, installed CLI link/default-off check, OneDrive bookmark
-persistence check, opt-in retention review, and Recovery fixed-actions review
-are complete. Verified build 351 is ready for a separately approved recoverable
-installation. On first launch, build 350 retained the exact OneDrive destination
-but macOS required Screen/System Audio permission again; the microphone also had
-no selected device. The app reported 30 retained local recordings needing
-attention, so publication is not claimed complete. Bounded runtime UAT, the
-sandbox bookmark, and release-key operational activation remain open.
+**In progress.** The code/security review gates, green GitHub main CI,
+recoverable build 350 installation, installed CLI link/default-off check,
+OneDrive bookmark persistence check, opt-in retention review, and Recovery
+fixed-actions review are complete. Verified build 351 is ready for a separately
+approved recoverable installation. On first launch, build 350 retained the exact
+OneDrive destination but macOS required Screen/System Audio permission again;
+the microphone also had no selected device. The app reported 30 retained local
+recordings needing attention, so publication is not claimed complete. Bounded
+runtime UAT, the sandbox bookmark, and release-key operational activation remain
+open.

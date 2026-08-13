@@ -447,19 +447,53 @@ final class RecordingSessionPublisherTests: XCTestCase {
             destinationCloser: closer.close
         )
 
-        let error = await Task { () -> Error? in
+        let task = Task { () -> Error? in
             do {
                 _ = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
                 return nil
             } catch {
                 return error
             }
-        }.value
+        }
+        await fulfillment(of: [opener.firstStarted], timeout: 1)
+        let error = await task.value
 
         XCTAssertEqual(error as? RecordingPublicationError, .destinationUnavailable)
         XCTAssertEqual(closer.closeCount, 1)
         opener.release()
         await fulfillment(of: [opener.returned], timeout: 1)
+    }
+
+    func testTimedOutDestinationOpenClosesLateReturnedDescriptorWithoutWriting() async throws {
+        let opener = LateDescriptorOpener()
+        let closer = DestinationCloseObserver()
+        let fixture = try PublisherFixture(
+            destinationOpenDeadline: .milliseconds(50),
+            destinationOpener: opener.open,
+            destinationCloser: closer.close
+        )
+
+        let task = Task { () -> Error? in
+            do {
+                _ = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+                return nil
+            } catch {
+                return error
+            }
+        }
+        await fulfillment(of: [opener.started], timeout: 1)
+        let error = await task.value
+
+        XCTAssertEqual(error as? RecordingPublicationError, .destinationUnavailable)
+        XCTAssertEqual(closer.closeCount, 1, "The retained parent closes independently")
+        XCTAssertTrue(fixture.destinationIsEmpty)
+
+        opener.release()
+        await fulfillment(of: [opener.returned], timeout: 1)
+        let descriptor = try XCTUnwrap(opener.returnedDescriptor)
+        XCTAssertEqual(fcntl(descriptor, F_GETFD), -1)
+        XCTAssertEqual(errno, EBADF, "The late positive descriptor must be closed by the timed-out request")
+        XCTAssertTrue(fixture.destinationIsEmpty)
     }
 }
 
@@ -581,11 +615,38 @@ private final class FirstOpenBlocksThenSucceedsOpener: @unchecked Sendable {
         let isFirst = calls == 1
         lock.unlock()
         if isFirst {
+            defer { returned.fulfill() }
             firstStarted.fulfill()
             releaseSignal.wait()
-            returned.fulfill()
         }
         return openat(parent, name, flags)
+    }
+
+    func release() { releaseSignal.signal() }
+}
+
+private final class LateDescriptorOpener: @unchecked Sendable {
+    let started = XCTestExpectation(description: "late descriptor opener started")
+    let returned = XCTestExpectation(description: "late descriptor opener returned")
+    private let lock = NSLock()
+    private let releaseSignal = DispatchSemaphore(value: 0)
+    private var descriptor: Int32?
+
+    var returnedDescriptor: Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return descriptor
+    }
+
+    func open(parent: Int32, name: String, flags: Int32) -> Int32 {
+        defer { returned.fulfill() }
+        started.fulfill()
+        releaseSignal.wait()
+        let opened = openat(parent, name, flags)
+        lock.lock()
+        descriptor = opened
+        lock.unlock()
+        return opened
     }
 
     func release() { releaseSignal.signal() }

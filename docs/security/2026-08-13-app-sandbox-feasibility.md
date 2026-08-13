@@ -123,10 +123,13 @@ Developer ID、Hardened Runtime 或 notarization。
   GUI/background launch。
 - **security-scoped selected folder across relaunch（尚未執行）**：fixture 已
   編譯 `NSOpenPanel` 選取、`.withSecurityScope` bookmark 寫入與第二次 process
-  resolve/start/stop/write/cleanup 的兩段式流程，但沒有自動開 panel。下一步
-  必須由使用者在 UI 選取非 Downloads 的測試資料夾，再重啟 fixture 驗證；若
-  macOS 在過程顯示任何 privacy/security 設定變更，必須在該動作當刻取得確認，
-  不得自行接受。
+  resolve/start/stop/write/cleanup 的兩段式流程。以固定的
+  `Tests/ManualFixtures/run-app-sandbox-feasibility-spikes.sh --bookmark` 啟動時，
+  runner 會先建立其自有的暫存 bundle，等待使用者於 `NSOpenPanel` 選取非
+  Downloads 的測試資料夾，然後在同一個 bundle 尚未清理前以第二個 process
+  執行 relaunch 驗證；它不接受任何 caller-supplied output path，也不會自動選取
+  資料夾。若 macOS 在過程顯示任何 privacy/security 設定變更，必須在該動作當刻
+  取得確認，不得自行接受。
 
 **更新後判讀**：選項 1 仍是推薦 baseline。SCK/mic 與 container pending 的
 可行性由 runtime evidence 提升，但 bookmark 尚待手動驗證，而 AF_UNIX/public

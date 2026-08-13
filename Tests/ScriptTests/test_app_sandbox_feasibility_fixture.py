@@ -78,6 +78,18 @@ class AppSandboxFeasibilityFixtureContractTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 64)
                 self.assertTrue(sentinel.exists())
 
+    def test_bookmark_mode_keeps_the_fixture_alive_for_select_and_relaunch(self) -> None:
+        source = self.fixture_source()
+
+        self.assertIn('MODE="passive"', source)
+        self.assertIn('"--bookmark") MODE="bookmark"', source)
+        self.assertIn('run_bookmark_spike()', source)
+        self.assertIn('"$APP/Contents/MacOS/SandboxSpike" bookmark-select', source)
+        self.assertIn('"$APP/Contents/MacOS/SandboxSpike" bookmark-verify', source)
+        self.assertIn('if [[ "$MODE" == "bookmark" ]]; then', source)
+        self.assertNotIn('manual-bookmark-select=', source)
+        self.assertNotIn('manual-bookmark-relaunch=', source)
+
     def test_pending_recovery_uses_a_second_process(self) -> None:
         source = self.fixture_source()
         probe_source = (

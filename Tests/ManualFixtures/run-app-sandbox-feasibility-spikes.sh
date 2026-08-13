@@ -5,10 +5,23 @@ set -euo pipefail
 # install, signing, entitlement, release, or TCC-setting path.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURE_DIR="$ROOT_DIR/Tests/ManualFixtures"
-if (($# != 0)); then
-  echo "usage: $0" >&2
-  exit 64
-fi
+MODE="passive"
+case "$#" in
+  0) ;;
+  1)
+    case "$1" in
+      "--bookmark") MODE="bookmark" ;;
+      *)
+        echo "usage: $0 [--bookmark]" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  *)
+    echo "usage: $0 [--bookmark]" >&2
+    exit 64
+    ;;
+esac
 
 OUTPUT_ROOT="$(mktemp -d /private/tmp/lmr-sandbox-spike.XXXXXX)"
 OUTPUT_CREATED=1
@@ -66,9 +79,19 @@ PY
 "$CODESIGN" -d --entitlements :- "$APP" 2>/dev/null
 
 echo "app=$APP"
-echo "manual-bookmark-select=$APP/Contents/MacOS/SandboxSpike bookmark-select"
-echo "manual-bookmark-relaunch=$APP/Contents/MacOS/SandboxSpike bookmark-verify"
 echo "manual-background-launch=/usr/bin/open -gj '$APP' --args ipc-embedded"
+
+run_bookmark_spike() {
+  # This keeps the disposable bundle present while the operator picks a folder,
+  # then proves the saved bookmark from a separate process before cleanup.
+  "$APP/Contents/MacOS/SandboxSpike" bookmark-select
+  "$APP/Contents/MacOS/SandboxSpike" bookmark-verify
+}
+
+if [[ "$MODE" == "bookmark" ]]; then
+  run_bookmark_spike
+  exit 0
+fi
 
 # Passive/fixture-owned runtime evidence: no permission requests or GUI panels.
 "$APP/Contents/MacOS/SandboxSpike" capture-status

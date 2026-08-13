@@ -157,6 +157,19 @@ class WorkflowContractTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assert_step_command(packaging, name, command)
 
+    def test_named_storage_security_gate_precedes_full_swift_suites(self):
+        workflow = self.read_workflow()
+        ci_swift_tests = self.job_body(workflow, "swift-tests")
+        self.assert_step_command(
+            ci_swift_tests,
+            "Storage security boundary gate",
+            "Tests/StorageSecurityGate/run.sh",
+        )
+        self.assertLess(
+            ci_swift_tests.index("Storage security boundary gate"),
+            ci_swift_tests.index("Swift tests"),
+        )
+
     def test_ci_sources_avoid_unavailable_isolated_deinit_feature(self):
         manifest = PACKAGE_MANIFEST.read_text(encoding="utf-8")
         playback_coordinator = PLAYBACK_COORDINATOR.read_text(encoding="utf-8")
@@ -226,6 +239,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             if lines[end] == "}":
                 return "\n".join(lines[start : end + 1])
         self.fail(f"Unterminated shell function: {function_name}")
+
+    def test_named_storage_security_gate_precedes_full_swift_suites(self):
+        release_gates = self.step_run(self.read_workflow(), "Run release gates")
+        self.assertIn("Tests/StorageSecurityGate/run.sh", release_gates)
+        self.assertLess(
+            release_gates.index("Tests/StorageSecurityGate/run.sh"),
+            release_gates.index("swift test"),
+        )
 
     def make_fake_cleanup_tools(self, directory):
         tool_source = """#!/usr/bin/python3

@@ -46,6 +46,7 @@ jobs:
       - name: Run release gates
         run: |
           set -euo pipefail
+          Tests/StorageSecurityGate/run.sh
           swift test
           swift test
           python3 -m unittest discover \

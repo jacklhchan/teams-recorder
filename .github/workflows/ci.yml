@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Targeted transcription tests
         run: swift test --filter OpenAICompatibleTranscriptionClientTests
+      - name: Storage security boundary gate
+        run: Tests/StorageSecurityGate/run.sh
       - name: Swift tests
         run: swift test
       - name: Workspace stability tests

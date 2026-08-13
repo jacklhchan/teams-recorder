@@ -523,7 +523,8 @@ final class AppModel: ObservableObject {
                     activeProviderRepository,
                     self.transcriptionFeature.publicationSourceID,
                     transcriptMutationGate,
-                    activePrivacyModePolicy
+                    activePrivacyModePolicy,
+                    .init(load: activeLifecyclePolicyProvider)
                 )
             } else {
                 self.meetingIntelligenceFeature = MeetingIntelligenceFeatureModel(
@@ -793,7 +794,8 @@ final class AppModel: ObservableObject {
             publisher: publisher,
             artifactStore: artifactStore,
             stateStore: MeetingIntelligenceStateStore(
-                mutationGate: mutationGate
+                mutationGate: mutationGate,
+                lifecyclePolicyProvider: lifecyclePolicyProvider
             ),
             artifactEditor: artifactEditor,
             titleApplier: MeetingIntelligenceSuggestedTitleApplier(

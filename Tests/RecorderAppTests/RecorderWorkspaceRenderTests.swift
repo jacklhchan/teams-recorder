@@ -2681,7 +2681,7 @@ private final class RecordingsMeetingIntelligenceRenderFixture {
             initialOutputFolder: workspace,
             transcriptionAudioPreparer: transcriptionPreparer,
             libraryFeature: injectedLibraryFeature,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission, _ in
                 let coordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,

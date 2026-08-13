@@ -1,11 +1,16 @@
 import Combine
 import Foundation
 
+struct MeetingIntelligenceLifecyclePolicyProvider: Sendable {
+    let load: @Sendable () -> RecordingDataLifecyclePolicy
+}
+
 typealias MeetingIntelligenceFeatureFactory = (
     any OpenAICompatibleProviderManaging,
     UUID,
     RecordingSessionMutationGate,
-    any ThirdPartyProcessingAdmitting
+    any ThirdPartyProcessingAdmitting,
+    MeetingIntelligenceLifecyclePolicyProvider
 ) -> MeetingIntelligenceFeatureModel
 
 /// Main-actor UI boundary for meeting intelligence.  The coordinator remains

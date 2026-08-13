@@ -337,13 +337,16 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
     static let maximumBytes = 32 * 1_024
     private let mutationGate: RecordingSessionMutationGate
     private let fileAccess: any MeetingIntelligenceStoreFileAccess
+    private let lifecyclePolicyProvider: @Sendable () -> RecordingDataLifecyclePolicy
 
     init(
         mutationGate: RecordingSessionMutationGate,
-        fileAccess: any MeetingIntelligenceStoreFileAccess = DarwinMeetingIntelligenceStoreFileAccess()
+        fileAccess: any MeetingIntelligenceStoreFileAccess = DarwinMeetingIntelligenceStoreFileAccess(),
+        lifecyclePolicyProvider: @escaping @Sendable () -> RecordingDataLifecyclePolicy = { .safeDefault }
     ) {
         self.mutationGate = mutationGate
         self.fileAccess = fileAccess
+        self.lifecyclePolicyProvider = lifecyclePolicyProvider
     }
 
     func load(in folder: URL) throws -> MeetingIntelligenceState? {
@@ -370,7 +373,9 @@ struct MeetingIntelligenceStateStore: MeetingIntelligenceStateStoring, Sendable 
             let interrupted = MeetingIntelligenceState(
                 schemaVersion: state.schemaVersion,
                 phase: .interrupted,
-                message: "Meeting intelligence interrupted. You can generate again.",
+                message: MeetingIntelligenceStatePersistencePolicy.message(
+                    for: lifecyclePolicyProvider()
+                ),
                 sourceTranscriptSHA256: state.sourceTranscriptSHA256,
                 startedAt: state.startedAt,
                 finishedAt: Date()

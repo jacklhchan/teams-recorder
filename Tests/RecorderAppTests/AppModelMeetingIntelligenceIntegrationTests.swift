@@ -23,7 +23,7 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             initialOutputFolder: fixture.workspace,
             transcriptionAudioPreparer: IntegrationAudioPreparer(),
             transcriptionService: asrService,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission, _ in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 let coordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,
@@ -172,18 +172,29 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
     func testMeetingIntelligenceFeatureFactoryBuildsExactlyOneRetainedFeature() async throws {
         let fixture = try IntegrationFixture()
         defer { fixture.remove() }
+        let suiteName = "meeting-intelligence-factory-policy-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let expectedLifecyclePolicy = RecordingDataLifecyclePolicy(
+            redactGeneratedDiagnostics: false
+        )
+        try RecordingDataLifecyclePolicyStore(defaults: defaults).save(expectedLifecyclePolicy)
         var factoryCalls = 0
         var receivedTranscriptionPublicationSourceID: UUID?
+        var receivedLifecyclePolicyProvider: MeetingIntelligenceLifecyclePolicyProvider?
         var returnedFeature: MeetingIntelligenceFeatureModel?
         var returnedCoordinator: MeetingIntelligenceJobCoordinator?
 
         let model = AppModel(
+            defaults: defaults,
             providerRepository: IntegrationRepository(),
             performStartupWork: false,
             initialOutputFolder: fixture.workspace,
-            meetingIntelligenceFeatureFactory: { repository, transcriptionPublicationSourceID, gate, admission in
+            meetingIntelligenceFeatureFactory: { repository, transcriptionPublicationSourceID, gate, admission, lifecyclePolicyProvider in
                 factoryCalls += 1
                 receivedTranscriptionPublicationSourceID = transcriptionPublicationSourceID
+                receivedLifecyclePolicyProvider = lifecyclePolicyProvider
                 let coordinator = fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: transcriptionPublicationSourceID,
@@ -203,6 +214,17 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
         XCTAssertEqual(
             receivedTranscriptionPublicationSourceID,
             model.transcriptionFeature.publicationSourceID
+        )
+        XCTAssertEqual(
+            receivedLifecyclePolicyProvider?.load(),
+            expectedLifecyclePolicy
+        )
+        var updatedLifecyclePolicy = expectedLifecyclePolicy
+        updatedLifecyclePolicy.redactGeneratedDiagnostics = true
+        try RecordingDataLifecyclePolicyStore(defaults: defaults).save(updatedLifecyclePolicy)
+        XCTAssertEqual(
+            receivedLifecyclePolicyProvider?.load(),
+            updatedLifecyclePolicy
         )
         XCTAssertTrue(model.meetingIntelligenceFeature === returnedFeature)
 
@@ -412,7 +434,7 @@ final class AppModelMeetingIntelligenceIntegrationTests: XCTestCase {
             providerRepository: IntegrationRepository(),
             performStartupWork: false,
             initialOutputFolder: fixture.workspace,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission, _ in
                 let createdCoordinator = fixture.coordinator(
                     providerRepository: repository,
                     expectedPublicationSourceID: sourceID,
@@ -1002,7 +1024,7 @@ private final class IntegrationFixture {
             performStartupWork: false,
             initialOutputFolder: workspace,
             recordingSessionReloader: reloader,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission, _ in
                 let coordinator = coordinatorFactory(repository, sourceID, gate, admission)
                 retainedCoordinator = coordinator
                 return MeetingIntelligenceFeatureModel(coordinator: coordinator)
@@ -1030,7 +1052,7 @@ private final class IntegrationFixture {
             recordingSearchDocumentLoader: searchLoader,
             transcriptionAudioPreparer: IntegrationAudioPreparer(),
             transcriptionService: transcriptionService,
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission, _ in
                 MeetingIntelligenceFeatureModel(
                     coordinator: coordinatorFactory(repository, sourceID, gate, admission)
                 )

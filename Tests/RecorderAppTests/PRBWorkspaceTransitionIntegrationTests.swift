@@ -16,7 +16,7 @@ final class PRBWorkspaceTransitionIntegrationTests: XCTestCase {
         var feature: MeetingIntelligenceFeatureModel?
         var coordinator: MeetingIntelligenceJobCoordinator?
         let model = fixture.makeModel(
-            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission in
+            meetingIntelligenceFeatureFactory: { repository, sourceID, gate, admission, _ in
                 let artifacts = MeetingIntelligenceArtifactStore(mutationGate: gate)
                 let createdCoordinator = MeetingIntelligenceJobCoordinator(
                     providerRepository: repository,

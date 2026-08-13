@@ -460,6 +460,10 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
 
         let interrupted = try XCTUnwrap(try store.load(in: fixture.folder))
         XCTAssertEqual(interrupted.phase, .interrupted)
+        XCTAssertEqual(
+            interrupted.message,
+            MeetingIntelligenceStatePersistencePolicy.redactedMessage
+        )
         XCTAssertEqual(interrupted.startedAt, started)
         XCTAssertNotNil(interrupted.finishedAt)
 
@@ -477,6 +481,40 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(in: fixture.folder)?.phase, .completed)
         try store.remove(in: fixture.folder)
         XCTAssertNil(try store.load(in: fixture.folder))
+    }
+
+    func testActiveStateRecoveryUsesEmptyMessageWhenLifecyclePolicyDisablesRedaction() throws {
+        let fixture = try MeetingIntelligenceStoreFixture()
+        let store = MeetingIntelligenceStateStore(
+            mutationGate: gate,
+            lifecyclePolicyProvider: {
+                RecordingDataLifecyclePolicy(redactGeneratedDiagnostics: false)
+            }
+        )
+        try store.save(
+            .init(
+                schemaVersion: 1,
+                phase: .generating,
+                message: "Generating",
+                sourceTranscriptSHA256: "sha256:abc",
+                startedAt: .distantPast,
+                finishedAt: nil
+            ),
+            in: fixture.folder
+        )
+
+        let interrupted = try XCTUnwrap(try store.load(in: fixture.folder))
+        XCTAssertEqual(interrupted.phase, .interrupted)
+        XCTAssertEqual(interrupted.message, "")
+        XCTAssertEqual(interrupted.sourceTranscriptSHA256, "sha256:abc")
+        XCTAssertEqual(interrupted.startedAt, .distantPast)
+
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: fixture.stateURL)
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(persisted["message"] as? String, "")
     }
 
     func testStateSaveAndRemoveRejectFutureDestinationWithoutChangingBytes() throws {

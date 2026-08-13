@@ -335,7 +335,7 @@ final class AppModel: ObservableObject {
         let activeLifecyclePolicyStore = RecordingDataLifecyclePolicyStore(defaults: defaults)
         recordingDataLifecyclePolicyStore = activeLifecyclePolicyStore
         let activeLifecyclePolicy = activeLifecyclePolicyStore.load()
-        let activeLifecyclePolicyProvider = {
+        let activeLifecyclePolicyProvider: @Sendable () -> RecordingDataLifecyclePolicy = {
             activeLifecyclePolicyStore.load()
         }
         recordingDataLifecyclePolicy = activeLifecyclePolicy
@@ -531,7 +531,8 @@ final class AppModel: ObservableObject {
                         repository: activeProviderRepository,
                         expectedPublicationSourceID: self.transcriptionFeature.publicationSourceID,
                         mutationGate: transcriptMutationGate,
-                        thirdPartyProcessingAdmission: activePrivacyModePolicy
+                        thirdPartyProcessingAdmission: activePrivacyModePolicy,
+                        lifecyclePolicyProvider: activeLifecyclePolicyProvider
                     )
                 )
             }
@@ -761,7 +762,8 @@ final class AppModel: ObservableObject {
         repository: any OpenAICompatibleProviderManaging,
         expectedPublicationSourceID: UUID,
         mutationGate: RecordingSessionMutationGate,
-        thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting
+        thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting,
+        lifecyclePolicyProvider: @escaping @Sendable () -> RecordingDataLifecyclePolicy
     ) -> MeetingIntelligenceJobCoordinator {
         let client = OpenAICompatibleMeetingIntelligenceClient()
         let transcriptReader = SecureTranscriptDocumentReader()
@@ -798,7 +800,8 @@ final class AppModel: ObservableObject {
                 mutationGate: mutationGate,
                 transcriptReader: transcriptReader
             ),
-            thirdPartyProcessingAdmission: thirdPartyProcessingAdmission
+            thirdPartyProcessingAdmission: thirdPartyProcessingAdmission,
+            lifecyclePolicyProvider: lifecyclePolicyProvider
         )
     }
 

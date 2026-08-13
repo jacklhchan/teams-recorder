@@ -307,8 +307,8 @@ struct RecorderSettingsView: View {
                 ))
                 Text(
                     model.recordingDataLifecyclePolicy.redactGeneratedDiagnostics
-                        ? "Generated diagnostics use a fixed safe record."
-                        : "Diagnostic content is not persisted; empty compatibility files may remain."
+                        ? "Generated transcription and meeting-intelligence diagnostic messages use a fixed safe record."
+                        : "Generated transcription and meeting-intelligence diagnostic content is not persisted; empty compatibility files may remain."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -316,8 +316,8 @@ struct RecorderSettingsView: View {
                 .background(RecorderSettingsAccessibilityMarker(
                     identifier: RecorderActionID.lifecycleRedactionStatus,
                     label: model.recordingDataLifecyclePolicy.redactGeneratedDiagnostics
-                        ? "Generated diagnostics use a fixed safe record."
-                        : "Diagnostic content is not persisted; empty compatibility files may remain."
+                        ? "Generated transcription and meeting-intelligence diagnostic messages use a fixed safe record."
+                        : "Generated transcription and meeting-intelligence diagnostic content is not persisted; empty compatibility files may remain."
                 ))
             }
             Label("Recording Storage", systemImage: "internaldrive")

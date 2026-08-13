@@ -23,6 +23,20 @@ final class MeetingIntelligenceStoreTests: XCTestCase {
         XCTAssertEqual(try permissions(of: fixture.stateURL), 0o600)
     }
 
+    func testLifecyclePolicyRedactsMeetingIntelligencePersistenceMessage() {
+        let message = MeetingIntelligenceStatePersistencePolicy.message(
+            for: RecordingDataLifecyclePolicy(redactGeneratedDiagnostics: true)
+        )
+
+        XCTAssertEqual(message, MeetingIntelligenceStatePersistencePolicy.redactedMessage)
+        XCTAssertEqual(
+            MeetingIntelligenceStatePersistencePolicy.message(
+                for: RecordingDataLifecyclePolicy(redactGeneratedDiagnostics: false)
+            ),
+            ""
+        )
+    }
+
     func testStagesAndPromotesValidArtifact() throws {
         let fixture = try MeetingIntelligenceStoreFixture()
         let store = MeetingIntelligenceArtifactStore(mutationGate: gate)

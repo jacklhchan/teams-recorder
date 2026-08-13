@@ -241,6 +241,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private let titleApplier: MeetingIntelligenceSuggestedTitleApplier?
     private let publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling
     private let thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting
+    private let lifecyclePolicyProvider: @Sendable () -> RecordingDataLifecyclePolicy
     var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier {
         ObjectIdentifier(thirdPartyProcessingAdmission as AnyObject)
     }
@@ -285,6 +286,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         stateSaveScheduler: any MeetingIntelligenceStateSaveScheduling = ImmediateMeetingIntelligenceStateSaveScheduler(),
         publicationDeliveryScheduler: any MeetingIntelligencePublicationDeliveryScheduling = ImmediateMeetingIntelligencePublicationDeliveryScheduler(),
         thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting,
+        lifecyclePolicyProvider: @escaping @Sendable () -> RecordingDataLifecyclePolicy = { .safeDefault },
         now: @escaping DateNow = { Date() }
     ) {
         self.expectedPublicationSourceID = expectedPublicationSourceID
@@ -305,6 +307,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         self.titleApplier = titleApplier
         self.publicationDeliveryScheduler = publicationDeliveryScheduler
         self.thirdPartyProcessingAdmission = thirdPartyProcessingAdmission
+        self.lifecyclePolicyProvider = lifecyclePolicyProvider
         self.now = now
     }
 
@@ -1048,7 +1051,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         guard owns(ticket, for: session), !Task.isCancelled else { return }
         let sequence = nextSequence(for: session, ticket: ticket)
         let state = MeetingIntelligenceState(schemaVersion: MeetingIntelligenceState.currentSchemaVersion, phase: phase,
-                                             message: sanitized(message), sourceTranscriptSHA256: revision?.sha256,
+                                             message: MeetingIntelligenceStatePersistencePolicy.message(for: lifecyclePolicyProvider()), sourceTranscriptSHA256: revision?.sha256,
                                              startedAt: ticket.startedAt,
                                              finishedAt: [.completed, .failed, .cancelled, .interrupted].contains(phase) ? now() : nil)
         do {
@@ -1286,7 +1289,6 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     private func titleIsProtected(_ session: RecordingSession) -> Bool { session.metadata.titleOrigin == .manual }
     private func isUsableModel(_ model: String) -> Bool { let v = model.trimmingCharacters(in: .whitespacesAndNewlines); return !v.isEmpty && v != "legacy-unconfigured-llm" }
-    private func sanitized(_ message: String) -> String { String(message.unicodeScalars.filter { $0.properties.generalCategory != .control || $0 == "\n" || $0 == "\t" }.map(String.init).joined().prefix(1_024)) }
     private func normalizedFolder(for session: RecordingSession) -> URL? {
         let folder = RecordingLibraryURLIdentity.normalized(session.folderURL)
         return RecordingLibraryURLIdentity.normalized(session.id).path == folder.path ? folder : nil

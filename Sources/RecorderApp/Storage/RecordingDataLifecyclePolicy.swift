@@ -98,7 +98,9 @@ enum RecordingDataLifecyclePolicyStoreError: Error, Equatable {
     case unsupportedPolicy
 }
 
-struct RecordingDataLifecyclePolicyStore {
+/// `UserDefaults` is safe for concurrent reads; this immutable wrapper only
+/// exposes decode-on-read and is used by background artifact stores.
+struct RecordingDataLifecyclePolicyStore: @unchecked Sendable {
     static let defaultsKey = "recordingDataLifecyclePolicyV1"
 
     private let defaults: UserDefaults

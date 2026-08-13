@@ -1,6 +1,16 @@
 import Darwin
 import Foundation
 
+enum MeetingIntelligenceStatePersistencePolicy {
+    static let redactedMessage = "Meeting intelligence state recorded."
+
+    static func message(
+        for lifecyclePolicy: RecordingDataLifecyclePolicy
+    ) -> String {
+        lifecyclePolicy.redactGeneratedDiagnostics ? redactedMessage : ""
+    }
+}
+
 enum MeetingIntelligenceStoreError: LocalizedError, Equatable, Sendable {
     case unsupportedSchemaVersion(Int)
     case malformed

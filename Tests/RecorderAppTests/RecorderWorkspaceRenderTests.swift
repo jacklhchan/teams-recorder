@@ -1970,7 +1970,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
         XCTAssertEqual(
             host.accessibilityLabel(for: RecorderActionID.lifecycleRedactionStatus),
-            "Diagnostic content is not persisted; empty compatibility files may remain."
+            "Generated transcription and meeting-intelligence diagnostic content is not persisted; empty compatibility files may remain."
         )
     }
 

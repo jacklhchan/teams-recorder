@@ -82,3 +82,46 @@
 - Apple 官方文件足以確認 user-selected read/write、audio input、network client、container，以及 embedded inherited command-line helper 的一般模型；它**沒有在本次查核中**提供可直接套用於現行 `/tmp` AF_UNIX protocol 或跨 HAL-driver POSIX shared-memory 的保證。
 - 現行 `AppPaths` 與可能的 legacy subprocess 對 home／外部執行檔有假設；即使主 capture spike 成功，完整錄製到 transcription、publication、recovery 的行為仍不可假稱已通過。
 - 本文不會改變 Developer ID、Hardened Runtime、notarization，也不表示這些既有機制已在 shipped artifact 被重新驗證。
+
+## 2026-08-13 隔離 runtime spike 證據
+
+以下是一次獨立、ad-hoc-signed fixture 的結果，不是 production bundle
+驗證。fixture 原始碼與 runner 位於 `Tests/ManualFixtures/`，輸出唯一在
+`/private/tmp/local-meeting-recorder-sandbox-spike`，bundle identifier 是
+`com.localmeetingrecorder.sandbox-spike.<uid>`。它沒有呼叫 production build、
+install、release 或 entitlement scripts；沒有修改已安裝 staging app、TCC、
+Developer ID、Hardened Runtime 或 notarization。
+
+- **環境**：macOS 26.5（25F71）、Xcode Swift 6.3.3。主 fixture effective
+  entitlements 為 `com.apple.security.app-sandbox=true`、
+  `com.apple.security.device.audio-input=true` 與
+  `com.apple.security.files.user-selected.read-write=true`；embedded helper
+  個別以 `app-sandbox` + `com.apple.security.inherit=true` ad-hoc 簽署，且
+  `codesign --verify --deep --strict` 通過。
+- **SCK + mic（通過，僅被動檢查）**：未呼叫 permission-request API，輸出為
+  `capture.microphone-status=3`（AVFoundation 的 authorized raw value）及
+  `capture.screen-content=available(displays=1,windows=58)`。這證實此 Mac 上
+  sandbox fixture 可載入 ScreenCaptureKit、讀取既有 TCC 狀態及列舉內容；未
+  驗證實際 stream、系統音訊、拒絕／重授權或 background capture。
+- **container pending publish/recovery（通過）**：fixture 以
+  `FileManager.applicationSupportDirectory` 建立其 container-owned pending
+  item，原子移動到 fixture-owned published 位置，再讀回並移除整個 fixture
+  root；輸出 `pending.publish-recovery=true`。此項不代表現行 pending store 或
+  任意使用者目的地已可直接搬遷。
+- **public CLI / AF_UNIX / background launch（失敗，保留阻塞）**：fixture 在
+  `/private/tmp/lmr-sbx-<pid>.sock` 建立 AF_UNIX server，embedded inherited
+  helper 嘗試連線；server 的 `bind` 失敗，結果為 `socket-bind`，helper 隨後
+  為 `helper-exit-67`。因此不能把現行 `/tmp/lmr-<uid>` public socket、外部
+  CLI 或 `/usr/bin/open -gj` 背景啟動宣稱為 sandbox compatible。這次沒有執行
+  external symlink CLI 或 GUI/background launch。
+- **security-scoped selected folder across relaunch（尚未執行）**：fixture 已
+  編譯 `NSOpenPanel` 選取、`.withSecurityScope` bookmark 寫入與第二次 process
+  resolve/start/stop/write/cleanup 的兩段式流程，但沒有自動開 panel。下一步
+  必須由使用者在 UI 選取非 Downloads 的測試資料夾，再重啟 fixture 驗證；若
+  macOS 在過程顯示任何 privacy/security 設定變更，必須在該動作當刻取得確認，
+  不得自行接受。
+
+**更新後判讀**：選項 1 仍是推薦 baseline。SCK/mic 與 container pending 的
+可行性由 runtime evidence 提升，但 bookmark 尚待手動驗證，而 AF_UNIX/public
+CLI 已在此 Mac 的隔離 runtime 中失敗；因此 full sandbox 或 sandbox GUI +
+沿用目前控制通道都不能進入 production migration 設計。

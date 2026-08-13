@@ -85,6 +85,18 @@ final class SafeSupportBundleTests: XCTestCase {
         }
     }
 
+    func testRootValidationAuthorizesTheOpenedDirectoryDescriptor() throws {
+        let source = try String(
+            contentsOf: sourceRoot()
+                .appendingPathComponent("Sources/RecorderApp/Storage/SafeSupportBundle.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(source.contains("lstat("))
+        XCTAssertTrue(source.contains("fstat(rootDescriptor"))
+        XCTAssertTrue(source.contains("openOwnerOnlyRoot"))
+    }
+
     private func makeRoot() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("safe-support-bundle-\(UUID().uuidString)", isDirectory: true)

@@ -111,6 +111,8 @@ enum SafeSupportBundleStoreError: Error, Equatable {
 
 /// Internal export API. Callers provide an app-owned directory; the exporter
 /// creates it at 0700 and refuses an existing directory that is not owner-only.
+/// All artifact writes are relative to the validated root descriptor. The
+/// returned URL is a display location, not a durable identity for that path.
 struct SafeSupportBundleStore: Sendable {
     static let maximumArtifactBytes = 64 * 1_024
 
@@ -121,15 +123,7 @@ struct SafeSupportBundleStore: Sendable {
         guard data.count <= Self.maximumArtifactBytes else {
             throw SafeSupportBundleStoreError.artifactTooLarge
         }
-        try ensureOwnerOnlyRoot()
-
-        let rootDescriptor = open(
-            rootDirectory.path,
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-        )
-        guard rootDescriptor >= 0 else {
-            throw SafeSupportBundleStoreError.unsafeRootDirectory
-        }
+        let rootDescriptor = try openOwnerOnlyRoot()
         defer { Darwin.close(rootDescriptor) }
 
         let name = "support-bundle-\(UUID().uuidString).json"
@@ -160,22 +154,36 @@ struct SafeSupportBundleStore: Sendable {
         return rootDirectory.appendingPathComponent(name)
     }
 
-    private func ensureOwnerOnlyRoot() throws {
-        if mkdir(rootDirectory.path, 0o700) == 0 {
-            guard chmod(rootDirectory.path, 0o700) == 0 else {
+    private func openOwnerOnlyRoot() throws -> Int32 {
+        var rootDescriptor = open(
+            rootDirectory.path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        if rootDescriptor < 0 {
+            guard errno == ENOENT else {
                 throw SafeSupportBundleStoreError.unsafeRootDirectory
             }
-        } else if errno != EEXIST {
-            throw SafeSupportBundleStoreError.unsafeRootDirectory
+            guard mkdir(rootDirectory.path, 0o700) == 0 || errno == EEXIST else {
+                throw SafeSupportBundleStoreError.unsafeRootDirectory
+            }
+            rootDescriptor = open(
+                rootDirectory.path,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
         }
 
+        guard rootDescriptor >= 0 else {
+            throw SafeSupportBundleStoreError.unsafeRootDirectory
+        }
         var attributes = stat()
-        guard rootDirectory.path.withCString({ lstat($0, &attributes) }) == 0,
+        guard fstat(rootDescriptor, &attributes) == 0,
               (attributes.st_mode & S_IFMT) == S_IFDIR,
               attributes.st_uid == getuid(),
               (attributes.st_mode & 0o077) == 0 else {
+            Darwin.close(rootDescriptor)
             throw SafeSupportBundleStoreError.unsafeRootDirectory
         }
+        return rootDescriptor
     }
 
     private func writeAll(_ data: Data, to descriptor: Int32) throws {

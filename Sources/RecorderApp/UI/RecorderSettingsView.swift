@@ -320,6 +320,64 @@ struct RecorderSettingsView: View {
                         : "Generated transcription and meeting-intelligence diagnostic content is not persisted; empty compatibility files may remain."
                 ))
             }
+            Section("Data Retention") {
+                Toggle(
+                    "Automatically clean diagnostic files and old backups",
+                    isOn: Binding(
+                        get: { retentionEnabled },
+                        set: { enabled in
+                            if enabled {
+                                model.requestRetentionEnableConfirmation()
+                            } else {
+                                model.setRetentionEnabled(false)
+                            }
+                        }
+                    )
+                )
+                .accessibilityIdentifier(RecorderActionID.retentionToggle)
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: RecorderActionID.retentionToggle,
+                    label: "Automatically clean diagnostic files and old backups",
+                    onPress: {
+                        if retentionEnabled {
+                            model.setRetentionEnabled(false)
+                        } else {
+                            model.requestRetentionEnableConfirmation()
+                        }
+                    }
+                ))
+                Text(retentionStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(RecorderActionID.retentionStatus)
+                    .background(RecorderSettingsAccessibilityMarker(
+                        identifier: RecorderActionID.retentionStatus,
+                        label: retentionStatusText
+                    ))
+                if retentionEnabled {
+                    Text("Scope: transcription logs, failure diagnostics, and old diagnostic backups after 30 days. Legacy-run folders remain owned by the transcription publisher.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    let aggregate = model.retentionScanAggregate
+                    Text("Eligible: \(aggregate.eligible)  Skipped: \(aggregate.skipped)  Deleted: \(aggregate.deleted)  Errors: \(aggregate.errors)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .alert(
+                "Enable automatic diagnostic cleanup?",
+                isPresented: Binding(
+                    get: { model.retentionEnableConfirmationRequired },
+                    set: { visible in
+                        if !visible { model.cancelRetentionEnableConfirmation() }
+                    }
+                )
+            ) {
+                Button("Enable", role: .destructive, action: model.confirmRetentionEnabled)
+                Button("Cancel", role: .cancel, action: model.cancelRetentionEnableConfirmation)
+            } message: {
+                Text("Only listed diagnostic files and old backups are eligible. Recordings, transcripts, and recovery or publication data are never automatically deleted.")
+            }
             Label("Recording Storage", systemImage: "internaldrive")
                 .font(.headline)
             Text(destinationStatusText)
@@ -394,6 +452,17 @@ struct RecorderSettingsView: View {
         model.localRecorderControlEnabled
             ? "Local command-line control is enabled for this Mac."
             : "Local command-line control is off. Recording and microphone settings are unchanged."
+    }
+
+    private var retentionEnabled: Bool {
+        if case .enabled = model.recordingDataLifecyclePolicy.retention { return true }
+        return false
+    }
+
+    private var retentionStatusText: String {
+        retentionEnabled
+            ? "Retention is on for diagnostic files and old backups only. Recordings, transcripts, and recovery or publication data are not automatically deleted."
+            : "Off by default. No files are scanned or deleted."
     }
 
     private var destinationStatusText: String {

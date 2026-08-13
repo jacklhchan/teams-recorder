@@ -193,6 +193,23 @@ struct RecordingPendingStore: Sendable {
         try replaceMetadata(metadata, expected: loaded.observation, in: session, hooks: hooks)
     }
 
+    /// Retention may inspect metadata only through an already-admitted pending
+    /// session. Missing or malformed metadata is deliberately not treated as a
+    /// default value by this query: callers must skip that session.
+    func retentionMetadata(in session: RecordingPendingSession) throws -> RecordingSessionMetadata {
+        try validateRetainedSession(session)
+        var observed = stat()
+        let name = RecordingSessionMetadataStore.fileName
+        guard fstatat(session.fileDescriptor, name, &observed, AT_SYMLINK_NOFOLLOW) == 0 else {
+            throw RecordingPendingStoreError.unsafeSession
+        }
+        let metadata = try loadMetadata(in: session).metadata
+        guard metadata.schemaVersion == RecordingSessionMetadata.currentSchemaVersion else {
+            throw RecordingPendingStoreError.unsafeSession
+        }
+        return metadata
+    }
+
     private func replaceMetadata(
         _ value: RecordingSessionMetadata,
         expected: stat?,

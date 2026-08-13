@@ -1974,6 +1974,35 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
+    func testRetentionSettingsStayOffUntilExplicitConfirmation() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.storage-shortcuts"))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.retentionToggle))
+        XCTAssertFalse(fixture.model.retentionEnableConfirmationRequired)
+        XCTAssertTrue(host.pressAccessibilityElement(RecorderActionID.retentionToggle))
+        XCTAssertTrue(fixture.model.retentionEnableConfirmationRequired)
+        XCTAssertEqual(fixture.model.recordingDataLifecyclePolicy.retention, .disabled)
+
+        fixture.model.confirmRetentionEnabled()
+        XCTAssertFalse(fixture.model.retentionEnableConfirmationRequired)
+        XCTAssertEqual(
+            fixture.model.recordingDataLifecyclePolicy.retention,
+            .enabled(eligibleClasses: Set(RetainableArtifactClass.allCases), olderThanDays: 30)
+        )
+        host.select(.settings)
+        XCTAssertEqual(
+            host.accessibilityLabel(for: RecorderActionID.retentionStatus),
+            "Retention is on for diagnostic files and old backups only. Recordings, transcripts, and recovery or publication data are not automatically deleted."
+        )
+    }
+
     func testMinimumSettingsRendersCaptureAndTeamsControls() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(

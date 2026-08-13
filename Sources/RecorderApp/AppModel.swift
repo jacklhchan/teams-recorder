@@ -69,6 +69,8 @@ final class AppModel: ObservableObject {
     )
     @Published private(set) var privacyModeEnabled: Bool
     @Published private(set) var recordingDataLifecyclePolicy: RecordingDataLifecyclePolicy
+    @Published private(set) var retentionEnableConfirmationRequired = false
+    @Published private(set) var retentionScanAggregate = RecordingRetentionAggregate()
     @Published private(set) var localRecorderControlEnabled: Bool
     @Published var statusMessage = "Ready"
     @Published var lastHealthReport: RecordingHealthReport?
@@ -750,6 +752,54 @@ final class AppModel: ObservableObject {
             return
         }
         recordingDataLifecyclePolicy = candidate
+    }
+
+    func requestRetentionEnableConfirmation() {
+        guard case .disabled = recordingDataLifecyclePolicy.retention else { return }
+        retentionEnableConfirmationRequired = true
+    }
+
+    func cancelRetentionEnableConfirmation() {
+        retentionEnableConfirmationRequired = false
+    }
+
+    func confirmRetentionEnabled() {
+        guard retentionEnableConfirmationRequired else { return }
+        retentionEnableConfirmationRequired = false
+        setRetentionEnabled(true)
+    }
+
+    func setRetentionEnabled(_ enabled: Bool) {
+        let retention: RetentionPolicy = enabled
+            ? .enabled(
+                eligibleClasses: Set(RetainableArtifactClass.allCases),
+                olderThanDays: 30
+            )
+            : .disabled
+        guard recordingDataLifecyclePolicy.retention != retention else { return }
+        var candidate = recordingDataLifecyclePolicy
+        candidate.retention = retention
+        guard (try? recordingDataLifecyclePolicyStore.save(candidate)) != nil else { return }
+        recordingDataLifecyclePolicy = candidate
+        guard enabled else {
+            retentionScanAggregate = .init()
+            return
+        }
+        let scanner = RecordingRetentionScanner()
+        let result = scanner.scan(
+            policy: candidate,
+            publicationSnapshot: .init(),
+            pendingStore: pendingRecordingStore,
+            now: Date()
+        )
+        var aggregate = result.aggregate
+        for item in result.candidates {
+            switch scanner.delete(item) {
+            case .deleted: aggregate.deleted += 1
+            case .rejected: aggregate.errors += 1
+            }
+        }
+        retentionScanAggregate = aggregate
     }
 
     func setLocalRecorderControlEnabled(_ enabled: Bool) {

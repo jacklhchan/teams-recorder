@@ -58,7 +58,8 @@ final class AppModelControlAdapterTests: XCTestCase {
             microphone: microphone,
             outputFolder: folder,
             recorder: engine,
-            teamsAutoMeetingCoordinator: coordinator
+            teamsAutoMeetingCoordinator: coordinator,
+            appPaths: .init(homeDirectory: folder, applicationSupportRoot: folder)
         )
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
@@ -203,7 +204,7 @@ final class AppModelControlAdapterTests: XCTestCase {
         XCTAssertFalse(status.nativeInputMicMuted)
         XCTAssertTrue(status.effectiveMicMuted)
         XCTAssertEqual(status.teamsMicState, "notMonitored")
-        XCTAssertEqual(status.outputStorageState, "unavailable")
+        XCTAssertEqual(status.outputStorageState, "configured")
 
         let encoded = try String(decoding: JSONEncoder().encode(status), as: UTF8.self)
         for secret in ["/Users/private/meeting", "mic-secret-uid", "private.example", "prompt=secret", "token=abc"] {
@@ -301,7 +302,8 @@ final class AppModelControlAdapterTests: XCTestCase {
         outputFolder: URL = URL(fileURLWithPath: "/tmp", isDirectory: true),
         recorder: RecordingEngine? = nil,
         teamsAutoMeetingCoordinator: TeamsAutoMeetingCoordinator? = nil,
-        autoModeEnabled: Bool = false
+        autoModeEnabled: Bool = false,
+        appPaths: AppPaths = .live
     ) -> AppModel {
         let suiteName = "AppModelControlAdapterTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -309,6 +311,7 @@ final class AppModelControlAdapterTests: XCTestCase {
         defaults.set(autoModeEnabled, forKey: "teamsAutoMeetingEnabled")
         return AppModel(
             defaults: defaults,
+            appPaths: appPaths,
             recorder: recorder,
             inputDevices: { microphone.map { [$0] } ?? [] },
             defaultInputDeviceID: { microphone?.id },

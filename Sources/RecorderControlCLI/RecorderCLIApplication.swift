@@ -93,7 +93,7 @@ struct RecorderCLIApplication {
                 code: "unknown",
                 message: "Recorder rejected the operation."
             )
-            writeLine("error [\(error.code)]: \(error.message)")
+            writeLine(Self.safeServerErrorLine(error))
             return 4
         }
         guard let status = response.status else {
@@ -116,7 +116,7 @@ struct RecorderCLIApplication {
                     code: "unknown",
                     message: "Recorder rejected the operation."
                 )
-                writeLine("error [\(error.code)]: \(error.message)")
+                writeLine(Self.safeServerErrorLine(error))
                 return 4
             }
             guard let status = response.status else {
@@ -251,6 +251,16 @@ struct RecorderCLIApplication {
 
     private static func yesNo(_ value: Bool) -> String {
         value ? "yes" : "no"
+    }
+
+    private static func safeServerErrorLine(_ error: RecorderControlErrorPayload) -> String {
+        switch error.code {
+        case "unsupported_protocol": return "error [unsupported_protocol]: Unsupported protocol version."
+        case "invalid_argument": return "error [invalid_argument]: Invalid command argument."
+        case "operation-in-progress": return "error [operation-in-progress]: Recording finalization is in progress."
+        case "server_stopped": return "error [server_stopped]: Recorder control is unavailable."
+        default: return "error [control_failed]: Recorder control request failed."
+        }
     }
 }
 

@@ -290,6 +290,21 @@ final class RecorderCLIApplicationTests: XCTestCase {
         XCTAssertFalse(output.lines.joined().contains(SecretError().localizedDescription))
     }
 
+    func testUnknownServerErrorNeverRendersPayloadSecretsForStatusOrWatch() async {
+        let rejected = RecorderControlResponse(
+            protocolVersion: 1, requestID: "x", ok: false, status: nil,
+            error: .init(code: "token=abc", message: "/Users/private/meeting prompt=secret")
+        )
+        let output = OutputRecorder()
+        let application = makeApplication(client: FakeClient(results: [.success(rejected), .success(rejected)]), output: output)
+
+        let statusExitCode = await application.run(arguments: ["status"])
+        let watchExitCode = await application.run(arguments: ["watch"])
+        XCTAssertEqual(statusExitCode, 4)
+        XCTAssertEqual(watchExitCode, 4)
+        XCTAssertEqual(output.lines, ["error [control_failed]: Recorder control request failed.", "error [control_failed]: Recorder control request failed."])
+    }
+
     private func makeApplication(
         client: FakeClient,
         launcher: FakeLauncher = FakeLauncher(),

@@ -103,6 +103,19 @@ final class RecorderControlMessagesTests: XCTestCase {
         XCTAssertFalse(rendered.contains("private.example"))
     }
 
+    func testInvalidNewProjectionValuesDecodeToSafeFiniteValues() throws {
+        let data = Data(#"""
+        {"appRunning":true,"appVersion":"1","recordingState":"idle","lifecycleOperation":"none","activeRecordingStorageState":"/Users/private/meeting token=abc","operationStatusCode":"secret prompt=abc","autoModeEnabled":false,"autoMeetingState":"waiting","meetingDetectionState":"waiting","localMicMuted":false,"nativeInputMicMuted":false,"teamsMicState":"unknown","effectiveMicMuted":false,"virtualMicState":"ready","systemAudioPermission":"granted","microphonePermission":"granted","outputStorageState":"mic-secret-uid"}
+        """#.utf8)
+
+        let status = try JSONDecoder().decode(RecorderControlStatus.self, from: data)
+
+        XCTAssertEqual(status.activeRecordingStorageState, "inactive")
+        XCTAssertEqual(status.operationStatusCode, "attention")
+        XCTAssertEqual(status.outputStorageState, "unavailable")
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(status), as: UTF8.self).contains("secret"))
+    }
+
     private func roundTrip<Value: Codable>(_ value: Value) throws -> Value {
         try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(value))
     }

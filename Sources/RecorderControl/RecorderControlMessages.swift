@@ -91,8 +91,8 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         self.lifecycleOperation = lifecycleOperation
         self.recordingOwnership = recordingOwnership
         self.elapsedSeconds = elapsedSeconds
-        self.activeRecordingStorageState = activeRecordingStorageState
-        self.operationStatusCode = operationStatusCode
+        self.activeRecordingStorageState = Self.activeRecordingStorageState(activeRecordingStorageState)
+        self.operationStatusCode = Self.operationStatusCode(operationStatusCode)
         self.autoModeEnabled = autoModeEnabled
         self.autoMeetingState = autoMeetingState
         self.autoMeetingCountdownSeconds = autoMeetingCountdownSeconds
@@ -106,7 +106,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         self.virtualMicPublisherState = virtualMicPublisherState
         self.systemAudioPermission = systemAudioPermission
         self.microphonePermission = microphonePermission
-        self.outputStorageState = outputStorageState
+        self.outputStorageState = Self.outputStorageState(outputStorageState)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -127,10 +127,8 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         lifecycleOperation = try values.decode(String.self, forKey: .lifecycleOperation)
         recordingOwnership = try values.decodeIfPresent(String.self, forKey: .recordingOwnership)
         elapsedSeconds = try values.decodeIfPresent(Int.self, forKey: .elapsedSeconds)
-        activeRecordingStorageState = try values.decodeIfPresent(String.self, forKey: .activeRecordingStorageState)
-            ?? "inactive"
-        operationStatusCode = try values.decodeIfPresent(String.self, forKey: .operationStatusCode)
-            ?? Self.legacyOperationStatusCode(recordingState: recordingState, lifecycleOperation: lifecycleOperation)
+        activeRecordingStorageState = Self.activeRecordingStorageState(try values.decodeIfPresent(String.self, forKey: .activeRecordingStorageState) ?? "inactive")
+        operationStatusCode = Self.operationStatusCode(try values.decodeIfPresent(String.self, forKey: .operationStatusCode) ?? Self.legacyOperationStatusCode(recordingState: recordingState, lifecycleOperation: lifecycleOperation))
         autoModeEnabled = try values.decode(Bool.self, forKey: .autoModeEnabled)
         autoMeetingState = try values.decode(String.self, forKey: .autoMeetingState)
         autoMeetingCountdownSeconds = try values.decodeIfPresent(Int.self, forKey: .autoMeetingCountdownSeconds)
@@ -144,8 +142,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         virtualMicPublisherState = try values.decodeIfPresent(String.self, forKey: .virtualMicPublisherState)
         systemAudioPermission = try values.decode(String.self, forKey: .systemAudioPermission)
         microphonePermission = try values.decode(String.self, forKey: .microphonePermission)
-        outputStorageState = try values.decodeIfPresent(String.self, forKey: .outputStorageState)
-            ?? "unavailable"
+        outputStorageState = Self.outputStorageState(try values.decodeIfPresent(String.self, forKey: .outputStorageState) ?? "unavailable")
     }
 
     private static func legacyOperationStatusCode(
@@ -157,6 +154,11 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         if lifecycleOperation == "stop" { return "stopping" }
         return "idle"
     }
+
+    private static func activeRecordingStorageState(_ value: String) -> String { value == "active" ? "active" : "inactive" }
+    private static func outputStorageState(_ value: String) -> String { ["configured", "needsFolderAccess", "unavailable"].contains(value) ? value : "unavailable" }
+    private static func operationStatusCode(_ value: String) -> String { ["idle", "recording", "starting", "stopping", "saved", "attention"].contains(value) ? value : "attention" }
+
 }
 
 public struct RecorderControlResponse: Codable, Equatable, Sendable {

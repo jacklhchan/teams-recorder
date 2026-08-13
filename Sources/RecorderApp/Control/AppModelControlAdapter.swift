@@ -145,9 +145,11 @@ final class AppModelControlAdapter {
     }
 
     private func outputStorageState() -> String {
-        let path = model.outputFolder.path
-        guard FileManager.default.fileExists(atPath: path) else { return "unavailable" }
-        return FileManager.default.isWritableFile(atPath: path) ? "configured" : "needsFolderAccess"
+        switch model.recordingDestinationState {
+        case .ready: return "configured"
+        case .needsFolderAccess: return "needsFolderAccess"
+        case .unavailable: return "unavailable"
+        }
     }
 
     private func lifecycleOperation() -> String {

@@ -171,19 +171,20 @@ final class AppModelControlAdapterTests: XCTestCase {
         }
     }
 
-    func testStatusProjectsControlSafeAppState() async throws {
+    func testStatusProjectsControlSafeAppStateWithoutSensitiveDetails() async throws {
         let microphone = AudioDevice(
             id: 7,
-            uid: "control-mic",
+            uid: "mic-secret-uid",
             name: "Control Microphone",
             manufacturer: "Tests",
             channelCount: 1
         )
-        let output = URL(fileURLWithPath: "/tmp/recorder-control-output", isDirectory: true)
+        let output = URL(fileURLWithPath: "/Users/private/meeting", isDirectory: true)
         let model = makeModel(microphone: microphone, outputFolder: output)
         model.systemAudioPermission = .granted
         model.microphonePermission = .granted
         model.setRecorderMicMuted(true)
+        model.statusMessage = "provider=https://private.example prompt=secret token=abc"
 
         let response = await AppModelControlAdapter(model: model).handle(.init(
             requestID: "status-1", command: .status
@@ -192,17 +193,22 @@ final class AppModelControlAdapterTests: XCTestCase {
 
         XCTAssertTrue(response.ok)
         XCTAssertEqual(status.selectedMicrophoneName, "Control Microphone")
-        XCTAssertEqual(status.selectedMicrophoneUID, "control-mic")
+        XCTAssertEqual(status.activeRecordingStorageState, "inactive")
+        XCTAssertEqual(status.operationStatusCode, "idle")
         XCTAssertEqual(status.systemAudioPermission, "granted")
         XCTAssertEqual(status.microphonePermission, "granted")
         XCTAssertFalse(status.autoModeEnabled)
         XCTAssertNil(status.recordingOwnership)
-        XCTAssertNil(status.activeRecordingFolder)
         XCTAssertTrue(status.localMicMuted)
         XCTAssertFalse(status.nativeInputMicMuted)
         XCTAssertTrue(status.effectiveMicMuted)
         XCTAssertEqual(status.teamsMicState, "notMonitored")
-        XCTAssertEqual(status.outputFolder, output.path)
+        XCTAssertEqual(status.outputStorageState, "unavailable")
+
+        let encoded = try String(decoding: JSONEncoder().encode(status), as: UTF8.self)
+        for secret in ["/Users/private/meeting", "mic-secret-uid", "private.example", "prompt=secret", "token=abc"] {
+            XCTAssertFalse(encoded.contains(secret))
+        }
     }
 
     func testStatusProjectsCountdownSecondsOnlyDuringCountdowns() async throws {

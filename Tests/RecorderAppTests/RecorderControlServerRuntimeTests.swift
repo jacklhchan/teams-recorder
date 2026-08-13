@@ -47,7 +47,7 @@ final class RecorderControlServerRuntimeTests: XCTestCase {
 
         XCTAssertEqual(response.requestID, "runtime-status")
         XCTAssertTrue(response.ok)
-        XCTAssertEqual(response.status?.outputFolder, outputFolder.path)
+        XCTAssertEqual(response.status?.outputStorageState, "configured")
 
         runtime.shutdown()
 

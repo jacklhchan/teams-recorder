@@ -148,7 +148,9 @@ final class RecorderCLIApplicationTests: XCTestCase {
         XCTAssertFalse(
             output.lines.contains { $0.hasPrefix("Teams mic state:") }
         )
-        XCTAssertEqual(output.lines.last, "Output folder: /tmp/Recordings")
+        XCTAssertTrue(output.lines.contains("Active recording storage: inactive"))
+        XCTAssertTrue(output.lines.contains("Operation status: idle"))
+        XCTAssertTrue(output.lines.contains("Output storage: configured"))
     }
 
     func testJSONStatusUsesSortedKeysAndEncodesStatusDirectly() async {
@@ -162,7 +164,7 @@ final class RecorderCLIApplicationTests: XCTestCase {
 
         XCTAssertEqual(exitCode, 0)
         XCTAssertEqual(output.lines.count, 1)
-        XCTAssertTrue(output.lines[0].hasPrefix("{\"appRunning\":"))
+        XCTAssertTrue(output.lines[0].hasPrefix("{\"activeRecordingStorageState\":"))
         XCTAssertEqual(
             try? JSONDecoder().decode(
                 RecorderControlStatus.self,
@@ -188,8 +190,8 @@ final class RecorderCLIApplicationTests: XCTestCase {
     }
 
     func testWatchJSONEmitsFirstAndOnlyLaterChangedStatuses() async {
-        let first = makeStatus(statusMessage: "Ready")
-        let changed = makeStatus(statusMessage: "Recording")
+        let first = makeStatus(operationStatusCode: "idle")
+        let changed = makeStatus(operationStatusCode: "recording")
         let client = FakeClient(results: [
             .success(makeResponse(status: first)),
             .success(makeResponse(status: first)),
@@ -247,6 +249,45 @@ final class RecorderCLIApplicationTests: XCTestCase {
         let exitCode = await task.value
         XCTAssertEqual(exitCode, 0)
         XCTAssertTrue(output.lines.isEmpty)
+    }
+
+    func testStatusNeverRendersSensitiveLegacyFields() async throws {
+        let sensitive = "/Users/private/meeting mic-secret-uid provider=https://private.example prompt=secret token=abc"
+        let status = makeStatus(
+            selectedMicrophoneName: "Studio Mic",
+            operationStatusCode: "attention"
+        )
+        let output = OutputRecorder()
+        let application = makeApplication(
+            client: FakeClient(results: [
+                .success(makeResponse(status: status)),
+                .success(makeResponse(status: status))
+            ]),
+            output: output
+        )
+
+        _ = await application.run(arguments: ["status"])
+        _ = await application.run(arguments: ["status", "--json"])
+
+        let rendered = output.lines.joined(separator: "\n")
+        XCTAssertFalse(rendered.contains(sensitive))
+        XCTAssertFalse(rendered.contains("/Users/private/meeting"))
+        XCTAssertFalse(rendered.contains("mic-secret-uid"))
+        XCTAssertFalse(rendered.contains("private.example"))
+    }
+
+    func testUnexpectedFallbackErrorRendersFixedSafeMessage() async {
+        let output = OutputRecorder()
+        let application = makeApplication(
+            client: FakeClient(results: [.failure(SecretError())]),
+            output: output
+        )
+
+        let exitCode = await application.run(arguments: ["status"])
+
+        XCTAssertEqual(exitCode, 3)
+        XCTAssertEqual(output.lines, ["error: Recorder control transport failed: unexpected transport error."])
+        XCTAssertFalse(output.lines.joined().contains(SecretError().localizedDescription))
     }
 
     private func makeApplication(
@@ -359,7 +400,8 @@ private func makeResponse(status: RecorderControlStatus) -> RecorderControlRespo
 }
 
 private func makeStatus(
-    statusMessage: String = "Ready",
+    selectedMicrophoneName: String? = "Studio Mic",
+    operationStatusCode: String = "idle",
     virtualMicPublisherState: String? = "unavailable"
 ) -> RecorderControlStatus {
     RecorderControlStatus(
@@ -369,14 +411,13 @@ private func makeStatus(
         lifecycleOperation: "idle",
         recordingOwnership: nil,
         elapsedSeconds: nil,
-        activeRecordingFolder: nil,
-        statusMessage: statusMessage,
+        activeRecordingStorageState: "inactive",
+        operationStatusCode: operationStatusCode,
         autoModeEnabled: false,
         autoMeetingState: "startCountdown",
         autoMeetingCountdownSeconds: 5,
         meetingDetectionState: "not-in-meeting",
-        selectedMicrophoneName: "Studio Mic",
-        selectedMicrophoneUID: "mic-1",
+        selectedMicrophoneName: selectedMicrophoneName,
         localMicMuted: false,
         nativeInputMicMuted: false,
         teamsMicState: "notMonitored",
@@ -385,6 +426,10 @@ private func makeStatus(
         virtualMicPublisherState: virtualMicPublisherState,
         systemAudioPermission: "granted",
         microphonePermission: "granted",
-        outputFolder: "/tmp/Recordings"
+        outputStorageState: "configured"
     )
+}
+
+private struct SecretError: LocalizedError {
+    var errorDescription: String? { "transport secret /Users/private/meeting token=abc" }
 }

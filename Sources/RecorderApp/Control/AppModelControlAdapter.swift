@@ -106,15 +106,13 @@ final class AppModelControlAdapter {
             lifecycleOperation: lifecycleOperation(),
             recordingOwnership: recordingOwnership(),
             elapsedSeconds: elapsedSeconds(),
-            activeRecordingFolder: model.recorder.outputFolder?.path,
-            statusMessage: model.statusMessage,
+            activeRecordingStorageState: model.recorder.outputFolder == nil ? "inactive" : "active",
+            operationStatusCode: operationStatusCode(),
             autoModeEnabled: model.teamsAutoMeetingEnabled,
             autoMeetingState: autoMeetingState(),
             autoMeetingCountdownSeconds: autoMeetingCountdownSeconds(),
             meetingDetectionState: meetingDetectionState(),
             selectedMicrophoneName: model.selectedMicDevice?.name,
-            selectedMicrophoneUID: model.selectedMicDevice?.uid
-                ?? model.selectedMicrophoneUID,
             localMicMuted: snapshot.localMuted,
             nativeInputMicMuted: snapshot.nativeInputMuted,
             teamsMicState: "notMonitored",
@@ -123,7 +121,7 @@ final class AppModelControlAdapter {
             virtualMicPublisherState: virtualMicPublisherState(),
             systemAudioPermission: permission(model.systemAudioPermission),
             microphonePermission: permission(model.microphonePermission),
-            outputFolder: model.outputFolder.path
+            outputStorageState: outputStorageState()
         )
     }
 
@@ -131,6 +129,25 @@ final class AppModelControlAdapter {
         if model.recorder.isRecording { return "recording" }
         if model.recorder.isMonitoring { return "monitoring" }
         return "idle"
+    }
+
+    private func operationStatusCode() -> String {
+        if model.recorder.isRecording { return "recording" }
+        switch model.recordingLifecycleOperation {
+        case .start: return "starting"
+        case .stop: return "stopping"
+        default: break
+        }
+        switch model.teamsAutoMeetingState {
+        case .startBlocked, .startFailed: return "attention"
+        default: return "idle"
+        }
+    }
+
+    private func outputStorageState() -> String {
+        let path = model.outputFolder.path
+        guard FileManager.default.fileExists(atPath: path) else { return "unavailable" }
+        return FileManager.default.isWritableFile(atPath: path) ? "configured" : "needsFolderAccess"
     }
 
     private func lifecycleOperation() -> String {

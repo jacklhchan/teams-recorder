@@ -77,7 +77,7 @@ struct RecorderCLIApplication {
             writeLine("error: \(error.message)")
             return 3
         } catch {
-            writeLine("error: \(error.localizedDescription)")
+            writeLine("error: Recorder control failed.")
             return 3
         }
     }
@@ -151,7 +151,7 @@ struct RecorderCLIApplication {
             try Task.checkCancellation()
         } catch {
             try Task.checkCancellation()
-            throw RecorderCLIApplicationError.launchFailed(error.localizedDescription)
+            throw RecorderCLIApplicationError.launchFailed
         }
 
         let deadline = clock.now + 5
@@ -203,7 +203,7 @@ struct RecorderCLIApplication {
         if let error = error as? POSIXError {
             return "POSIX error \(error.code.rawValue)."
         }
-        return String(describing: error)
+        return "unexpected transport error."
     }
 
     private func render(_ status: RecorderControlStatus, json: Bool) throws {
@@ -231,14 +231,13 @@ struct RecorderCLIApplication {
             "Lifecycle operation: \(status.lifecycleOperation)",
             "Recording ownership: \(status.recordingOwnership ?? "-")",
             "Elapsed seconds: \(status.elapsedSeconds.map(String.init) ?? "-")",
-            "Active recording folder: \(status.activeRecordingFolder ?? "-")",
-            "Status message: \(status.statusMessage)",
+            "Active recording storage: \(status.activeRecordingStorageState)",
+            "Operation status: \(status.operationStatusCode)",
             "Auto Mode enabled: \(yesNo(status.autoModeEnabled))",
             "Auto meeting state: \(status.autoMeetingState)",
             "Auto meeting countdown seconds: \(status.autoMeetingCountdownSeconds.map(String.init) ?? "-")",
             "Meeting detection: \(status.meetingDetectionState)",
             "Selected microphone: \(status.selectedMicrophoneName ?? "-")",
-            "Selected microphone UID: \(status.selectedMicrophoneUID ?? "-")",
             "Recorder mic muted: \(yesNo(status.localMicMuted))",
             "Native input mic muted: \(yesNo(status.nativeInputMicMuted))",
             "Effective mic muted: \(yesNo(status.effectiveMicMuted))",
@@ -246,7 +245,7 @@ struct RecorderCLIApplication {
             "Virtual Mic publisher: \(status.virtualMicPublisherState ?? "unknown")",
             "System Audio permission: \(status.systemAudioPermission)",
             "Microphone permission: \(status.microphonePermission)",
-            "Output folder: \(status.outputFolder)"
+            "Output storage: \(status.outputStorageState)"
         ]
     }
 
@@ -273,7 +272,7 @@ enum RecorderCLIEntrypoint {
             let application = try makeApplication()
             return await application.run(command: command)
         } catch {
-            writeLine("error: \(error.localizedDescription)")
+            writeLine("error: Recorder control failed.")
             return 3
         }
     }
@@ -281,7 +280,7 @@ enum RecorderCLIEntrypoint {
 
 private enum RecorderCLIApplicationError: Error {
     case startupTimedOut
-    case launchFailed(String)
+    case launchFailed
     case transportFailed(String)
     case missingStatus
     case invalidJSON
@@ -290,8 +289,8 @@ private enum RecorderCLIApplicationError: Error {
         switch self {
         case .startupTimedOut:
             return "Recorder app did not become ready within 5 seconds."
-        case let .launchFailed(message):
-            return "Unable to launch Recorder app: \(message)"
+        case .launchFailed:
+            return "Unable to launch Recorder app."
         case let .transportFailed(message):
             return "Recorder control transport failed: \(message)"
         case .missingStatus:

@@ -44,14 +44,13 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
     public let lifecycleOperation: String
     public let recordingOwnership: String?
     public let elapsedSeconds: Int?
-    public let activeRecordingFolder: String?
-    public let statusMessage: String
+    public let activeRecordingStorageState: String
+    public let operationStatusCode: String
     public let autoModeEnabled: Bool
     public let autoMeetingState: String
     public let autoMeetingCountdownSeconds: Int?
     public let meetingDetectionState: String
     public let selectedMicrophoneName: String?
-    public let selectedMicrophoneUID: String?
     public let localMicMuted: Bool
     public let nativeInputMicMuted: Bool
     public let teamsMicState: String
@@ -60,7 +59,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
     public let virtualMicPublisherState: String?
     public let systemAudioPermission: String
     public let microphonePermission: String
-    public let outputFolder: String
+    public let outputStorageState: String
 
     public init(
         appRunning: Bool,
@@ -69,14 +68,13 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         lifecycleOperation: String,
         recordingOwnership: String?,
         elapsedSeconds: Int?,
-        activeRecordingFolder: String?,
-        statusMessage: String,
+        activeRecordingStorageState: String,
+        operationStatusCode: String,
         autoModeEnabled: Bool,
         autoMeetingState: String,
         autoMeetingCountdownSeconds: Int? = nil,
         meetingDetectionState: String,
         selectedMicrophoneName: String?,
-        selectedMicrophoneUID: String?,
         localMicMuted: Bool,
         nativeInputMicMuted: Bool,
         teamsMicState: String,
@@ -85,7 +83,7 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         virtualMicPublisherState: String? = nil,
         systemAudioPermission: String,
         microphonePermission: String,
-        outputFolder: String
+        outputStorageState: String
     ) {
         self.appRunning = appRunning
         self.appVersion = appVersion
@@ -93,14 +91,13 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         self.lifecycleOperation = lifecycleOperation
         self.recordingOwnership = recordingOwnership
         self.elapsedSeconds = elapsedSeconds
-        self.activeRecordingFolder = activeRecordingFolder
-        self.statusMessage = statusMessage
+        self.activeRecordingStorageState = activeRecordingStorageState
+        self.operationStatusCode = operationStatusCode
         self.autoModeEnabled = autoModeEnabled
         self.autoMeetingState = autoMeetingState
         self.autoMeetingCountdownSeconds = autoMeetingCountdownSeconds
         self.meetingDetectionState = meetingDetectionState
         self.selectedMicrophoneName = selectedMicrophoneName
-        self.selectedMicrophoneUID = selectedMicrophoneUID
         self.localMicMuted = localMicMuted
         self.nativeInputMicMuted = nativeInputMicMuted
         self.teamsMicState = teamsMicState
@@ -109,7 +106,56 @@ public struct RecorderControlStatus: Codable, Equatable, Sendable {
         self.virtualMicPublisherState = virtualMicPublisherState
         self.systemAudioPermission = systemAudioPermission
         self.microphonePermission = microphonePermission
-        self.outputFolder = outputFolder
+        self.outputStorageState = outputStorageState
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case appRunning, appVersion, recordingState, lifecycleOperation, recordingOwnership
+        case elapsedSeconds, activeRecordingStorageState, operationStatusCode
+        case autoModeEnabled, autoMeetingState, autoMeetingCountdownSeconds
+        case meetingDetectionState, selectedMicrophoneName, localMicMuted
+        case nativeInputMicMuted, teamsMicState, effectiveMicMuted, virtualMicState
+        case virtualMicPublisherState, systemAudioPermission, microphonePermission
+        case outputStorageState
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        appRunning = try values.decode(Bool.self, forKey: .appRunning)
+        appVersion = try values.decode(String.self, forKey: .appVersion)
+        recordingState = try values.decode(String.self, forKey: .recordingState)
+        lifecycleOperation = try values.decode(String.self, forKey: .lifecycleOperation)
+        recordingOwnership = try values.decodeIfPresent(String.self, forKey: .recordingOwnership)
+        elapsedSeconds = try values.decodeIfPresent(Int.self, forKey: .elapsedSeconds)
+        activeRecordingStorageState = try values.decodeIfPresent(String.self, forKey: .activeRecordingStorageState)
+            ?? "inactive"
+        operationStatusCode = try values.decodeIfPresent(String.self, forKey: .operationStatusCode)
+            ?? Self.legacyOperationStatusCode(recordingState: recordingState, lifecycleOperation: lifecycleOperation)
+        autoModeEnabled = try values.decode(Bool.self, forKey: .autoModeEnabled)
+        autoMeetingState = try values.decode(String.self, forKey: .autoMeetingState)
+        autoMeetingCountdownSeconds = try values.decodeIfPresent(Int.self, forKey: .autoMeetingCountdownSeconds)
+        meetingDetectionState = try values.decode(String.self, forKey: .meetingDetectionState)
+        selectedMicrophoneName = try values.decodeIfPresent(String.self, forKey: .selectedMicrophoneName)
+        localMicMuted = try values.decode(Bool.self, forKey: .localMicMuted)
+        nativeInputMicMuted = try values.decode(Bool.self, forKey: .nativeInputMicMuted)
+        teamsMicState = try values.decode(String.self, forKey: .teamsMicState)
+        effectiveMicMuted = try values.decode(Bool.self, forKey: .effectiveMicMuted)
+        virtualMicState = try values.decode(String.self, forKey: .virtualMicState)
+        virtualMicPublisherState = try values.decodeIfPresent(String.self, forKey: .virtualMicPublisherState)
+        systemAudioPermission = try values.decode(String.self, forKey: .systemAudioPermission)
+        microphonePermission = try values.decode(String.self, forKey: .microphonePermission)
+        outputStorageState = try values.decodeIfPresent(String.self, forKey: .outputStorageState)
+            ?? "unavailable"
+    }
+
+    private static func legacyOperationStatusCode(
+        recordingState: String,
+        lifecycleOperation: String
+    ) -> String {
+        if recordingState == "recording" { return "recording" }
+        if lifecycleOperation == "start" { return "starting" }
+        if lifecycleOperation == "stop" { return "stopping" }
+        return "idle"
     }
 }
 

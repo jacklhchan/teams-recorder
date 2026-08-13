@@ -21,14 +21,13 @@ final class RecorderControlMessagesTests: XCTestCase {
             lifecycleOperation: "none",
             recordingOwnership: "app",
             elapsedSeconds: 42,
-            activeRecordingFolder: "/tmp/recording",
-            statusMessage: "Recording",
+            activeRecordingStorageState: "active",
+            operationStatusCode: "recording",
             autoModeEnabled: true,
             autoMeetingState: "inMeeting",
             autoMeetingCountdownSeconds: 5,
             meetingDetectionState: "detected",
             selectedMicrophoneName: "Built-in Microphone",
-            selectedMicrophoneUID: "builtin-mic",
             localMicMuted: false,
             nativeInputMicMuted: false,
             teamsMicState: "notMonitored",
@@ -37,7 +36,7 @@ final class RecorderControlMessagesTests: XCTestCase {
             virtualMicPublisherState: "ready",
             systemAudioPermission: "granted",
             microphonePermission: "granted",
-            outputFolder: "/tmp/output"
+            outputStorageState: "configured"
         )
         let response = RecorderControlResponse(
             protocolVersion: 1,
@@ -54,7 +53,7 @@ final class RecorderControlMessagesTests: XCTestCase {
         XCTAssertEqual(decoded.status?.virtualMicPublisherState, "ready")
     }
 
-    func testLegacyProtocolOneStatusWithoutNewKeysDecodes() throws {
+    func testLegacyProtocolOneStatusWithSensitiveFieldsDecodesToSafeProjection() throws {
         let legacyJSON = Data(#"""
         {
           "protocolVersion": 1,
@@ -65,10 +64,12 @@ final class RecorderControlMessagesTests: XCTestCase {
             "appVersion": "1.2.3",
             "recordingState": "idle",
             "lifecycleOperation": "none",
-            "statusMessage": "Ready",
+            "activeRecordingFolder": "/Users/private/meeting",
+            "statusMessage": "provider=https://private.example prompt=secret token=abc",
             "autoModeEnabled": false,
             "autoMeetingState": "waitingForMeeting",
             "meetingDetectionState": "waiting",
+            "selectedMicrophoneUID": "mic-secret-uid",
             "localMicMuted": false,
             "nativeInputMicMuted": false,
             "teamsMicState": "unknown",
@@ -92,6 +93,14 @@ final class RecorderControlMessagesTests: XCTestCase {
         XCTAssertEqual(status.autoMeetingState, "waitingForMeeting")
         XCTAssertNil(status.autoMeetingCountdownSeconds)
         XCTAssertNil(status.virtualMicPublisherState)
+        XCTAssertEqual(status.activeRecordingStorageState, "inactive")
+        XCTAssertEqual(status.operationStatusCode, "idle")
+        XCTAssertEqual(status.outputStorageState, "unavailable")
+
+        let rendered = try String(decoding: JSONEncoder().encode(status), as: UTF8.self)
+        XCTAssertFalse(rendered.contains("/Users/private/meeting"))
+        XCTAssertFalse(rendered.contains("mic-secret-uid"))
+        XCTAssertFalse(rendered.contains("private.example"))
     }
 
     private func roundTrip<Value: Codable>(_ value: Value) throws -> Value {

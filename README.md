@@ -48,6 +48,16 @@ If your global `xcode-select` points to Command Line Tools but Xcode is installe
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./scripts/run-app.sh
 ```
 
+## Local Control Status
+
+`recorderctl status` and `recorderctl watch` provide a deliberately limited
+local-control snapshot. Their human and JSON output include typed recorder,
+Auto Mode, mute, virtual-microphone, permission, and selected microphone display
+name state. Absolute recording/output paths, microphone UIDs, provider settings,
+prompts, transcripts, credentials, bookmark data, and arbitrary app status text
+are intentionally omitted. Storage is reported only as a finite state and
+operation status uses a fixed code.
+
 ## Build and Release
 
 The commands in this section are build-only checks. They create local `.build`

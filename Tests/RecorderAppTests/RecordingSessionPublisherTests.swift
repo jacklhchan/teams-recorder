@@ -491,6 +491,7 @@ final class RecordingSessionPublisherTests: XCTestCase {
         opener.release()
         await fulfillment(of: [opener.returned], timeout: 1)
         let descriptor = try XCTUnwrap(opener.returnedDescriptor)
+        XCTAssertGreaterThanOrEqual(descriptor, 0, "The late opener must return a real descriptor")
         XCTAssertEqual(fcntl(descriptor, F_GETFD), -1)
         XCTAssertEqual(errno, EBADF, "The late positive descriptor must be closed by the timed-out request")
         XCTAssertTrue(fixture.destinationIsEmpty)
@@ -582,6 +583,7 @@ private final class BlockingDestinationOpener: @unchecked Sendable {
     }
 
     func open(parent: Int32, name: String, flags: Int32) -> Int32 {
+        defer { returned.fulfill() }
         lock.lock()
         calls += 1
         let call = calls
@@ -589,7 +591,6 @@ private final class BlockingDestinationOpener: @unchecked Sendable {
         if call == 1 { firstStarted.fulfill() }
         if call == 2 { secondStarted.fulfill() }
         releaseSignal.wait()
-        returned.fulfill()
         return openat(parent, name, flags)
     }
 
@@ -642,7 +643,7 @@ private final class LateDescriptorOpener: @unchecked Sendable {
         defer { returned.fulfill() }
         started.fulfill()
         releaseSignal.wait()
-        let opened = openat(parent, name, flags)
+        let opened = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         lock.lock()
         descriptor = opened
         lock.unlock()

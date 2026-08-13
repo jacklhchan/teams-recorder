@@ -88,6 +88,10 @@ final class TranscriptionFeatureModel: ObservableObject {
 
     func cancel() { coordinator.cancel() }
 
+    func cancelForPrivacyMode() {
+        coordinator.cancelForPrivacyMode()
+    }
+
     func advanceWorkspacePublicationFence(to fence: WorkspacePublicationFence) {
         coordinator.advanceWorkspacePublicationFence(to: fence)
     }

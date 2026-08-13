@@ -270,6 +270,31 @@ final class TranscriptionJobCoordinator: ObservableObject {
         )
     }
 
+    func cancelForPrivacyMode() {
+        guard let session = activeSession else { return }
+        generation &+= 1
+        task?.cancel()
+        task = nil
+        activeAttempt = nil
+        activeSession = nil
+        cancellationRequested = true
+        transcribingSessionID = nil
+        transcriptionStatus = "Transcription cancelled"
+        lastTranscriptionSessionID = session.id
+        lastTranscriptionStatus = transcriptionStatus
+        lastTranscriptionDidFail = false
+        updateState(
+            .init(
+                phase: .cancelled,
+                message: transcriptionStatus,
+                startedAt: transcriptionStatesBySessionID[session.id]?.startedAt ?? Date(),
+                finishedAt: Date()
+            ),
+            for: session
+        )
+        publishGlobalStatus(transcriptionStatus)
+    }
+
     func shutdown() {
         generation &+= 1
         cancellationRequested = true

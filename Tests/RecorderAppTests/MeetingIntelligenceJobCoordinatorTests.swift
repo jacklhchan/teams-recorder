@@ -803,6 +803,39 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.coordinator.presentation(for: fixture.session).phase, .cancelled)
     }
 
+    func testPrivacyCancellationMakesLateGeneratorReturnInertAndRetainsExistingArtifact() async throws {
+        let entered = expectation(description: "generator entered")
+        let finished = expectation(description: "late generator completed")
+        let gate = GenerationGate()
+        let generator = BlockingCoordinatorGenerator(
+            entered: entered,
+            finished: finished,
+            gate: gate
+        )
+        let fixture = try CoordinatorFixture(availability: .confirmed, generatorOverride: generator)
+        let artifact = fixture.artifact(revision: fixture.reader.snapshot.revision)
+        fixture.artifactStore.loaded = artifact
+        fixture.coordinator.reload(sessions: [fixture.session])
+        await fixture.waitForIdle()
+
+        fixture.coordinator.generate(for: fixture.session)
+        await fulfillment(of: [entered], timeout: 1)
+        fixture.coordinator.cancelThirdPartyProcessingForPrivacyMode()
+        await gate.release()
+        await fulfillment(of: [finished], timeout: 1)
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.requests, 0)
+        XCTAssertEqual(
+            fixture.coordinator.presentation(for: fixture.session).unavailableReason,
+            .privacyModeEnabled
+        )
+        XCTAssertEqual(
+            fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact,
+            artifact
+        )
+    }
+
     func testCancelledTerminalStateWinsAfterQueuedGeneratingWrite() async throws {
         let entered = expectation(description: "generating state save entered")
         let release = DispatchSemaphore(value: 0)

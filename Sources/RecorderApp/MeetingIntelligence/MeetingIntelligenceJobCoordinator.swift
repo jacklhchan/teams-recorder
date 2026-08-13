@@ -247,6 +247,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private let now: DateNow
 
     private var tasksBySessionID: [RecordingSession.ID: Task<Void, Never>] = [:]
+    /// Tasks in this set may contact a provider. `tasksBySessionID` also owns
+    /// local title/observation work, which Privacy Mode must not cancel.
+    private var thirdPartyTaskSessionIDs = Set<RecordingSession.ID>()
     private var editTasksBySessionID: [RecordingSession.ID: Task<MeetingIntelligenceEditSaveOutcome, Never>] = [:]
     private var editTicketsBySessionID: [RecordingSession.ID: Ticket] = [:]
     private var cancelledEditTicketsBySessionID: [RecordingSession.ID: Ticket] = [:]
@@ -366,6 +369,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             for: session,
             workspaceFence: event.workspaceFence
         )
+        thirdPartyTaskSessionIDs.insert(sessionID)
         tasksBySessionID[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: session) }
@@ -381,6 +385,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             return
         }
         let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
+        thirdPartyTaskSessionIDs.insert(canonicalSession.id)
         tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: canonicalSession) }
@@ -472,11 +477,24 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         }
     }
 
+    /// Cancels only provider egress work. Local artifact editing retains its
+    /// distinct task/ticket ownership and may finish normally.
+    func cancelThirdPartyProcessingForPrivacyMode() {
+        guard !isShutDown else { return }
+        for sessionID in Array(thirdPartyTaskSessionIDs) {
+            invalidateThirdPartyWork(for: sessionID)
+            if let session = sessionsByID[sessionID] {
+                setPrivacyModeUnavailable(for: session)
+            }
+        }
+    }
+
     func transcriptDidSave(_ session: RecordingSession) {
         guard !isShutDown, let canonicalSession = canonicalSession(for: session) else { return }
         sessionsByID[canonicalSession.id] = canonicalSession
         invalidateWork(for: canonicalSession.id)
         let ticket = replaceWork(for: canonicalSession)
+        thirdPartyTaskSessionIDs.remove(canonicalSession.id)
         tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: canonicalSession) }
@@ -534,6 +552,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         guard !isShutDown, let applier = titleApplier,
               let canonicalSession = canonicalSession(for: session) else { return }
         let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
+        thirdPartyTaskSessionIDs.remove(canonicalSession.id)
         tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: canonicalSession) }
@@ -576,6 +595,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             invalidateWork(for: id)
         }
         tasksBySessionID.removeAll()
+        thirdPartyTaskSessionIDs.removeAll()
         attemptsBySessionID.removeAll()
         leasesBySessionID.removeAll()
         cancelledSessionIDs.removeAll()
@@ -594,6 +614,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             invalidateWork(for: id)
         }
         tasksBySessionID.removeAll()
+        thirdPartyTaskSessionIDs.removeAll()
         // Keep the counters across a workspace cutover. A user can later
         // switch back to the same folder, whose IO actor has already observed
         // a higher generation; resetting to one would permanently reject all
@@ -666,6 +687,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
             return
         }
         let ticket = replaceWork(for: canonicalSession, workspaceFence: workspaceFence)
+        thirdPartyTaskSessionIDs.insert(canonicalSession.id)
         tasksBySessionID[canonicalSession.id] = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.clearTaskIfOwned(ticket, for: canonicalSession) }
@@ -1069,6 +1091,16 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         cancelledEditTicketsBySessionID.removeValue(forKey: sessionID)
         attemptsBySessionID.removeValue(forKey: sessionID)
         leasesBySessionID.removeValue(forKey: sessionID)
+        thirdPartyTaskSessionIDs.remove(sessionID)
+    }
+
+    private func invalidateThirdPartyWork(for sessionID: RecordingSession.ID) {
+        leasesBySessionID[sessionID]?.invalidate()
+        tasksBySessionID.removeValue(forKey: sessionID)?.cancel()
+        attemptsBySessionID.removeValue(forKey: sessionID)
+        leasesBySessionID.removeValue(forKey: sessionID)
+        nextWriteSequenceBySessionID.removeValue(forKey: sessionID)
+        thirdPartyTaskSessionIDs.remove(sessionID)
     }
 
     private func owns(_ ticket: Ticket, for session: RecordingSession) -> Bool {
@@ -1087,6 +1119,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private func clearTaskIfOwned(_ ticket: Ticket, for session: RecordingSession) {
         guard owns(ticket, for: session) else { return }
         tasksBySessionID.removeValue(forKey: session.id)
+        thirdPartyTaskSessionIDs.remove(session.id)
         attemptsBySessionID.removeValue(forKey: session.id)
         leasesBySessionID.removeValue(forKey: session.id)
         nextWriteSequenceBySessionID.removeValue(forKey: session.id)

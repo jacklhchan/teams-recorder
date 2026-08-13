@@ -118,6 +118,29 @@ final class TranscriptionFeatureModelTests: XCTestCase {
         feature.shutdown()
     }
 
+    func testPrivacyCancellationReleasesActiveAttemptForANewExplicitRequest() async throws {
+        let fixture = try FeatureFixture.make()
+        defer { fixture.remove() }
+        let preparer = FeatureBlockingPreparer()
+        let feature = fixture.makeFeature(preparer: preparer)
+        feature.setTranscriptURL(fixture.transcriptURL, for: fixture.session.id)
+
+        feature.start(session: fixture.session, providerIsConfigured: true)
+        await preparer.waitUntilStarted()
+        feature.cancelForPrivacyMode()
+
+        XCTAssertNil(feature.presentation.transcribingSessionID)
+        XCTAssertEqual(
+            feature.presentation.transcriptionStatesBySessionID[fixture.session.id]?.phase,
+            .cancelled
+        )
+        XCTAssertEqual(feature.presentation.transcriptURLsBySessionID[fixture.session.id], fixture.transcriptURL)
+
+        feature.start(session: fixture.session, providerIsConfigured: true)
+        await preparer.waitForStartCount(2)
+        feature.shutdown()
+    }
+
     func testProviderSaveDoesNotMutateActiveASRSnapshotAndLaterAttemptUsesSavedProfile() async throws {
         let fixture = try FeatureFixture.make()
         defer { fixture.remove() }

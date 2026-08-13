@@ -111,6 +111,11 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
         coordinator.cancel(sessionID: sessionID)
     }
 
+    func cancelThirdPartyProcessingForPrivacyMode() {
+        guard !isShutdown else { return }
+        coordinator.cancelThirdPartyProcessingForPrivacyMode()
+    }
+
     func applySuggestedTitle(for session: RecordingSession, workspaceFence: WorkspacePublicationFence = .initial) {
         guard !isShutdown else { return }
         coordinator.applySuggestedTitle(for: session, workspaceFence: workspaceFence)

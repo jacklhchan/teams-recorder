@@ -42,6 +42,20 @@ final class PrivacyModePolicyTests: XCTestCase {
         )
     }
 
+    func testRepeatedEnabledAssignmentPublishesOnlyOneEnabledTransition() {
+        let defaults = makeDefaults()
+        let policy = PrivacyModePolicy(defaults: defaults)
+        var transitions: [Bool] = []
+        let observation = policy.$isEnabled.dropFirst().sink { transitions.append($0) }
+        defer { observation.cancel() }
+
+        policy.setEnabled(true)
+        policy.setEnabled(true)
+        policy.setEnabled(false)
+
+        XCTAssertEqual(transitions, [true, false])
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "PrivacyModePolicyTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

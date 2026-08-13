@@ -538,6 +538,44 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.llmModel, "manual-llm")
     }
 
+    func testPrivacyModeBlocksAndCancelsConnectionWithoutLateProviderUIMutation() async {
+        let policy = PrivacyModePolicy(defaults: UserDefaults(suiteName: "provider-privacy-\(UUID().uuidString)")!)
+        let client = DeferredProviderClient()
+        let model = AIProviderSettingsModel(
+            repository: RecordingProviderRepository(hasAPIKey: true),
+            client: client,
+            thirdPartyProcessingAdmission: policy,
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+
+        policy.setEnabled(true)
+        await model.testConnection()
+        let blockedRequestCount = await client.requestCount()
+        XCTAssertEqual(blockedRequestCount, 0)
+        XCTAssertEqual(model.status, PrivacyModePolicy.localOnlyMessage)
+
+        policy.setEnabled(false)
+        let first = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+        model.cancelForPrivacyMode()
+        await client.completeNext(with: .success(.init(supportsModelDiscovery: true, models: ["late"])))
+        await first.value
+
+        XCTAssertEqual(model.status, PrivacyModePolicy.localOnlyMessage)
+        XCTAssertTrue(model.discoveredModels.isEmpty)
+        XCTAssertFalse(model.isTesting)
+
+        let second = Task { await model.testConnection() }
+        await client.waitForRequestCount(2)
+        await client.completeNext(with: .success(.init(supportsModelDiscovery: true, models: ["fresh"])))
+        await second.value
+        XCTAssertEqual(model.discoveredModels, ["fresh"])
+    }
+
     func testStartupMigrationFailureIsRedactedAndLeavesManualSetupUsable() {
         let repository = RecordingProviderRepository(
             migrationError: NSError(domain: "legacy-secret", code: 1)
@@ -930,6 +968,8 @@ private actor DeferredProviderClient: ProviderConnectionTesting {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
     }
+
+    func requestCount() -> Int { requestsStarted }
 
     func completeNext(
         with result: Result<ProviderConnectionReport, Error>

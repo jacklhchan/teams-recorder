@@ -429,6 +429,7 @@ final class AppModel: ObservableObject {
             )
         aiProviderSettingsModel = AIProviderSettingsModel(
             repository: activeProviderRepository,
+            thirdPartyProcessingAdmission: activePrivacyModePolicy,
             loadImmediately: false
         )
         let hasIndividualFeatureInjection = transcriptionFeatureFactory != nil
@@ -456,6 +457,8 @@ final class AppModel: ObservableObject {
                     == ObjectIdentifier(activePrivacyModePolicy)
                     && selectedFeatureBoundaries.meetingIntelligence
                         .thirdPartyProcessingAdmissionIdentity
+                        == ObjectIdentifier(activePrivacyModePolicy)
+                    && aiProviderSettingsModel.thirdPartyProcessingAdmissionIdentity
                         == ObjectIdentifier(activePrivacyModePolicy),
                 "Injected feature boundaries must share AppModel's Privacy Mode policy."
             )
@@ -589,8 +592,14 @@ final class AppModel: ObservableObject {
         activePrivacyModePolicy.$isEnabled
             .removeDuplicates()
             .sink { [weak self] enabled in
-                guard self?.privacyModeEnabled != enabled else { return }
-                self?.privacyModeEnabled = enabled
+                guard let self else { return }
+                if self.privacyModeEnabled != enabled {
+                    self.privacyModeEnabled = enabled
+                }
+                guard enabled else { return }
+                self.transcriptionFeature.cancelForPrivacyMode()
+                self.meetingIntelligenceFeature.cancelThirdPartyProcessingForPrivacyMode()
+                self.aiProviderSettingsModel.cancelForPrivacyMode()
             }
             .store(in: &cancellables)
         self.playbackFeature.onStatusMessage = { [weak self] message in
@@ -616,7 +625,9 @@ final class AppModel: ObservableObject {
                 thirdPartyProcessingAdmissionIdentity:
                     ObjectIdentifier(activePrivacyModePolicy)
             ) && aiProviderSettingsModel.providerRepositoryIdentity
-                == activeProviderRepository.compositionIdentity,
+                == activeProviderRepository.compositionIdentity
+                && aiProviderSettingsModel.thirdPartyProcessingAdmissionIdentity
+                    == ObjectIdentifier(activePrivacyModePolicy),
             "PR B boundaries and Provider Settings must share one provider repository, one mutation gate, one Privacy Mode policy, and compatible ASR/meeting-intelligence publication sources."
         )
         let bridge = PRBFeatureBridge(

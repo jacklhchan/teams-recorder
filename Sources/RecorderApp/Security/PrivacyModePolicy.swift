@@ -38,6 +38,7 @@ final class PrivacyModePolicy: ObservableObject, ThirdPartyProcessingAdmitting {
     }
 
     func setEnabled(_ enabled: Bool) {
+        guard isEnabled != enabled else { return }
         isEnabled = enabled
         defaults.set(enabled, forKey: Self.defaultsKey)
     }

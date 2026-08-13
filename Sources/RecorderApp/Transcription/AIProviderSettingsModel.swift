@@ -121,28 +121,39 @@ final class AIProviderSettingsModel: ObservableObject {
     /// target the same mutable repository observed by future ASR/MI jobs.
     let providerRepositoryIdentity: ObjectIdentifier
     private let client: any ProviderConnectionTesting
+    private let thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting
     private var drafts: [AIProviderKind: Draft] = [:]
     private var replacements: [AIProviderKind: String] = [:]
     private var savedKinds: Set<AIProviderKind> = []
     private var applyingDraft = false
     private var connectionTestGeneration: UInt64 = 0
+    private var connectionTestTask: Task<Void, Never>?
     private var providerSettingsSavedToken: UUID?
     private var providerSettingsSavedCallback: ((ProviderSettingsSaved) -> Void)?
 
     init(
         repository: any OpenAICompatibleProviderManaging,
         client: any ProviderConnectionTesting = OpenAICompatibleProviderClient(),
+        thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting =
+            AlwaysAllowThirdPartyProcessing.shared,
         loadImmediately: Bool = true,
         initialErrorStatus: String? = nil
     ) {
         self.repository = repository
         providerRepositoryIdentity = repository.compositionIdentity
         self.client = client
+        self.thirdPartyProcessingAdmission = thirdPartyProcessingAdmission
         if loadImmediately { reload() }
         if let initialErrorStatus {
             status = initialErrorStatus
             statusIsError = true
         }
+    }
+
+    /// Composition-only identity used to prove all provider egress boundaries
+    /// share AppModel's retained Privacy Mode policy.
+    var thirdPartyProcessingAdmissionIdentity: ObjectIdentifier {
+        ObjectIdentifier(thirdPartyProcessingAdmission as AnyObject)
     }
 
     func save() {
@@ -211,22 +222,58 @@ final class AIProviderSettingsModel: ObservableObject {
     }
 
     func testConnection() async {
-        let generation = beginConnectionTest()
-        do {
-            let snapshot = try repository.snapshot(overriding: draftProfile())
-            let report = try await client.testConnection(for: snapshot)
-            guard generation == connectionTestGeneration else { return }
-            discoveredModels = report.models
-            status = report.supportsModelDiscovery
-                ? "Connected; model list available"
-                : "Connected; enter models manually"
+        guard admitsThirdPartyProcessing() else {
+            isTesting = false
+            status = PrivacyModePolicy.localOnlyMessage
             statusIsError = false
-            isTesting = false
-        } catch {
-            guard generation == connectionTestGeneration else { return }
-            present(error)
-            isTesting = false
+            return
         }
+        let draft: OpenAICompatibleProviderProfile
+        do {
+            draft = try draftProfile()
+        } catch {
+            present(error)
+            return
+        }
+        let generation = beginConnectionTest()
+        let repository = repository
+        let client = client
+        let task = Task { @MainActor [weak self, repository, client] in
+            do {
+                guard let self,
+                      self.acceptsConnectionTestCompletion(generation) else { return }
+                let snapshot = try repository.snapshot(overriding: draft)
+                guard self.acceptsConnectionTestCompletion(generation) else { return }
+                let report = try await client.testConnection(for: snapshot)
+                guard !Task.isCancelled,
+                      self.acceptsConnectionTestCompletion(generation) else { return }
+                self.discoveredModels = report.models
+                self.status = report.supportsModelDiscovery
+                    ? "Connected; model list available"
+                    : "Connected; enter models manually"
+                self.statusIsError = false
+                self.isTesting = false
+                self.connectionTestTask = nil
+            } catch {
+                guard let self,
+                      !Task.isCancelled,
+                      self.acceptsConnectionTestCompletion(generation) else { return }
+                self.present(error)
+                self.isTesting = false
+                self.connectionTestTask = nil
+            }
+        }
+        connectionTestTask = task
+        await task.value
+    }
+
+    func cancelForPrivacyMode() {
+        connectionTestGeneration &+= 1
+        connectionTestTask?.cancel()
+        connectionTestTask = nil
+        isTesting = false
+        status = PrivacyModePolicy.localOnlyMessage
+        statusIsError = false
     }
 
     func performStartupMigration(settingsURL: URL) {
@@ -350,10 +397,20 @@ final class AIProviderSettingsModel: ObservableObject {
 
     private func invalidateConnectionTest() {
         guard !applyingDraft else { return }
+        connectionTestTask?.cancel()
+        connectionTestTask = nil
         connectionTestGeneration &+= 1
         isTesting = false
         discoveredModels = []
         status = "Not configured"
         statusIsError = false
+    }
+
+    private func admitsThirdPartyProcessing() -> Bool {
+        thirdPartyProcessingAdmission.admitThirdPartyProcessing() != .blockedLocalOnly
+    }
+
+    private func acceptsConnectionTestCompletion(_ generation: UInt64) -> Bool {
+        generation == connectionTestGeneration && admitsThirdPartyProcessing()
     }
 }

@@ -101,7 +101,12 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
     private static let maximumMarkerBytes: Int64 = 65_536
     private static let maximumDepth = 32
     private static let maximumEntries = 4_096
-    private static let destinationOpenExecutor = DispatchQueue(label: "RecorderApp.destination-open")
+    private static let destinationOpenExecutor: OperationQueue = {
+        let executor = OperationQueue()
+        executor.name = "RecorderApp.destination-open"
+        executor.maxConcurrentOperationCount = 2
+        return executor
+    }()
 
     private let pendingStore: RecordingPendingStore
     private let mediaValidator: MediaValidator
@@ -354,7 +359,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         let request = DestinationOpenRequest()
         return try await withCheckedThrowingContinuation { continuation in
             request.install(continuation)
-            Self.destinationOpenExecutor.async {
+            Self.destinationOpenExecutor.addOperation {
                 guard request.begin() else { return }
                 request.finish(descriptor: self.destinationOpener(parent, name, flags))
             }

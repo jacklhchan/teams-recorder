@@ -43,6 +43,7 @@ final class RecordingDestinationAccess: @unchecked Sendable {
 }
 
 struct RecordingDestinationBookmarkCodec: @unchecked Sendable {
+    let prefersSecurityScope: Bool
     let encodeScoped: (URL) throws -> Data
     let encodeStandard: (URL) throws -> Data
     let resolve: (Data, RecordingDestinationBookmarkKind) throws -> (url: URL, stale: Bool)
@@ -50,6 +51,9 @@ struct RecordingDestinationBookmarkCodec: @unchecked Sendable {
     let stopAccessing: (URL) -> Void
 
     static let live = RecordingDestinationBookmarkCodec(
+        prefersSecurityScope: ProcessInfo.processInfo.environment[
+            "APP_SANDBOX_CONTAINER_ID"
+        ] != nil,
         encodeScoped: { try $0.bookmarkData(options: [.withSecurityScope]) },
         encodeStandard: { try $0.bookmarkData(options: []) },
         resolve: { data, kind in
@@ -165,10 +169,15 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
         let path = normalizedPath(url)
         let bookmarkKind: RecordingDestinationBookmarkKind
         let bookmarkData: Data
-        do {
-            bookmarkData = try codec.encodeScoped(url)
-            bookmarkKind = .securityScoped
-        } catch {
+        if codec.prefersSecurityScope {
+            do {
+                bookmarkData = try codec.encodeScoped(url)
+                bookmarkKind = .securityScoped
+            } catch {
+                bookmarkData = try codec.encodeStandard(url)
+                bookmarkKind = .standard
+            }
+        } else {
             bookmarkData = try codec.encodeStandard(url)
             bookmarkKind = .standard
         }

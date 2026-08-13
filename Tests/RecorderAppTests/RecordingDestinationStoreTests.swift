@@ -40,6 +40,21 @@ final class RecordingDestinationStoreTests: XCTestCase {
         )
     }
 
+    func testNonSandboxedCodecSkipsSecurityScopedBookmarkEncoding() throws {
+        let defaults = UserDefaults(suiteName: #function + UUID().uuidString)!
+        let codec = DestinationBookmarkCodecSpy()
+        let store = RecordingDestinationStore(
+            defaults: defaults,
+            codec: codec.makeCodec(prefersSecurityScope: false)
+        )
+
+        try store.save(URL(fileURLWithPath: "/Users/test/Downloads", isDirectory: true))
+
+        XCTAssertEqual(codec.scopedEncodeCount, 0)
+        XCTAssertEqual(codec.standardEncodeCount, 1)
+        XCTAssertEqual(store.savedBookmarkKind, .standard)
+    }
+
     func testStaleBookmarkNeedsFolderAccessAndDoesNotFallBackToDownloads() throws {
         let fixture = DestinationStoreFixture()
         let selected = URL(fileURLWithPath: "/Volumes/OneDrive/Meeting Recording", isDirectory: true)
@@ -120,13 +135,20 @@ private final class DestinationBookmarkCodecSpy {
     var scopedEncodeError: Error?
     var resolvedURL: URL?
     var isStale = false
+    private(set) var scopedEncodeCount = 0
     private(set) var standardEncodeCount = 0
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
     var codec: RecordingDestinationBookmarkCodec {
+        makeCodec(prefersSecurityScope: true)
+    }
+
+    func makeCodec(prefersSecurityScope: Bool) -> RecordingDestinationBookmarkCodec {
         RecordingDestinationBookmarkCodec(
+            prefersSecurityScope: prefersSecurityScope,
             encodeScoped: { [weak self] url in
+                self?.scopedEncodeCount += 1
                 if let error = self?.scopedEncodeError {
                     throw error
                 }

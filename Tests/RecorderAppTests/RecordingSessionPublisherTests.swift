@@ -399,17 +399,28 @@ final class RecordingSessionPublisherTests: XCTestCase {
         XCTAssertTrue(fixture.destinationIsEmpty)
     }
 
-    func testSecondDestinationOpenSucceedsWhileFirstWorkerRemainsBlocked() async throws {
+    func testSecondPublishedValidationSucceedsWhileFirstWorkerRemainsBlocked() async throws {
         let opener = FirstOpenBlocksThenSucceedsOpener()
-        defer { opener.release() }
-        let fixture = try PublisherFixture(
+        let fixture = try PublisherFixture()
+        let published = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+        let validator = RecordingSessionPublisher(
+            pendingStore: fixture.store,
+            mediaValidator: { descriptor, _ in !readDescriptor(descriptor).isEmpty },
             destinationOpenDeadline: .milliseconds(50),
             destinationOpener: opener.open
         )
+        var publishedItem = fixture.item
+        publishedItem.state = .published
+        publishedItem.publishedFolderName = published.folderURL.lastPathComponent
+        publishedItem.publishedRecordingName = published.recordingURL.lastPathComponent
+        publishedItem.publishedSourceDevice = published.sourceDevice
+        publishedItem.publishedSourceInode = published.sourceInode
+        publishedItem.publishedSourceRootDevice = published.sourceRootDevice
+        publishedItem.publishedSourceRootInode = published.sourceRootInode
 
         let first = Task { () -> Error? in
             do {
-                _ = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+                _ = try await validator.validatePublished(item: publishedItem, destination: fixture.destination)
                 return nil
             } catch {
                 return error
@@ -417,17 +428,18 @@ final class RecordingSessionPublisherTests: XCTestCase {
         }
         await fulfillment(of: [opener.firstStarted], timeout: 1)
 
-        let second = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+        let second = try await validator.validatePublished(item: publishedItem, destination: fixture.destination)
         let firstError = await first.value
 
         XCTAssertEqual(second.itemID, fixture.item.id)
         XCTAssertEqual(firstError as? RecordingPublicationError, .destinationUnavailable)
         XCTAssertGreaterThan(opener.callCount, 1)
+        opener.release()
+        await fulfillment(of: [opener.returned], timeout: 1)
     }
 
     func testTimedOutDestinationOpenClosesItsRetainedParentDescriptorExactlyOnce() async throws {
-        let opener = BlockingDestinationOpener()
-        defer { opener.release() }
+        let opener = BlockingDestinationOpener(expectedReturns: 1)
         let closer = DestinationCloseObserver()
         let fixture = try PublisherFixture(
             destinationOpenDeadline: .milliseconds(50),
@@ -446,6 +458,8 @@ final class RecordingSessionPublisherTests: XCTestCase {
 
         XCTAssertEqual(error as? RecordingPublicationError, .destinationUnavailable)
         XCTAssertEqual(closer.closeCount, 1)
+        opener.release()
+        await fulfillment(of: [opener.returned], timeout: 1)
     }
 }
 
@@ -517,14 +531,15 @@ private final class PublisherFixture {
 private final class BlockingDestinationOpener: @unchecked Sendable {
     let firstStarted = XCTestExpectation(description: "first destination open started")
     let secondStarted = XCTestExpectation(description: "second destination open started")
-    let returned: XCTestExpectation = {
-        let expectation = XCTestExpectation(description: "blocked destination opens returned")
-        expectation.expectedFulfillmentCount = 2
-        return expectation
-    }()
+    let returned: XCTestExpectation
     private let lock = NSLock()
     private let releaseSignal = DispatchSemaphore(value: 0)
     private var calls = 0
+
+    init(expectedReturns: Int = 2) {
+        returned = XCTestExpectation(description: "blocked destination opens returned")
+        returned.expectedFulfillmentCount = expectedReturns
+    }
 
     var callCount: Int {
         lock.lock()
@@ -549,6 +564,7 @@ private final class BlockingDestinationOpener: @unchecked Sendable {
 
 private final class FirstOpenBlocksThenSucceedsOpener: @unchecked Sendable {
     let firstStarted = XCTestExpectation(description: "first destination open started")
+    let returned = XCTestExpectation(description: "first blocked destination open returned")
     private let lock = NSLock()
     private let releaseSignal = DispatchSemaphore(value: 0)
     private var calls = 0
@@ -567,6 +583,7 @@ private final class FirstOpenBlocksThenSucceedsOpener: @unchecked Sendable {
         if isFirst {
             firstStarted.fulfill()
             releaseSignal.wait()
+            returned.fulfill()
         }
         return openat(parent, name, flags)
     }

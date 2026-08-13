@@ -4,19 +4,20 @@
 
 - Previous installed candidate: `Local Meeting Recorder Staging` `0.2.0 (351)`,
   built from `3f176a0` (`fix: keep recovery actions visible`).
-- Installed candidate: `Local Meeting Recorder Staging` `0.2.0 (352)`, built
-  from `c7b6501` (`fix: close timed out publication descriptors`). Build 352
-  includes the reviewed bounded destination-open path in addition to the
-  diagnostic-retention and Recovery fixed-action work present in build 351.
+- Installed candidate: `Local Meeting Recorder Staging` `0.2.0 (355)`, built
+  from `ffb5f8d` (`test: use valid late destination descriptor`). Build 355
+  includes the reviewed legacy-published validation recovery and fixed
+  two-worker destination-open mitigation in addition to the diagnostic-
+  retention and Recovery fixed-action work present in build 351.
 - Bundle ID: `local.meeting.recorder.staging`
 - Signature: ad-hoc staging signature
 - Bundle verification: Info.plist, PrivacyInfo.xcprivacy, and
   `codesign --verify --deep --strict` passed.
-- Installed staging app is build 352. The previously installed build 351 is
+- Installed staging app is build 355. The previously installed build 354 is
   retained as the verified recoverable backup at
-  `/private/tmp/Local Meeting Recorder Staging old-351-before-352.app`; build
-  350 also remains recoverable at
-  `/private/tmp/Local Meeting Recorder Staging old-350-before-351.app`.
+  `/private/tmp/Local Meeting Recorder Staging old-354-before-355.app`.
+  Earlier verified build 353, 352, 351, and 350 backups also remain under
+  `/private/tmp`.
 - The separate build 348 live-microphone experiment is retained only under
   `/private/tmp/recorder-live-mic-uat-348/`; it is not the release candidate.
 
@@ -49,6 +50,10 @@ ad-hoc build is a production distribution artifact.
 | Destination-open deadline fix | PASS — 24/24 focused | `publish` and `validatePublished` now run each destination component open on one process-wide serial worker with a two-second deadline. Timeout maps to destination unavailable, writes no staging content, retains the pending source, prevents queued timed-out work from opening later, and closes parent/late descriptors. Independent review found no Critical or Important issue. |
 | Recoverable 352 installation | PASS | Build 351 was normally replaced with verified build 352 and retained as the backup above. Installed Info.plist/Privacy manifest and strict deep codesign passed; the installed bundle reports build 352. |
 | Installed-352 CLI default-off | PASS | `/usr/local/bin/recorderctl` resolves to build 352's embedded helper. `status --json` returned finite `control_disabled` and exit 3, without enabling local control or starting a control transport. |
+| Legacy published-state recovery | PASS — 27/27 focused | Items with complete historical published evidence route directly to validation-only recovery even when an older manifest says pending/transient. Five partial/corrupt evidence cases fail closed to needs-attention without publishing, cleanup, or completion. Independent review found no findings. |
+| Bounded destination-open recovery | PASS — 25/25 focused | Destination component opens use a process-wide fixed two-worker cap. One blocked File Provider open cannot poison every later published validation; when both workers are blocked a third request times out without issuing another syscall. Tests directly cover successful `validatePublished` recovery, worker saturation, completed-operation isolation, and closing a late positive descriptor without a destination write. Independent review found no findings under this deliberately bounded mitigation scope. |
+| Recoverable 355 installation | PASS | Build 354 was normally quit and retained at the verified backup path above. Installed build 355 passed Info.plist, PrivacyInfo.xcprivacy, and strict deep codesign verification. The fixed CLI symlink resolves to build 355's embedded helper; default-off status returned finite `control_disabled` and exit 3. |
+| Build-355 launch and retained publication | SAFE RETENTION; DESTINATION VALIDATION INCOMPLETE | The user completed the macOS Keychain authorization and build 355 reached its main workspace. One final manual Retry kept the historical item at `published/transient`; it did not create another destination folder, overwrite the three existing files, emit completion, or delete the source. The fixed two-worker mitigation prevents one poisoned worker from disabling all future opens, but it does not make an unavailable or persistently blocking File Provider succeed. The exact local source and matching OneDrive copy remain readable. No further Retry was issued. |
 | GitHub main bounded CI | PASS | [Run 31674648708](https://github.com/jacklhchan/teams-recorder/actions/runs/31674648708) completed successfully at `ff96d51`: targeted transcription, the named storage gate, the full Swift package suite, workspace stability, Python scripts, the production-tree Accessibility audit, policy checks, app packaging, and virtual-microphone contracts all passed. |
 
 The session-name production fix retains no-overwrite admission: each readable
@@ -83,8 +88,8 @@ reject an existing direct child.
 
 The following are deliberately not marked as passed:
 
-1. Re-authorize macOS capture/microphone access if build 352's new ad-hoc
-   signature causes TCC to require it.
+1. Re-authorize capture/microphone access if build 355's new ad-hoc signature
+   causes TCC to require it. The launch-time Keychain authorization is complete.
 2. Run bounded staging checks for: Recording Health; Re-arm Now after manual
    suppression; Privacy Mode local-only/zero-provider-work; Recovery Center;
    CLI default-off then explicit opt-in; rapid Meet now end/restart; floating
@@ -105,11 +110,15 @@ The following are deliberately not marked as passed:
 ## Acceptance status
 
 **In progress.** The code/security review gates, destination-open deadline,
-recoverable build 352 installation, installed CLI link/default-off check,
+recoverable build 355 installation, installed CLI link/default-off check,
 OneDrive bookmark persistence check, opt-in retention review, and Recovery
 fixed-actions runtime check are complete. Build 351 reproduced the destination
-open hang while retaining the exact pending source; build 352 contains the
-reviewed fix. A final unlocked-session check must show that the retained item
-leaves `publishing`, either reaches `waitingForDestination` within the deadline
-or publishes exactly once when OneDrive responds, and never loses its local
-source. Release-key operational activation remains an external governance gate.
+open hang while retaining the exact pending source; builds 352–355 added the
+deadline, descriptor cleanup, validation-only legacy recovery, and bounded
+worker mitigation. After Keychain authorization and the final bounded Retry,
+the retained item remains safely `published/transient`: exactly one destination
+folder exists, the source remains intact, and no additional destination write
+or completion occurred. This closes the no-loss/no-duplicate safety check but
+does not claim successful cleanup while the File Provider continues returning
+a transient validation failure. Release-key operational activation remains an
+external governance gate.

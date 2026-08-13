@@ -21,11 +21,14 @@ NOTARY_KEYCHAIN=""
 OUTPUT_DIR=""
 SIGNED_ONLY=0
 DRY_RUN=0
+MANIFEST_KEY_ID=""
+MANIFEST_PRIVATE_KEY_FILE=""
 
 usage() {
   cat >&2 <<'USAGE'
 Usage: build-release.sh --version X.Y.Z --build-number N --signing-identity ID
   (--notary-profile PROFILE --notary-keychain ABSOLUTE_KEYCHAIN_PATH | --signed-only)
+  [--manifest-key-id KEY_ID --manifest-private-key-file ABSOLUTE_PATH]
   [--output-dir ABSOLUTE_PATH] [--dry-run]
 USAGE
 }
@@ -66,6 +69,8 @@ while [[ $# -gt 0 ]]; do
     --notary-profile) [[ $# -ge 2 ]] || die_usage "Missing notary profile"; NOTARY_PROFILE="$2"; shift 2 ;;
     --notary-keychain) [[ $# -ge 2 ]] || die_usage "Missing notary keychain"; NOTARY_KEYCHAIN="$2"; shift 2 ;;
     --output-dir) [[ $# -ge 2 ]] || die_usage "Missing output directory"; OUTPUT_DIR="$2"; shift 2 ;;
+    --manifest-key-id) [[ $# -ge 2 ]] || die_usage "Missing manifest key id"; MANIFEST_KEY_ID="$2"; shift 2 ;;
+    --manifest-private-key-file) [[ $# -ge 2 ]] || die_usage "Missing manifest private key file"; MANIFEST_PRIVATE_KEY_FILE="$2"; shift 2 ;;
     --signed-only) SIGNED_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -82,6 +87,9 @@ if [[ -n "$NOTARY_PROFILE" || -n "$NOTARY_KEYCHAIN" ]]; then
   [[ -n "$NOTARY_PROFILE" && -n "$NOTARY_KEYCHAIN" ]] || die_usage "Notary profile and keychain must be supplied together."
   [[ "$NOTARY_KEYCHAIN" == /* ]] || die_usage "Notary keychain path must be absolute."
 fi
+[[ -z "$MANIFEST_PRIVATE_KEY_FILE" || "$MANIFEST_PRIVATE_KEY_FILE" == /* ]] || die_usage "Manifest private key path must be absolute."
+[[ -z "$MANIFEST_KEY_ID" || -n "$MANIFEST_PRIVATE_KEY_FILE" ]] || die_usage "Manifest key id requires a private key file."
+[[ -z "$MANIFEST_PRIVATE_KEY_FILE" || -n "$MANIFEST_KEY_ID" ]] || die_usage "Manifest private key file requires a key id."
 
 MODE="notarized-production"
 ARTIFACT_STEM="Local-Meeting-Recorder-${VERSION}-${BUILD_NUMBER}"
@@ -116,6 +124,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   printf 'mode=%s\n' "$MODE"
   printf 'output_dir=%q\n' "$OUTPUT_DIR"
   printf 'notary_keychain=%q\n' "${NOTARY_KEYCHAIN:-none}"
+  printf 'manifest_key_id=%q\n' "${MANIFEST_KEY_ID:-none}"
+  printf 'manifest=%s\n' "$([[ -n "$MANIFEST_KEY_ID" ]] && echo planned || echo not-produced)"
   exit 0
 fi
 
@@ -140,6 +150,7 @@ fi
   exit 66
 }
 if [[ "$MODE" == "notarized-production" ]]; then
+  [[ -n "$MANIFEST_KEY_ID" && -f "$MANIFEST_PRIVATE_KEY_FILE" && ! -L "$MANIFEST_PRIVATE_KEY_FILE" && -r "$MANIFEST_PRIVATE_KEY_FILE" ]] || fail_execution "Production release manifest signing key is required."
   [[ -f "$NOTARY_KEYCHAIN" && ! -L "$NOTARY_KEYCHAIN" && -r "$NOTARY_KEYCHAIN" ]] || {
     echo "Notary keychain is not a readable regular file." >&2
     exit 78
@@ -200,6 +211,10 @@ PUBLISH_SOURCE="$WORK_DIR/release"
 STAGED_ZIP="$PUBLISH_SOURCE/${ARTIFACT_STEM}.zip"
 run_checked "$DITTO_BIN" -c -k --keepParent "$APP" "$STAGED_ZIP"
 STAGED_CHECKSUM="$("$ROOT_DIR/scripts/write-sha256.sh" "$STAGED_ZIP")" || fail_execution "Checksum generation failed."
+if [[ -n "$MANIFEST_KEY_ID" ]]; then
+  # The committed production keyring is deliberately empty until a release owner provisions its real public key.
+  fail_execution "Release manifest signing is fail-closed pending operational keyring handoff."
+fi
 /bin/cp "$ROOT_DIR/LICENSE" "$PUBLISH_SOURCE/LICENSE" || fail_execution "Cannot stage LICENSE."
 /bin/cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PUBLISH_SOURCE/THIRD_PARTY_NOTICES.md" || fail_execution "Cannot stage third-party notices."
 [[ -s "$STAGED_ZIP" && -s "$STAGED_CHECKSUM" ]] || fail_execution "Staged release artifacts are incomplete."

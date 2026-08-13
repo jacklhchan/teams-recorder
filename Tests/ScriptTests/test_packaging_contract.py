@@ -552,7 +552,7 @@ os.link = forbidden_destination_access
         ).read_text(encoding="utf-8")
         self.assertEqual(REQUIRED_THIRD_PARTY_NOTICES, notices)
 
-    def test_abandoned_release_manifest_is_absent(self):
+    def test_release_manifest_is_release_side_not_app_bundled(self):
         self.assertFalse(
             (
                 ROOT
@@ -576,9 +576,11 @@ os.link = forbidden_destination_access
         build = (
             ROOT / "scripts/build-app.sh"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("release-manifest", package)
+        self.assertIn("ReleaseManifestTool", package)
+        self.assertTrue((ROOT / "Config/release-manifest-keyring-v1.json").is_file())
+        self.assertTrue((ROOT / "Sources/RecorderControl/ReleaseManifest.swift").is_file())
         self.assertNotIn("release-manifest", build)
-        self.assertNotIn("ReleaseManifest", package)
+        self.assertNotIn("ReleaseManifest", build)
 
     def test_active_release_metadata_does_not_model_blackhole(self):
         active_paths = [

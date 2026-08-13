@@ -23,6 +23,7 @@ jobs:
     env:
       RELEASE_VERSION: ${{ inputs.version }}
       RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
+      RELEASE_PROVENANCE_ID: github-actions:${{ github.repository }}@${{ github.sha }}:run-${{ github.run_id }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Verify releasable ref
@@ -65,10 +66,12 @@ jobs:
           KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
           PRIVATE_KEY: ${{ secrets.MACOS_NOTARY_PRIVATE_KEY_BASE64 }}
+          MANIFEST_PRIVATE_KEY: ${{ secrets.RELEASE_MANIFEST_ED25519_PRIVATE_KEY_BASE64 }}
+          MANIFEST_KEY_ID: ${{ vars.RELEASE_MANIFEST_KEY_ID }}
         run: |
           set -euo pipefail
           for value in "$P12" "$P12_PASSWORD" "$IDENTITY" \
-            "$KEY_ID" "$ISSUER_ID" "$PRIVATE_KEY"; do
+            "$KEY_ID" "$ISSUER_ID" "$PRIVATE_KEY" "$MANIFEST_PRIVATE_KEY" "$MANIFEST_KEY_ID"; do
             test -n "$value" || {
               echo "A required production secret is missing." >&2
               exit 78

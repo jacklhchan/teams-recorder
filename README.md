@@ -126,12 +126,20 @@ MACOS_SIGNING_IDENTITY
 MACOS_NOTARY_KEY_ID
 MACOS_NOTARY_ISSUER_ID
 MACOS_NOTARY_PRIVATE_KEY_BASE64
+RELEASE_MANIFEST_ED25519_PRIVATE_KEY_BASE64
 ```
 
 The workflow uploads a verified notarized workflow artifact only. It does not
 create a GitHub Release. This repository documents local YAML and contract
 validation only; the protected workflow has not been remotely dispatched or
 accepted here.
+
+Release-manifest operational handoff remains required: a release owner must
+provide the real public key/key ID in the pinned keyring, authorize custody of
+the production private seed, and define the authoritative channel, key
+rotation/revocation, and rollback-floor policy.  The committed keyring is
+intentionally empty; production manifest verification fails closed and this is
+not production-ready.
 
 Before creating a public GitHub Release, an authorized QA user must pass the
 signed microphone acceptance gate with the exact notarized workflow artifact:

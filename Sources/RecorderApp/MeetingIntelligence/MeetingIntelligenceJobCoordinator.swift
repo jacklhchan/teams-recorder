@@ -260,6 +260,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
     private var leasesBySessionID: [RecordingSession.ID: MeetingIntelligenceAttemptLease] = [:]
     private var nextWriteSequenceBySessionID: [RecordingSession.ID: UInt64] = [:]
     private var latestPublicationsBySessionID: [RecordingSession.ID: TranscriptPublicationIdentity] = [:]
+    private var retainedEditableContentBySessionID: [
+        RecordingSession.ID: MeetingIntelligenceEditableContent
+    ] = [:]
     private var sessionsByID: [RecordingSession.ID: RecordingSession] = [:]
     private var removedSessionIDs = Set<RecordingSession.ID>()
     private var cancelledSessionIDs = Set<RecordingSession.ID>()
@@ -533,6 +536,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         replaceSnapshot(snapshot.removing(identity))
         sessionsByID.removeValue(forKey: sessionID)
         latestPublicationsBySessionID.removeValue(forKey: sessionID)
+        retainedEditableContentBySessionID.removeValue(forKey: sessionID)
     }
 
     func reload(sessions: [RecordingSession]) {
@@ -623,6 +627,7 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
         leasesBySessionID.removeAll()
         nextWriteSequenceBySessionID.removeAll()
         latestPublicationsBySessionID.removeAll()
+        retainedEditableContentBySessionID.removeAll()
         sessionsByID.removeAll()
         removedSessionIDs.removeAll()
         cancelledSessionIDs.removeAll()
@@ -922,15 +927,18 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
 
     private func setPrivacyModeUnavailable(for session: RecordingSession) {
         let current = presentation(for: session)
+        let editableContent = current.editableContent
+            ?? retainedEditableContentBySessionID[session.id]
         setPresentation(.init(
             phase: current.phase,
-            summary: current.summary,
-            suggestedTitle: current.suggestedTitle,
+            summary: current.summary ?? editableContent?.artifact.summary,
+            suggestedTitle: current.suggestedTitle
+                ?? editableContent?.artifact.suggestedTitle,
             statusMessage: PrivacyModePolicy.localOnlyMessage,
-            model: current.model,
+            model: current.model ?? editableContent?.artifact.model,
             titleIsProtected: titleIsProtected(session),
             unavailableReason: .privacyModeEnabled,
-            editableContent: current.editableContent
+            editableContent: editableContent
         ), for: session)
     }
 
@@ -999,6 +1007,9 @@ final class MeetingIntelligenceJobCoordinator: ObservableObject {
                 : nil
         default:
             editableContent = nil
+        }
+        if let editableContent {
+            retainedEditableContentBySessionID[session.id] = editableContent
         }
         return setPresentation(.init(phase: phase, summary: artifact.summary, suggestedTitle: artifact.suggestedTitle,
                                      statusMessage: message, model: artifact.model, titleIsProtected: titleIsProtected(session), unavailableReason: nil,

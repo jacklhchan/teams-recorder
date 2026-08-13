@@ -817,6 +817,10 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
         fixture.artifactStore.loaded = artifact
         fixture.coordinator.reload(sessions: [fixture.session])
         await fixture.waitForIdle()
+        XCTAssertEqual(
+            fixture.coordinator.presentation(for: fixture.session).editableContent?.artifact,
+            artifact
+        )
 
         fixture.coordinator.generate(for: fixture.session)
         await fulfillment(of: [entered], timeout: 1)

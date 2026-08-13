@@ -2,20 +2,20 @@
 
 ## Candidates under test
 
-- Installed candidate: `Local Meeting Recorder Staging` `0.2.0 (350)`, built
+- Previous installed candidate: `Local Meeting Recorder Staging` `0.2.0 (350)`, built
   from `d325604` (`fix: autoplay verified test recordings`).
-- Successor candidate: `Local Meeting Recorder Staging` `0.2.0 (351)`, built
+- Installed candidate: `Local Meeting Recorder Staging` `0.2.0 (351)`, built
   from `3f176a0` (`fix: keep recovery actions visible`). Build 351 includes the
   reviewed opt-in diagnostic-retention work and fixes the Recovery page so its
   title, retained count, and actions remain visible while only the item list
-  scrolls. It is verified but is not installed.
+  scrolls.
 - Bundle ID: `local.meeting.recorder.staging`
 - Signature: ad-hoc staging signature
 - Bundle verification: Info.plist, PrivacyInfo.xcprivacy, and
   `codesign --verify --deep --strict` passed.
-- Installed staging app is build 350. The previously installed build 347 is
+- Installed staging app is build 351. The previously installed build 350 is
   retained as the recoverable backup at
-  `/private/tmp/Local Meeting Recorder Staging old-347-before-350.app`.
+  `/private/tmp/Local Meeting Recorder Staging old-350-before-351.app`.
 - The separate build 348 live-microphone experiment is retained only under
   `/private/tmp/recorder-live-mic-uat-348/`; it is not the release candidate.
 
@@ -40,7 +40,9 @@ ad-hoc build is a production distribution artifact.
 | Installed-350 CLI default-off | PASS | `recorderctl status --json` returned the finite `control_disabled` error and exit 3. Local control was not enabled for this check. |
 | Opt-in diagnostic retention | PASS — 16/16 focused | Default-off scanner, current-policy/class/age revalidation before descriptor-bound deletion, persisted count-only aggregate, and truthful Settings scope. The current architecture exposes no safe retained published session, so it has zero candidates and never scans OneDrive or the destination. Independent review found no Critical or Important issue. |
 | Recovery fixed-actions layout | PASS — 5/5 focused | With 30 needs-attention items in an 860×680 host, the title, retained count, and `Open Local Copies` remain in the visible viewport; only item groups scroll. Independent review found no findings. |
-| Successor 351 bundle | PASS | Release build, Info.plist, PrivacyInfo.xcprivacy, and `codesign --verify --deep --strict` passed. Build 351 has not replaced installed build 350. |
+| Recoverable 351 installation | PASS | The app was normally quit, build 350 was moved to a verified recoverable backup, and build 351 was installed. Installed Info.plist, PrivacyInfo.xcprivacy, and strict codesign passed; the fixed CLI symlink resolves to the installed embedded helper. |
+| Installed-351 CLI default-off | PASS | `/usr/local/bin/recorderctl status --json` returned the finite `control_disabled` error and exit 3 without enabling local control. The installer recognized the existing owned fixed-path link as the correct no-op target; no interactive sudo mutation was required. |
+| Installed-351 Recovery layout | PASS | On the target Mac with 30 needs-attention items, fresh Accessibility state simultaneously exposed `Recovery`, `30 recordings retained locally`, the independently scrollable item list, and `Open Local Copies`. No Recovery action was invoked. |
 | GitHub main bounded CI | PASS | [Run 31674648708](https://github.com/jacklhchan/teams-recorder/actions/runs/31674648708) completed successfully at `ff96d51`: targeted transcription, the named storage gate, the full Swift package suite, workspace stability, Python scripts, the production-tree Accessibility audit, policy checks, app packaging, and virtual-microphone contracts all passed. |
 
 The session-name production fix retains no-overwrite admission: each readable
@@ -97,12 +99,11 @@ The following are deliberately not marked as passed:
 ## Acceptance status
 
 **In progress.** The code/security review gates, green GitHub main CI,
-recoverable build 350 installation, installed CLI link/default-off check,
+recoverable build 351 installation, installed CLI link/default-off check,
 OneDrive bookmark persistence check, opt-in retention review, and Recovery
-fixed-actions review are complete. Verified build 351 is ready for a separately
-approved recoverable installation. On first launch, build 350 retained the exact
-OneDrive destination but macOS required Screen/System Audio permission again;
-the microphone also had no selected device. The app reported 30 retained local
-recordings needing attention, so publication is not claimed complete. Bounded
-runtime UAT, the sandbox bookmark, and release-key operational activation remain
-open.
+fixed-actions runtime check are complete. Build 351 retained the exact OneDrive
+destination but macOS still requires Screen/System Audio permission; the
+microphone also has no selected device. The app reports 30 retained local
+recordings needing attention, so publication is not claimed complete. Remaining
+bounded capture/runtime UAT requires action-time permission consent. The sandbox
+bookmark and release-key operational activation also remain open.

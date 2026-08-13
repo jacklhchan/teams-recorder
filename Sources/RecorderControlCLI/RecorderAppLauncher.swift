@@ -78,6 +78,14 @@ struct RecorderAppLauncher: RecorderAppLaunching {
     }
 }
 
+enum LocalRecorderControlPreference {
+    private static let defaultsKey = "localRecorderControlEnabled"
+
+    static func isEnabled(bundleIdentifier: String) -> Bool {
+        UserDefaults(suiteName: bundleIdentifier)?.bool(forKey: defaultsKey) ?? false
+    }
+}
+
 private final class ProcessTerminationWaiter: @unchecked Sendable {
     private let process: Process
     private let lock = NSLock()

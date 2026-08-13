@@ -5,6 +5,7 @@ final class RecorderControlServerRuntime {
     private let adapter: AppModelControlAdapter
     private let requestGate: RecorderControlRequestGate
     private let server: RecorderControlSocketServer
+    private var isRunning = false
 
     init(model: AppModel, bundleIdentifier: String) {
         let adapter = AppModelControlAdapter(model: model)
@@ -35,9 +36,11 @@ final class RecorderControlServerRuntime {
     }
 
     func start() throws {
+        guard !isRunning else { return }
         requestGate.activate()
         do {
             try server.start()
+            isRunning = true
         } catch {
             requestGate.deactivate()
             throw error
@@ -45,8 +48,10 @@ final class RecorderControlServerRuntime {
     }
 
     func stop() {
+        guard isRunning else { return }
         requestGate.deactivate()
         server.stop()
+        isRunning = false
     }
 }
 

@@ -1,8 +1,66 @@
 import XCTest
 @testable import RecorderApp
+@testable import RecorderControl
 
 @MainActor
 final class AppRuntimeTests: XCTestCase {
+    func testLocalRecorderControlPolicyDefaultsToDisabledAndPersistsEnable() {
+        let suiteName = "LocalRecorderControlPolicyTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertFalse(LocalRecorderControlPolicy(defaults: defaults).isEnabled)
+        LocalRecorderControlPolicy(defaults: defaults).setEnabled(true)
+        XCTAssertTrue(LocalRecorderControlPolicy(defaults: defaults).isEnabled)
+    }
+
+    func testDisabledRuntimeDoesNotStartControlServerAndEnableStartsIt() {
+        let suiteName = "AppRuntimeControlPolicyTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let policy = LocalRecorderControlPolicy(defaults: defaults)
+        let model = AppModel(defaults: defaults, localRecorderControlPolicy: policy, performStartupWork: false)
+        let socketPath = FileManager.default.temporaryDirectory.appendingPathComponent("control-\(UUID().uuidString).sock").path
+        defer { try? FileManager.default.removeItem(atPath: socketPath) }
+        let server = RecorderControlServerRuntime(model: model, serverFactory: { handler in
+            RecorderControlSocketServer(socketPath: socketPath, handler: handler)
+        })
+        let runtime = AppRuntime(model: model, controlServerRuntimeFactory: { _ in server })
+        defer { runtime.shutdown() }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
+        model.setLocalRecorderControlEnabled(true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
+        model.setLocalRecorderControlEnabled(true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
+    }
+
+    func testDisablingControlStopsServerWithoutChangingModelState() {
+        let suiteName = "AppRuntimeControlPolicyTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let policy = LocalRecorderControlPolicy(defaults: defaults)
+        policy.setEnabled(true)
+        let model = AppModel(defaults: defaults, localRecorderControlPolicy: policy, performStartupWork: false)
+        model.setTeamsAutoMeetingEnabled(true)
+        model.setRecorderMicMuted(true)
+        let socketPath = FileManager.default.temporaryDirectory.appendingPathComponent("control-\(UUID().uuidString).sock").path
+        defer { try? FileManager.default.removeItem(atPath: socketPath) }
+        let server = RecorderControlServerRuntime(model: model, serverFactory: { handler in
+            RecorderControlSocketServer(socketPath: socketPath, handler: handler)
+        })
+        let runtime = AppRuntime(model: model, controlServerRuntimeFactory: { _ in server })
+        defer { runtime.shutdown() }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
+
+        model.setLocalRecorderControlEnabled(false)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
+        XCTAssertTrue(model.teamsAutoMeetingEnabled)
+        XCTAssertTrue(model.localMicMuted)
+        XCTAssertFalse(model.recorder.isRecording)
+    }
+
     func testRuntimeShutsDownControllerAndPresenterBeforeModelExactlyOnce() {
         let fixture = makeFixture()
         var producerCallbacksWereStillInstalledDuringDismiss = false

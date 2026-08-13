@@ -59,6 +59,7 @@ final class AppModel: ObservableObject {
         items: []
     )
     @Published private(set) var privacyModeEnabled: Bool
+    @Published private(set) var localRecorderControlEnabled: Bool
     @Published var statusMessage = "Ready"
     @Published var lastHealthReport: RecordingHealthReport?
     @Published private(set) var lastRecordingSavedAsM4A = false
@@ -80,6 +81,7 @@ final class AppModel: ObservableObject {
 
     let recorder: RecordingEngine
     let privacyModePolicy: PrivacyModePolicy
+    let localRecorderControlPolicy: LocalRecorderControlPolicy
     let aiProviderSettingsModel: AIProviderSettingsModel
     private let recordingSessionCoordinator:
         RecordingSessionCoordinator
@@ -235,6 +237,7 @@ final class AppModel: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         privacyModePolicy: PrivacyModePolicy? = nil,
+        localRecorderControlPolicy: LocalRecorderControlPolicy? = nil,
         providerRepository: (any OpenAICompatibleProviderManaging)? = nil,
         appPaths: AppPaths = .live,
         recorder: RecordingEngine? = nil,
@@ -316,6 +319,10 @@ final class AppModel: ObservableObject {
             ?? PrivacyModePolicy(defaults: defaults)
         self.privacyModePolicy = activePrivacyModePolicy
         privacyModeEnabled = activePrivacyModePolicy.isEnabled
+        let activeLocalRecorderControlPolicy = localRecorderControlPolicy
+            ?? LocalRecorderControlPolicy(defaults: defaults)
+        self.localRecorderControlPolicy = activeLocalRecorderControlPolicy
+        localRecorderControlEnabled = activeLocalRecorderControlPolicy.isEnabled
         let activeDestinationStore = recordingDestinationStore
             ?? RecordingDestinationStore(defaults: defaults)
         let destinationSelection: RecordingDestinationSelection
@@ -675,6 +682,12 @@ final class AppModel: ObservableObject {
 
     func setPrivacyModeEnabled(_ enabled: Bool) {
         privacyModePolicy.setEnabled(enabled)
+    }
+
+    func setLocalRecorderControlEnabled(_ enabled: Bool) {
+        guard localRecorderControlEnabled != enabled else { return }
+        localRecorderControlEnabled = enabled
+        localRecorderControlPolicy.setEnabled(enabled)
     }
 
     deinit {

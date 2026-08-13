@@ -1916,6 +1916,28 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
+    func testLocalRecorderControlSettingsTogglePersistsAndProjectsEnabledCopy() throws {
+        let fixture = makeStartupDisabledFixture()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 860, height: 680)
+        )
+        defer { host.close() }
+
+        host.select(.settings)
+        XCTAssertTrue(host.click(atAccessibilityFrame: "recorder.settings.navigation.storage-shortcuts"))
+        XCTAssertFalse(fixture.model.localRecorderControlEnabled)
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.localRecorderControlToggle))
+        XCTAssertTrue(host.pressAccessibilityElement(RecorderActionID.localRecorderControlToggle))
+
+        XCTAssertTrue(fixture.model.localRecorderControlEnabled)
+        XCTAssertTrue(fixture.defaults.bool(forKey: LocalRecorderControlPolicy.defaultsKey))
+        XCTAssertEqual(
+            host.accessibilityLabel(for: RecorderActionID.localRecorderControlStatus),
+            "Local command-line control is enabled for this Mac."
+        )
+    }
+
     func testMinimumSettingsRendersCaptureAndTeamsControls() throws {
         let fixture = makeStartupDisabledFixture()
         let host = try makeWorkspaceHost(

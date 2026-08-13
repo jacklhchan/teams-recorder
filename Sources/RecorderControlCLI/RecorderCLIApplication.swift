@@ -25,17 +25,20 @@ struct RecorderCLIApplication {
     private let client: RecorderCLIClient
     private let launcher: RecorderAppLaunching
     private let clock: RecorderCLIClock
+    private let isControlEnabled: () -> Bool
     private let writeLine: (String) -> Void
 
     init(
         client: RecorderCLIClient,
         launcher: RecorderAppLaunching,
         clock: RecorderCLIClock,
+        isControlEnabled: @escaping () -> Bool = { true },
         writeLine: @escaping (String) -> Void
     ) {
         self.client = client
         self.launcher = launcher
         self.clock = clock
+        self.isControlEnabled = isControlEnabled
         self.writeLine = writeLine
     }
 
@@ -52,6 +55,10 @@ struct RecorderCLIApplication {
     }
 
     func run(command: RecorderCLICommand) async -> Int32 {
+        guard isControlEnabled() else {
+            writeLine("error [control_disabled]: Local recorder control is disabled in Settings.")
+            return 3
+        }
         do {
             switch command {
             case let .status(json):

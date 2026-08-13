@@ -20,6 +20,11 @@ let task = Task {
             client: RecorderCLISocketClient(socketPath: endpoint.socketPath),
             launcher: launcher,
             clock: SystemRecorderCLIClock(),
+            isControlEnabled: {
+                LocalRecorderControlPreference.isEnabled(
+                    bundleIdentifier: launcher.bundleIdentifier
+                )
+            },
             writeLine: writeLine
         )
     }

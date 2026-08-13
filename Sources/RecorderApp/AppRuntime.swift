@@ -5,6 +5,7 @@ final class AppRuntime {
     let model: AppModel
     private let recordingController: RecordingControllerCoordinator
     private let controlServerRuntime: RecorderControlServerRuntime
+    private var isControlServerRunning = false
 
     init(
         model: AppModel? = nil,
@@ -26,12 +27,34 @@ final class AppRuntime {
                 bundleIdentifier: Bundle.main.bundleIdentifier
                     ?? "local.meeting.recorder"
             )
-        try? controlServerRuntime.start()
+        model.localRecorderControlPolicy.onChange = { [weak self] _ in
+            self?.reconcileControlServer()
+        }
+        reconcileControlServer()
     }
 
     func shutdown() {
-        controlServerRuntime.stop()
+        model.localRecorderControlPolicy.onChange = nil
+        stopControlServerIfNeeded()
         recordingController.shutdown()
         model.shutdown()
+    }
+
+    private func reconcileControlServer() {
+        if model.localRecorderControlPolicy.isEnabled {
+            guard !isControlServerRunning else { return }
+            do {
+                try controlServerRuntime.start()
+                isControlServerRunning = true
+            } catch {}
+        } else {
+            stopControlServerIfNeeded()
+        }
+    }
+
+    private func stopControlServerIfNeeded() {
+        guard isControlServerRunning else { return }
+        controlServerRuntime.stop()
+        isControlServerRunning = false
     }
 }

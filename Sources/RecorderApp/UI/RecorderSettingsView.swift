@@ -235,6 +235,33 @@ struct RecorderSettingsView: View {
     private var storageAndShortcutsSectionContent: some View {
         let publication = model.recordingPublicationPresentation
         return VStack(alignment: .leading, spacing: 12) {
+            Section("Local Control") {
+                Toggle(
+                    "Allow local recorder control",
+                    isOn: Binding(
+                        get: { model.localRecorderControlEnabled },
+                        set: { model.setLocalRecorderControlEnabled($0) }
+                    )
+                )
+                .accessibilityIdentifier(RecorderActionID.localRecorderControlToggle)
+                .background(RecorderSettingsAccessibilityMarker(
+                    identifier: RecorderActionID.localRecorderControlToggle,
+                    label: "Allow local recorder control",
+                    onPress: {
+                        model.setLocalRecorderControlEnabled(
+                            !model.localRecorderControlEnabled
+                        )
+                    }
+                ))
+                Text(localRecorderControlStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(RecorderActionID.localRecorderControlStatus)
+                    .background(RecorderSettingsAccessibilityMarker(
+                        identifier: RecorderActionID.localRecorderControlStatus,
+                        label: localRecorderControlStatusText
+                    ))
+            }
             Label("Recording Storage", systemImage: "internaldrive")
                 .font(.headline)
             Text(destinationStatusText)
@@ -303,6 +330,12 @@ struct RecorderSettingsView: View {
                 .buttonStyle(.bordered)
             }
         }
+    }
+
+    private var localRecorderControlStatusText: String {
+        model.localRecorderControlEnabled
+            ? "Local command-line control is enabled for this Mac."
+            : "Local command-line control is off. Recording and microphone settings are unchanged."
     }
 
     private var destinationStatusText: String {

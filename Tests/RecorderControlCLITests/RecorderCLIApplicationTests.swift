@@ -3,6 +3,26 @@ import RecorderControl
 import XCTest
 
 final class RecorderCLIApplicationTests: XCTestCase {
+    func testDisabledControlExitsThreeWithoutSendingOrLaunching() async {
+        let client = FakeClient(results: [])
+        let launcher = FakeLauncher()
+        let output = OutputRecorder()
+        let application = RecorderCLIApplication(
+            client: client,
+            launcher: launcher,
+            clock: FakeClock(),
+            isControlEnabled: { false },
+            writeLine: output.write
+        )
+
+        let exitCode = await application.run(arguments: ["status", "--json"])
+
+        XCTAssertEqual(exitCode, 3)
+        XCTAssertTrue(client.requests.isEmpty)
+        XCTAssertEqual(launcher.launchCount, 0)
+        XCTAssertEqual(output.lines, ["error [control_disabled]: Local recorder control is disabled in Settings."])
+    }
+
     func testExistingSocketSendsOnceWithoutLaunching() async {
         let status = makeStatus()
         let client = FakeClient(results: [.success(makeResponse(status: status))])

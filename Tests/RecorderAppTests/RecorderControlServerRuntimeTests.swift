@@ -16,8 +16,10 @@ final class RecorderControlServerRuntimeTests: XCTestCase {
         let outputFolder = directory.appendingPathComponent("recordings", isDirectory: true)
         let suiteName = "RecorderControlServerRuntimeTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set(true, forKey: LocalRecorderControlPolicy.defaultsKey)
         let model = AppModel(
-            defaults: UserDefaults(suiteName: suiteName)!,
+            defaults: defaults,
             performStartupWork: false,
             initialOutputFolder: outputFolder
         )

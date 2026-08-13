@@ -117,7 +117,9 @@ Developer ID、Hardened Runtime 或 notarization。
   失敗，明確輸出 `socket-bind(errno=1)`、`ipc.server-result=not-ready` 與
   `ipc.helper-exit=not-launched`。因此不能把現行 `/tmp/lmr-<uid>` public
   socket、外部 CLI 或 `/usr/bin/open -gj` 背景啟動宣稱為 sandbox compatible，且
-  此結果不是 helper-start race。這次沒有執行 external symlink CLI 或
+  此結果不是 helper-start race。ready marker 以直接寫入 stdout 發送；若 helper
+  在 ready 後非零結束，parent 會先 terminate/reap server，再分別輸出 helper 與
+  server exit status，避免 server 卡在 `accept`。這次沒有執行 external symlink CLI 或
   GUI/background launch。
 - **security-scoped selected folder across relaunch（尚未執行）**：fixture 已
   編譯 `NSOpenPanel` 選取、`.withSecurityScope` bookmark 寫入與第二次 process

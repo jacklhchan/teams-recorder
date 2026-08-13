@@ -103,6 +103,23 @@ class AppSandboxFeasibilityFixtureContractTests(unittest.TestCase):
         self.assertIn('ipc.helper-exit=', probe_source)
         self.assertNotIn('usleep(100_000)', probe_source)
 
+    def test_embedded_ipc_reaps_server_before_reporting_helper_failure(self) -> None:
+        probe_source = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "Tests/ManualFixtures/AppSandboxSpike.swift"
+        ).read_text()
+
+        self.assertIn('FileHandle.standardOutput.write', probe_source)
+        self.assertIn('reapServer(server)', probe_source)
+        self.assertIn('guard helper.terminationStatus == 0 else', probe_source)
+        self.assertIn('server.terminate()', probe_source)
+        helper_failure = probe_source.split(
+            'guard helper.terminationStatus == 0 else {', 1
+        )[1].split('server.waitUntilExit()', 1)[0]
+        self.assertIn('reapServer(server)', helper_failure)
+        self.assertIn('ipc.helper-exit=', helper_failure)
+        self.assertIn('ipc.server-exit=', helper_failure)
+
 
 if __name__ == "__main__":
     unittest.main()

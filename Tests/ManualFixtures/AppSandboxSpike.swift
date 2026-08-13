@@ -140,16 +140,26 @@ struct AppSandboxSpike {
         helper.arguments = [endpoint]
         try helper.run()
         helper.waitUntilExit()
+        guard helper.terminationStatus == 0 else {
+            reapServer(server)
+            print("ipc.helper-exit=\(helper.terminationStatus)")
+            print("ipc.server-exit=\(server.terminationStatus)")
+            throw ProbeError.process(helper.terminationStatus)
+        }
         server.waitUntilExit()
         print("ipc.helper-exit=\(helper.terminationStatus)")
         print("ipc.server-exit=\(server.terminationStatus)")
-        guard helper.terminationStatus == 0 else {
-            throw ProbeError.process(helper.terminationStatus)
-        }
         guard server.terminationStatus == 0 else {
             throw ProbeError.process(server.terminationStatus)
         }
         print("ipc.embedded-helper=true")
+    }
+
+    static func reapServer(_ server: Process) {
+        if server.isRunning {
+            server.terminate()
+        }
+        server.waitUntilExit()
     }
 
     static func waitForReadyMarker(from output: Pipe, server: Process) throws {
@@ -174,7 +184,7 @@ struct AppSandboxSpike {
             guard bind(fd, address, length) == 0 else { throw ProbeError.socket("socket-bind(errno=\(errno))") }
         }
         guard listen(fd, 1) == 0 else { throw ProbeError.socket("socket-listen") }
-        print("ipc.server-ready")
+        FileHandle.standardOutput.write(Data("ipc.server-ready\n".utf8))
         let client = accept(fd, nil, nil)
         guard client >= 0 else { throw ProbeError.socket("socket-accept") }
         defer { close(client) }

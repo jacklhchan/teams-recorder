@@ -409,6 +409,29 @@ final class RecordingPublicationCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.completions.values.map(\.itemID), [fixture.request.id])
         XCTAssertFalse(fixture.sourceExists)
     }
+
+    func testPublishedValidationTransientFailureRetainsPublishedItemAndRetryValidatesWithoutRepublishing() async throws {
+        let fixture = try CoordinatorFixture(manifestState: .published, retryDelays: [300])
+        fixture.publisher.validationErrors = [.ioFailure("read")]
+        fixture.coordinator.resume()
+        await fixture.waitForIdle()
+
+        let retained = try XCTUnwrap(fixture.persistedItems.first)
+        XCTAssertEqual(retained.state, .published)
+        XCTAssertEqual(retained.failureCategory, "transient")
+        XCTAssertTrue(fixture.sourceExists)
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+        XCTAssertEqual(fixture.publisher.validationIDs, [fixture.request.id])
+
+        fixture.coordinator.retryNow()
+        await fixture.waitForIdle()
+
+        XCTAssertEqual(fixture.publisher.attemptCount, 0)
+        XCTAssertEqual(fixture.publisher.validationIDs, [fixture.request.id, fixture.request.id])
+        XCTAssertTrue(fixture.persistedItems.isEmpty)
+        XCTAssertEqual(fixture.completions.values.map(\.itemID), [fixture.request.id])
+        XCTAssertFalse(fixture.sourceExists)
+    }
 }
 
 private func recoveryItem(from request: RecordingPublicationRequest, name: String, state: RecordingPublicationState, category: String? = nil) -> RecordingPublicationItem {

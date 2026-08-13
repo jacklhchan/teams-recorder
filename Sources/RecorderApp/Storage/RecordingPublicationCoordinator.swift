@@ -115,7 +115,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
         guard loadIfNeeded() else { publishPresentation(); return }
         generation &+= 1; worker?.cancel(); worker = nil
         let old = items
-        let retryable = items.filter { $0.state == .waitingForDestination || ($0.state == .pending && $0.failureCategory == "transient") || ($0.state == .published && $0.failureCategory == "destinationUnavailable") }
+        let retryable = items.filter { $0.state == .waitingForDestination || ($0.state == .pending && $0.failureCategory == "transient") || ($0.state == .published && ($0.failureCategory == "destinationUnavailable" || $0.failureCategory == "transient")) }
         let retained = items.filter { item in !retryable.contains(where: { $0.id == item.id }) }
         items = retryable + retained
         for index in items.indices where items[index].state == .waitingForDestination || (items[index].state == .pending && items[index].failureCategory == "transient") {
@@ -123,7 +123,7 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
             items[index].failureCategory = nil
             items[index].lastAttemptAt = nil
         }
-        for index in items.indices where items[index].state == .published && items[index].failureCategory == "destinationUnavailable" {
+        for index in items.indices where items[index].state == .published && (items[index].failureCategory == "destinationUnavailable" || items[index].failureCategory == "transient") {
             items[index].lastAttemptAt = nil
         }
         guard persist() else { items = old; publishPresentation(); return }
@@ -201,8 +201,10 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
             guard current(workerGeneration) else { return }
             if case RecordingPublicationError.destinationUnavailable = error {
                 _ = recordPublishedDestinationUnavailable(item.id)
-            } else {
+            } else if isTerminalPublicationError(error) {
                 _ = recordFailure(item.id, error: error)
+            } else {
+                _ = recordPublishedTransient(item.id)
             }
         }
     }
@@ -241,24 +243,42 @@ final class RecordingPublicationCoordinator: RecordingPublicationCoordinating {
         publishPresentation()
         return true
     }
+    private func recordPublishedTransient(_ id: UUID) -> Bool {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        let old = items[index]
+        items[index].state = .published
+        items[index].failureCategory = "transient"
+        items[index].lastAttemptAt = Date()
+        items[index].attemptCount += 1
+        guard persist() else { items[index] = old; return false }
+        publishPresentation()
+        return true
+    }
     private func nextEligibleItem() -> RecordingPublicationItem? {
         let now = Date()
         return items.first { item in
             guard item.state == .pending || item.state == .published else { return false }
-            guard item.state == .pending || item.failureCategory == "destinationUnavailable" else { return true }
-            return isEligible(item, now: now)
+            let delayedRetry = (item.state == .pending && item.failureCategory == "transient")
+                || (item.state == .published && (item.failureCategory == "destinationUnavailable" || item.failureCategory == "transient"))
+            return !delayedRetry || isEligible(item, now: now)
         }
     }
     private func nextRetryDelay() -> TimeInterval? {
         let now = Date()
         let deadlines = items.compactMap { item -> TimeInterval? in
-            guard (item.state == .pending && item.failureCategory == "transient") || (item.state == .published && item.failureCategory == "destinationUnavailable"), let last = item.lastAttemptAt else { return nil }
+            guard (item.state == .pending && item.failureCategory == "transient") || (item.state == .published && (item.failureCategory == "destinationUnavailable" || item.failureCategory == "transient")), let last = item.lastAttemptAt else { return nil }
             return max(0, retryDelay(for: item) - now.timeIntervalSince(last))
         }
         return deadlines.min()
     }
     private func isEligible(_ item: RecordingPublicationItem, now: Date) -> Bool { guard let last = item.lastAttemptAt else { return true }; return now.timeIntervalSince(last) >= retryDelay(for: item) }
     private func retryDelay(for item: RecordingPublicationItem) -> TimeInterval { retryDelays[min(max(item.attemptCount - 1, 0), retryDelays.count - 1)] }
+    private func isTerminalPublicationError(_ error: Error) -> Bool {
+        switch error as? RecordingPublicationError {
+        case .some(.invalidSource), .some(.unsafeEntry), .some(.invalidMedia), .some(.verificationMismatch), .some(.destinationCollision): return true
+        default: return false
+        }
+    }
     private func loadIfNeeded() -> Bool { guard !loaded else { return true }; do { items = try manifestStore.loadOrRebuild(from: pendingStore); loaded = true; persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }
     private func persist() -> Bool { do { try manifestStore.save(items); persistenceFailed = false; return true } catch { persistenceFailed = true; return false } }
     private func current(_ candidate: UInt64) -> Bool { generation == candidate && !Task.isCancelled }

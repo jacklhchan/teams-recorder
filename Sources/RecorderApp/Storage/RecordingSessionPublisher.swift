@@ -85,6 +85,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
     typealias MediaValidator = (Int32, String) -> Bool
     typealias WriteOperation = (Int32, UnsafeRawPointer, Int) -> Int
     typealias DestinationOpener = (Int32, String, Int32) -> Int32
+    typealias DestinationCloser = (Int32) -> Int32
 
     enum EntryContext: Equatable { case source, staging, published }
 
@@ -108,6 +109,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
     private let writeOperation: WriteOperation
     private let destinationOpenDeadline: Duration
     private let destinationOpener: DestinationOpener
+    private let destinationCloser: DestinationCloser
 
     init(
         pendingStore: RecordingPendingStore,
@@ -117,7 +119,8 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         destinationOpenDeadline: Duration = .seconds(2),
         destinationOpener: @escaping DestinationOpener = { parent, name, flags in
             openat(parent, name, flags)
-        }
+        },
+        destinationCloser: @escaping DestinationCloser = { Darwin.close($0) }
     ) {
         self.pendingStore = pendingStore
         self.mediaValidator = mediaValidator
@@ -125,6 +128,7 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
         self.writeOperation = writeOperation
         self.destinationOpenDeadline = destinationOpenDeadline
         self.destinationOpener = destinationOpener
+        self.destinationCloser = destinationCloser
     }
 
     func publish(item: RecordingPublicationItem, destination: RecordingDestinationAccess) async throws -> RecordingPublicationSuccess {
@@ -316,25 +320,31 @@ struct RecordingSessionPublisher: RecordingSessionPublishing, @unchecked Sendabl
             var observation = stat()
             guard fstatat(current, String(component), &observation, AT_SYMLINK_NOFOLLOW) == 0,
                   (observation.st_mode & S_IFMT) == S_IFDIR else {
-                Darwin.close(current)
+                _ = destinationCloser(current)
                 throw RecordingPublicationError.destinationUnavailable
             }
-            let next = try await boundedDestinationOpen(
-                parent: current,
-                name: String(component),
-                flags: O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-            )
+            let next: Int32
+            do {
+                next = try await boundedDestinationOpen(
+                    parent: current,
+                    name: String(component),
+                    flags: O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                )
+            } catch {
+                _ = destinationCloser(current)
+                throw error
+            }
             guard next >= 0 else {
-                Darwin.close(current)
+                _ = destinationCloser(current)
                 throw RecordingPublicationError.destinationUnavailable
             }
             var opened = stat()
             guard fstat(next, &opened) == 0, sameIdentity(observation, opened) else {
-                Darwin.close(next)
-                Darwin.close(current)
+                _ = destinationCloser(next)
+                _ = destinationCloser(current)
                 throw RecordingPublicationError.destinationUnavailable
             }
-            Darwin.close(current)
+            _ = destinationCloser(current)
             current = next
         }
         return current

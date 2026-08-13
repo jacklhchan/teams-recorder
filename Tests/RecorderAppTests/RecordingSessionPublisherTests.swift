@@ -385,6 +385,29 @@ final class RecordingSessionPublisherTests: XCTestCase {
         XCTAssertEqual(opener.callCount, 1)
         XCTAssertTrue(fixture.destinationIsEmpty)
     }
+
+    func testTimedOutDestinationOpenClosesItsRetainedParentDescriptorExactlyOnce() async throws {
+        let opener = BlockingDestinationOpener()
+        defer { opener.release() }
+        let closer = DestinationCloseObserver()
+        let fixture = try PublisherFixture(
+            destinationOpenDeadline: .milliseconds(50),
+            destinationOpener: opener.open,
+            destinationCloser: closer.close
+        )
+
+        let error = await Task { () -> Error? in
+            do {
+                _ = try await fixture.publisher.publish(item: fixture.item, destination: fixture.destination)
+                return nil
+            } catch {
+                return error
+            }
+        }.value
+
+        XCTAssertEqual(error as? RecordingPublicationError, .destinationUnavailable)
+        XCTAssertEqual(closer.closeCount, 1)
+    }
 }
 
 private final class PublisherFixture {
@@ -411,7 +434,8 @@ private final class PublisherFixture {
         destinationOpenDeadline: Duration = .seconds(2),
         destinationOpener: @escaping RecordingSessionPublisher.DestinationOpener = { parent, name, flags in
             openat(parent, name, flags)
-        }
+        },
+        destinationCloser: @escaping RecordingSessionPublisher.DestinationCloser = { Darwin.close($0) }
     ) throws {
         temporaryRoot = try realDirectoryURL(FileManager.default.temporaryDirectory)
             .appendingPathComponent("publisher-\(UUID().uuidString)", isDirectory: true)
@@ -434,7 +458,8 @@ private final class PublisherFixture {
             hooks: hooks,
             writeOperation: markerWriter,
             destinationOpenDeadline: destinationOpenDeadline,
-            destinationOpener: destinationOpener
+            destinationOpener: destinationOpener,
+            destinationCloser: destinationCloser
         )
     }
 
@@ -474,6 +499,24 @@ private final class BlockingDestinationOpener: @unchecked Sendable {
     }
 
     func release() { releaseSignal.signal() }
+}
+
+private final class DestinationCloseObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closes = 0
+
+    var closeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return closes
+    }
+
+    func close(_ descriptor: Int32) -> Int32 {
+        lock.lock()
+        closes += 1
+        lock.unlock()
+        return Darwin.close(descriptor)
+    }
 }
 
 private func realDirectoryURL(_ url: URL) throws -> URL {

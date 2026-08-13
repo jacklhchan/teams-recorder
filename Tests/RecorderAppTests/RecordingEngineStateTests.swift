@@ -70,9 +70,9 @@ final class RecordingEngineStateTests: XCTestCase {
         source.pauseMicrophoneSwitch = true
 
         let first = Task { await engine.switchMicrophone(to: "B") }
-        await settle()
+        await waitUntil { source.microphoneSwitchCount == 1 }
         let second = Task { await engine.switchMicrophone(to: "C") }
-        await settle()
+        await Task.yield()
 
         XCTAssertEqual(source.maximumConcurrentMicrophoneSwitches, 1)
         XCTAssertEqual(source.microphoneSwitchCount, 1)

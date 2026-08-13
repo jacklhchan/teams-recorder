@@ -52,7 +52,7 @@ struct RecordingDiagnosticEventInput: Sendable {
     let byteCount: Int
 }
 
-struct SafeRecordingDiagnostic: Codable, Equatable, Sendable {
+struct SafeRecordingDiagnostic: Encodable, Equatable, Sendable {
     static let schemaVersion = 1
     static let maximumAttemptCount = 1_000
     static let maximumByteCount = 64 * 1_024 * 1_024
@@ -68,22 +68,74 @@ struct SafeRecordingDiagnostic: Codable, Equatable, Sendable {
     let timestamp: String
     let artifactClass: RecordingDiagnosticArtifactClass
     let byteCount: Int
+
+    private init(
+        event: RecordingDiagnosticEvent,
+        schemaVersion: Int,
+        component: RecordingDiagnosticComponent,
+        stage: RecordingDiagnosticStage,
+        outcome: RecordingDiagnosticOutcome,
+        errorCode: RecordingDiagnosticErrorCode,
+        httpStatus: Int?,
+        attemptCount: Int,
+        timestamp: String,
+        artifactClass: RecordingDiagnosticArtifactClass,
+        byteCount: Int
+    ) {
+        self.event = event
+        self.schemaVersion = schemaVersion
+        self.component = component
+        self.stage = stage
+        self.outcome = outcome
+        self.errorCode = errorCode
+        self.httpStatus = httpStatus
+        self.attemptCount = attemptCount
+        self.timestamp = timestamp
+        self.artifactClass = artifactClass
+        self.byteCount = byteCount
+    }
+
+    fileprivate static func make(
+        event: RecordingDiagnosticEvent,
+        component: RecordingDiagnosticComponent,
+        stage: RecordingDiagnosticStage,
+        outcome: RecordingDiagnosticOutcome,
+        errorCode: RecordingDiagnosticErrorCode,
+        httpStatus: Int?,
+        attemptCount: Int,
+        timestamp: Date,
+        artifactClass: RecordingDiagnosticArtifactClass,
+        byteCount: Int
+    ) -> SafeRecordingDiagnostic {
+        .init(
+            event: event,
+            schemaVersion: schemaVersion,
+            component: component,
+            stage: stage,
+            outcome: outcome,
+            errorCode: errorCode,
+            httpStatus: httpStatus.flatMap { (100...599).contains($0) ? $0 : nil },
+            attemptCount: min(max(0, attemptCount), maximumAttemptCount),
+            timestamp: ISO8601DateFormatter().string(from: timestamp),
+            artifactClass: artifactClass,
+            byteCount: min(max(0, byteCount), maximumByteCount)
+        )
+    }
 }
 
 enum RecordingDiagnosticRedactor {
     static func redact(_ input: RecordingDiagnosticEventInput) -> SafeRecordingDiagnostic {
-        .init(
+        .make(
             event: input.event,
-            schemaVersion: SafeRecordingDiagnostic.schemaVersion,
             component: input.component,
             stage: input.stage,
             outcome: input.outcome,
             errorCode: input.errorCode,
-            httpStatus: input.httpStatus.flatMap { (100...599).contains($0) ? $0 : nil },
-            attemptCount: min(max(0, input.attemptCount), SafeRecordingDiagnostic.maximumAttemptCount),
-            timestamp: ISO8601DateFormatter().string(from: input.timestamp),
+            httpStatus: input.httpStatus,
+            attemptCount: input.attemptCount,
+            timestamp: input.timestamp,
             artifactClass: input.artifactClass,
-            byteCount: min(max(0, input.byteCount), SafeRecordingDiagnostic.maximumByteCount)
+            byteCount: input.byteCount
         )
     }
 }

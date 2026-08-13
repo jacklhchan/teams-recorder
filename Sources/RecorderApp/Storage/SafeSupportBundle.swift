@@ -3,14 +3,26 @@ import Foundation
 
 /// A deliberately small support artifact. It contains only typed operational
 /// diagnostics, never recording/session content or local configuration.
-struct SafeSupportBundle: Codable, Equatable, Sendable {
+struct SafeSupportBundle: Encodable, Equatable, Sendable {
     static let schemaVersion = 1
     static let maximumDiagnostics = 100
 
     let schemaVersion: Int
-    let generatedAt: String
+    let generatedAt: Date
     let build: SafeSupportBundleBuild
     let diagnostics: [SafeRecordingDiagnostic]
+
+    private init(
+        schemaVersion: Int,
+        generatedAt: Date,
+        build: SafeSupportBundleBuild,
+        diagnostics: [SafeRecordingDiagnostic]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.generatedAt = generatedAt
+        self.build = build
+        self.diagnostics = diagnostics
+    }
 
     static func make(
         build: SafeSupportBundleBuild,
@@ -19,20 +31,35 @@ struct SafeSupportBundle: Codable, Equatable, Sendable {
     ) -> SafeSupportBundle {
         .init(
             schemaVersion: schemaVersion,
-            generatedAt: ISO8601DateFormatter().string(from: generatedAt),
+            generatedAt: generatedAt,
             build: build,
             diagnostics: Array(diagnostics.prefix(maximumDiagnostics))
         )
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, generatedAt, build, diagnostics
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(
+            ISO8601DateFormatter().string(from: generatedAt),
+            forKey: .generatedAt
+        )
+        try container.encode(build, forKey: .build)
+        try container.encode(diagnostics, forKey: .diagnostics)
+    }
 }
 
-enum SafeSupportBundleChannel: String, Codable, Equatable, Sendable {
+enum SafeSupportBundleChannel: String, Encodable, Equatable, Sendable {
     case development
     case staging
     case production
 }
 
-struct SafeSupportBundleBuild: Codable, Equatable, Sendable {
+struct SafeSupportBundleBuild: Encodable, Equatable, Sendable {
     static let maximumBuildNumber = 9_999_999
 
     let channel: SafeSupportBundleChannel
@@ -41,7 +68,7 @@ struct SafeSupportBundleBuild: Codable, Equatable, Sendable {
     let versionPatch: Int
     let buildNumber: Int
 
-    init(
+    private init(
         channel: SafeSupportBundleChannel,
         versionMajor: Int,
         versionMinor: Int,
@@ -53,6 +80,22 @@ struct SafeSupportBundleBuild: Codable, Equatable, Sendable {
         self.versionMinor = Self.bounded(versionMinor)
         self.versionPatch = Self.bounded(versionPatch)
         self.buildNumber = Self.bounded(buildNumber)
+    }
+
+    static func make(
+        channel: SafeSupportBundleChannel,
+        versionMajor: Int,
+        versionMinor: Int,
+        versionPatch: Int,
+        buildNumber: Int
+    ) -> SafeSupportBundleBuild {
+        .init(
+            channel: channel,
+            versionMajor: versionMajor,
+            versionMinor: versionMinor,
+            versionPatch: versionPatch,
+            buildNumber: buildNumber
+        )
     }
 
     private static func bounded(_ value: Int) -> Int {

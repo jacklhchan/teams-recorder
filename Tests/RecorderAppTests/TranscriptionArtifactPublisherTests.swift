@@ -67,16 +67,15 @@ final class TranscriptionArtifactPublisherTests: XCTestCase {
 
         let data = try Data(contentsOf: artifacts.logURL)
         let text = try XCTUnwrap(String(data: data, encoding: .utf8))
-        let diagnostic = try JSONDecoder().decode(
-            SafeRecordingDiagnostic.self,
-            from: data
+        let diagnostic = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
 
-        XCTAssertEqual(diagnostic.event, .transcriptionSucceeded)
-        XCTAssertEqual(diagnostic.component, .transcription)
-        XCTAssertEqual(diagnostic.stage, .publication)
-        XCTAssertEqual(diagnostic.outcome, .succeeded)
-        XCTAssertEqual(diagnostic.artifactClass, .transcriptionLog)
+        XCTAssertEqual(diagnostic["event"] as? String, "transcription_succeeded")
+        XCTAssertEqual(diagnostic["component"] as? String, "transcription")
+        XCTAssertEqual(diagnostic["stage"] as? String, "publication")
+        XCTAssertEqual(diagnostic["outcome"] as? String, "succeeded")
+        XCTAssertEqual(diagnostic["artifactClass"] as? String, "transcription_log")
         XCTAssertFalse(text.contains("Native transcription started"))
         XCTAssertFalse(text.contains("Prepared 10000 audio chunks"))
     }

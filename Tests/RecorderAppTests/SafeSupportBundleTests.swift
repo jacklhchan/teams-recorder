@@ -4,6 +4,19 @@ import XCTest
 @testable import RecorderApp
 
 final class SafeSupportBundleTests: XCTestCase {
+    func testProductionBundleTypeHasNoUnsafeDecodingOrMemberwiseConstructionSeam() throws {
+        let source = try String(
+            contentsOf: sourceRoot()
+                .appendingPathComponent("Sources/RecorderApp/Storage/SafeSupportBundle.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(source.contains("Codable"))
+        XCTAssertFalse(source.contains("Decodable"))
+        XCTAssertTrue(source.contains("private init("))
+        XCTAssertTrue(source.contains("static func make("))
+    }
+
     func testBundleUsesOnlyDocumentedSafeFieldsAndBoundsDiagnostics() throws {
         let diagnostic = RecordingDiagnosticRedactor.redact(.init(
             event: .storageFailure,
@@ -19,7 +32,7 @@ final class SafeSupportBundleTests: XCTestCase {
         ))
 
         let bundle = SafeSupportBundle.make(
-            build: .init(channel: .staging, versionMajor: 0, versionMinor: 2, versionPatch: 0, buildNumber: 347),
+            build: .make(channel: .staging, versionMajor: 0, versionMinor: 2, versionPatch: 0, buildNumber: 347),
             generatedAt: Date(timeIntervalSince1970: 1_700_000_001),
             diagnostics: Array(repeating: diagnostic, count: 101)
         )
@@ -28,6 +41,8 @@ final class SafeSupportBundleTests: XCTestCase {
         )
 
         XCTAssertEqual(Set(object.keys), ["schemaVersion", "generatedAt", "build", "diagnostics"])
+        XCTAssertEqual(object["schemaVersion"] as? Int, SafeSupportBundle.schemaVersion)
+        XCTAssertEqual(object["generatedAt"] as? String, "2023-11-14T22:13:21Z")
         XCTAssertEqual((object["diagnostics"] as? [Any])?.count, 100)
         XCTAssertEqual(
             Set(try XCTUnwrap(object["build"] as? [String: Any]).keys),
@@ -44,15 +59,15 @@ final class SafeSupportBundleTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let url = try SafeSupportBundleStore(rootDirectory: root).export(
-            .make(build: .init(channel: .development, versionMajor: 0, versionMinor: 2, versionPatch: 0, buildNumber: 1))
+            .make(build: .make(channel: .development, versionMajor: 0, versionMinor: 2, versionPatch: 0, buildNumber: 1))
         )
 
         XCTAssertEqual(try permissions(of: root), 0o700)
         XCTAssertEqual(try permissions(of: url), 0o600)
-        XCTAssertEqual(
-            try JSONDecoder().decode(SafeSupportBundle.self, from: Data(contentsOf: url)).schemaVersion,
-            SafeSupportBundle.schemaVersion
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         )
+        XCTAssertEqual(object["schemaVersion"] as? Int, SafeSupportBundle.schemaVersion)
     }
 
     func testExportFailsClosedForExistingNonOwnerOnlyDirectory() throws {
@@ -63,7 +78,7 @@ final class SafeSupportBundleTests: XCTestCase {
 
         XCTAssertThrowsError(
             try SafeSupportBundleStore(rootDirectory: root).export(
-                .make(build: .init(channel: .development, versionMajor: 0, versionMinor: 2, versionPatch: 0, buildNumber: 1))
+                .make(build: .make(channel: .development, versionMajor: 0, versionMinor: 2, versionPatch: 0, buildNumber: 1))
             )
         ) { error in
             XCTAssertEqual(error as? SafeSupportBundleStoreError, .unsafeRootDirectory)
@@ -78,5 +93,12 @@ final class SafeSupportBundleTests: XCTestCase {
     private func permissions(of url: URL) throws -> Int {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         return try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).intValue
+    }
+
+    private func sourceRoot() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 }

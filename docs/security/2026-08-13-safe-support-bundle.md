@@ -29,6 +29,10 @@ Each diagnostic is the existing typed redacted schema only: its fixed enums,
 validated HTTP status, bounded counts/byte count, schema version, and
 timestamp. No per-session identifier is included.
 
+The exported bundle types are encode-only. Their sole construction paths accept
+typed `Date`/enum/integer inputs and apply the schema/version/count bounds
+before encoding; they do not accept decoded or arbitrary string payloads.
+
 ## Explicitly excluded
 
 The bundle cannot contain paths, URLs, device names or UIDs, recording media,

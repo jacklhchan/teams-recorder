@@ -561,6 +561,7 @@ final class AIProviderSettingsModelTests: XCTestCase {
         policy.setEnabled(false)
         let first = Task { await model.testConnection() }
         await client.waitForRequestCount(1)
+        policy.setEnabled(true)
         model.cancelForPrivacyMode()
         await client.completeNext(with: .success(.init(supportsModelDiscovery: true, models: ["late"])))
         await first.value
@@ -569,6 +570,7 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertTrue(model.discoveredModels.isEmpty)
         XCTAssertFalse(model.isTesting)
 
+        policy.setEnabled(false)
         let second = Task { await model.testConnection() }
         await client.waitForRequestCount(2)
         await client.completeNext(with: .success(.init(supportsModelDiscovery: true, models: ["fresh"])))
@@ -592,6 +594,7 @@ final class AIProviderSettingsModelTests: XCTestCase {
 
         let test = Task { await model.testConnection() }
         await client.waitForRequestCount(1)
+        policy.setEnabled(true)
         model.cancelForPrivacyMode()
         await client.completeNext(with: .failure(NSError(
             domain: "provider-secret-sentinel",

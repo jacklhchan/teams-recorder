@@ -170,6 +170,14 @@ class WorkflowContractTests(unittest.TestCase):
             ci_swift_tests.index("Swift tests"),
         )
 
+    def test_ci_runs_accessibility_audit_against_checkout_tree(self):
+        policy = self.job_body(self.read_workflow(), "policy")
+        self.assert_step_command(
+            policy,
+            "Accessibility API production-tree gate",
+            "scripts/check-no-accessibility-api.sh",
+        )
+
     def test_ci_sources_avoid_unavailable_isolated_deinit_feature(self):
         manifest = PACKAGE_MANIFEST.read_text(encoding="utf-8")
         playback_coordinator = PLAYBACK_COORDINATOR.read_text(encoding="utf-8")
@@ -245,6 +253,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("Tests/StorageSecurityGate/run.sh", release_gates)
         self.assertLess(
             release_gates.index("Tests/StorageSecurityGate/run.sh"),
+            release_gates.index("swift test"),
+        )
+
+    def test_release_runs_accessibility_audit_against_checkout_tree(self):
+        release_gates = self.step_run(self.read_workflow(), "Run release gates")
+        self.assertIn("./scripts/check-no-accessibility-api.sh", release_gates)
+        self.assertLess(
+            release_gates.index("./scripts/check-no-accessibility-api.sh"),
             release_gates.index("swift test"),
         )
 

@@ -60,6 +60,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+      - name: Accessibility API production-tree gate
+        run: scripts/check-no-accessibility-api.sh
       - name: License and active metadata policy
         run: >-
           python3 -m unittest

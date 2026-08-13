@@ -121,7 +121,7 @@ Developer ID、Hardened Runtime 或 notarization。
   在 ready 後非零結束，parent 會先 terminate/reap server，再分別輸出 helper 與
   server exit status，避免 server 卡在 `accept`。這次沒有執行 external symlink CLI 或
   GUI/background launch。
-- **security-scoped selected folder across relaunch（尚未執行）**：fixture 已
+- **security-scoped selected folder across relaunch（GUI automation unavailable）**：fixture 已
   編譯 `NSOpenPanel` 選取、`.withSecurityScope` bookmark 寫入與第二次 process
   resolve/start/stop/write/cleanup 的兩段式流程。以固定的
   `Tests/ManualFixtures/run-app-sandbox-feasibility-spikes.sh --bookmark` 啟動時，
@@ -130,8 +130,14 @@ Developer ID、Hardened Runtime 或 notarization。
   執行 relaunch 驗證；它不接受任何 caller-supplied output path，也不會自動選取
   資料夾。若 macOS 在過程顯示任何 privacy/security 設定變更，必須在該動作當刻
   取得確認，不得自行接受。
+  2026-08-13 在目標 Mac 實際啟動該 mode；bundle 已完整建置、簽署並
+  進入 `NSOpenPanel` 等待狀態，但 Computer Use 對 fixture app 的兩次新鮮
+  Accessibility tree 查詢均 timeout，且 Finder tree 未暴露該 panel。因此沒有
+  猜座標、沒有選取任何資料夾；fixture 以 interrupt 結束，EXIT cleanup
+  已移除 `/private/tmp/lmr-sandbox-spike.*` bundle，container 中亦無
+  `selected-folder.bookmark` 殘留。本項仍為手動 UAT gate，不宣稱通過或失敗。
 
 **更新後判讀**：選項 1 仍是推薦 baseline。SCK/mic 與 container pending 的
-可行性由 runtime evidence 提升，但 bookmark 尚待手動驗證，而 AF_UNIX/public
+可行性由 runtime evidence 提升，但 bookmark 尚待可見 panel 的手動驗證，而 AF_UNIX/public
 CLI 已在此 Mac 的隔離 runtime 中失敗；因此 full sandbox 或 sandbox GUI +
 沿用目前控制通道都不能進入 production migration 設計。

@@ -40,19 +40,32 @@ final class RecordingDestinationStoreTests: XCTestCase {
         )
     }
 
-    func testNonSandboxedCodecSkipsSecurityScopedBookmarkEncoding() throws {
+    func testNonSandboxedStorePersistsPathWithoutBookmarkEncoding() throws {
         let defaults = UserDefaults(suiteName: #function + UUID().uuidString)!
         let codec = DestinationBookmarkCodecSpy()
+        let destination = URL(
+            fileURLWithPath: "/Users/test/Downloads",
+            isDirectory: true
+        )
         let store = RecordingDestinationStore(
             defaults: defaults,
             codec: codec.makeCodec(prefersSecurityScope: false)
         )
 
-        try store.save(URL(fileURLWithPath: "/Users/test/Downloads", isDirectory: true))
+        try store.save(destination)
+        let restored = store.restore(defaultURL: URL(fileURLWithPath: "/tmp"))
+        let access = try store.access(identity: XCTUnwrap(store.currentIdentity))
 
         XCTAssertEqual(codec.scopedEncodeCount, 0)
-        XCTAssertEqual(codec.standardEncodeCount, 1)
-        XCTAssertEqual(store.savedBookmarkKind, .standard)
+        XCTAssertEqual(codec.standardEncodeCount, 0)
+        XCTAssertEqual(codec.resolveCount, 0)
+        XCTAssertEqual(store.savedBookmarkKind, .path)
+        XCTAssertEqual(restored, .init(
+            identity: store.currentIdentity,
+            url: destination,
+            state: .ready
+        ))
+        XCTAssertEqual(access.url, destination)
     }
 
     func testStaleBookmarkNeedsFolderAccessAndDoesNotFallBackToDownloads() throws {
@@ -137,6 +150,7 @@ private final class DestinationBookmarkCodecSpy {
     var isStale = false
     private(set) var scopedEncodeCount = 0
     private(set) var standardEncodeCount = 0
+    private(set) var resolveCount = 0
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
@@ -159,6 +173,7 @@ private final class DestinationBookmarkCodecSpy {
                 return self?.encoded(url, kind: .standard) ?? Data()
             },
             resolve: { [weak self] data, _ in
+                self?.resolveCount += 1
                 let url = self?.resolvedURL ?? self?.decodedURL(from: data)
                 guard let url else { throw CocoaError(.fileNoSuchFile) }
                 return (url, self?.isStale ?? false)

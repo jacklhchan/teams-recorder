@@ -7,6 +7,7 @@ struct RecordingDestinationIdentity: Codable, Equatable, Hashable, Sendable {
 enum RecordingDestinationBookmarkKind: String, Codable, Equatable, Sendable {
     case securityScoped
     case standard
+    case path
 }
 
 enum RecordingDestinationState: String, Codable, Equatable, Sendable {
@@ -155,7 +156,7 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
 
         let intendedURL = URL(fileURLWithPath: entry.path, isDirectory: true)
         do {
-            let resolved = try codec.resolve(entry.bookmarkData, entry.bookmarkKind)
+            let resolved = try resolve(entry)
             guard !resolved.stale, normalizedPath(resolved.url) == entry.path else {
                 return RecordingDestinationSelection(identity: identity, url: intendedURL, state: .needsFolderAccess)
             }
@@ -178,8 +179,8 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
                 bookmarkKind = .standard
             }
         } else {
-            bookmarkData = try codec.encodeStandard(url)
-            bookmarkKind = .standard
+            bookmarkData = Data()
+            bookmarkKind = .path
         }
 
         let identity = RecordingDestinationIdentity(id: UUID())
@@ -197,7 +198,7 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
         guard let entry = loadCatalog()?.entries.first(where: { $0.identity == identity }) else {
             throw StoreError.destinationNotFound
         }
-        let resolved = try codec.resolve(entry.bookmarkData, entry.bookmarkKind)
+        let resolved = try resolve(entry)
         guard !resolved.stale, normalizedPath(resolved.url) == entry.path else {
             throw StoreError.bookmarkResolutionFailed
         }
@@ -229,6 +230,16 @@ final class RecordingDestinationStore: RecordingDestinationStoring {
               let catalog = try? JSONDecoder().decode(Catalog.self, from: data),
               catalog.version == 1 else { return nil }
         return catalog
+    }
+
+    private func resolve(_ entry: Entry) throws -> (url: URL, stale: Bool) {
+        if entry.bookmarkKind == .path {
+            return (
+                URL(fileURLWithPath: entry.path, isDirectory: true),
+                false
+            )
+        }
+        return try codec.resolve(entry.bookmarkData, entry.bookmarkKind)
     }
 
     private func loadCurrentIdentity() -> CurrentIdentityLoadResult {

@@ -31,6 +31,9 @@ final class TranscriptionFeatureModel: ObservableObject {
     private var successfulPublicationToken: UUID?
     private var successfulPublicationCallback: ((TranscriptPublished) -> Void)?
 
+    /// Test-only observation seam; the coordinator remains cancellation owner.
+    var onPrivacyModeCancellation: (() -> Void)?
+
     init(
         coordinator: TranscriptionJobCoordinator,
         thirdPartyProcessingAdmission: any ThirdPartyProcessingAdmitting
@@ -89,6 +92,7 @@ final class TranscriptionFeatureModel: ObservableObject {
     func cancel() { coordinator.cancel() }
 
     func cancelForPrivacyMode() {
+        onPrivacyModeCancellation?()
         coordinator.cancelForPrivacyMode()
     }
 

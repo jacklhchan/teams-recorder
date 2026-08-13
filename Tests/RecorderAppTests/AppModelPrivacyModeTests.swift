@@ -58,6 +58,46 @@ final class AppModelPrivacyModeTests: XCTestCase {
         )
     }
 
+    func testEnablingPrivacyDispatchesOneCancellationToEachAIBoundaryWithoutChangingRecordingOrMic() {
+        let defaults = makeDefaults()
+        let policy = PrivacyModePolicy(defaults: defaults)
+        let model = AppModel(
+            defaults: defaults,
+            privacyModePolicy: policy,
+            performStartupWork: false
+        )
+        var transcriptionCancellations = 0
+        var intelligenceCancellations = 0
+        var settingsCancellations = 0
+        model.transcriptionFeature.onPrivacyModeCancellation = {
+            transcriptionCancellations += 1
+        }
+        model.meetingIntelligenceFeature.onPrivacyModeCancellation = {
+            intelligenceCancellations += 1
+        }
+        model.aiProviderSettingsModel.onPrivacyModeCancellation = {
+            settingsCancellations += 1
+        }
+        let recordingBefore = model.recorder.isRecording
+        let localMicMutedBefore = model.localMicMuted
+        let nativeMicMutedBefore = model.nativeInputMicMuted
+
+        model.setPrivacyModeEnabled(true)
+
+        XCTAssertEqual(transcriptionCancellations, 1)
+        XCTAssertEqual(intelligenceCancellations, 1)
+        XCTAssertEqual(settingsCancellations, 1)
+        XCTAssertEqual(model.recorder.isRecording, recordingBefore)
+        XCTAssertEqual(model.localMicMuted, localMicMutedBefore)
+        XCTAssertEqual(model.nativeInputMicMuted, nativeMicMutedBefore)
+
+        model.setPrivacyModeEnabled(false)
+
+        XCTAssertEqual(transcriptionCancellations, 1)
+        XCTAssertEqual(intelligenceCancellations, 1)
+        XCTAssertEqual(settingsCancellations, 1)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "AppModelPrivacyModeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

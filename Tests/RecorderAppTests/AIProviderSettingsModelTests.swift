@@ -576,6 +576,38 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.discoveredModels, ["fresh"])
     }
 
+    func testPrivacyCancellationMakesLateRawConnectionErrorInertUntilAnExplicitNewTest() async {
+        let policy = PrivacyModePolicy(defaults: UserDefaults(suiteName: "provider-privacy-late-error-\(UUID().uuidString)")!)
+        let client = DeferredProviderClient()
+        let model = AIProviderSettingsModel(
+            repository: RecordingProviderRepository(hasAPIKey: true),
+            client: client,
+            thirdPartyProcessingAdmission: policy,
+            loadImmediately: false
+        )
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.selectedLanguage = .cantonese
+
+        let test = Task { await model.testConnection() }
+        await client.waitForRequestCount(1)
+        model.cancelForPrivacyMode()
+        await client.completeNext(with: .failure(NSError(
+            domain: "provider-secret-sentinel",
+            code: 42
+        )))
+        await test.value
+        policy.setEnabled(false)
+        await Task.yield()
+        let requestCount = await client.requestCount()
+
+        XCTAssertEqual(model.status, PrivacyModePolicy.localOnlyMessage)
+        XCTAssertFalse(model.statusIsError)
+        XCTAssertFalse(model.status.localizedCaseInsensitiveContains("provider-secret-sentinel"))
+        XCTAssertEqual(requestCount, 1)
+    }
+
     func testStartupMigrationFailureIsRedactedAndLeavesManualSetupUsable() {
         let repository = RecordingProviderRepository(
             migrationError: NSError(domain: "legacy-secret", code: 1)

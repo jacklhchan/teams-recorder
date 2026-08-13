@@ -824,6 +824,9 @@ final class MeetingIntelligenceJobCoordinatorTests: XCTestCase {
 
         fixture.coordinator.generate(for: fixture.session)
         await fulfillment(of: [entered], timeout: 1)
+        // Generation intentionally clears the visible edit projection. Privacy
+        // cancellation must restore it from retainedEditableContentBySessionID.
+        XCTAssertNil(fixture.coordinator.presentation(for: fixture.session).editableContent)
         fixture.coordinator.cancelThirdPartyProcessingForPrivacyMode()
         await gate.release()
         await fulfillment(of: [finished], timeout: 1)

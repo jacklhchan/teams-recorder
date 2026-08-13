@@ -141,6 +141,40 @@ final class TranscriptionFeatureModelTests: XCTestCase {
         feature.shutdown()
     }
 
+    func testPrivacyCancellationMakesCancellationIgnoringLateASRCompletionInertUntilExplicitRestart() async throws {
+        let fixture = try FeatureFixture.make()
+        defer { fixture.remove() }
+        let service = FeatureDeferredService(result: .init(
+            transcriptURL: fixture.transcriptURL,
+            rawTranscriptURL: nil,
+            manifestURL: nil,
+            logURL: fixture.logURL,
+            committedTranscriptRevision: fixture.revision
+        ))
+        let feature = fixture.makeFeature(service: service)
+
+        feature.start(session: fixture.session, providerIsConfigured: true)
+        await service.waitForRequestCount(1)
+        feature.cancelForPrivacyMode()
+        await service.completeNext()
+        await Task.yield()
+        let requestsAfterCancellation = await service.requestCount
+
+        XCTAssertEqual(requestsAfterCancellation, 1)
+        XCTAssertEqual(
+            feature.presentation.transcriptionStatesBySessionID[fixture.session.id]?.phase,
+            .cancelled
+        )
+
+        feature.start(session: fixture.session, providerIsConfigured: true)
+        await service.waitForRequestCount(2)
+        await service.completeNext()
+        await eventually { feature.presentation.transcribingSessionID == nil }
+        let requestsAfterRestart = await service.requestCount
+        XCTAssertEqual(requestsAfterRestart, 2)
+        feature.shutdown()
+    }
+
     func testProviderSaveDoesNotMutateActiveASRSnapshotAndLaterAttemptUsesSavedProfile() async throws {
         let fixture = try FeatureFixture.make()
         defer { fixture.remove() }
@@ -439,6 +473,38 @@ private final class FeatureCapturingService: TranscriptionServicing, @unchecked 
         lock.withLock { capturedRequests.append(request) }
         onProgress(.uploading(chunk: 1, total: 1))
         return result
+    }
+}
+
+private actor FeatureDeferredService: TranscriptionServicing {
+    private let result: TranscriptionServiceResult
+    private var continuations: [CheckedContinuation<TranscriptionServiceResult, Never>] = []
+    private var requests = 0
+
+    init(result: TranscriptionServiceResult) { self.result = result }
+
+    nonisolated func transcribe(
+        _: TranscriptionServiceRequest,
+        onProgress _: @escaping @Sendable (TranscriptionServiceProgress) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        await withCheckedContinuation { continuation in
+            Task { await self.enqueue(continuation) }
+        }
+    }
+
+    private func enqueue(_ continuation: CheckedContinuation<TranscriptionServiceResult, Never>) {
+        requests += 1
+        continuations.append(continuation)
+    }
+
+    var requestCount: Int { requests }
+
+    func waitForRequestCount(_ count: Int) async {
+        while requests < count { await Task.yield() }
+    }
+
+    func completeNext() {
+        continuations.removeFirst().resume(returning: result)
     }
 }
 

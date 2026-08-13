@@ -18,6 +18,9 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
     private var publicationToken: UUID?
     private var publicationCallback: ((MeetingIntelligencePublished) -> Void)?
 
+    /// Test-only observation seam; the coordinator remains cancellation owner.
+    var onPrivacyModeCancellation: (() -> Void)?
+
     var onPublished: ((MeetingIntelligencePublished) -> Void)? {
         get { publicationCallback }
         set { replacePublicationObserver(with: newValue) }
@@ -113,6 +116,7 @@ final class MeetingIntelligenceFeatureModel: ObservableObject {
 
     func cancelThirdPartyProcessingForPrivacyMode() {
         guard !isShutdown else { return }
+        onPrivacyModeCancellation?()
         coordinator.cancelThirdPartyProcessingForPrivacyMode()
     }
 

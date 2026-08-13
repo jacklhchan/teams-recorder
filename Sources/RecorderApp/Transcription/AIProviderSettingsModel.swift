@@ -128,6 +128,8 @@ final class AIProviderSettingsModel: ObservableObject {
     private var applyingDraft = false
     private var connectionTestGeneration: UInt64 = 0
     private var connectionTestTask: Task<Void, Never>?
+    /// Test-only observation seam; this model retains connection cancellation.
+    var onPrivacyModeCancellation: (() -> Void)?
     private var providerSettingsSavedToken: UUID?
     private var providerSettingsSavedCallback: ((ProviderSettingsSaved) -> Void)?
 
@@ -268,6 +270,7 @@ final class AIProviderSettingsModel: ObservableObject {
     }
 
     func cancelForPrivacyMode() {
+        onPrivacyModeCancellation?()
         connectionTestGeneration &+= 1
         connectionTestTask?.cancel()
         connectionTestTask = nil

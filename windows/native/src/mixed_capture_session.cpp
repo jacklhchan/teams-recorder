@@ -12,6 +12,7 @@
 #include "canonical_timeline.h"
 #include "discontinuity_fade.h"
 #include "dynamic_video_route.h"
+#include "trusted_video_frame_hold.h"
 #include "session_duration_clock.h"
 #include "video_pts_mapper.h"
 #include "wgc_window_capture_session.h"
@@ -907,6 +908,8 @@ private:
             const std::uint64_t frame_duration = config_.video_frame_rate == 0
                 ? 333'333U : 10'000'000U / config_.video_frame_rate;
             std::uint64_t next_timestamp = 0;
+            recorder::video::WgcNv12Frame held_frame;
+            recorder::video::TrustedVideoFrameHold frame_hold;
             for (;;) {
                 std::shared_ptr<recorder::video::WgcWindowCaptureSession> capture;
                 recorder::video::ExactWindowIdentity target;
@@ -939,22 +942,64 @@ private:
 
                 bool use_target_frame = false;
                 recorder::video::WgcNv12Frame frame;
+                const recorder::video::WgcNv12Frame* frame_to_write = nullptr;
                 if (capture) {
                     if (!capture->IsRunning()) {
+                        frame_hold.Forget();
+                        held_frame = {};
                         MarkVideoTargetLost(capture, target_generation);
                     } else if (capture->TryPopFrame(&frame)) {
+                        const auto frame_pool_epoch =
+                            capture->Stats().frame_pool_recreations;
                         std::lock_guard<std::mutex> lock(mutex_);
                         // Recheck after the pop. A target change may have
                         // completed while WGC was copying this frame.
                         use_target_frame = video_capture_ == capture &&
+                            frame.frame_pool_epoch == frame_pool_epoch &&
                             video_route_.AllowsFrame(target_generation, target);
+                        if (use_target_frame) {
+                            held_frame = std::move(frame);
+                            frame_hold.Remember(
+                                reinterpret_cast<std::uintptr_t>(capture.get()),
+                                target_generation, target,
+                                held_frame.frame_pool_epoch);
+                            frame_to_write = &held_frame;
+                        } else {
+                            frame_hold.Forget();
+                            held_frame = {};
+                        }
+                    } else {
+                        const auto frame_pool_epoch =
+                            capture->Stats().frame_pool_recreations;
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        const bool route_allows_frame =
+                            video_capture_ == capture &&
+                            video_route_.AllowsFrame(target_generation, target);
+                        // WGC is change-driven and may not produce a new frame
+                        // for every fixed-rate MP4 sample. Repeating the last
+                        // owned, exact-window frame is normal video timing;
+                        // inserting black here would make static Teams content
+                        // alternate between the target and privacy black.
+                        use_target_frame = frame_hold.CanRepeat(
+                            reinterpret_cast<std::uintptr_t>(capture.get()),
+                            target_generation, target, frame_pool_epoch,
+                            route_allows_frame, capture->IsRunning());
+                        if (use_target_frame) {
+                            frame_to_write = &held_frame;
+                        } else {
+                            frame_hold.Forget();
+                            held_frame = {};
+                        }
                     }
+                } else {
+                    frame_hold.Forget();
+                    held_frame = {};
                 }
 
                 const std::uint8_t* bytes = use_target_frame
-                    ? frame.bytes.data() : black_video_frame_.data();
+                    ? frame_to_write->bytes.data() : black_video_frame_.data();
                 const std::uint32_t stride = use_target_frame
-                    ? frame.stride : config_.video_width;
+                    ? frame_to_write->stride : config_.video_width;
                 std::lock_guard<std::mutex> writer_lock(mp4_mutex_);
                 if (!mp4_writer_ || video_failed_) break;
                 std::string detail;

@@ -29,7 +29,6 @@ public sealed partial class MainPage : Page
         recordingOverlayPresenter.CancelRequested += OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested += OnRecordingOverlayStopRequested;
         recordingOverlayPresenter.TeamsWindowCaptureToggleRequested += OnTeamsWindowCaptureToggleRequested;
-        recordingOverlayPresenter.RecorderMicrophoneMuteToggleRequested += OnRecorderMicrophoneMuteToggleRequested;
         Loaded += OnLoaded;
     }
 
@@ -45,7 +44,6 @@ public sealed partial class MainPage : Page
         recordingOverlayPresenter.CancelRequested -= OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested -= OnRecordingOverlayStopRequested;
         recordingOverlayPresenter.TeamsWindowCaptureToggleRequested -= OnTeamsWindowCaptureToggleRequested;
-        recordingOverlayPresenter.RecorderMicrophoneMuteToggleRequested -= OnRecorderMicrophoneMuteToggleRequested;
         recordingOverlayPresenter.Hide();
         await viewModel.ShutdownAsync();
         recordingOverlayPresenter.Dispose();
@@ -151,13 +149,4 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async void OnRecorderMicrophoneMuteToggleRequested(
-        object? sender,
-        RecorderMicrophoneMuteToggleRequestedEventArgs args)
-    {
-        if (!isShutdown)
-        {
-            await viewModel.SetRecorderControlMicrophoneMutedAsync(args.Muted, CancellationToken.None);
-        }
-    }
 }

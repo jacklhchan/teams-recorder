@@ -50,7 +50,7 @@
 
             <StackPanel Grid.Row="2" x:Name="SourcesPanel" Spacing="6" Visibility="Collapsed">
                 <Border Padding="10,7" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}">
-                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="108" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="108" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <FontIcon Glyph="&#xE767;" Foreground="{ThemeResource SystemFillColorAttentionBrush}" />
                         <TextBlock Grid.Column="1" Text="Teams／系統輸出" VerticalAlignment="Center" FontSize="12" />
                         <ProgressBar x:Name="SystemWaveform" Grid.Column="2" Height="6" VerticalAlignment="Center" Value="0" Maximum="100" AutomationProperties.AutomationId="SystemWaveform" AutomationProperties.Name="Teams／系統輸出即時音量" />
@@ -60,16 +60,8 @@
                 <Border Padding="10,7" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}">
                     <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="108" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <FontIcon x:Name="MicrophoneIcon" Glyph="&#xE720;" Foreground="{ThemeResource SystemFillColorSuccessBrush}" />
-                        <StackPanel Grid.Column="1" Spacing="1"><TextBlock Text="麥克風" FontSize="12" /><TextBlock x:Name="MicrophoneScopeText" Text="僅影響 Recorder，不會同步 Teams" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="1"><TextBlock Text="麥克風" FontSize="12" /><TextBlock x:Name="MicrophoneScopeText" Text="狀態顯示；不會控制 Teams" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>
                         <ProgressBar x:Name="MicrophoneWaveform" Grid.Column="2" Height="6" VerticalAlignment="Center" Value="0" Maximum="100" AutomationProperties.AutomationId="MicrophoneWaveform" AutomationProperties.Name="麥克風即時輸入音量" />
-                        <Button
-                            x:Name="MicrophoneMuteButton"
-                            Grid.Column="3"
-                            MinWidth="62"
-                            Padding="8,3"
-                            AutomationProperties.AutomationId="RecorderMicrophoneMuteButton"
-                            Click="OnMicrophoneMuteButtonClick"
-                            Content="靜音" />
                     </Grid>
                 </Border>
             </StackPanel>

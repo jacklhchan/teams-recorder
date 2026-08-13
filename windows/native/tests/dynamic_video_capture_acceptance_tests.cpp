@@ -1,4 +1,5 @@
 #include "dynamic_video_route.h"
+#include "trusted_video_frame_hold.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -7,6 +8,7 @@ namespace {
 
 using recorder::video::DynamicVideoRoute;
 using recorder::video::ExactWindowIdentity;
+using recorder::video::TrustedVideoFrameHold;
 
 void Expect(bool condition, const char* message) {
     if (!condition) {
@@ -90,11 +92,65 @@ void ResizeAndTargetCloseRemainPrivateAndAudioContinues() {
            "Target loss must not interrupt the independent audio timeline.");
 }
 
+void SparseFramesRepeatWithoutPrivacyBlackBlinking() {
+    DynamicVideoRoute route;
+    TrustedVideoFrameHold hold;
+    const auto target = Target(0x4567, 91, 456);
+    const auto generation = route.BeginReplace();
+    Expect(route.CommitReplace(generation, target),
+           "Sparse-frame target must commit.");
+
+    constexpr std::uintptr_t capture_token = 0xABC;
+    constexpr std::uint64_t frame_pool_epoch = 7;
+    hold.Remember(capture_token, generation, target, frame_pool_epoch);
+
+    Expect(hold.CanRepeat(capture_token, generation, target, frame_pool_epoch,
+                          route.AllowsFrame(generation, target), true),
+           "A static exact-window frame must be repeated when WGC has no new frame.");
+    Expect(hold.CanRepeat(capture_token, generation, target, frame_pool_epoch,
+                          route.AllowsFrame(generation, target), true),
+           "Repeated empty WGC polls must remain on the trusted frame, not blink black.");
+}
+
+void HeldFrameFailsClosedAcrossEveryPrivacyBoundary() {
+    DynamicVideoRoute route;
+    TrustedVideoFrameHold hold;
+    const auto target = Target(0x5678, 92, 567);
+    const auto generation = route.BeginReplace();
+    Expect(route.CommitReplace(generation, target),
+           "Privacy-boundary target must commit.");
+
+    constexpr std::uintptr_t capture_token = 0xDEF;
+    constexpr std::uint64_t frame_pool_epoch = 11;
+    hold.Remember(capture_token, generation, target, frame_pool_epoch);
+
+    Expect(!hold.CanRepeat(capture_token, generation, target,
+                           frame_pool_epoch + 1,
+                           route.AllowsFrame(generation, target), true),
+           "A frame-pool recreation must invalidate the held pre-resize frame.");
+    Expect(!hold.CanRepeat(capture_token + 1, generation, target,
+                           frame_pool_epoch,
+                           route.AllowsFrame(generation, target), true),
+           "A replacement WGC session must not reuse the old session frame.");
+    Expect(!hold.CanRepeat(capture_token, generation, target,
+                           frame_pool_epoch,
+                           route.AllowsFrame(generation, target), false),
+           "A stopped capture must not freeze its final frame.");
+
+    route.Disable();
+    Expect(!hold.CanRepeat(capture_token, generation, target,
+                           frame_pool_epoch,
+                           route.AllowsFrame(generation, target), true),
+           "Disabling capture must immediately select privacy black.");
+}
+
 }  // namespace
 
 int main() {
     MidRecordingAddRemoveReplaceUsesOnlyCurrentFrames();
     HwndReuseAndStaleCallbacksFailClosed();
     ResizeAndTargetCloseRemainPrivateAndAudioContinues();
+    SparseFramesRepeatWithoutPrivacyBlackBlinking();
+    HeldFrameFailsClosedAcrossEveryPrivacyBoundary();
     return 0;
 }

@@ -233,6 +233,7 @@ int LiveResizeAndTargetLossAcceptanceTest() {
         }
     }
     if (!changed_content) {
+        const auto stats = session.Stats();
         std::cerr << "Exact-window capture did not reflect target-only painted content changes (first luma="
                   << static_cast<unsigned>(first_luma);
         if (received_changed_frame) {
@@ -240,7 +241,15 @@ int LiveResizeAndTargetLossAcceptanceTest() {
         } else {
             std::cerr << ", no post-paint frame was delivered";
         }
-        std::cerr << ").\n";
+        std::cerr << ", arrived=" << stats.frames_arrived
+                  << ", enqueued=" << stats.frames_enqueued
+                  << ", recreations=" << stats.frame_pool_recreations
+                  << ", invalid=" << stats.frames_dropped_invalid
+                  << ", copyFailures=" << stats.frames_dropped_copy_failure
+                  << ", conversionFailures=" << stats.frames_dropped_conversion_failure
+                  << ", lastFrameHresult=0x" << std::hex
+                  << static_cast<unsigned long>(stats.last_frame_failure_hresult)
+                  << ").\n";
         session.Stop();
         DestroyWindow(window);
         return 1;

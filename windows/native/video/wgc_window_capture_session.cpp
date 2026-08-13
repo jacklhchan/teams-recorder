@@ -404,7 +404,29 @@ void ProcessFrame(const std::shared_ptr<SharedState>& state,
         HRESULT conversion_hresult = E_FAIL;
         if (!CopyAndConvertFrame(state, runtime, frame, &converted, &conversion_failure,
                                  &conversion_hresult)) {
+            if (recreate_pool && conversion_hresult == E_INVALIDARG) {
+                // During a WGC resize transition ContentSize can already be
+                // the new geometry while the delivered texture still has the
+                // old dimensions. It cannot be copied safely, but treating it
+                // as an ordinary copy failure means the pool is never resized
+                // and every subsequent frame fails forever. Release this old
+                // surface, recreate for the announced geometry, and wait for
+                // the first frame backed by the new pool.
+                frame.Close();
+                sender.Recreate(runtime->d3d.winrt_device,
+                    winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                    2, content_size);
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->stats.latest_source_width = source_width;
+                state->stats.latest_source_height = source_height;
+                ++state->stats.frame_pool_recreations;
+                state->stats.frames_dropped_invalid += state->queue.size() + 1U;
+                state->queue.clear();
+                state->changed.notify_all();
+                return;
+            }
             std::lock_guard<std::mutex> lock(state->mutex);
+            state->stats.last_frame_failure_hresult = conversion_hresult;
             if (conversion_failure == WgcCaptureError::kFrameConversionFailed) {
                 ++state->stats.frames_dropped_conversion_failure;
             } else {
@@ -416,6 +438,11 @@ void ProcessFrame(const std::shared_ptr<SharedState>& state,
         // resize can invalidate its backing surface; converting first avoids
         // reading an undefined/reused surface and keeps resize fail-closed.
         if (recreate_pool) {
+            // Release the pool-owned surface before asking the pool to replace
+            // its backing buffers. Keeping this frame alive across Recreate
+            // can suppress every later FrameArrived notification on the
+            // free-threaded WGC pool, leaving the recording permanently black.
+            frame.Close();
             sender.Recreate(runtime->d3d.winrt_device,
                 winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
                 2, content_size);
@@ -425,21 +452,21 @@ void ProcessFrame(const std::shared_ptr<SharedState>& state,
         state->stats.latest_source_height = source_height;
         if (recreate_pool) {
             ++state->stats.frame_pool_recreations;
-            // A resize is a privacy boundary, not an opportunity to repeat a
-            // stale frame. Drop the transition frame and every pre-resize
-            // queued frame. The A/V scheduler observes the empty queue and
-            // emits an explicit black canvas until a later stable frame
-            // arrives from this same exact HWND.
-            state->stats.frames_dropped_invalid += state->queue.size() + 1U;
+            // A resize is a privacy boundary for frames queued at the old
+            // geometry, but the current frame was copied before Recreate and
+            // has already passed the exact HWND/PID/creation-time fence. Keep
+            // it as the first frame at the new geometry. Dropping it can leave
+            // a static window permanently black because WGC is not required
+            // to send another frame after the pool is recreated.
+            state->stats.frames_dropped_invalid += state->queue.size();
             state->queue.clear();
-            state->changed.notify_all();
-            return;
         }
         if (state->stop_requested || state->state != WgcWindowCaptureState::kRunning) return;
         if (state->queue.size() >= state->config.max_queued_frames) {
             ++state->stats.frames_dropped_queue_full;
             return;
         }
+        converted.frame_pool_epoch = state->stats.frame_pool_recreations;
         state->queue.emplace_back(std::move(converted));
         ++state->stats.frames_enqueued;
         state->changed.notify_all();
@@ -551,11 +578,26 @@ void WorkerMain(const std::shared_ptr<SharedState>& state) noexcept {
                 state->changed.notify_all();
             }
         }
-        {
-            std::unique_lock<std::mutex> lock(state->mutex);
-            state->changed.wait(lock, [&] { return state->stop_requested; });
-            if (state->state == WgcWindowCaptureState::kRunning) {
-                state->state = WgcWindowCaptureState::kStopping;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(state->mutex);
+                if (state->changed.wait_for(lock, std::chrono::milliseconds(100),
+                                            [&] { return state->stop_requested; })) {
+                    if (state->state == WgcWindowCaptureState::kRunning) {
+                        state->state = WgcWindowCaptureState::kStopping;
+                    }
+                    break;
+                }
+            }
+            // GraphicsCaptureItem.Closed is not guaranteed to arrive promptly
+            // for every destroyed/reparented HWND. Revalidate the immutable
+            // identity while idle so a static or resized target still fails
+            // closed instead of leaving a black writer alive indefinitely.
+            HRESULT live_identity_failure = S_OK;
+            if (!HasMatchingIdentity(state->config.target, &live_identity_failure)) {
+                SetFailure(state, WgcCaptureError::kTargetLost,
+                           live_identity_failure,
+                           "The selected capture window is no longer the validated target.");
             }
         }
         DisableCallbacks(state);

@@ -118,15 +118,6 @@ public sealed class TeamsWindowCaptureToggleRequestedEventArgs(bool enabled) : E
 }
 
 /// <summary>
-/// Requests a Recorder-local microphone mute transition. This never reads or
-/// changes the Teams mute state.
-/// </summary>
-public sealed class RecorderMicrophoneMuteToggleRequestedEventArgs(bool muted) : EventArgs
-{
-    public bool Muted { get; } = muted;
-}
-
-/// <summary>
 /// Presents an auxiliary, non-activating recording window. Consumers subscribe
 /// to the events and keep recording ownership in their existing coordinator.
 /// </summary>
@@ -137,8 +128,6 @@ public interface IRecordingOverlayPresenter : IDisposable
     event EventHandler? StopRequested;
 
     event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
-
-    event EventHandler<RecorderMicrophoneMuteToggleRequestedEventArgs>? RecorderMicrophoneMuteToggleRequested;
 
     /// <summary>Shows the Teams automatic-recording cancellation countdown.</summary>
     void ShowCountdown(int remainingSeconds);
@@ -186,8 +175,6 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRec
         window.StopRequested += (_, _) => StopRequested?.Invoke(this, EventArgs.Empty);
         window.TeamsWindowCaptureToggleRequested += (_, args) =>
             TeamsWindowCaptureToggleRequested?.Invoke(this, args);
-        window.RecorderMicrophoneMuteToggleRequested += (_, args) =>
-            RecorderMicrophoneMuteToggleRequested?.Invoke(this, args);
     }
 
     public event EventHandler? CancelRequested;
@@ -195,8 +182,6 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRec
     public event EventHandler? StopRequested;
 
     public event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
-
-    public event EventHandler<RecorderMicrophoneMuteToggleRequestedEventArgs>? RecorderMicrophoneMuteToggleRequested;
 
     public void ShowCountdown(int remainingSeconds) =>
         Update(RecordingOverlayPresentation.Countdown(remainingSeconds));

@@ -63,7 +63,6 @@ public sealed partial class RecordingOverlayWindow : Window
     public event EventHandler? CancelRequested;
     public event EventHandler? StopRequested;
     public event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
-    public event EventHandler<RecorderMicrophoneMuteToggleRequestedEventArgs>? RecorderMicrophoneMuteToggleRequested;
 
     internal void ApplyPresentation(RecordingOverlayPresentation presentation)
     {
@@ -98,14 +97,6 @@ public sealed partial class RecordingOverlayWindow : Window
             SystemWaveform.Value = presentation.SystemAudioLevelPercent;
             MicrophoneWaveform.Value = presentation.IsRecorderMicrophoneMuted ? 0 : presentation.MicrophoneLevelPercent;
             ToolTipService.SetToolTip(MicrophoneScopeText, presentation.VirtualMicrophoneStatus);
-            MicrophoneMuteButton.Visibility = isRecording ? Visibility.Visible : Visibility.Collapsed;
-            MicrophoneMuteButton.IsEnabled = isRecording && presentation.MicrophoneStatus != RecordingOverlayInputStatus.Disconnected;
-            MicrophoneMuteButton.Content = presentation.IsRecorderMicrophoneMuted ? "取消靜音" : "靜音";
-            AutomationProperties.SetName(
-                MicrophoneMuteButton,
-                presentation.IsRecorderMicrophoneMuted
-                    ? "取消 Recorder 與虛擬麥克風靜音"
-                    : "將 Recorder 與虛擬麥克風靜音");
 
             // Finalizing is deliberately inert: it is neither dismissible nor
             // able to change the active A/V target while the file is written.
@@ -229,16 +220,6 @@ public sealed partial class RecordingOverlayWindow : Window
         {
             ActionButton.IsEnabled = false;
             CancelRequested?.Invoke(this, EventArgs.Empty);
-        }
-    }
-
-    private void OnMicrophoneMuteButtonClick(object sender, RoutedEventArgs e)
-    {
-        if (MicrophoneMuteButton.IsEnabled && MicrophoneMuteButton.Content is string action)
-        {
-            RecorderMicrophoneMuteToggleRequested?.Invoke(
-                this,
-                new RecorderMicrophoneMuteToggleRequestedEventArgs(action == "靜音"));
         }
     }
 

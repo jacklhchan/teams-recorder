@@ -75,6 +75,10 @@ struct WgcNv12Frame {
     // WGC SystemRelativeTime in QPC-derived 100 ns units.  The mux lifecycle
     // maps this through VideoPtsMapper against the shared audio origin.
     std::uint64_t system_relative_time_100ns = 0;
+    // Snapshot of frame_pool_recreations when this owned frame entered the
+    // queue. Consumers use it to avoid holding an already-dequeued frame over
+    // a later resize/privacy boundary.
+    std::uint64_t frame_pool_epoch = 0;
 };
 
 enum class WgcWindowCaptureState : std::uint8_t {
@@ -97,6 +101,7 @@ struct WgcCaptureStats {
     std::uint64_t frame_pool_recreations = 0;
     std::uint32_t latest_source_width = 0;
     std::uint32_t latest_source_height = 0;
+    HRESULT last_frame_failure_hresult = S_OK;
 };
 
 // A background exact-HWND Windows Graphics Capture producer.  It owns every

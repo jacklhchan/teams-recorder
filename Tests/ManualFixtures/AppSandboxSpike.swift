@@ -30,7 +30,8 @@ struct AppSandboxSpike {
             case "capture-status": try await captureStatus()
             case "bookmark-select": try selectBookmark()
             case "bookmark-verify": try verifyBookmark()
-            case "pending": try pendingPublishRecovery()
+            case "pending-create": try pendingCreate()
+            case "pending-recover": try pendingRecover()
             case "ipc-embedded": try embeddedIPC()
             case "serve-once":
                 guard CommandLine.arguments.count == 3 else { throw ProbeError.usage }
@@ -95,17 +96,27 @@ struct AppSandboxSpike {
         print("bookmark.relaunch-access=true")
     }
 
-    static func pendingPublishRecovery() throws {
+    static func pendingCreate() throws {
+        let root = try containerRoot()
+        let pending = root.appendingPathComponent("pending", isDirectory: true)
+        try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
+        let session = pending.appendingPathComponent("session.txt")
+        try? FileManager.default.removeItem(at: session)
+        try Data("pending".utf8).write(to: session, options: .withoutOverwriting)
+        print("pending.created=true")
+    }
+
+    static func pendingRecover() throws {
         let root = try containerRoot()
         let pending = root.appendingPathComponent("pending", isDirectory: true)
         let published = root.appendingPathComponent("published", isDirectory: true)
-        try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: published, withIntermediateDirectories: true)
         let session = pending.appendingPathComponent("session.txt")
         let destination = published.appendingPathComponent("session.txt")
-        try? FileManager.default.removeItem(at: session)
+        guard FileManager.default.fileExists(atPath: session.path) else {
+            throw ProbeError.socket("pending-item-missing")
+        }
+        try FileManager.default.createDirectory(at: published, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: destination)
-        try Data("pending".utf8).write(to: session, options: .withoutOverwriting)
         try FileManager.default.moveItem(at: session, to: destination)
         let recovered = try String(contentsOf: destination, encoding: .utf8)
         guard recovered == "pending" else { throw ProbeError.socket("recovery-read-mismatch") }
@@ -120,18 +131,37 @@ struct AppSandboxSpike {
         let server = Process()
         server.executableURL = Bundle.main.executableURL
         server.arguments = ["serve-once", endpoint]
+        let serverOutput = Pipe()
+        server.standardOutput = serverOutput
         try server.run()
-        usleep(100_000)
+        try waitForReadyMarker(from: serverOutput, server: server)
         let helper = Process()
         helper.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/SandboxSpikeHelper")
         helper.arguments = [endpoint]
         try helper.run()
         helper.waitUntilExit()
         server.waitUntilExit()
-        guard helper.terminationStatus == 0, server.terminationStatus == 0 else {
-            throw ProbeError.process(helper.terminationStatus != 0 ? helper.terminationStatus : server.terminationStatus)
+        print("ipc.helper-exit=\(helper.terminationStatus)")
+        print("ipc.server-exit=\(server.terminationStatus)")
+        guard helper.terminationStatus == 0 else {
+            throw ProbeError.process(helper.terminationStatus)
+        }
+        guard server.terminationStatus == 0 else {
+            throw ProbeError.process(server.terminationStatus)
         }
         print("ipc.embedded-helper=true")
+    }
+
+    static func waitForReadyMarker(from output: Pipe, server: Process) throws {
+        let data = output.fileHandleForReading.availableData
+        let status = String(decoding: data, as: UTF8.self)
+        guard status.contains("ipc.server-ready") else {
+            server.waitUntilExit()
+            print("ipc.server-result=not-ready")
+            print("ipc.helper-exit=not-launched")
+            throw ProbeError.socket("ipc.server-not-ready(status=\(status.trimmingCharacters(in: .whitespacesAndNewlines)),exit=\(server.terminationStatus))")
+        }
+        print("ipc.server-result=ready")
     }
 
     static func serveOnce(at path: String) throws {
@@ -141,9 +171,10 @@ struct AppSandboxSpike {
         guard fd >= 0 else { throw ProbeError.socket("socket-create") }
         defer { close(fd) }
         try withUnixAddress(path) { address, length in
-            guard bind(fd, address, length) == 0 else { throw ProbeError.socket("socket-bind") }
+            guard bind(fd, address, length) == 0 else { throw ProbeError.socket("socket-bind(errno=\(errno))") }
         }
         guard listen(fd, 1) == 0 else { throw ProbeError.socket("socket-listen") }
+        print("ipc.server-ready")
         let client = accept(fd, nil, nil)
         guard client >= 0 else { throw ProbeError.socket("socket-accept") }
         defer { close(client) }

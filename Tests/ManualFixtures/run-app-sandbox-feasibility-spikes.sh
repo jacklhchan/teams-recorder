@@ -5,19 +5,40 @@ set -euo pipefail
 # install, signing, entitlement, release, or TCC-setting path.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURE_DIR="$ROOT_DIR/Tests/ManualFixtures"
-OUTPUT_ROOT="${1:-/private/tmp/local-meeting-recorder-sandbox-spike}"
+if (($# != 0)); then
+  echo "usage: $0" >&2
+  exit 64
+fi
+
+OUTPUT_ROOT="$(mktemp -d /private/tmp/lmr-sandbox-spike.XXXXXX)"
+OUTPUT_CREATED=1
 APP="$OUTPUT_ROOT/LocalMeetingRecorderSandboxSpike.app"
 BUNDLE_ID="com.localmeetingrecorder.sandbox-spike.$(id -u)"
 SWIFTC="$(/usr/bin/xcrun --find swiftc)"
 CODESIGN="$(/usr/bin/xcrun --find codesign)"
 SDKROOT="$(/usr/bin/xcrun --show-sdk-path)"
 
-case "$OUTPUT_ROOT" in
-  /private/tmp/*) ;;
-  *) echo "Output must stay under /private/tmp." >&2; exit 64 ;;
-esac
+is_owned_output_root() {
+  [[ "${OUTPUT_CREATED:-0}" == 1 ]] || return 1
+  [[ -d "$OUTPUT_ROOT" && ! -L "$OUTPUT_ROOT" ]] || return 1
+  local canonical_output_root
+  canonical_output_root="$(cd -P "$OUTPUT_ROOT" && /bin/pwd -P)" || return 1
+  [[ "$canonical_output_root" == "$OUTPUT_ROOT" ]] || return 1
+  case "$canonical_output_root" in
+    /private/tmp/lmr-sandbox-spike.*) ;;
+    *) return 1 ;;
+  esac
+}
 
-rm -rf "$OUTPUT_ROOT"
+cleanup_output_root() {
+  if is_owned_output_root; then
+    rm -rf -- "$OUTPUT_ROOT"
+  else
+    echo "Refusing to remove an unowned fixture output directory: $OUTPUT_ROOT" >&2
+  fi
+}
+trap cleanup_output_root EXIT
+
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 /usr/bin/python3 - "$APP/Contents/Info.plist" "$BUNDLE_ID" <<'PY'
 import plistlib
@@ -51,7 +72,8 @@ echo "manual-background-launch=/usr/bin/open -gj '$APP' --args ipc-embedded"
 
 # Passive/fixture-owned runtime evidence: no permission requests or GUI panels.
 "$APP/Contents/MacOS/SandboxSpike" capture-status
-"$APP/Contents/MacOS/SandboxSpike" pending
+"$APP/Contents/MacOS/SandboxSpike" pending-create
+"$APP/Contents/MacOS/SandboxSpike" pending-recover
 if "$APP/Contents/MacOS/SandboxSpike" ipc-embedded; then
   echo "ipc.embedded-helper-result=passed"
 else

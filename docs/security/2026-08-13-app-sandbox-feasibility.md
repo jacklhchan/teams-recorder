@@ -86,8 +86,10 @@
 ## 2026-08-13 隔離 runtime spike 證據
 
 以下是一次獨立、ad-hoc-signed fixture 的結果，不是 production bundle
-驗證。fixture 原始碼與 runner 位於 `Tests/ManualFixtures/`，輸出唯一在
-`/private/tmp/local-meeting-recorder-sandbox-spike`，bundle identifier 是
+驗證。fixture 原始碼與 runner 位於 `Tests/ManualFixtures/`，每次執行只會以
+`mktemp` 建立一個 `/private/tmp/lmr-sandbox-spike.XXXXXX` 直接子目錄；runner
+不接受 output path，並且只會在 canonical path、prefix 與 non-symlink directory
+檢查都通過時刪除自己建立的目錄。bundle identifier 是
 `com.localmeetingrecorder.sandbox-spike.<uid>`。它沒有呼叫 production build、
 install、release 或 entitlement scripts；沒有修改已安裝 staging app、TCC、
 Developer ID、Hardened Runtime 或 notarization。
@@ -103,17 +105,20 @@ Developer ID、Hardened Runtime 或 notarization。
   `capture.screen-content=available(displays=1,windows=58)`。這證實此 Mac 上
   sandbox fixture 可載入 ScreenCaptureKit、讀取既有 TCC 狀態及列舉內容；未
   驗證實際 stream、系統音訊、拒絕／重授權或 background capture。
-- **container pending publish/recovery（通過）**：fixture 以
-  `FileManager.applicationSupportDirectory` 建立其 container-owned pending
-  item，原子移動到 fixture-owned published 位置，再讀回並移除整個 fixture
-  root；輸出 `pending.publish-recovery=true`。此項不代表現行 pending store 或
-  任意使用者目的地已可直接搬遷。
+- **container pending publish/recovery（通過，跨程序）**：第一次 process 以
+  `FileManager.applicationSupportDirectory` 建立 fixture-owned pending item，
+  第二次 process 讀取、原子移動到 fixture-owned published 位置、驗證內容後清理
+  fixture root；輸出依序為 `pending.created=true` 與
+  `pending.publish-recovery=true`。此項不代表現行 pending store 或任意使用者
+  目的地已可直接搬遷。
 - **public CLI / AF_UNIX / background launch（失敗，保留阻塞）**：fixture 在
-  `/private/tmp/lmr-sbx-<pid>.sock` 建立 AF_UNIX server，embedded inherited
-  helper 嘗試連線；server 的 `bind` 失敗，結果為 `socket-bind`，helper 隨後
-  為 `helper-exit-67`。因此不能把現行 `/tmp/lmr-<uid>` public socket、外部
-  CLI 或 `/usr/bin/open -gj` 背景啟動宣稱為 sandbox compatible。這次沒有執行
-  external symlink CLI 或 GUI/background launch。
+  `/private/tmp/lmr-sbx-<pid>.sock` 建立 AF_UNIX server。server 先輸出 ready
+  marker 才會啟動 embedded inherited helper；本次 `bind` 在 helper 尚未啟動前
+  失敗，明確輸出 `socket-bind(errno=1)`、`ipc.server-result=not-ready` 與
+  `ipc.helper-exit=not-launched`。因此不能把現行 `/tmp/lmr-<uid>` public
+  socket、外部 CLI 或 `/usr/bin/open -gj` 背景啟動宣稱為 sandbox compatible，且
+  此結果不是 helper-start race。這次沒有執行 external symlink CLI 或
+  GUI/background launch。
 - **security-scoped selected folder across relaunch（尚未執行）**：fixture 已
   編譯 `NSOpenPanel` 選取、`.withSecurityScope` bookmark 寫入與第二次 process
   resolve/start/stop/write/cleanup 的兩段式流程，但沒有自動開 panel。下一步

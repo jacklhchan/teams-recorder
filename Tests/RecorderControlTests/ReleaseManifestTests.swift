@@ -9,7 +9,7 @@ final class ReleaseManifestTests: XCTestCase {
     private func manifest(build: String = "456", floor: String = "456") throws -> ReleaseManifest {
         try ReleaseManifest(
             version: "1.2.3", build: build, minimumAcceptedBuild: floor,
-            keyID: "test-key", provenanceID: "github-actions:owner/repo@1234567890abcdef1234567890abcdef12345678:run-123",
+            keyID: "test-key", provenanceID: "github-actions:owner-repo@1234567890abcdef1234567890abcdef12345678:run-123",
             zipFilename: "Local-Meeting-Recorder-1.2.3-\(build).zip", zipData: zip
         )
     }

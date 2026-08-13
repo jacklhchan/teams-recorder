@@ -212,12 +212,16 @@ STAGED_ZIP="$PUBLISH_SOURCE/${ARTIFACT_STEM}.zip"
 run_checked "$DITTO_BIN" -c -k --keepParent "$APP" "$STAGED_ZIP"
 STAGED_CHECKSUM="$("$ROOT_DIR/scripts/write-sha256.sh" "$STAGED_ZIP")" || fail_execution "Checksum generation failed."
 if [[ -n "$MANIFEST_KEY_ID" ]]; then
-  # The committed production keyring is deliberately empty until a release owner provisions its real public key.
-  fail_execution "Release manifest signing is fail-closed pending operational keyring handoff."
+  STAGED_MANIFEST="$PUBLISH_SOURCE/${ARTIFACT_STEM}.manifest.json"
+  STAGED_SIGNATURE="$PUBLISH_SOURCE/${ARTIFACT_STEM}.manifest.sig"
+  [[ -n "${RELEASE_PROVENANCE_ID:-}" ]] || fail_execution "Release provenance is required."
+  "$ROOT_DIR/scripts/sign-release-manifest.sh" --manifest-out "$STAGED_MANIFEST" --signature-out "$STAGED_SIGNATURE" --version "$VERSION" --build "$BUILD_NUMBER" --minimum-accepted-build "$BUILD_NUMBER" --git-commit "$(/usr/bin/git -C "$ROOT_DIR" rev-parse --verify HEAD^{commit})" --provenance-id "$RELEASE_PROVENANCE_ID" --zip "$STAGED_ZIP" --key-id "$MANIFEST_KEY_ID" --private-key-file "$MANIFEST_PRIVATE_KEY_FILE" || fail_execution "Release manifest signing failed."
+  "$ROOT_DIR/scripts/verify-release-manifest.sh" --manifest "$STAGED_MANIFEST" --signature "$STAGED_SIGNATURE" --zip "$STAGED_ZIP" --minimum-build "$BUILD_NUMBER" || fail_execution "Release manifest verification failed."
 fi
 /bin/cp "$ROOT_DIR/LICENSE" "$PUBLISH_SOURCE/LICENSE" || fail_execution "Cannot stage LICENSE."
 /bin/cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PUBLISH_SOURCE/THIRD_PARTY_NOTICES.md" || fail_execution "Cannot stage third-party notices."
 [[ -s "$STAGED_ZIP" && -s "$STAGED_CHECKSUM" ]] || fail_execution "Staged release artifacts are incomplete."
+if [[ -n "$MANIFEST_KEY_ID" ]]; then [[ -s "$STAGED_MANIFEST" && -s "$STAGED_SIGNATURE" && ! -L "$STAGED_MANIFEST" && ! -L "$STAGED_SIGNATURE" ]] || fail_execution "Staged manifest artifacts are incomplete."; fi
 /usr/bin/cmp -s "$ROOT_DIR/LICENSE" "$PUBLISH_SOURCE/LICENSE" || fail_execution "Staged LICENSE differs."
 /usr/bin/cmp -s "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PUBLISH_SOURCE/THIRD_PARTY_NOTICES.md" || fail_execution "Staged third-party notices differ."
 (

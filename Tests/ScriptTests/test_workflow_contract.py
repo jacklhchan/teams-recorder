@@ -531,6 +531,7 @@ if kind == "rm":
             keychain = root / "temporary keychain.keychain-db"
             signing_p12 = root / "signing.p12"
             notary_key = root / "AuthKey.p8"
+            manifest_key = root / "release-manifest-ed25519.key"
             original_paths = [
                 "/Users/runner/Library/Keychains/login.keychain-db",
                 "/Users/runner/Library/Keychains/Team Signing.keychain-db",
@@ -539,7 +540,7 @@ if kind == "rm":
                 "".join(f'    "{path}"\n' for path in original_paths),
                 encoding="utf-8",
             )
-            for credential in (keychain, signing_p12, notary_key):
+            for credential in (keychain, signing_p12, notary_key, manifest_key):
                 credential.write_text("fixture", encoding="utf-8")
 
             environment = os.environ.copy()
@@ -555,6 +556,7 @@ if kind == "rm":
                     "KEYCHAIN": str(keychain),
                     "SIGNING_P12": str(signing_p12),
                     "NOTARY_KEY": str(notary_key),
+                    "MANIFEST_KEY": str(manifest_key),
                 }
             )
             trap_fixture = (
@@ -594,6 +596,7 @@ if kind == "rm":
                         "-f",
                         str(signing_p12),
                         str(notary_key),
+                        str(manifest_key),
                         str(original),
                     ],
                 ],
@@ -608,6 +611,7 @@ if kind == "rm":
                     "LMR_ORIGINAL_KEYCHAINS": str(original),
                     "LMR_SIGNING_P12": str(signing_p12),
                     "LMR_NOTARY_KEY": str(notary_key),
+                    "LMR_MANIFEST_KEY": str(manifest_key),
                     "FAKE_DELETE_EXIT": "24",
                     "FAKE_RM_EXIT": "25",
                 }
@@ -636,6 +640,7 @@ if kind == "rm":
                     "-f",
                     str(signing_p12),
                     str(notary_key),
+                    str(manifest_key),
                     str(original),
                 ],
             ],
@@ -679,6 +684,7 @@ if kind == "rm":
                     "-f",
                     str(root / "signing.p12"),
                     str(root / "AuthKey.p8"),
+                    str(root / "release-manifest-ed25519.key"),
                     str(root / "lmr-original-keychains"),
                 ]
             ],

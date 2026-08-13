@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-echo "release manifest signing requires the production signing tool implementation" >&2
-exit 70
+[[ $# -eq 20 ]] || exit 64
+exec /usr/bin/xcrun swift run -c release ReleaseManifestTool sign "$@"

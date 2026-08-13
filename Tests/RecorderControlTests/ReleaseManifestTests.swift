@@ -24,7 +24,7 @@ final class ReleaseManifestTests: XCTestCase {
 
         XCTAssertEqual(try ReleaseManifest.decodeCanonical(bytes), manifest)
         XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("\"gitCommit\":\"1234567890abcdef1234567890abcdef12345678\""))
-        XCTAssertNoThrow(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, keyring: keyring, minimumBuild: "456"))
+        XCTAssertNoThrow(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, zipFilename: manifest.artifact.zipFilename, keyring: keyring, minimumBuild: "456"))
         for bad in [Data(" {\n".utf8) + bytes, Data("{\"build\":\"456\",\"build\":\"456\"}".utf8)] {
             XCTAssertThrowsError(try ReleaseManifest.decodeCanonical(bad)) { XCTAssertEqual($0 as? ReleaseManifestError, .malformed) }
         }
@@ -35,8 +35,9 @@ final class ReleaseManifestTests: XCTestCase {
         let publicKey = try Curve25519.Signing.PrivateKey(rawRepresentation: seed).publicKey.rawRepresentation
         let keyring = ReleaseManifestKeyring(entries: [.init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "1", status: .active)])
         var alteredSignature = signature; alteredSignature[0] ^= 1
-        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: alteredSignature, zipData: zip, keyring: keyring, minimumBuild: "1")) { XCTAssertEqual($0 as? ReleaseManifestError, .invalidSignatureOrDigest) }
-        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: Data("changed".utf8), keyring: keyring, minimumBuild: "1")) { XCTAssertEqual($0 as? ReleaseManifestError, .invalidSignatureOrDigest) }
+        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: alteredSignature, zipData: zip, zipFilename: value.artifact.zipFilename, keyring: keyring, minimumBuild: "1")) { XCTAssertEqual($0 as? ReleaseManifestError, .invalidSignatureOrDigest) }
+        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: Data("changed".utf8), zipFilename: value.artifact.zipFilename, keyring: keyring, minimumBuild: "1")) { XCTAssertEqual($0 as? ReleaseManifestError, .invalidSignatureOrDigest) }
+        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, zipFilename: "renamed.zip", keyring: keyring, minimumBuild: "1")) { XCTAssertEqual($0 as? ReleaseManifestError, .invalidSignatureOrDigest) }
     }
 
     func testVerifierRejectsUnknownSchemaUnknownOrRetiredKey() throws {
@@ -45,14 +46,14 @@ final class ReleaseManifestTests: XCTestCase {
         XCTAssertThrowsError(try ReleaseManifest.decodeCanonical(Data(String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":2").utf8))) { XCTAssertEqual($0 as? ReleaseManifestError, .unsupported) }
         for status in [ReleaseManifestKeyStatus.retired] {
             let ring = ReleaseManifestKeyring(entries: [.init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "1", status: status)])
-            XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, keyring: ring, minimumBuild: "1")) { XCTAssertEqual($0 as? ReleaseManifestError, .unsupported) }
+            XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, zipFilename: value.artifact.zipFilename, keyring: ring, minimumBuild: "1")) { XCTAssertEqual($0 as? ReleaseManifestError, .unsupported) }
         }
 
         let duplicateRing = ReleaseManifestKeyring(entries: [
             .init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "1", status: .active),
             .init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "1", status: .active),
         ])
-        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, keyring: duplicateRing, minimumBuild: "1")) {
+        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, zipFilename: value.artifact.zipFilename, keyring: duplicateRing, minimumBuild: "1")) {
             XCTAssertEqual($0 as? ReleaseManifestError, .unsupported)
         }
     }
@@ -79,6 +80,10 @@ final class ReleaseManifestTests: XCTestCase {
         let bytes = try value.canonicalData(); let signature = try ReleaseManifest.sign(bytes, privateKeySeed: seed)
         let publicKey = try Curve25519.Signing.PrivateKey(rawRepresentation: seed).publicKey.rawRepresentation
         let ring = ReleaseManifestKeyring(entries: [.init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "999999999999999999999999", status: .active)])
-        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, keyring: ring, minimumBuild: "1000000000000000000000000")) { XCTAssertEqual($0 as? ReleaseManifestError, .rollback) }
+        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, zipFilename: value.artifact.zipFilename, keyring: ring, minimumBuild: "1000000000000000000000000")) { XCTAssertEqual($0 as? ReleaseManifestError, .rollback) }
+    }
+
+    func testUsageExitCodeIsStable() {
+        XCTAssertEqual(ReleaseManifestError.usage.rawValue, 64)
     }
 }

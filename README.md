@@ -117,7 +117,7 @@ configured `notarytool` Keychain profile:
 
 The protected manual production workflow requires a GitHub `production`
 environment with required reviewers and a main-only deployment. Configure these
-six repository secrets before dispatching it:
+seven repository secrets before dispatching it:
 
 ```text
 MACOS_CERTIFICATE_P12_BASE64
@@ -142,17 +142,20 @@ intentionally empty; production manifest verification fails closed and this is
 not production-ready.
 
 Before creating a public GitHub Release, an authorized QA user must pass the
-signed microphone acceptance gate with the exact notarized workflow artifact:
+signed microphone acceptance gate with the exact notarized workflow artifact.
+Use the repository-pinned keyring and a release-owner supplied rollback floor:
 
 ```text
-1. Download the workflow artifact and verify its SHA-256 with:
+1. Download the workflow artifact and verify its signed manifest with:
+   scripts/verify-release-manifest.sh --manifest <manifest-file> --signature <signature-file> --zip <zip-file> --minimum-build <approved-floor>
+2. Verify its portable SHA-256 with:
    /usr/bin/shasum -a 256 -c <checksum-file>
-2. Expand the ZIP into a temporary QA folder, not /Applications.
-3. Run codesign --verify --deep --strict and spctl --assess --type execute.
-4. Launch that exact candidate, grant Microphone permission when macOS asks,
+3. Expand the ZIP into a temporary QA folder, not /Applications.
+4. Run codesign --verify --deep --strict and spctl --assess --type execute.
+5. Launch that exact candidate, grant Microphone permission when macOS asks,
    choose All System Audio or Selected App, select the test microphone, and
    record 10 seconds of speech.
-5. Confirm the in-app mic waveform moves and the saved MP4 is non-empty and
+6. Confirm the in-app mic waveform moves and the saved MP4 is non-empty and
    audible. If media recovery was required, validate the M4A fallback instead,
    then quit and remove the temporary QA copy.
 ```

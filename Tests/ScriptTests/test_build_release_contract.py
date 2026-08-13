@@ -490,6 +490,17 @@ class BuildReleaseContractTests(unittest.TestCase):
         self.assertIn(publish_call, script)
         self.assertLess(script.index('cp "$ROOT_DIR/LICENSE"'), script.rindex(publish_call))
 
+    def test_signed_manifest_binds_commit_and_is_verified_before_atomic_publish(self):
+        script = RELEASE_SCRIPT.read_text(encoding="utf-8")
+        sign = script.index('"$ROOT_DIR/scripts/sign-release-manifest.sh"')
+        verify = script.index('"$ROOT_DIR/scripts/verify-release-manifest.sh"', sign)
+        publish = script.rindex('"$ROOT_DIR/scripts/atomic-publish-directory.py"')
+        self.assertLess(sign, verify)
+        self.assertLess(verify, publish)
+        sign_block = script[sign:verify]
+        self.assertIn('--git-commit "$(/usr/bin/git -C "$ROOT_DIR" rev-parse --verify HEAD^{commit})"', sign_block)
+        self.assertIn('--provenance-id "$RELEASE_PROVENANCE_ID"', sign_block)
+
     def test_signing_and_notary_command_order_is_fixed(self):
         script = RELEASE_SCRIPT.read_text(encoding="utf-8")
         commands = [

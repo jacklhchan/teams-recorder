@@ -23,7 +23,7 @@ jobs:
     env:
       RELEASE_VERSION: ${{ inputs.version }}
       RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
-      RELEASE_PROVENANCE_ID: github-actions:${{ github.repository }}@${{ github.sha }}:run-${{ github.run_id }}
+      RELEASE_PROVENANCE_ID: github-actions:repo-${{ github.repository_id }}@${{ github.sha }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Verify releasable ref
@@ -179,6 +179,14 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/release"
           /usr/bin/shasum -a 256 -c ./*.sha256
+      - name: Verify published release manifest
+        run: |
+          set -euo pipefail
+          ./scripts/verify-release-manifest.sh \
+            --manifest "$RUNNER_TEMP/release/Local-Meeting-Recorder-${RELEASE_VERSION}-${RELEASE_BUILD_NUMBER}.manifest.json" \
+            --signature "$RUNNER_TEMP/release/Local-Meeting-Recorder-${RELEASE_VERSION}-${RELEASE_BUILD_NUMBER}.manifest.sig" \
+            --zip "$RUNNER_TEMP/release/Local-Meeting-Recorder-${RELEASE_VERSION}-${RELEASE_BUILD_NUMBER}.zip" \
+            --minimum-build "$RELEASE_BUILD_NUMBER"
       - name: Upload verified release
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

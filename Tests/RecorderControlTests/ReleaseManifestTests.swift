@@ -9,6 +9,7 @@ final class ReleaseManifestTests: XCTestCase {
     private func manifest(build: String = "456", floor: String = "456") throws -> ReleaseManifest {
         try ReleaseManifest(
             version: "1.2.3", build: build, minimumAcceptedBuild: floor,
+            gitCommit: "1234567890abcdef1234567890abcdef12345678",
             keyID: "test-key", provenanceID: "github-actions:owner-repo@1234567890abcdef1234567890abcdef12345678:run-123",
             zipFilename: "Local-Meeting-Recorder-1.2.3-\(build).zip", zipData: zip
         )
@@ -22,6 +23,7 @@ final class ReleaseManifestTests: XCTestCase {
         let keyring = ReleaseManifestKeyring(entries: [.init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "1", status: .active)])
 
         XCTAssertEqual(try ReleaseManifest.decodeCanonical(bytes), manifest)
+        XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("\"gitCommit\":\"1234567890abcdef1234567890abcdef12345678\""))
         XCTAssertNoThrow(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, keyring: keyring, minimumBuild: "456"))
         for bad in [Data(" {\n".utf8) + bytes, Data("{\"build\":\"456\",\"build\":\"456\"}".utf8)] {
             XCTAssertThrowsError(try ReleaseManifest.decodeCanonical(bad)) { XCTAssertEqual($0 as? ReleaseManifestError, .malformed) }
@@ -45,6 +47,31 @@ final class ReleaseManifestTests: XCTestCase {
             let ring = ReleaseManifestKeyring(entries: [.init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "1", status: status)])
             XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, keyring: ring, minimumBuild: "1")) { XCTAssertEqual($0 as? ReleaseManifestError, .unsupported) }
         }
+
+        let duplicateRing = ReleaseManifestKeyring(entries: [
+            .init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "1", status: .active),
+            .init(keyID: "test-key", publicKeyBase64: publicKey.base64EncodedString(), minimumAcceptedBuild: "1", status: .active),
+        ])
+        XCTAssertThrowsError(try ReleaseManifest.verify(manifestData: bytes, signature: signature, zipData: zip, keyring: duplicateRing, minimumBuild: "1")) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .unsupported)
+        }
+    }
+
+
+    func testManifestRejectsUnsafeTokensAndMalformedGitCommit() throws {
+        for provenance in ["owner/repo", "quoted\"value", "back\\slash"] {
+            XCTAssertThrowsError(try ReleaseManifest(
+                version: "1.2.3", build: "456", minimumAcceptedBuild: "456",
+                gitCommit: "1234567890abcdef1234567890abcdef12345678",
+                keyID: "test-key", provenanceID: provenance,
+                zipFilename: "Local-Meeting-Recorder-1.2.3-456.zip", zipData: zip
+            )) { XCTAssertEqual($0 as? ReleaseManifestError, .malformed) }
+        }
+        XCTAssertThrowsError(try ReleaseManifest(
+            version: "1.2.3", build: "456", minimumAcceptedBuild: "456",
+            gitCommit: "not-a-commit", keyID: "test-key", provenanceID: "local:test",
+            zipFilename: "Local-Meeting-Recorder-1.2.3-456.zip", zipData: zip
+        )) { XCTAssertEqual($0 as? ReleaseManifestError, .malformed) }
     }
 
     func testVerifierRejectsRollbackAgainstManifestKeyRingAndCallerFloors() throws {

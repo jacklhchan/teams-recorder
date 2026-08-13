@@ -324,6 +324,8 @@ if kind == "rm":
         )
         self.assertIn("${{ runner.temp }}/release/*.zip", workflow)
         self.assertIn("${{ runner.temp }}/release/*.sha256", workflow)
+        self.assertIn("${{ runner.temp }}/release/*.manifest.json", workflow)
+        self.assertIn("${{ runner.temp }}/release/*.manifest.sig", workflow)
         self.assertIn("${{ runner.temp }}/release/LICENSE", workflow)
         self.assertIn("${{ runner.temp }}/release/THIRD_PARTY_NOTICES.md", workflow)
         self.assertIn(
@@ -725,6 +727,28 @@ if kind == "rm":
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, workflow)
+
+    def test_release_verifies_slash_free_signed_provenance_after_publication(self):
+        workflow = self.read_workflow()
+        self.assertIn(
+            "RELEASE_PROVENANCE_ID: github-actions:repo-${{ github.repository_id }}@${{ github.sha }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}",
+            workflow,
+        )
+        self.assertNotIn("RELEASE_PROVENANCE_ID: github-actions:${{ github.repository }}", workflow)
+        checksum = workflow.index("- name: Verify portable checksum")
+        manifest = workflow.index("- name: Verify published release manifest")
+        upload = workflow.index("- name: Upload verified release")
+        self.assertLess(checksum, manifest)
+        self.assertLess(manifest, upload)
+        verify_block = workflow[manifest:upload]
+        for required in (
+            "./scripts/verify-release-manifest.sh",
+            "--manifest \"$RUNNER_TEMP/release/Local-Meeting-Recorder-${RELEASE_VERSION}-${RELEASE_BUILD_NUMBER}.manifest.json\"",
+            "--signature \"$RUNNER_TEMP/release/Local-Meeting-Recorder-${RELEASE_VERSION}-${RELEASE_BUILD_NUMBER}.manifest.sig\"",
+            "--zip \"$RUNNER_TEMP/release/Local-Meeting-Recorder-${RELEASE_VERSION}-${RELEASE_BUILD_NUMBER}.zip\"",
+            "--minimum-build \"$RELEASE_BUILD_NUMBER\"",
+        ):
+            self.assertIn(required, verify_block)
 
 
 if __name__ == "__main__":

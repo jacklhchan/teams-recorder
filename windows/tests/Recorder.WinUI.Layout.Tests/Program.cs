@@ -35,6 +35,8 @@ var tests = new (string Name, Action Run)[]
     ("Teams window capture refreshes an exact target at the start boundary", TeamsWindowTargetRefreshIsBounded),
     ("recording overlay supports active countdown and finalizing states", OverlayStatesAreComplete),
     ("recording overlay scales for DPI and remains user-resizable", OverlayIsDpiAwareAndResizable),
+    ("recording overlay has a dedicated non-activating drag handle", OverlayCanBeMovedSafely),
+    ("completed recordings release the lifecycle before library reindexing", StopDoesNotWaitForLibraryReindex),
     ("pipe control joins the UI lifecycle and stops before finalization", ControlRuntimeLifecycleIsBounded),
     ("pipe status remains a bounded privacy-safe projection", ControlStatusIsPrivate),
 };
@@ -55,6 +57,35 @@ foreach (var (name, run) in tests)
 }
 
 return failures == 0 ? 0 : 1;
+
+void StopDoesNotWaitForLibraryReindex()
+{
+    var stopStart = viewModelCode.IndexOf("private async Task StopRecordingCoreAsync", StringComparison.Ordinal);
+    var stopEnd = viewModelCode.IndexOf("private async Task<T> RunRecordingLifecycleActionAsync", stopStart, StringComparison.Ordinal);
+    if (stopStart < 0 || stopEnd <= stopStart)
+    {
+        throw new InvalidOperationException("The bounded recording stop boundary is missing.");
+    }
+
+    var stop = viewModelCode[stopStart..stopEnd];
+    DoesNotContain("await RefreshLibraryCoreAsync()", stop,
+        "A full library reindex must not hold the recording lifecycle gate after publication.");
+    Contains("BeginSessionPublication()", stop,
+        "A clean stop must detach publication before releasing the lifecycle action.");
+
+    var publishStart = viewModelCode.IndexOf(
+        "private async Task<RecordingSessionPublicationResult> EnsureSessionPublishedAsync",
+        StringComparison.Ordinal);
+    var publishEnd = viewModelCode.IndexOf("private async Task CompleteTestPlaybackAsync", publishStart, StringComparison.Ordinal);
+    if (publishStart < 0 || publishEnd <= publishStart)
+    {
+        throw new InvalidOperationException("The session publication boundary is missing.");
+    }
+    DoesNotContain("RefreshLibraryCoreAsync", viewModelCode[publishStart..publishEnd],
+        "Durable publication must not synchronously rescan every historical recording.");
+    Contains("PublishStoppedSessionAndRefreshLibraryAsync", viewModelCode,
+        "Detached publication must still refresh the library after validation succeeds.");
+}
 
 void WorkspaceRoutesAreStable()
 {
@@ -428,7 +459,7 @@ void OverlayStatesAreComplete()
     {
         "ElapsedText", "SystemWaveform", "MicrophoneWaveform",
         "TeamsWindowCaptureToggle", "StatusDetailText",
-        "RecordingOverlayLifecycleActionButton",
+        "RecordingOverlayLifecycleActionButton", "RecordingOverlayDragHandle",
     })
     {
         _ = SingleByAutomationIdOrName(overlay, automationId);
@@ -490,6 +521,23 @@ void OverlayIsDpiAwareAndResizable()
     Contains("MinimumHeightDips", overlayCode, "Overlay must enforce a readable minimum height.");
     Contains("presenter.IsResizable = true", overlayCode, "Users must be able to enlarge the floating controller.");
     DoesNotContain("AppWindow.Resize(new SizeInt32(448, 276))", overlayCode, "A fixed physical-pixel size clips the overlay above 100% display scaling.");
+}
+
+void OverlayCanBeMovedSafely()
+{
+    var handle = SingleByAutomationIdOrName(overlay, "RecordingOverlayDragHandle");
+    Equal("OnDragHandlePointerPressed", handle.Attribute("PointerPressed")?.Value,
+        "The dedicated drag handle must route pointer input to its guarded native move handler.");
+    Contains("IsLeftButtonPressed", overlayCode,
+        "Only a primary-button drag may move the recording overlay.");
+    Contains("WmNcLButtonDown", overlayCode,
+        "The move handler must use the Windows caption drag loop.");
+    Contains("HtCaption", overlayCode,
+        "The overlay must identify the dedicated region as a caption drag.");
+    Contains("ReleaseCapture", overlayCode,
+        "Pointer capture must be released before entering the native move loop.");
+    Contains("WsExNoActivate", overlayCode,
+        "Moving the overlay must preserve its non-activating window style.");
 }
 
 XElement SingleByName(string name) =>

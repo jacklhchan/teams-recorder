@@ -60,6 +60,7 @@ var tests = new (string Name, Action Run)[]
     ,("selected-audio request rejects fallback-shaped options", AudioMvpTests.SelectedAudioRequestRejectsFallbackShapedOptions)
     ,("selected-window lifecycle preserves M4A when MP4 is unavailable", AudioMvpTests.SelectedWindowLifecycleFallsBackToAudio)
     ,("selected-window lifecycle remains release-gated by default", AudioMvpTests.SelectedWindowLifecycleIsReleaseGatedByDefault)
+    ,("completed media validation does not block the next recording", AudioMvpTests.CompletedSessionValidationDoesNotBlockNextRecording)
     ,("selected-audio test auto-stop publishes exactly once", SelectedAudioLifecycleTests.TestAutoStopPublishesExactlyOnce)
     ,("selected process disappearance fails closed and cleans empty state", SelectedAudioLifecycleTests.ProcessDisappearanceFailsClosedAndCleansOnlyEmptyFolder)
     ,("selected-audio fault retains recoverable backup", SelectedAudioLifecycleTests.RecoverableSelectedFaultKeepsAccumulatedBackup)

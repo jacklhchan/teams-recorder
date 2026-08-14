@@ -291,10 +291,10 @@ public sealed record NativeSelectedWindowAvRequest(
     uint AudioTargetProcessId = 0,
     bool IncludedProcessTree = false,
     ulong AudioProcessCreationTime100Nanoseconds = 0,
-    uint VideoWidth = 1280,
-    uint VideoHeight = 720,
+    uint VideoWidth = 1920,
+    uint VideoHeight = 1080,
     uint VideoFrameRate = 30,
-    uint VideoBitRate = 2_500_000,
+    uint VideoBitRate = 5_000_000,
     uint AacBitRate = 128_000) : INativeRecordingRequest
 {
     public RecordingCaptureMode Mode => RecordingCaptureMode.SelectedWindowAv;

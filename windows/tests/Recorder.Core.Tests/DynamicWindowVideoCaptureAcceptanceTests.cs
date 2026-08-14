@@ -15,6 +15,12 @@ internal static class DynamicWindowVideoCaptureAcceptanceTests
             NativeSelectedAudioSource.SystemLoopback,
             "C:\\recordings\\audio-safety.partial.mp4",
             "C:\\recordings\\recording.partial.mp4");
+        if (start.VideoWidth != 1920 || start.VideoHeight != 1080 ||
+            start.VideoFrameRate != 30 || start.VideoBitRate != 5_000_000)
+        {
+            throw new InvalidOperationException(
+                "Selected-window capture must default to a 1080p30 fixed canvas at the bounded 5 Mbps profile.");
+        }
         start.Validate();
         Equal(NativeRecorderResult.Ok, bridge.StartSelectedWindowAv(start).Result);
         bridge.EmitAudio();

@@ -20,6 +20,7 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
     private RecordingSessionPlan? activeSession;
     private RecordingSessionActiveLock? activeSessionLock;
     private Task<RecordingSessionPublicationResult>? publication;
+    private readonly HashSet<Task<RecordingSessionPublicationResult>> publicationTasks = [];
     private Task recoveryJournalWrite = Task.CompletedTask;
     private ulong lastAudioCheckpointSequence;
     private ulong lastVideoCheckpointSequence;
@@ -98,7 +99,7 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
         var replacement = new SessionStorageService(storageRoot);
         lock (stateGate)
         {
-            if (activeSession is not null || publication is { IsCompleted: false })
+            if (activeSession is not null)
                 throw new InvalidOperationException("The recording storage location cannot change while a session is active.");
             storage = replacement;
         }
@@ -155,8 +156,8 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
         {
             lock (stateGate)
             {
-                if (activeSession is not null || publication is { IsCompleted: false } || pendingStartCancellation is not null)
-                    throw new InvalidOperationException("A recording session is already active or being published.");
+                if (activeSession is not null || pendingStartCancellation is not null)
+                    throw new InvalidOperationException("A recording session is already active.");
                 plan = storage.CreateSessionPlan(request.Kind);
                 activeSessionLock = storage.AcquireActiveLock(plan);
                 activeSession = plan;
@@ -267,8 +268,8 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
             RecordingSessionPlan plan;
             lock (stateGate)
             {
-                if (activeSession is not null || publication is { IsCompleted: false })
-                    throw new InvalidOperationException("A recording session is already active or being published.");
+                if (activeSession is not null)
+                    throw new InvalidOperationException("A recording session is already active.");
                 plan = storage.CreateSessionPlan(kind);
                 activeSessionLock = storage.AcquireActiveLock(plan);
                 activeSession = plan;
@@ -311,20 +312,59 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
     public async Task<RecordingSessionPublicationResult> PublishCompletedAsync()
     {
         ThrowIfDisposed();
+        Task<RecordingSessionPublicationResult>? task = null;
+        RecordingSessionPublicationResult? immediate = null;
         await operationGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            RecordingSessionPlan? plan;
             lock (stateGate)
             {
-                plan = activeSession;
-                if (plan is null) return RecordingSessionPublicationResult.NoActiveSession;
-                if (publication is not null) return publication.GetAwaiter().GetResult();
-                publication = PublishCoreAsync(plan);
+                if (activeSession is null)
+                {
+                    task = publication;
+                    immediate = task is null ? RecordingSessionPublicationResult.NoActiveSession : null;
+                }
+                else if (coordinator.Snapshot.State != RecordingCoordinatorState.Stopped)
+                {
+                    immediate = RecordingSessionPublicationResult.NoActiveSession;
+                }
+                else
+                {
+                    var context = new PublicationContext(
+                        storage,
+                        activeSession,
+                        activeWindowsCapture,
+                        activeWindowVideo,
+                        coordinator.Snapshot.Stats.CapturedWindowFrames > 0,
+                        activeSessionLock);
+                    activeSession = null;
+                    activeSessionKind = null;
+                    activeWindowsCapture = null;
+                    activeWindowVideo = false;
+                    activeSessionLock = null;
+                    // Validators deliberately decode the completed media to
+                    // end-of-stream and may take seconds for a long call. Run
+                    // that publication work on an independent worker after
+                    // ownership has been detached from the live recorder.
+                    task = Task.Run(() => PublishCoreAsync(context));
+                    publication = task;
+                    publicationTasks.Add(task);
+                    _ = ObservePublicationCompletionAsync(task);
+                }
             }
-            return await publication.ConfigureAwait(false);
         }
         finally { operationGate.Release(); }
+
+        if (immediate is not null) return immediate;
+        return await task!.ConfigureAwait(false);
+    }
+
+    /// <summary>Joins all detached publication work before process shutdown.</summary>
+    public async Task WaitForPublicationsAsync()
+    {
+        Task<RecordingSessionPublicationResult>[] pending;
+        lock (stateGate) pending = publicationTasks.ToArray();
+        if (pending.Length > 0) await Task.WhenAll(pending).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -437,53 +477,49 @@ public sealed class RecordingLifecycleService : IDisposable, INativeTeamsRenderE
         }
     }
 
-    private async Task<RecordingSessionPublicationResult> PublishCoreAsync(RecordingSessionPlan plan)
+    private async Task<RecordingSessionPublicationResult> PublishCoreAsync(PublicationContext context)
     {
+        var plan = context.Plan;
         try
         {
-            SessionStorageService current;
-            WindowsCaptureMetadata? capture;
-            bool videoWasEnabled;
-            bool capturedWindowFrames;
-            lock (stateGate)
-            {
-                current = storage;
-                capture = activeWindowsCapture;
-                // A successful WGC target setup only authorizes privacy-black
-                // continuity frames. Publish a video session only once native
-                // evidence confirms that at least one current exact-window
-                // frame was actually muxed. Otherwise preserve the black-only
-                // work MP4 as evidence and promote the independent audio-safe
-                // recording as the library item.
-                videoWasEnabled = activeWindowVideo;
-                capturedWindowFrames = coordinator.Snapshot.Stats.CapturedWindowFrames > 0;
-            }
-            if (videoWasEnabled && capturedWindowFrames)
-                await current.PublishCompletedVideoAsync(plan, title: null, windowsCapture: capture).ConfigureAwait(false);
-            else if (videoWasEnabled)
-                await current.PublishVideoFailureAudioFallbackAsync(
-                    plan, title: null, windowsCapture: capture).ConfigureAwait(false);
+            if (context.VideoWasEnabled && context.CapturedWindowFrames)
+                await context.Storage.PublishCompletedVideoAsync(
+                    plan, title: null, windowsCapture: context.Capture).ConfigureAwait(false);
+            else if (context.VideoWasEnabled)
+                await context.Storage.PublishVideoFailureAudioFallbackAsync(
+                    plan, title: null, windowsCapture: context.Capture).ConfigureAwait(false);
             else
-                await current.PublishCompletedMediaAsync(plan, title: null, windowsCapture: capture).ConfigureAwait(false);
+                await context.Storage.PublishCompletedMediaAsync(
+                    plan, title: null, windowsCapture: context.Capture).ConfigureAwait(false);
             return new RecordingSessionPublicationResult(plan, true, null);
         }
         catch (Exception exception) { return new RecordingSessionPublicationResult(plan, false, exception); }
         finally
         {
+            context.SessionLock?.Dispose();
+        }
+    }
+
+    private async Task ObservePublicationCompletionAsync(Task<RecordingSessionPublicationResult> task)
+    {
+        try { await task.ConfigureAwait(false); }
+        finally
+        {
             lock (stateGate)
             {
-                if (activeSession == plan)
-                {
-                    activeSession = null;
-                    activeSessionKind = null;
-                    activeWindowsCapture = null;
-                    activeWindowVideo = false;
-                    ReleaseActiveSessionLock();
-                }
-                publication = null;
+                publicationTasks.Remove(task);
+                if (ReferenceEquals(publication, task)) publication = null;
             }
         }
     }
+
+    private sealed record PublicationContext(
+        SessionStorageService Storage,
+        RecordingSessionPlan Plan,
+        WindowsCaptureMetadata? Capture,
+        bool VideoWasEnabled,
+        bool CapturedWindowFrames,
+        RecordingSessionActiveLock? SessionLock);
 
     private void EnsureVideoCapability(RecordingSessionPlan plan)
     {

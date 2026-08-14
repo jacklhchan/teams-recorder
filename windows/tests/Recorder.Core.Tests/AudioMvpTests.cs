@@ -213,9 +213,52 @@ internal static class AudioMvpTests
             throw new InvalidOperationException("Release gate allowed a native window-capture start.");
     }
 
+    public static void CompletedSessionValidationDoesNotBlockNextRecording()
+    {
+        using var root = new TemporaryRoot();
+        var bridge = new MixedBridge { WriteOutputOnStart = true };
+        var validator = new BlockingAudioValidator();
+        using var lifecycle = new RecordingLifecycleService(
+            bridge, root.Path, audioValidator: validator);
+
+        var first = lifecycle.StartMixedAsync(
+            RecordingSessionKind.Manual, null, null).GetAwaiter().GetResult();
+        lifecycle.StopAsync().GetAwaiter().GetResult();
+        var publication = lifecycle.PublishCompletedAsync();
+        if (!validator.Entered.Wait(TimeSpan.FromSeconds(2)))
+            throw new InvalidOperationException("The detached validator did not start.");
+
+        var second = lifecycle.StartMixedAsync(
+            RecordingSessionKind.Manual, null, null).WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+        Equal(RecordingCoordinatorState.Recording, second.Snapshot.State);
+        if (second.Session.FolderPath == first.Session.FolderPath)
+            throw new InvalidOperationException("The next recording reused the session still being published.");
+
+        validator.Release.Set();
+        if (!publication.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult().Published)
+            throw new InvalidOperationException("The detached session was not safely published.");
+        lifecycle.StopAsync().GetAwaiter().GetResult();
+        lifecycle.PublishCompletedAsync().GetAwaiter().GetResult();
+        lifecycle.WaitForPublicationsAsync().GetAwaiter().GetResult();
+    }
+
     private static void Equal<T>(T expected, T actual) where T : notnull { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private static void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new InvalidOperationException($"Expected {typeof(T).Name}."); }
     private sealed class AlwaysValidAudio : IAudioBackupValidator { public bool IsValidNonEmptyAudio(string path) => File.Exists(path) && new FileInfo(path).Length > 0; }
+
+    private sealed class BlockingAudioValidator : IAudioBackupValidator
+    {
+        public ManualResetEventSlim Entered { get; } = new(false);
+        public ManualResetEventSlim Release { get; } = new(false);
+
+        public bool IsValidNonEmptyAudio(string path)
+        {
+            Entered.Set();
+            if (!Release.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("The test publication validator was not released.");
+            return File.Exists(path) && new FileInfo(path).Length > 0;
+        }
+    }
 
     private sealed class MixedBridge : INativeRecorderBridge, INativeSelectedAudioRecorderBridge, INativeSelectedWindowAvRecorderBridge
     {

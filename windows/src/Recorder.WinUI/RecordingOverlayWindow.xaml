@@ -25,15 +25,30 @@
             <Grid ColumnSpacing="10">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <Ellipse x:Name="RecordingIndicator" Width="10" Height="10" VerticalAlignment="Center" Fill="{ThemeResource SystemFillColorCriticalBrush}" />
-                <StackPanel Grid.Column="1" Spacing="1">
+                <Border
+                    x:Name="DragHandle"
+                    Width="28"
+                    Height="34"
+                    Background="Transparent"
+                    AutomationProperties.AutomationId="RecordingOverlayDragHandle"
+                    AutomationProperties.Name="拖曳以移動錄音控制器"
+                    PointerPressed="OnDragHandlePointerPressed"
+                    ToolTipService.ToolTip="拖曳以移動浮動視窗">
+                    <FontIcon
+                        FontSize="15"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Glyph="&#xE700;" />
+                </Border>
+                <Ellipse Grid.Column="1" x:Name="RecordingIndicator" Width="10" Height="10" VerticalAlignment="Center" Fill="{ThemeResource SystemFillColorCriticalBrush}" />
+                <StackPanel Grid.Column="2" Spacing="1">
                     <TextBlock x:Name="StatusText" FontSize="16" FontWeight="SemiBold" Text="自動錄音即將開始" />
                     <TextBlock x:Name="StatusDetailText" AutomationProperties.AutomationId="StatusDetailText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12" Text="錄音控制器不會取得 Teams 焦點" />
                 </StackPanel>
-                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                     <TextBlock x:Name="ElapsedText" AutomationProperties.AutomationId="ElapsedText" FontFamily="Consolas" FontSize="13" VerticalAlignment="Center" Visibility="Collapsed" />
                     <Button
                         x:Name="ActionButton"

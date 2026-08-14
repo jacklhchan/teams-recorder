@@ -3,6 +3,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Windows.Graphics;
 using WinRT.Interop;
 
@@ -26,6 +27,8 @@ public sealed partial class RecordingOverlayWindow : Window
     private const uint SwpNoActivate = 0x0010;
     private const uint SwpShowWindow = 0x0040;
     private const int SwHide = 0;
+    private const uint WmNcLButtonDown = 0x00A1;
+    private static readonly nint HtCaption = new(2);
     private static readonly nint HwndTopmost = new(-1);
 
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer indicatorTimer;
@@ -223,6 +226,25 @@ public sealed partial class RecordingOverlayWindow : Window
         }
     }
 
+    private void OnDragHandlePointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(DragHandle).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        // Keep the overlay non-activating while delegating the actual move to
+        // Windows' caption drag loop. Restricting this to a dedicated handle
+        // prevents a drag from stealing Stop or screen-toggle input.
+        e.Handled = true;
+        _ = ReleaseCapture();
+        _ = SendMessage(
+            WindowNative.GetWindowHandle(this),
+            WmNcLButtonDown,
+            HtCaption,
+            nint.Zero);
+    }
+
     private void OnTeamsWindowCaptureToggleToggled(object sender, RoutedEventArgs e)
     {
         if (isApplyingPresentation)
@@ -285,4 +307,11 @@ public sealed partial class RecordingOverlayWindow : Window
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ShowWindow(nint hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern nint SendMessage(nint hWnd, uint message, nint wParam, nint lParam);
 }

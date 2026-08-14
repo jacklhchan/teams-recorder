@@ -2213,6 +2213,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             }
             finally
             {
+                // Cleanly stopped sessions may still be undergoing full
+                // decoder validation in the background. Process shutdown must
+                // join that work before disposing its native/runtime owner.
+                await activeLifecycle.WaitForPublicationsAsync();
                 activeLifecycle.SnapshotChanged -= OnSnapshotChanged;
             }
         }
@@ -2732,8 +2736,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
 
         var result = await GetRecordingLifecycle().StopAsync();
         ApplySnapshot(result);
-        await EnsureSessionPublishedAsync();
-        await RefreshLibraryCoreAsync();
+        BeginSessionPublication();
         await NotifyManualRecordingStoppedAsync();
     }
 
@@ -2837,8 +2840,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                 // immediately finish the just-created capture while the bridge is still alive.
                 var stopped = await GetRecordingLifecycle().StopAsync();
                 ApplySnapshot(stopped);
-                await EnsureSessionPublishedAsync();
-                await RefreshLibraryCoreAsync();
+                BeginSessionPublication();
                 return TeamsAutomaticStartResult.BlockedBy("Teams 會議狀態已改變，已取消剛開始的錄音。" );
             }
 
@@ -2871,8 +2873,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             {
                 var stopped = await recordingLifecycle.StopAsync();
                 ApplySnapshot(stopped);
-                await EnsureSessionPublishedAsync();
-                await RefreshLibraryCoreAsync();
+                BeginSessionPublication();
                 return true;
             }
             catch (Exception exception)
@@ -3596,6 +3597,25 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         }
     }
 
+    /// <summary>
+    /// The completed session is durable before this is called. Rebuilding the
+    /// library projection is UI/indexing work and must not hold either the
+    /// recording lifecycle gate or the global busy state after a clean stop.
+    /// </summary>
+    private void RequestDeferredLibraryRefresh()
+    {
+        if (isShuttingDown)
+        {
+            return;
+        }
+
+        _ = dispatcherQueue.TryEnqueue(async () =>
+        {
+            await Task.Yield();
+            await RefreshLibraryCoreAsync();
+        });
+    }
+
     private void ApplyLibraryQuery(RecordingLibrarySessionIdentity? preferredSelection = null)
     {
         var selectedIdentity = preferredSelection ?? SelectedLibraryItem?.Identity;
@@ -3704,7 +3724,6 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             NextOutputPath = result.Session.FinalVideoPath;
             lastResultText = $"已發佈：{result.Session.FinalVideoPath}";
             StatusText = "錄音已儲存。";
-            await RefreshLibraryCoreAsync();
         }
         else
         {
@@ -4075,7 +4094,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             }
             else
             {
-                _ = EnsureSessionPublishedAsync();
+                _ = PublishStoppedSessionAndRefreshLibraryAsync();
             }
         }
         else if (changed.State == RecordingCoordinatorState.Faulted && !isFaultFinalizationInProgress)
@@ -4176,7 +4195,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             var result = await lifecycle.FinalizeForRecoveryAsync();
             if (result.Published)
             {
-                await RefreshLibraryCoreAsync();
+                RequestDeferredLibraryRefresh();
             }
             else if (result.Error is not null)
             {
@@ -4194,6 +4213,17 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             UpdateCommandStates();
         }
     }
+
+    private async Task PublishStoppedSessionAndRefreshLibraryAsync()
+    {
+        var publication = await EnsureSessionPublishedAsync();
+        if (publication.Published)
+        {
+            RequestDeferredLibraryRefresh();
+        }
+    }
+
+    private void BeginSessionPublication() => _ = PublishStoppedSessionAndRefreshLibraryAsync();
 
     private void RefreshElapsed()
     {

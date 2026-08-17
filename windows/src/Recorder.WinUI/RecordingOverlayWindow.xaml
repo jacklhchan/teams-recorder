@@ -14,7 +14,7 @@
         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
         BorderThickness="1"
         CornerRadius="16">
-        <Grid MinWidth="392" RowSpacing="8">
+        <Grid RowSpacing="8">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -22,34 +22,45 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
-            <Grid ColumnSpacing="10">
+            <Grid
+                x:Name="HeaderDragSurface"
+                Background="Transparent"
+                ColumnSpacing="10"
+                AutomationProperties.AutomationId="RecordingOverlayDragSurface"
+                AutomationProperties.Name="拖曳以移動錄音控制器"
+                PointerPressed="OnHeaderPointerPressed">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <Border
-                    x:Name="DragHandle"
+                <FontIcon
                     Width="28"
-                    Height="34"
-                    Background="Transparent"
-                    AutomationProperties.AutomationId="RecordingOverlayDragHandle"
-                    AutomationProperties.Name="拖曳以移動錄音控制器"
-                    PointerPressed="OnDragHandlePointerPressed"
-                    ToolTipService.ToolTip="拖曳以移動浮動視窗">
-                    <FontIcon
-                        FontSize="15"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Glyph="&#xE700;" />
-                </Border>
+                    FontSize="15"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Glyph="&#xE700;"
+                    ToolTipService.ToolTip="按住頂部以拖曳浮動視窗" />
                 <Ellipse Grid.Column="1" x:Name="RecordingIndicator" Width="10" Height="10" VerticalAlignment="Center" Fill="{ThemeResource SystemFillColorCriticalBrush}" />
                 <StackPanel Grid.Column="2" Spacing="1">
-                    <TextBlock x:Name="StatusText" FontSize="16" FontWeight="SemiBold" Text="自動錄音即將開始" />
+                    <TextBlock x:Name="StatusText" FontSize="16" FontWeight="SemiBold" Text="自動錄音即將開始" TextTrimming="CharacterEllipsis" />
                     <TextBlock x:Name="StatusDetailText" AutomationProperties.AutomationId="StatusDetailText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12" Text="錄音控制器不會取得 Teams 焦點" />
                 </StackPanel>
                 <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                     <TextBlock x:Name="ElapsedText" AutomationProperties.AutomationId="ElapsedText" FontFamily="Consolas" FontSize="13" VerticalAlignment="Center" Visibility="Collapsed" />
+                    <Button
+                        x:Name="CompactButton"
+                        Width="32"
+                        Height="32"
+                        Padding="0"
+                        AutomationProperties.AutomationId="RecordingOverlayCompactButton"
+                        AutomationProperties.Name="最小化錄音控制器"
+                        Click="OnCompactButtonClick"
+                        Content="—"
+                        ToolTipService.ToolTip="最小化" />
+                </StackPanel>
+                <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                     <Button
                         x:Name="ActionButton"
                         MinWidth="96"
@@ -81,11 +92,37 @@
                 </Border>
             </StackPanel>
 
-            <Border Grid.Row="3" x:Name="ScreenCaptureCard" Padding="10,5" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Visibility="Collapsed">
-                <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <Border Grid.Row="3" x:Name="ScreenCaptureCard" Padding="10,7" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Visibility="Collapsed">
+                <Grid ColumnSpacing="8" RowSpacing="7">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                     <FontIcon Glyph="&#xE7F4;" Foreground="{ThemeResource SystemFillColorAttentionBrush}" VerticalAlignment="Center" />
-                    <StackPanel Grid.Column="1" Spacing="1"><TextBlock Text="錄製 Teams 畫面" FontSize="12" /><TextBlock x:Name="TeamsWindowCaptureStatusText" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="可在錄音期間切換" /></StackPanel>
+                    <StackPanel Grid.Column="1" Spacing="1"><TextBlock Text="錄製 Teams 畫面" FontSize="12" /><TextBlock x:Name="TeamsWindowCaptureStatusText" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="自動尋找目前會議視窗" TextTrimming="CharacterEllipsis" /></StackPanel>
                     <ToggleSwitch x:Name="TeamsWindowCaptureToggle" Grid.Column="2" AutomationProperties.AutomationId="TeamsWindowCaptureToggle" OffContent="關" OnContent="開" Toggled="OnTeamsWindowCaptureToggleToggled" />
+                    <ComboBox
+                        x:Name="TeamsWindowCaptureTargetSelector"
+                        Grid.Row="1"
+                        Grid.Column="1"
+                        MinWidth="250"
+                        HorizontalAlignment="Stretch"
+                        AutomationProperties.AutomationId="TeamsWindowCaptureTargetSelector"
+                        AutomationProperties.Name="選擇 Teams 會議視窗"
+                        DisplayMemberPath="DisplayName"
+                        PlaceholderText="找不到可驗證的 Teams 視窗"
+                        SelectionChanged="OnTeamsWindowCaptureTargetSelectionChanged" />
+                    <Button
+                        x:Name="TeamsWindowCaptureRefreshButton"
+                        Grid.Row="1"
+                        Grid.Column="2"
+                        Width="34"
+                        Height="34"
+                        Padding="0"
+                        AutomationProperties.AutomationId="TeamsWindowCaptureRefreshButton"
+                        AutomationProperties.Name="重新整理 Teams 視窗"
+                        Click="OnTeamsWindowCaptureRefreshClick"
+                        ToolTipService.ToolTip="重新整理 Teams 視窗">
+                        <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                    </Button>
                 </Grid>
             </Border>
         </Grid>

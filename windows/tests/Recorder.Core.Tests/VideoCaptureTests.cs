@@ -51,6 +51,58 @@ internal static class VideoCaptureTests
             throw new InvalidOperationException("No target must be invented when Teams has no admitted meeting window.");
     }
 
+    public static void AutomaticSelectionPrefersVerifiedMeetingAndFailsClosedOnAmbiguity()
+    {
+        var settings = new VideoCaptureTarget(42, (nint)0x1000, 101, "ms-teams.exe", "Settings");
+        var meeting = new VideoCaptureTarget(42, (nint)0x2000, 101, "ms-teams.exe", "Meeting");
+        var secondMeeting = new VideoCaptureTarget(42, (nint)0x3000, 101, "ms-teams.exe", "Meeting pop-out");
+
+        var automatic = VideoCaptureTargetSelection.SelectAutomatically(
+            settings,
+            selectedWasExplicit: false,
+            [settings, meeting],
+            [meeting],
+            foregroundWindowHandle: settings.WindowHandle);
+        if (automatic != meeting)
+            throw new InvalidOperationException("A unique verified meeting must replace an old automatic non-meeting choice.");
+
+        var explicitChoice = VideoCaptureTargetSelection.SelectAutomatically(
+            settings,
+            selectedWasExplicit: true,
+            [settings, meeting],
+            [meeting],
+            foregroundWindowHandle: meeting.WindowHandle);
+        if (explicitChoice != settings)
+            throw new InvalidOperationException("A live explicit user choice must not be silently replaced.");
+
+        var ambiguous = VideoCaptureTargetSelection.SelectAutomatically(
+            null,
+            selectedWasExplicit: false,
+            [meeting, secondMeeting],
+            [meeting, secondMeeting],
+            foregroundWindowHandle: nint.Zero);
+        if (ambiguous is not null)
+            throw new InvalidOperationException("Multiple verified meeting surfaces must require an explicit choice.");
+
+        var foreground = VideoCaptureTargetSelection.SelectAutomatically(
+            null,
+            selectedWasExplicit: false,
+            [settings, meeting],
+            [],
+            foregroundWindowHandle: meeting.WindowHandle);
+        if (foreground != meeting)
+            throw new InvalidOperationException("The admitted foreground Teams window should be the bounded fallback.");
+
+        var sole = VideoCaptureTargetSelection.SelectAutomatically(
+            null,
+            selectedWasExplicit: false,
+            [meeting],
+            [],
+            foregroundWindowHandle: nint.Zero);
+        if (sole != meeting)
+            throw new InvalidOperationException("A sole admitted Teams window should be selected automatically.");
+    }
+
     public static void TargetAdmissionFailsClosedForUnsafeOrUnrelatedWindows()
     {
         var valid = Candidate();

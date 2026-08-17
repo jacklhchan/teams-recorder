@@ -34,12 +34,33 @@ var tests = new (string Name, Action Run)[]
     ("recording overlay owns a safe dynamic Teams video toggle", OverlayVideoToggleIsSafe),
     ("Teams window capture refreshes an exact target at the start boundary", TeamsWindowTargetRefreshIsBounded),
     ("recording overlay supports active countdown and finalizing states", OverlayStatesAreComplete),
-    ("recording overlay scales for DPI and remains user-resizable", OverlayIsDpiAwareAndResizable),
-    ("recording overlay has a dedicated non-activating drag handle", OverlayCanBeMovedSafely),
+    ("recording overlay scales for DPI and has a compact mode", OverlayIsDpiAwareAndCompact),
+    ("recording overlay header supports native caption dragging", OverlayCanBeMovedSafely),
+    ("recording microphone mute is applied only on state transitions", RecordingMuteIsTransitionBounded),
     ("completed recordings release the lifecycle before library reindexing", StopDoesNotWaitForLibraryReindex),
     ("pipe control joins the UI lifecycle and stops before finalization", ControlRuntimeLifecycleIsBounded),
     ("pipe status remains a bounded privacy-safe projection", ControlStatusIsPrivate),
 };
+
+void RecordingMuteIsTransitionBounded()
+{
+    var applyStart = viewModelCode.IndexOf(
+        "private void ApplyRecordingMicrophoneMute(bool muted)",
+        StringComparison.Ordinal);
+    var applyEnd = viewModelCode.IndexOf("private bool IsSetupEditable", applyStart, StringComparison.Ordinal);
+    if (applyStart < 0 || applyEnd <= applyStart)
+    {
+        throw new InvalidOperationException("The recording microphone mute boundary is missing.");
+    }
+
+    var apply = viewModelCode[applyStart..applyEnd];
+    Contains("lastAppliedRecordingMicrophoneMute == muted", apply,
+        "Repeated telemetry snapshots must not reapply an unchanged native mute state.");
+    Contains("lastAppliedRecordingMicrophoneMute = muted", apply,
+        "The mute transition must be fenced before crossing the native stop boundary.");
+    Contains("lastAppliedRecordingMicrophoneMute = null", viewModelCode,
+        "Each new recording generation must be allowed to apply its initial mute state once.");
+}
 
 var failures = 0;
 foreach (var (name, run) in tests)
@@ -276,6 +297,16 @@ void OverlayVideoToggleIsSafe()
         "The page must subscribe to the overlay video request.");
     Contains("SetTeamsWindowCaptureDuringRecordingAsync", viewModelCode,
         "The overlay must use the recording-lifecycle dynamic video API.");
+    _ = overlay.Descendants().Single(element =>
+        element.Attribute("AutomationProperties.AutomationId")?.Value == "TeamsWindowCaptureTargetSelector");
+    _ = overlay.Descendants().Single(element =>
+        element.Attribute("AutomationProperties.AutomationId")?.Value == "TeamsWindowCaptureRefreshButton");
+    Contains("TeamsWindowCaptureTargetRequested", codeBehind,
+        "The overlay Teams selector must route an exact transient target to the view model.");
+    Contains("SetTeamsWindowCaptureTargetDuringRecordingAsync", viewModelCode,
+        "Changing the overlay target must use the dynamic video lifecycle API.");
+    Contains("RefreshTeamsWindowsFromOverlayAsync", viewModelCode,
+        "The overlay refresh button must trigger a bounded current Teams inventory.");
     Contains("videoToggleRequestGate.WaitAsync(0)", viewModelCode,
         "Repeated overlay clicks must be coalesced before waiting for the lifecycle gate.");
     Contains("DisableVideoTargetAsync", viewModelCode,
@@ -459,7 +490,9 @@ void OverlayStatesAreComplete()
     {
         "ElapsedText", "SystemWaveform", "MicrophoneWaveform",
         "TeamsWindowCaptureToggle", "StatusDetailText",
-        "RecordingOverlayLifecycleActionButton", "RecordingOverlayDragHandle",
+        "RecordingOverlayLifecycleActionButton", "RecordingOverlayDragSurface",
+        "RecordingOverlayCompactButton", "TeamsWindowCaptureTargetSelector",
+        "TeamsWindowCaptureRefreshButton",
     })
     {
         _ = SingleByAutomationIdOrName(overlay, automationId);
@@ -477,7 +510,7 @@ void OverlayStatesAreComplete()
     Contains("IsAlwaysOnTop = true", overlayCode, "Overlay must stay on top.");
     Contains("WsExNoActivate", overlayCode, "Overlay must not activate.");
     Contains("SwpNoActivate", overlayCode, "Overlay must show without activation.");
-    Contains("SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false)", overlayCode, "Overlay needs a resize border without exposing a close title bar.");
+    Contains("SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false)", overlayCode, "Overlay needs a border without exposing a close title bar.");
     Contains("args.Cancel = true", overlayCode, "Overlay close must be rejected until controlled shutdown.");
     Contains("ActionButton.IsEnabled = !isFinalizing", overlayCode, "Finalizing must lock the overlay action.");
     Contains("ActionButton.Content = isRecording ? \"停止錄音\"", overlayCode,
@@ -509,33 +542,40 @@ void TeamsWindowTargetRefreshIsBounded()
     if (refresh < 0 || target < refresh)
         throw new InvalidOperationException("Recording start must refresh Teams windows before resolving the exact capture target.");
 
-    Contains("RetainOrSelectCurrent(previous, targets)", viewModelCode,
-        "A stale selected HWND must be replaced only from the admitted current Teams catalog.");
+    Contains("teamsVideoTargetAutoSelector.Select(previous, explicitSelection, available)", viewModelCode,
+        "A refresh must prefer a verified current Teams meeting rather than the first title in the catalog.");
+    Contains("RefreshAndRebindTeamsWindowAsync(announce: false)", viewModelCode,
+        "Active screen capture must periodically rebind a replaced Teams meeting HWND.");
+    DoesNotContain("Select a Teams shared-content window before recording.", viewModelCode,
+        "An ambiguous video target must start audio with privacy-black video and remain selectable from the overlay.");
 }
 
-void OverlayIsDpiAwareAndResizable()
+void OverlayIsDpiAwareAndCompact()
 {
     Contains("GetDpiForWindow", overlayCode, "Overlay physical pixels must be scaled from WinUI DIPs at the active monitor DPI.");
     Contains("ScaleForDpi", overlayCode, "Overlay sizing needs one tested DPI conversion policy.");
-    Contains("MinimumWidthDips", overlayCode, "Overlay must enforce a readable minimum width.");
-    Contains("MinimumHeightDips", overlayCode, "Overlay must enforce a readable minimum height.");
-    Contains("presenter.IsResizable = true", overlayCode, "Users must be able to enlarge the floating controller.");
+    Contains("CompactWidthDips", overlayCode, "Overlay must expose a compact recorder status size.");
+    Contains("CompactHeightDips", overlayCode, "Overlay must expose a compact recorder status height.");
+    Contains("presenter.IsResizable = false", overlayCode, "The floating controller uses fixed expanded and compact layouts.");
+    Contains("OnCompactButtonClick", overlayCode, "Users must be able to minimize and restore the controller.");
     DoesNotContain("AppWindow.Resize(new SizeInt32(448, 276))", overlayCode, "A fixed physical-pixel size clips the overlay above 100% display scaling.");
 }
 
 void OverlayCanBeMovedSafely()
 {
-    var handle = SingleByAutomationIdOrName(overlay, "RecordingOverlayDragHandle");
-    Equal("OnDragHandlePointerPressed", handle.Attribute("PointerPressed")?.Value,
-        "The dedicated drag handle must route pointer input to its guarded native move handler.");
+    var handle = SingleByAutomationIdOrName(overlay, "RecordingOverlayDragSurface");
+    Equal("OnHeaderPointerPressed", handle.Attribute("PointerPressed")?.Value,
+        "The full header must route pointer input to its guarded move handler.");
     Contains("IsLeftButtonPressed", overlayCode,
         "Only a primary-button drag may move the recording overlay.");
     Contains("WmNcLButtonDown", overlayCode,
-        "The move handler must use the Windows caption drag loop.");
+        "The full header must enter the Windows caption move loop.");
     Contains("HtCaption", overlayCode,
-        "The overlay must identify the dedicated region as a caption drag.");
+        "The full header must be identified as a native caption region.");
     Contains("ReleaseCapture", overlayCode,
-        "Pointer capture must be released before entering the native move loop.");
+        "XAML pointer capture must be released before native dragging.");
+    Contains("IsInteractiveHeaderElement", overlayCode,
+        "Header buttons must remain clickable rather than starting a drag.");
     Contains("WsExNoActivate", overlayCode,
         "Moving the overlay must preserve its non-activating window style.");
 }

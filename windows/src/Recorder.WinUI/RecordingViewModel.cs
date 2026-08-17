@@ -50,6 +50,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private VirtualMicPublisherRuntime? virtualMicPublisher;
     private readonly IProcessCatalog processCatalog = new ProcessCatalog();
     private readonly IVideoCaptureTargetCatalog videoTargetCatalog = new WindowsVideoCaptureTargetCatalog();
+    private readonly ITeamsVideoTargetAutoSelector teamsVideoTargetAutoSelector = new WindowsTeamsVideoTargetAutoSelector();
     private RecordingLibraryService? libraryService;
     private string? libraryServiceRoot;
     private readonly IRecorderAppSettingsStore appSettingsStore = new JsonRecorderAppSettingsStore();
@@ -83,6 +84,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private CaptureSourceChoice? selectedCaptureSource;
     private ProcessSelectionChoice? selectedProcess;
     private VideoCaptureWindowChoice? selectedVideoCaptureWindow;
+    private VideoCaptureTarget? activeTeamsVideoTarget;
+    private bool isApplyingVideoTargetSelection;
+    private bool isVideoTargetUserSelected;
+    private bool isTeamsWindowAutoRefreshInProgress;
     private bool isSharedContentCaptureEnabled;
     private bool isTeamsWindowCaptureEnabled;
     private bool isTeamsWindowCaptureToggleInProgress;
@@ -112,6 +117,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private bool isLowStorageStopInProgress;
     private bool isLowStorageVideoDowngradeInProgress;
     private DateTimeOffset nextStorageCapacityCheckUtc;
+    private DateTimeOffset nextTeamsWindowAutoRefreshUtc;
     private bool isFaultFinalizationInProgress;
     private bool isUpdatingPlaybackPosition;
     private double playbackProgress;
@@ -127,6 +133,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private bool isLibraryFavorite;
     private bool isRecycleConfirmationVisible;
     private readonly InputMuteCoordinator recorderMicrophoneMute = new();
+    private bool? lastAppliedRecordingMicrophoneMute;
     private readonly WindowsInputMuteMonitor inputMuteMonitor = new();
     private bool isInputMuteRefreshInProgress;
     private string? monitoredInputEndpointId;
@@ -468,6 +475,8 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         CanToggleTeamsWindowCapture: CanToggleTeamsWindowCapture,
         IsTeamsWindowCaptureEnabled: isTeamsWindowCaptureEnabled,
         TeamsWindowCaptureStatus: teamsWindowCaptureStatus,
+        TeamsWindowChoices: TeamsCaptureWindows,
+        SelectedTeamsWindow: SelectedVideoCaptureWindow,
         IsFinalizing: snapshot.State == RecordingCoordinatorState.Stopping || isFaultFinalizationInProgress,
         Elapsed: recordingStartedAt is { } startedAt ? DateTimeOffset.Now - startedAt : elapsed,
         SystemAudioStatus: !IsPrimaryCaptureAvailable
@@ -552,6 +561,7 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             if (result.IsSuccess)
             {
                 isTeamsWindowCaptureEnabled = enabled;
+                activeTeamsVideoTarget = enabled ? SelectedVideoCaptureWindow?.Target : null;
                 teamsWindowCaptureStatus = enabled
                     ? "Teams 畫面錄製中；關閉時同一 MP4 會寫入隱私黑畫面，音訊不會中斷。"
                     : "Teams 畫面已停止；音訊繼續錄製，影片時間線保持黑畫面。";
@@ -570,6 +580,179 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         finally
         {
             isTeamsWindowCaptureToggleInProgress = false;
+            NotifyRecordingOverlayStateChanged();
+            recordingLifecycleActionGate.Release();
+            videoToggleRequestGate.Release();
+        }
+    }
+
+    public async Task SetTeamsWindowCaptureTargetDuringRecordingAsync(VideoCaptureTarget requested)
+    {
+        ArgumentNullException.ThrowIfNull(requested);
+        if (!await videoToggleRequestGate.WaitAsync(0))
+        {
+            return;
+        }
+
+        isTeamsWindowCaptureToggleInProgress = true;
+        teamsWindowCaptureStatus = "正在驗證所選 Teams 視窗…";
+        NotifyRecordingOverlayStateChanged();
+        await recordingLifecycleActionGate.WaitAsync();
+        try
+        {
+            if (snapshot.State != RecordingCoordinatorState.Recording)
+            {
+                return;
+            }
+
+            await RefreshTeamsWindowsCoreAsync();
+            var current = VideoCaptureTargetSelection.Resolve(
+                requested,
+                TeamsCaptureWindows.Select(choice => choice.Target));
+            if (current is null)
+            {
+                teamsWindowCaptureStatus = "所選 Teams 視窗已失效；請重新整理後再選擇。";
+                ErrorText = teamsWindowCaptureStatus;
+                return;
+            }
+
+            var choice = TeamsCaptureWindows.First(item => item.Target == current);
+            SelectedVideoCaptureWindow = choice;
+            isVideoTargetUserSelected = true;
+            if (!isTeamsWindowCaptureEnabled)
+            {
+                teamsWindowCaptureStatus = $"已選擇「{choice.DisplayName}」；開啟畫面錄製後才會擷取。";
+                return;
+            }
+
+            var result = await GetRecordingLifecycle().SetVideoTargetAsync(current);
+            if (result.IsSuccess)
+            {
+                activeTeamsVideoTarget = current;
+                teamsWindowCaptureStatus = $"已切換至「{choice.DisplayName}」；音訊與同一 MP4 時間線保持連續。";
+            }
+            else
+            {
+                teamsWindowCaptureStatus = result.Error ?? "無法切換 Teams 畫面錄製目標。";
+                ErrorText = teamsWindowCaptureStatus;
+            }
+        }
+        catch (Exception exception)
+        {
+            teamsWindowCaptureStatus = exception.Message;
+            ErrorText = exception.Message;
+        }
+        finally
+        {
+            isTeamsWindowCaptureToggleInProgress = false;
+            NotifyRecordingOverlayStateChanged();
+            recordingLifecycleActionGate.Release();
+            videoToggleRequestGate.Release();
+        }
+    }
+
+    public Task RefreshTeamsWindowsFromOverlayAsync() =>
+        RefreshAndRebindTeamsWindowAsync(announce: true);
+
+    private async Task RefreshAndRebindTeamsWindowAsync(bool announce)
+    {
+        if (isTeamsWindowAutoRefreshInProgress || !await videoToggleRequestGate.WaitAsync(0))
+        {
+            return;
+        }
+
+        isTeamsWindowAutoRefreshInProgress = true;
+        if (announce)
+        {
+            isTeamsWindowCaptureToggleInProgress = true;
+            teamsWindowCaptureStatus = "正在重新整理並尋找 Teams 會議視窗…";
+            NotifyRecordingOverlayStateChanged();
+        }
+
+        if (!await recordingLifecycleActionGate.WaitAsync(0))
+        {
+            isTeamsWindowAutoRefreshInProgress = false;
+            if (announce)
+            {
+                isTeamsWindowCaptureToggleInProgress = false;
+                NotifyRecordingOverlayStateChanged();
+            }
+            videoToggleRequestGate.Release();
+            return;
+        }
+
+        try
+        {
+            if (snapshot.State != RecordingCoordinatorState.Recording)
+            {
+                return;
+            }
+
+            await RefreshTeamsWindowsCoreAsync();
+            var selected = SelectedVideoCaptureWindow?.Target;
+            var available = TeamsCaptureWindows.Select(choice => choice.Target).ToArray();
+            var active = VideoCaptureTargetSelection.Resolve(activeTeamsVideoTarget, available);
+            if (!isTeamsWindowCaptureEnabled)
+            {
+                if (announce)
+                {
+                    teamsWindowCaptureStatus = selected is null
+                        ? "找到多個可能的 Teams 視窗；請從清單選擇。"
+                        : $"已找到「{SelectedVideoCaptureWindow!.DisplayName}」；開啟後開始擷取。";
+                }
+                return;
+            }
+
+            if (selected is null)
+            {
+                if (active is null)
+                {
+                    teamsWindowCaptureStatus = "原 Teams 視窗已失效且新目標不唯一；影片保持隱私黑畫面，音訊繼續錄製。";
+                }
+                return;
+            }
+
+            if (active is not null &&
+                VideoCaptureTargetSelection.Resolve(active, [selected]) is not null)
+            {
+                activeTeamsVideoTarget = selected;
+                if (announce)
+                {
+                    teamsWindowCaptureStatus = $"正在錄製「{SelectedVideoCaptureWindow!.DisplayName}」。";
+                }
+                return;
+            }
+
+            var result = await GetRecordingLifecycle().SetVideoTargetAsync(selected);
+            if (result.IsSuccess)
+            {
+                activeTeamsVideoTarget = selected;
+                teamsWindowCaptureStatus = $"已自動重新連接「{SelectedVideoCaptureWindow!.DisplayName}」；音訊沒有中斷。";
+            }
+            else
+            {
+                teamsWindowCaptureStatus = result.Error ?? "無法重新連接 Teams 畫面；影片保持黑畫面。";
+                if (announce)
+                {
+                    ErrorText = teamsWindowCaptureStatus;
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            teamsWindowCaptureStatus = exception.Message;
+            if (announce)
+            {
+                ErrorText = exception.Message;
+            }
+        }
+        finally
+        {
+            isTeamsWindowAutoRefreshInProgress = false;
+            if (announce)
+            {
+                isTeamsWindowCaptureToggleInProgress = false;
+            }
             NotifyRecordingOverlayStateChanged();
             recordingLifecycleActionGate.Release();
             videoToggleRequestGate.Release();
@@ -709,6 +892,10 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         {
             if (SetProperty(ref selectedVideoCaptureWindow, value))
             {
+                if (!isApplyingVideoTargetSelection)
+                {
+                    isVideoTargetUserSelected = value is not null;
+                }
                 UpdateCommandStates();
                 NotifyRecordingOverlayStateChanged();
             }
@@ -2621,6 +2808,17 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
             return;
         }
 
+        // Snapshot telemetry can arrive repeatedly while recording and can
+        // race the native stop/finalize boundary.  The bridge accepts an
+        // absolute state, so apply each transition once instead of issuing a
+        // mute call for every stats refresh after native ingress has stopped.
+        if (lastAppliedRecordingMicrophoneMute == muted)
+        {
+            return;
+        }
+
+        lastAppliedRecordingMicrophoneMute = muted;
+
         var result = recordingLifecycle.SetMicrophoneMuted(muted);
         if (!result.IsSuccess)
         {
@@ -2645,15 +2843,11 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         SelectedCaptureSource?.Kind != CaptureSourceKind.SelectedApplication ||
         SelectedProcess is { IsAvailable: true };
 
-    private bool SelectedVideoWindowReady =>
-        !IsSharedContentCaptureEnabled || SelectedVideoCaptureWindow is not null;
-
     private bool CanStart =>
         IsSetupEditable &&
         storageCanStart &&
         SelectedDevicesReady &&
         SelectedProcessReady &&
-        SelectedVideoWindowReady &&
         recordingLifecycle is not { HasPublicationInProgress: true };
 
     private bool CanStop =>
@@ -2898,13 +3092,32 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
     private async Task RefreshTeamsWindowsCoreAsync()
     {
         var previous = SelectedVideoCaptureWindow?.Target;
-        var targets = await Task.Run(videoTargetCatalog.ListTargets);
+        var explicitSelection = isVideoTargetUserSelected;
+        var refreshed = await Task.Run(() =>
+        {
+            var available = videoTargetCatalog.ListTargets();
+            var selected = teamsVideoTargetAutoSelector.Select(previous, explicitSelection, available);
+            return (Available: available, Selected: selected);
+        });
+        var targets = refreshed.Available;
         TeamsCaptureWindows.Clear();
         foreach (var target in targets) TeamsCaptureWindows.Add(new VideoCaptureWindowChoice(target));
-        var current = VideoCaptureTargetSelection.RetainOrSelectCurrent(previous, targets);
-        SelectedVideoCaptureWindow = current is null
-            ? null
-            : TeamsCaptureWindows.FirstOrDefault(choice => choice.Target == current);
+        var current = refreshed.Selected;
+        var retainedExplicit = explicitSelection &&
+            VideoCaptureTargetSelection.Resolve(previous, targets) is not null &&
+            VideoCaptureTargetSelection.Resolve(previous, current is null ? [] : [current]) is not null;
+        isApplyingVideoTargetSelection = true;
+        try
+        {
+            SelectedVideoCaptureWindow = current is null
+                ? null
+                : TeamsCaptureWindows.FirstOrDefault(choice => choice.Target == current);
+        }
+        finally
+        {
+            isApplyingVideoTargetSelection = false;
+        }
+        isVideoTargetUserSelected = retainedExplicit;
     }
 
     internal RecorderCrashContext CaptureCrashContext() => new(
@@ -3437,16 +3650,20 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         ErrorText = null;
         OnPropertyChanged(nameof(ElapsedText));
         isTeamsWindowCaptureEnabled = requestedVideoTarget is not null;
+        activeTeamsVideoTarget = requestedVideoTarget;
+        nextTeamsWindowAutoRefreshUtc = DateTimeOffset.UtcNow.AddSeconds(2);
         teamsWindowCaptureStatus = requestedVideoTarget is null
-            ? "可從浮動視窗啟用所選 Teams 畫面；音訊會持續錄製。"
-            : "Teams 畫面錄製中。";
+            ? IsSharedContentCaptureEnabled
+                ? "未能唯一確認 Teams 會議視窗；音訊已開始，畫面保持黑色，可從浮動視窗選擇。"
+                : "可從浮動視窗啟用 Teams 畫面；音訊會持續錄製。"
+            : $"已自動選取「{SelectedVideoCaptureWindow?.DisplayName ?? "Teams 會議"}」並開始畫面錄製。";
         ApplySnapshot(started.Snapshot);
         return started.Snapshot;
     }
 
     private VideoCaptureTarget? SelectedVideoTargetOrNull() =>
         IsSharedContentCaptureEnabled
-            ? SelectedVideoCaptureWindow?.Target ?? throw new InvalidOperationException("Select a Teams shared-content window before recording.")
+            ? SelectedVideoCaptureWindow?.Target
             : null;
 
     private async Task RefreshEndpointsCoreAsync(bool announce = false)
@@ -4009,6 +4226,11 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
                     return;
                 }
             }
+            if (isTeamsWindowCaptureEnabled && now >= nextTeamsWindowAutoRefreshUtc)
+            {
+                nextTeamsWindowAutoRefreshUtc = now.AddSeconds(2);
+                await RefreshAndRebindTeamsWindowAsync(announce: false);
+            }
             ApplySnapshot(await recordingLifecycle.RefreshAsync());
         }
         catch (Exception exception)
@@ -4067,9 +4289,12 @@ public sealed class RecordingViewModel : INotifyPropertyChanged, IRecordingOverl
         else
         {
             telemetryTimer.Stop();
+            lastAppliedRecordingMicrophoneMute = null;
             ResetWaveforms();
             isTeamsWindowCaptureEnabled = false;
             isTeamsWindowCaptureToggleInProgress = false;
+            isTeamsWindowAutoRefreshInProgress = false;
+            activeTeamsVideoTarget = null;
             teamsWindowCaptureStatus = null;
         }
 

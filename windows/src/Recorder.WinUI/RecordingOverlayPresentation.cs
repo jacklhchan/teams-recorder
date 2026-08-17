@@ -1,3 +1,5 @@
+using Recorder.Core;
+
 namespace TeamsRecorder.Windows.WinUI;
 
 /// <summary>
@@ -14,6 +16,8 @@ public sealed record RecordingOverlayState(
     bool CanToggleTeamsWindowCapture = false,
     bool IsTeamsWindowCaptureEnabled = false,
     string? TeamsWindowCaptureStatus = null,
+    IReadOnlyList<VideoCaptureWindowChoice>? TeamsWindowChoices = null,
+    VideoCaptureWindowChoice? SelectedTeamsWindow = null,
     bool IsFinalizing = false,
     TimeSpan? Elapsed = null,
     RecordingOverlayInputStatus SystemAudioStatus = RecordingOverlayInputStatus.Signal,
@@ -78,6 +82,8 @@ public sealed record RecordingOverlayPresentation(
     bool CanToggleTeamsWindowCapture = false,
     bool IsTeamsWindowCaptureEnabled = false,
     string? TeamsWindowCaptureStatus = null,
+    IReadOnlyList<VideoCaptureWindowChoice>? TeamsWindowChoices = null,
+    VideoCaptureWindowChoice? SelectedTeamsWindow = null,
     TimeSpan? Elapsed = null,
     RecordingOverlayInputStatus SystemAudioStatus = RecordingOverlayInputStatus.Signal,
     RecordingOverlayInputStatus MicrophoneStatus = RecordingOverlayInputStatus.Quiet,
@@ -117,6 +123,12 @@ public sealed class TeamsWindowCaptureToggleRequestedEventArgs(bool enabled) : E
     public bool Enabled { get; } = enabled;
 }
 
+/// <summary>Requests a current exact Teams target; the lifecycle revalidates it.</summary>
+public sealed class TeamsWindowCaptureTargetRequestedEventArgs(VideoCaptureTarget target) : EventArgs
+{
+    public VideoCaptureTarget Target { get; } = target ?? throw new ArgumentNullException(nameof(target));
+}
+
 /// <summary>
 /// Presents an auxiliary, non-activating recording window. Consumers subscribe
 /// to the events and keep recording ownership in their existing coordinator.
@@ -128,6 +140,10 @@ public interface IRecordingOverlayPresenter : IDisposable
     event EventHandler? StopRequested;
 
     event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+
+    event EventHandler<TeamsWindowCaptureTargetRequestedEventArgs>? TeamsWindowCaptureTargetRequested;
+
+    event EventHandler? TeamsWindowCaptureRefreshRequested;
 
     /// <summary>Shows the Teams automatic-recording cancellation countdown.</summary>
     void ShowCountdown(int remainingSeconds);
@@ -175,6 +191,10 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRec
         window.StopRequested += (_, _) => StopRequested?.Invoke(this, EventArgs.Empty);
         window.TeamsWindowCaptureToggleRequested += (_, args) =>
             TeamsWindowCaptureToggleRequested?.Invoke(this, args);
+        window.TeamsWindowCaptureTargetRequested += (_, args) =>
+            TeamsWindowCaptureTargetRequested?.Invoke(this, args);
+        window.TeamsWindowCaptureRefreshRequested += (_, _) =>
+            TeamsWindowCaptureRefreshRequested?.Invoke(this, EventArgs.Empty);
     }
 
     public event EventHandler? CancelRequested;
@@ -182,6 +202,10 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRec
     public event EventHandler? StopRequested;
 
     public event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+
+    public event EventHandler<TeamsWindowCaptureTargetRequestedEventArgs>? TeamsWindowCaptureTargetRequested;
+
+    public event EventHandler? TeamsWindowCaptureRefreshRequested;
 
     public void ShowCountdown(int remainingSeconds) =>
         Update(RecordingOverlayPresentation.Countdown(remainingSeconds));
@@ -213,7 +237,9 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRec
         double systemAudioLevelPercent,
         double microphoneLevelPercent,
         bool isVirtualMicrophoneReady,
-        string? virtualMicrophoneStatus) =>
+        string? virtualMicrophoneStatus,
+        IReadOnlyList<VideoCaptureWindowChoice>? teamsWindowChoices,
+        VideoCaptureWindowChoice? selectedTeamsWindow) =>
         Update(RecordingOverlayPresentation.Recording(
             kind,
             canToggleTeamsWindowCapture,
@@ -228,6 +254,8 @@ public sealed class RecordingOverlayPresenter : IRecordingOverlayPresenter, IRec
             MicrophoneLevelPercent = Math.Clamp(microphoneLevelPercent, 0, 100),
             IsVirtualMicrophoneReady = isVirtualMicrophoneReady,
             VirtualMicrophoneStatus = virtualMicrophoneStatus,
+            TeamsWindowChoices = teamsWindowChoices,
+            SelectedTeamsWindow = selectedTeamsWindow,
         });
 
     public void ShowFinalizing(string? status = null) =>

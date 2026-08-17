@@ -138,6 +138,62 @@ public static class VideoCaptureTargetSelection
         VideoCaptureTarget? selected,
         IReadOnlyList<VideoCaptureTarget> available) =>
         Resolve(selected, available) ?? available.FirstOrDefault(candidate => candidate.IsUsable);
+
+    /// <summary>
+    /// Selects a Teams meeting window without guessing from a localized title.
+    /// An explicit user choice wins while its complete identity remains live.
+    /// Otherwise a single independently-confirmed meeting surface wins, then a
+    /// retained automatic choice, a sole Teams window, or the current admitted
+    /// foreground Teams window. Multiple confirmed meetings remain ambiguous.
+    /// </summary>
+    public static VideoCaptureTarget? SelectAutomatically(
+        VideoCaptureTarget? selected,
+        bool selectedWasExplicit,
+        IReadOnlyList<VideoCaptureTarget> available,
+        IReadOnlyList<VideoCaptureTarget> confirmedMeetingTargets,
+        nint foregroundWindowHandle)
+    {
+        ArgumentNullException.ThrowIfNull(available);
+        ArgumentNullException.ThrowIfNull(confirmedMeetingTargets);
+
+        var retained = Resolve(selected, available);
+        if (selectedWasExplicit && retained is not null)
+        {
+            return retained;
+        }
+
+        var confirmed = confirmedMeetingTargets
+            .Select(candidate => Resolve(candidate, available))
+            .Where(candidate => candidate is not null)
+            .Cast<VideoCaptureTarget>()
+            .Distinct()
+            .ToArray();
+        if (confirmed.Length == 1)
+        {
+            return confirmed[0];
+        }
+        if (confirmed.Length > 1)
+        {
+            return retained is not null && confirmed.Contains(retained)
+                ? retained
+                : null;
+        }
+
+        if (retained is not null)
+        {
+            return retained;
+        }
+
+        var usable = available.Where(candidate => candidate.IsUsable).ToArray();
+        if (usable.Length == 1)
+        {
+            return usable[0];
+        }
+
+        return foregroundWindowHandle == nint.Zero
+            ? null
+            : usable.FirstOrDefault(candidate => candidate.WindowHandle == foregroundWindowHandle);
+    }
 }
 
 public interface IVideoCaptureTargetCatalog

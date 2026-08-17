@@ -114,6 +114,7 @@ var tests = new (string Name, Action Run)[]
     ,("video capture is gated until a frame pipeline is verified", VideoCaptureTests.FeatureGateFailsClosedUntilFramePipelineExists)
     ,("video capture target selection requires the same live window", VideoCaptureTests.TargetSelectionRequiresTheSameLiveWindow)
     ,("Teams target refresh retains live selection or chooses an admitted replacement", VideoCaptureTests.RefreshRetainsLiveTargetOrSelectsReplacement)
+    ,("Teams target auto-selection prefers verified meetings and fails closed on ambiguity", VideoCaptureTests.AutomaticSelectionPrefersVerifiedMeetingAndFailsClosedOnAmbiguity)
     ,("video capture target admission rejects unsafe and unrelated windows", VideoCaptureTests.TargetAdmissionFailsClosedForUnsafeOrUnrelatedWindows)
     ,("Teams window catalog only offers admitted top-level windows", WindowsVideoCaptureTargetCatalogTests.OnlyOffersAdmittedTeamsWindows)
     ,("dynamic video target changes keep audio and fence stale pixels", DynamicWindowVideoCaptureAcceptanceTests.MidRecordingTargetChangesArePrivateAndAudioContinues)

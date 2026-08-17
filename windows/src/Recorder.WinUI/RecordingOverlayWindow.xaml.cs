@@ -3,7 +3,9 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.Graphics;
 using WinRT.Interop;
 
@@ -16,9 +18,11 @@ namespace TeamsRecorder.Windows.WinUI;
 public sealed partial class RecordingOverlayWindow : Window
 {
     private const int DefaultWidthDips = 448;
-    private const int DefaultHeightDips = 340;
+    private const int DefaultHeightDips = 392;
     private const int MinimumWidthDips = 420;
     private const int MinimumHeightDips = 300;
+    private const int CompactWidthDips = 300;
+    private const int CompactHeightDips = 64;
     private const int GwlExStyle = -20;
     private const nint WsExToolWindow = 0x00000080;
     private const nint WsExNoActivate = 0x08000000;
@@ -36,6 +40,7 @@ public sealed partial class RecordingOverlayWindow : Window
     private bool isClosing;
     private bool isApplyingPresentation;
     private bool isApplyingWindowSize;
+    private bool isCompact;
     private RecordingOverlayMode currentMode = RecordingOverlayMode.Countdown;
 
     public RecordingOverlayWindow()
@@ -48,7 +53,7 @@ public sealed partial class RecordingOverlayWindow : Window
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
             presenter.IsAlwaysOnTop = true;
-            presenter.IsResizable = true;
+            presenter.IsResizable = false;
             presenter.IsMaximizable = false;
             presenter.IsMinimizable = false;
             presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
@@ -66,6 +71,8 @@ public sealed partial class RecordingOverlayWindow : Window
     public event EventHandler? CancelRequested;
     public event EventHandler? StopRequested;
     public event EventHandler<TeamsWindowCaptureToggleRequestedEventArgs>? TeamsWindowCaptureToggleRequested;
+    public event EventHandler<TeamsWindowCaptureTargetRequestedEventArgs>? TeamsWindowCaptureTargetRequested;
+    public event EventHandler? TeamsWindowCaptureRefreshRequested;
 
     internal void ApplyPresentation(RecordingOverlayPresentation presentation)
     {
@@ -107,6 +114,17 @@ public sealed partial class RecordingOverlayWindow : Window
             TeamsWindowCaptureToggle.IsEnabled = isRecording && presentation.CanToggleTeamsWindowCapture;
             TeamsWindowCaptureToggle.IsOn = presentation.IsTeamsWindowCaptureEnabled;
             TeamsWindowCaptureStatusText.Text = presentation.TeamsWindowCaptureStatus ?? "可在錄音期間切換";
+            var choices = presentation.TeamsWindowChoices ?? Array.Empty<VideoCaptureWindowChoice>();
+            if (!ReferenceEquals(TeamsWindowCaptureTargetSelector.ItemsSource, choices))
+            {
+                TeamsWindowCaptureTargetSelector.ItemsSource = choices;
+            }
+            TeamsWindowCaptureTargetSelector.IsEnabled =
+                isRecording && presentation.CanToggleTeamsWindowCapture && choices.Count > 0;
+            TeamsWindowCaptureTargetSelector.SelectedItem = presentation.SelectedTeamsWindow;
+            TeamsWindowCaptureRefreshButton.IsEnabled =
+                isRecording && presentation.CanToggleTeamsWindowCapture;
+            ApplyCompactVisibility(isRecording, isFinalizing);
         }
         finally
         {
@@ -167,14 +185,8 @@ public sealed partial class RecordingOverlayWindow : Window
             dpi = 96;
         }
 
-        var minimumWidth = ScaleForDpi(MinimumWidthDips, dpi);
-        var minimumHeight = ScaleForDpi(MinimumHeightDips, dpi);
-        var width = resetToDefault
-            ? ScaleForDpi(DefaultWidthDips, dpi)
-            : Math.Max(AppWindow.Size.Width, minimumWidth);
-        var height = resetToDefault
-            ? ScaleForDpi(DefaultHeightDips, dpi)
-            : Math.Max(AppWindow.Size.Height, minimumHeight);
+        var width = ScaleForDpi(isCompact ? CompactWidthDips : DefaultWidthDips, dpi);
+        var height = ScaleForDpi(isCompact ? CompactHeightDips : DefaultHeightDips, dpi);
 
         if (AppWindow.Size.Width == width && AppWindow.Size.Height == height)
         {
@@ -226,16 +238,17 @@ public sealed partial class RecordingOverlayWindow : Window
         }
     }
 
-    private void OnDragHandlePointerPressed(object sender, PointerRoutedEventArgs e)
+    private void OnHeaderPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (!e.GetCurrentPoint(DragHandle).Properties.IsLeftButtonPressed)
+        if (!e.GetCurrentPoint(HeaderDragSurface).Properties.IsLeftButtonPressed ||
+            IsInteractiveHeaderElement(e.OriginalSource as DependencyObject))
         {
             return;
         }
 
-        // Keep the overlay non-activating while delegating the actual move to
-        // Windows' caption drag loop. Restricting this to a dedicated handle
-        // prevents a drag from stealing Stop or screen-toggle input.
+        // WS_EX_NOACTIVATE prevents reliable XAML pointer capture on this
+        // auxiliary window. Hand the complete header (not a tiny handle) to
+        // Windows' native caption move loop instead.
         e.Handled = true;
         _ = ReleaseCapture();
         _ = SendMessage(
@@ -243,6 +256,40 @@ public sealed partial class RecordingOverlayWindow : Window
             WmNcLButtonDown,
             HtCaption,
             nint.Zero);
+    }
+
+    private bool IsInteractiveHeaderElement(DependencyObject? source)
+    {
+        for (var current = source; current is not null && current != HeaderDragSurface; current = VisualTreeHelper.GetParent(current))
+        {
+            if (current is ButtonBase or Selector or Slider)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void OnCompactButtonClick(object sender, RoutedEventArgs e)
+    {
+        isCompact = !isCompact;
+        ApplyCompactVisibility(
+            currentMode == RecordingOverlayMode.Recording,
+            currentMode == RecordingOverlayMode.Finalizing);
+        ResizeForCurrentDpi(resetToDefault: true);
+    }
+
+    private void ApplyCompactVisibility(bool isRecording, bool isFinalizing)
+    {
+        StatusDetailText.Visibility = isCompact ? Visibility.Collapsed : Visibility.Visible;
+        CountdownCard.Visibility = isCompact || isRecording || isFinalizing ? Visibility.Collapsed : Visibility.Visible;
+        SourcesPanel.Visibility = isCompact || (!isRecording && !isFinalizing) ? Visibility.Collapsed : Visibility.Visible;
+        ScreenCaptureCard.Visibility = isCompact || !isRecording ? Visibility.Collapsed : Visibility.Visible;
+        ActionButton.Visibility = isCompact || isFinalizing ? Visibility.Collapsed : Visibility.Visible;
+        CompactButton.Content = isCompact ? "□" : "—";
+        AutomationProperties.SetName(CompactButton, isCompact ? "還原錄音控制器" : "最小化錄音控制器");
+        ToolTipService.SetToolTip(CompactButton, isCompact ? "還原" : "最小化");
     }
 
     private void OnTeamsWindowCaptureToggleToggled(object sender, RoutedEventArgs e)
@@ -256,6 +303,24 @@ public sealed partial class RecordingOverlayWindow : Window
             this,
             new TeamsWindowCaptureToggleRequestedEventArgs(TeamsWindowCaptureToggle.IsOn));
     }
+
+    private void OnTeamsWindowCaptureTargetSelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (isApplyingPresentation ||
+            TeamsWindowCaptureTargetSelector.SelectedItem is not VideoCaptureWindowChoice choice)
+        {
+            return;
+        }
+
+        TeamsWindowCaptureTargetRequested?.Invoke(
+            this,
+            new TeamsWindowCaptureTargetRequestedEventArgs(choice.Target));
+    }
+
+    private void OnTeamsWindowCaptureRefreshClick(object sender, RoutedEventArgs e) =>
+        TeamsWindowCaptureRefreshRequested?.Invoke(this, EventArgs.Empty);
 
     private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {

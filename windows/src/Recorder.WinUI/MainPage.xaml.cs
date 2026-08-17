@@ -29,6 +29,8 @@ public sealed partial class MainPage : Page
         recordingOverlayPresenter.CancelRequested += OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested += OnRecordingOverlayStopRequested;
         recordingOverlayPresenter.TeamsWindowCaptureToggleRequested += OnTeamsWindowCaptureToggleRequested;
+        recordingOverlayPresenter.TeamsWindowCaptureTargetRequested += OnTeamsWindowCaptureTargetRequested;
+        recordingOverlayPresenter.TeamsWindowCaptureRefreshRequested += OnTeamsWindowCaptureRefreshRequested;
         Loaded += OnLoaded;
     }
 
@@ -44,6 +46,8 @@ public sealed partial class MainPage : Page
         recordingOverlayPresenter.CancelRequested -= OnRecordingOverlayCancelRequested;
         recordingOverlayPresenter.StopRequested -= OnRecordingOverlayStopRequested;
         recordingOverlayPresenter.TeamsWindowCaptureToggleRequested -= OnTeamsWindowCaptureToggleRequested;
+        recordingOverlayPresenter.TeamsWindowCaptureTargetRequested -= OnTeamsWindowCaptureTargetRequested;
+        recordingOverlayPresenter.TeamsWindowCaptureRefreshRequested -= OnTeamsWindowCaptureRefreshRequested;
         recordingOverlayPresenter.Hide();
         await viewModel.ShutdownAsync();
         recordingOverlayPresenter.Dispose();
@@ -106,7 +110,9 @@ public sealed partial class MainPage : Page
                     state.SystemAudioLevelPercent,
                     state.MicrophoneLevelPercent,
                     state.IsVirtualMicrophoneReady,
-                    state.VirtualMicrophoneStatus);
+                    state.VirtualMicrophoneStatus,
+                    state.TeamsWindowChoices,
+                    state.SelectedTeamsWindow);
             }
             else
             {
@@ -146,6 +152,24 @@ public sealed partial class MainPage : Page
         if (!isShutdown)
         {
             await viewModel.SetTeamsWindowCaptureDuringRecordingAsync(args.Enabled);
+        }
+    }
+
+    private async void OnTeamsWindowCaptureTargetRequested(
+        object? sender,
+        TeamsWindowCaptureTargetRequestedEventArgs args)
+    {
+        if (!isShutdown)
+        {
+            await viewModel.SetTeamsWindowCaptureTargetDuringRecordingAsync(args.Target);
+        }
+    }
+
+    private async void OnTeamsWindowCaptureRefreshRequested(object? sender, EventArgs args)
+    {
+        if (!isShutdown)
+        {
+            await viewModel.RefreshTeamsWindowsFromOverlayAsync();
         }
     }
 

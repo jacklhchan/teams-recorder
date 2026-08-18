@@ -289,7 +289,7 @@ class LongformTranscriber:
             response_error = ""
         except TranscriptionError as exc: text, response_error = "", str(exc)
         valid, reason = validate_transcript(text, interval.end - interval.start, previous) if not response_error else (False, response_error)
-        attempt = {"request_id": request_id, "raw_start": raw_interval.start, "raw_end": raw_interval.end, "request_start": interval.start, "request_end": interval.end, "response": str(response), "character_count": len(text) if isinstance(text, str) else 0, "prompt_character_count": len(prompt), "rolling_context_used": rolling_context_used, "validation": reason}; self.attempts.append(attempt)
+        attempt = {"request_id": request_id, "raw_start": raw_interval.start, "raw_end": raw_interval.end, "request_start": interval.start, "request_end": interval.end, "response": str(response), "character_count": len(text) if isinstance(text, str) else 0, "rolling_context_used": rolling_context_used, "validation": reason}; self.attempts.append(attempt)
         if valid and isinstance(text, str): self.accepted.append({**attempt, "text": text}); self._write_manifest(); return
         self._write_manifest()
         if rolling_context_used: self.emit("STATUS=Retrying failed chunk without previous transcript context"); return self._transcribe_interval(raw_interval, False)

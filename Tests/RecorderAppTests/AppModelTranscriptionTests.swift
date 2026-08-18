@@ -3,6 +3,88 @@ import XCTest
 
 @MainActor
 final class AppModelTranscriptionTests: XCTestCase {
+    func testImportedTranscriptionRequestDefaultsAndCancelDoesNotStart() throws {
+        let fixture = try makeFixtureWithConfiguredProvider()
+        defer { fixture.remove() }
+
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+
+        XCTAssertEqual(
+            fixture.model.transcriptionRequestDraft?.sessionID,
+            fixture.session.id
+        )
+        XCTAssertEqual(
+            fixture.model.transcriptionRequestDraft?.language,
+            .cantonese
+        )
+        XCTAssertEqual(
+            fixture.model.transcriptionRequestDraft?
+                .languageAccessibilityValue,
+            MeetingLanguage.cantonese.displayName
+        )
+        XCTAssertEqual(fixture.model.transcriptionRequestDraft?.prompt, "")
+        XCTAssertNil(fixture.service.startedSessionID)
+
+        fixture.model.cancelTranscriptionRequest()
+
+        XCTAssertNil(fixture.model.transcriptionRequestDraft)
+        XCTAssertNil(fixture.service.startedSessionID)
+
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(
+            fixture.model.transcriptionRequestDraft?.language,
+            .cantonese
+        )
+        XCTAssertEqual(fixture.model.transcriptionRequestDraft?.prompt, "")
+    }
+
+    func testImportedTranscriptionConfirmationForwardsOptions() async throws {
+        let fixture = try makeFixtureWithConfiguredProvider()
+        defer { fixture.remove() }
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+
+        fixture.model.submitTranscriptionRequest(
+            options: .init(language: .mandarin, prompt: "  imported names  ")
+        )
+
+        XCTAssertNil(fixture.model.transcriptionRequestDraft)
+        let started = await eventually {
+            fixture.service.startedSessionID != nil
+        }
+        XCTAssertTrue(started)
+        XCTAssertEqual(fixture.service.startedSessionID, fixture.session.id)
+        XCTAssertEqual(
+            fixture.service.startedOptions,
+            .init(language: .mandarin, prompt: "imported names")
+        )
+    }
+
+    func testImportedTranscriptionConfirmationRevalidatesCanonicalSession() throws {
+        let fixture = try makeFixtureWithConfiguredProvider()
+        defer { fixture.remove() }
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+        fixture.removeCanonicalSession()
+
+        fixture.model.submitTranscriptionRequest(
+            options: .init(language: .english, prompt: "secret prompt")
+        )
+
+        XCTAssertNil(fixture.model.transcriptionRequestDraft)
+        XCTAssertNil(fixture.service.startedSessionID)
+        XCTAssertEqual(
+            fixture.model.statusMessage,
+            "The recording is no longer available."
+        )
+    }
+
     func testPerJobTranscriptionRevalidatesCanonicalSessionAndForwardsOptions() async throws {
         let fixture = try makeFixtureWithConfiguredProvider()
         defer { fixture.remove() }

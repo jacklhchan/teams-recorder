@@ -78,6 +78,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var retentionScanAggregate = RecordingRetentionAggregate()
     @Published private(set) var localRecorderControlEnabled: Bool
     @Published var statusMessage = "Ready"
+    @Published var transcriptionRequestDraft: TranscriptionRequestDraft?
     @Published var lastHealthReport: RecordingHealthReport?
     @Published private(set) var lastRecordingSavedAsM4A = false
     @Published var isRunningTestRecording = false
@@ -661,9 +662,8 @@ final class AppModel: ObservableObject {
                     fence: self.workspacePublicationFence
                 )
             },
-            transcriptionProviderIsConfigured: {
-                [weak aiProviderSettingsModel] in
-                aiProviderSettingsModel?.hasSavedProfile ?? false
+            requestTranscriptionOptions: { [weak self] session in
+                self?.requestTranscriptionOptions(sessionID: session.id)
             },
             reportStatus: { [weak self] message in
                 self?.statusMessage = message
@@ -1965,6 +1965,33 @@ final class AppModel: ObservableObject {
             providerIsConfigured: aiProviderSettingsModel.hasSavedProfile,
             options: options
         )
+    }
+
+    func requestTranscriptionOptions(
+        sessionID: RecordingSession.ID
+    ) {
+        guard let session = libraryFeature.snapshot.sessions.first(where: {
+            $0.id == sessionID
+        }) else {
+            statusMessage = "The recording is no longer available."
+            return
+        }
+        transcriptionRequestDraft = .init(
+            sessionID: session.id,
+            sessionName: session.displayName
+        )
+    }
+
+    func cancelTranscriptionRequest() {
+        transcriptionRequestDraft = nil
+    }
+
+    func submitTranscriptionRequest(
+        options: TranscriptionRequestOptions
+    ) {
+        guard let draft = transcriptionRequestDraft else { return }
+        transcriptionRequestDraft = nil
+        transcribe(sessionID: draft.sessionID, options: options)
     }
 
     /// Compatibility entry point for existing non-UI callers. Recordings

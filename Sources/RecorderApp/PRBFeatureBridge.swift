@@ -12,7 +12,6 @@ final class PRBFeatureBridge {
         let expectedTranscriptionPublicationSourceID: UUID
         let expectedLibrarySourceID: UUID
         let expectedMeetingIntelligencePublicationSourceID: UUID
-        let transcriptionProviderIsConfigured: () -> Bool
         let registerTranscriptPublication: (@escaping (TranscriptPublished) -> Void) -> Unregister
         let registerLibrarySessionsLoaded: (@escaping (LibraryLoadedSnapshot) -> Void) -> Unregister
         let registerLibraryTranscriptCommit: (@escaping (LibraryTranscriptProjectionCommitted) -> Void) -> Unregister
@@ -26,7 +25,7 @@ final class PRBFeatureBridge {
         let handleCommittedTranscriptPublication: (TranscriptPublished) -> Void
         let markTranscriptStale: (RecordingSession) -> Void
         let refreshAfterMeetingIntelligence: (RecordingSession, WorkspacePublicationFence) -> Void
-        let startTranscription: (RecordingSession, Bool) -> Void
+        let requestTranscriptionOptions: (RecordingSession) -> Void
         let reportStatus: (String) -> Void
         let stopPlaybackIfActive: (RecordingSession.ID) -> Void
         let removeTranscriptionProjection: (RecordingSession.ID) -> Void
@@ -74,7 +73,7 @@ final class PRBFeatureBridge {
         boundaries: PRBFeatureBoundaries,
         providerSettings: AIProviderSettingsModel,
         currentWorkspace: @escaping () -> LibraryWorkspaceSnapshot?,
-        transcriptionProviderIsConfigured: @escaping () -> Bool,
+        requestTranscriptionOptions: @escaping (RecordingSession) -> Void,
         reportStatus: @escaping (String) -> Void
     ) {
         let library = boundaries.library
@@ -91,8 +90,6 @@ final class PRBFeatureBridge {
             expectedLibrarySourceID: library.librarySourceID,
             expectedMeetingIntelligencePublicationSourceID:
                 meetingIntelligence.publicationSourceID,
-            transcriptionProviderIsConfigured:
-                transcriptionProviderIsConfigured,
             registerTranscriptPublication: { [weak transcription] handler in
                 guard let transcription else { return {} }
                 let token = transcription.observeSuccessfulPublication(handler)
@@ -170,12 +167,7 @@ final class PRBFeatureBridge {
             refreshAfterMeetingIntelligence: { [weak library] session, fence in
                 library?.refreshAfterMeetingIntelligence(session, fence: fence)
             },
-            startTranscription: { [weak transcription] session, configured in
-                transcription?.start(
-                    session: session,
-                    providerIsConfigured: configured
-                )
-            },
+            requestTranscriptionOptions: requestTranscriptionOptions,
             reportStatus: reportStatus,
             stopPlaybackIfActive: { [weak playback] sessionID in
                 playback?.stopIfActive(sessionID: sessionID)
@@ -311,7 +303,7 @@ final class PRBFeatureBridge {
     private func receiveImport(_ event: ImportedAudioSessionReady) {
         guard isAdmitting, let current = routes.currentWorkspace(), valid(event.identity, session: event.canonicalSession, workspace: current), libraryAdmissions.insert(.importedAudio(event.identity)) else { return }
         routes.reportStatus("Audio imported for transcription: \(event.canonicalSession.displayName)")
-        routes.startTranscription(event.canonicalSession, routes.transcriptionProviderIsConfigured())
+        routes.requestTranscriptionOptions(event.canonicalSession)
     }
 
     private func receiveRemoval(_ event: SessionRemoved) {

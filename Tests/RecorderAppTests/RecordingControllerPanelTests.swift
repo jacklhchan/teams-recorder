@@ -6,6 +6,21 @@ import XCTest
 
 @MainActor
 final class RecordingControllerPanelTests: XCTestCase {
+    func testPanelToggleAccessibilityObservationFailsClosedWhenControlCannotBeObserved() {
+        let presenter = RecordingControllerPanelPresenter()
+
+        XCTAssertNil(presenter.panelToggleAccessibilityValue)
+        presenter.setPresentation(.collapsed)
+        XCTAssertNil(presenter.panelToggleAccessibilityValue)
+
+        let fixture = makeFixture()
+        presenter.present(model: fixture.model)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertNil(presenter.panelToggleAccessibilityValue)
+        presenter.dismiss()
+        XCTAssertNil(presenter.panelToggleAccessibilityValue)
+    }
+
     func testRecordingControllerCollapsedShowsOnlyRunningAndEye() throws {
         let host = makeRecordingControllerHost(state: .collapsed)
         defer { host.close() }
@@ -86,14 +101,12 @@ final class RecordingControllerPanelTests: XCTestCase {
         presenter.dismiss()
         presenter.present(model: fixture.model)
         defer { presenter.dismiss() }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertEqual(
             presenter.panelFrame.size,
             expandedOuterSize
         )
-        XCTAssertEqual(
-            presenter.panelToggleAccessibilityValue,
-            FloatingPanelPresentationState.expanded.accessibilityValue
-        )
+        XCTAssertNil(presenter.panelToggleAccessibilityValue)
         frameProbe.orderOut(nil)
     }
 

@@ -1125,6 +1125,54 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertNil(fixture.model.transcribingSessionID)
     }
 
+    func testTranscribeImportedCanonicalSessionOpensSharedSheetWithoutStarting() throws {
+        let fixture = makeFixtureWithOneSession()
+        let settings = fixture.model.aiProviderSettingsModel
+        settings.baseURLText = "https://api.example.com/v1"
+        settings.asrModel = "asr"
+        settings.llmModel = "llm"
+        settings.save()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.recordings)
+
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+
+        try waitUntil(timeout: 1, message: "import transcription sheet") {
+            host.containsAccessibilityIdentifier(
+                RecorderActionID.transcriptionSheet
+            )
+        }
+        XCTAssertNil(fixture.model.transcribingSessionID)
+        XCTAssertEqual(
+            host.transcriptionPickerValue(
+                for: RecorderActionID.transcriptionLanguage
+            ),
+            MeetingLanguage.cantonese.rawValue
+        )
+        XCTAssertEqual(
+            host.transcriptionPromptValue(
+                for: RecorderActionID.transcriptionPrompt
+            ),
+            ""
+        )
+
+        XCTAssertTrue(host.click(
+            atAccessibilityFrame: RecorderActionID.transcriptionCancel
+        ))
+        try waitUntil(timeout: 1, message: "import sheet dismissal") {
+            !host.containsAccessibilityIdentifier(
+                RecorderActionID.transcriptionSheet
+            )
+        }
+        XCTAssertNil(fixture.model.transcribingSessionID)
+    }
+
     func testTranscriptionSheetSubmitsSelectedLanguageAndPrompt() throws {
         let service = RenderCapturingTranscriptionService()
         let fixture = makeFixtureWithOneSession(

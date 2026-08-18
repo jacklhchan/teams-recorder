@@ -10,6 +10,10 @@ struct TranscriptionRequestDraft: Identifiable, Equatable {
     var options: TranscriptionRequestOptions {
         .init(language: language, prompt: prompt)
     }
+
+    var languageAccessibilityValue: String {
+        language.displayName
+    }
 }
 
 struct TranscriptionRequestSheet: View {
@@ -37,7 +41,7 @@ struct TranscriptionRequestSheet: View {
             }
             .pickerStyle(.menu)
             .accessibilityIdentifier(RecorderActionID.transcriptionLanguage)
-            .accessibilityValue(draft.language.rawValue)
+            .accessibilityValue(draft.languageAccessibilityValue)
             .background(
                 RecorderDestinationAccessibilityMarker(
                     identifier: RecorderActionID.transcriptionLanguage,

@@ -58,7 +58,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         withExtendedLifetime(libraryCancellable) {}
     }
 
-    func testIndexedImportedAudioStartsASROnceAndStaleOrFailedImportStartsNone() async throws {
+    func testIndexedImportedAudioRequestsOptionsAndNeverStartsASRImmediately() async throws {
         let root = try makeTemporaryFolder()
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source.m4a")
@@ -74,8 +74,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
             searchDocumentLoader: { $0.searchDocument }, recovery: { _ in },
             trashHandler: { _ in true }, audioImporter: { _, _ in imported }
         )
-        let preparationStarted = expectation(description: "imported session reaches ASR preparation")
-        let preparer = ImportCountingPreparer(onPrepare: { preparationStarted.fulfill() })
+        let preparer = ImportCountingPreparer()
         let model = AppModel(
             providerRepository: ImportTestProvider(),
             inputDevices: { [] }, defaultInputDeviceID: { nil },
@@ -89,8 +88,13 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         guard case .success = await feature.importAudio(
             source, workspace: root, fence: .initial
         ) else { return XCTFail("indexed import should succeed") }
-        await fulfillment(of: [preparationStarted], timeout: 1)
-        XCTAssertEqual(preparer.requestCount, 1)
+        XCTAssertEqual(
+            model.transcriptionRequestDraft?.sessionID,
+            RecordingLibraryURLIdentity.normalized(imported.id)
+        )
+        XCTAssertNil(model.transcribingSessionID)
+        XCTAssertEqual(preparer.requestCount, 0)
+        model.cancelTranscriptionRequest()
 
         let nextWorkspace = try makeTemporaryFolder()
         defer { try? FileManager.default.removeItem(at: nextWorkspace) }
@@ -98,7 +102,8 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         guard case .failure = await feature.importAudio(
             source, workspace: root, fence: .initial
         ) else { return XCTFail("old workspace import must fail") }
-        XCTAssertEqual(preparer.requestCount, 1)
+        XCTAssertNil(model.transcriptionRequestDraft)
+        XCTAssertEqual(preparer.requestCount, 0)
 
         let failing = LibraryFeatureModel(
             sessionLoader: { _ in [] }, sessionReloader: { $0 },
@@ -116,7 +121,8 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         guard case .failure = await failing.importAudio(
             source, workspace: nextWorkspace, fence: .initial
         ) else { return XCTFail("failed import must fail") }
-        XCTAssertEqual(preparer.requestCount, 1)
+        XCTAssertNil(failingModel.transcriptionRequestDraft)
+        XCTAssertEqual(preparer.requestCount, 0)
     }
 
     func testForgedImportedAudioEventsRequireCurrentCanonicalLibraryAdmission() async throws {
@@ -124,8 +130,7 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let session = try makeDiskSession(in: root, name: "canonical")
         let feature = makeFeature(session: session)
-        let admittedToASR = expectation(description: "only genuine imported event reaches ASR")
-        let preparer = ImportCountingPreparer(onPrepare: { admittedToASR.fulfill() })
+        let preparer = ImportCountingPreparer()
         let model = AppModel(
             providerRepository: ImportTestProvider(), inputDevices: { [] },
             defaultInputDeviceID: { nil }, performStartupWork: false,
@@ -183,19 +188,16 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
                 model.transcribingSessionID,
                 "A forged import must not synchronously acquire the ASR job."
             )
+            XCTAssertNil(model.transcriptionRequestDraft)
             XCTAssertEqual(preparer.requestCount, 0, "forged import must not reach ASR")
         }
 
         feature.onImportedAudioReady?(.init(
             identity: genuineIdentity, canonicalSession: session
         ))
-        XCTAssertEqual(
-            model.transcribingSessionID,
-            session.id,
-            "The genuine canonical event must synchronously acquire the ASR job."
-        )
-        await fulfillment(of: [admittedToASR], timeout: 1)
-        XCTAssertEqual(preparer.requestCount, 1)
+        XCTAssertEqual(model.transcriptionRequestDraft?.sessionID, session.id)
+        XCTAssertNil(model.transcribingSessionID)
+        XCTAssertEqual(preparer.requestCount, 0)
     }
 
     func testForeignStaleAndNoncanonicalLibraryCallbacksDoNotStartMeetingIntelligence() async throws {

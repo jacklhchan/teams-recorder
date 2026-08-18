@@ -67,7 +67,7 @@ final class PRBFeatureBridgeTests: XCTestCase {
         let event = edited("edit")
         route.emitTranscriptEdit(event)
         XCTAssertEqual(route.miStaleSessions, [session.id])
-        XCTAssertTrue(route.transcriptionStarts.isEmpty)
+        XCTAssertTrue(route.transcriptionOptionRequests.isEmpty)
         XCTAssertEqual(route.indexedTranscriptRevisions, [event.identity.transcriptRevision])
     }
 
@@ -77,7 +77,7 @@ final class PRBFeatureBridgeTests: XCTestCase {
         route.emitMeetingIntelligence(event); route.emitMeetingIntelligence(event)
         XCTAssertEqual(route.miRefreshes.map(\.0), [session.id])
         XCTAssertEqual(route.miRefreshes.map(\.1), [currentFence])
-        XCTAssertTrue(route.transcriptionStarts.isEmpty)
+        XCTAssertTrue(route.transcriptionOptionRequests.isEmpty)
     }
 
     func testEditedArtifactAdmissionRequiresCurrentSourceFenceAndCanonicalIdentityExactlyOnce() {
@@ -123,18 +123,17 @@ final class PRBFeatureBridgeTests: XCTestCase {
 
         XCTAssertEqual(route.miRefreshes.map(\.0), [session.id])
         XCTAssertEqual(route.miRefreshes.map(\.1), [currentFence])
-        XCTAssertTrue(route.transcriptionStarts.isEmpty)
+        XCTAssertTrue(route.transcriptionOptionRequests.isEmpty)
     }
 
-    func testEligibleAndIneligibleImportsRetainBothButStartOnlyEligibleASR() {
+    func testCanonicalImportsRequestOptionsWithoutStartingASR() {
         let (bridge, route) = makeSUT(); bridge.start()
-        route.transcriptionProviderConfigured = true
         route.emitImport(.init(identity: libraryIdentity("import-1", session: session), canonicalSession: session))
-        route.transcriptionProviderConfigured = false
         route.emitImport(.init(identity: libraryIdentity("import-2", session: otherSession), canonicalSession: otherSession))
-        XCTAssertEqual(route.retainedImports, [session.id, otherSession.id])
-        XCTAssertEqual(route.transcriptionStarts, [session.id])
-        XCTAssertEqual(route.providerRecoverySessions, [otherSession.id])
+        XCTAssertEqual(
+            route.transcriptionOptionRequests,
+            [session.id, otherSession.id]
+        )
         XCTAssertEqual(route.importStatuses, [
             "Audio imported for transcription: \(session.displayName)",
             "Audio imported for transcription: \(otherSession.displayName)"
@@ -274,7 +273,7 @@ final class PRBFeatureBridgeTests: XCTestCase {
                 currentWorkspace: {
                     .init(folder: model.outputFolder, fence: .initial)
                 },
-                transcriptionProviderIsConfigured: { false },
+                requestTranscriptionOptions: { _ in },
                 reportStatus: { _ in }
             )
         }
@@ -385,7 +384,6 @@ private func finalization(folder: URL, fence: WorkspacePublicationFence, metadat
 private final class PRBFeatureBridgeRouteRecorder {
     enum WorkspaceCall: Equatable { case advanceASR(WorkspacePublicationFence), clearLibrary, resetMI, clearASR, refreshLibrary(URL, WorkspacePublicationFence) }
     var currentWorkspace: LibraryWorkspaceSnapshot
-    var transcriptionProviderConfigured = true
     var activeASRProviderSnapshot: String?
     var activeMIProviderSnapshot: String?
     private(set) var nextProviderRevision: UUID?
@@ -400,9 +398,7 @@ private final class PRBFeatureBridgeRouteRecorder {
     private(set) var miStaleSessions: [RecordingSession.ID] = []
     private(set) var indexedTranscriptRevisions: [TranscriptDocumentRevision?] = []
     private(set) var miRefreshes: [(RecordingSession.ID, WorkspacePublicationFence)] = []
-    private(set) var transcriptionStarts: [RecordingSession.ID] = []
-    private(set) var providerRecoverySessions: [RecordingSession.ID] = []
-    private(set) var retainedImports: [RecordingSession.ID] = []
+    private(set) var transcriptionOptionRequests: [RecordingSession.ID] = []
     private(set) var importStatuses: [String] = []
     private(set) var tombstonedSessions: [RecordingSession.ID] = []
     private(set) var playbackStops: [RecordingSession.ID] = []
@@ -418,9 +414,9 @@ private final class PRBFeatureBridgeRouteRecorder {
     private var hiddenCanonicalIDs: Set<RecordingSession.ID> = []
     private var transcript: ((TranscriptPublished) -> Void)?; private var commit: ((LibraryTranscriptProjectionCommitted) -> Void)?; private var edit: ((TranscriptEdited) -> Void)?; private var metadata: ((MetadataSaved) -> Void)?; private var loaded: ((LibraryLoadedSnapshot) -> Void)?; private var imported: ((ImportedAudioSessionReady) -> Void)?; private var removed: ((SessionRemoved) -> Void)?; private var mi: ((MeetingIntelligencePublished) -> Void)?; private var provider: ((ProviderSettingsSaved) -> Void)?
     init(currentWorkspace: LibraryWorkspaceSnapshot) { self.currentWorkspace = currentWorkspace }
-    var allConsumerCommandsAreEmpty: Bool { acceptedTranscriptAttemptIDs.isEmpty && miTranscriptAttemptIDs.isEmpty && miStaleSessions.isEmpty && miRefreshes.isEmpty && transcriptionStarts.isEmpty && playbackStops.isEmpty && transcriptionRemovals.isEmpty && miRemovals.isEmpty && workspaceCalls.isEmpty && providerSaveEvents.isEmpty && finalizationIDs.isEmpty && miReloads.isEmpty }
+    var allConsumerCommandsAreEmpty: Bool { acceptedTranscriptAttemptIDs.isEmpty && miTranscriptAttemptIDs.isEmpty && miStaleSessions.isEmpty && miRefreshes.isEmpty && transcriptionOptionRequests.isEmpty && playbackStops.isEmpty && transcriptionRemovals.isEmpty && miRemovals.isEmpty && workspaceCalls.isEmpty && providerSaveEvents.isEmpty && finalizationIDs.isEmpty && miReloads.isEmpty }
     var routes: PRBFeatureBridge.Routes {
-        .init(currentWorkspace: { [weak self] in guard let self else { return nil }; self.currentWorkspaceReadCount += 1; return self.currentWorkspace }, canonicalSession: { [weak self] id in guard let self, !self.tombstonedCanonicalIDs.contains(id), !self.hiddenCanonicalIDs.contains(id) else { return nil }; return [session, otherSession].first { $0.id == id } }, expectedTranscriptionPublicationSourceID: transcriptionSourceID, expectedLibrarySourceID: librarySourceID, expectedMeetingIntelligencePublicationSourceID: miSourceID, transcriptionProviderIsConfigured: { [weak self] in self?.transcriptionProviderConfigured ?? false }, registerTranscriptPublication: { [weak self] h in self?.register(\.transcript, h) ?? {} }, registerLibrarySessionsLoaded: { [weak self] h in self?.register(\.loaded, h) ?? {} }, registerLibraryTranscriptCommit: { [weak self] h in self?.register(\.commit, h) ?? {} }, registerTranscriptEdit: { [weak self] h in self?.register(\.edit, h) ?? {} }, registerMetadataSaved: { [weak self] h in self?.register(\.metadata, h) ?? {} }, registerImportedAudio: { [weak self] h in self?.register(\.imported, h) ?? {} }, registerSessionRemoval: { [weak self] h in self?.register(\.removed, h) ?? {} }, registerMeetingIntelligencePublication: { [weak self] h in self?.register(\.mi, h) ?? {} }, registerProviderSave: { [weak self] h in self?.register(\.provider, h) ?? {} }, acceptTranscriptPublication: { [weak self] in self?.acceptedTranscriptAttemptIDs.append($0.identity.attemptID) }, handleCommittedTranscriptPublication: { [weak self] in self?.miTranscriptAttemptIDs.append($0.identity.attemptID) }, markTranscriptStale: { [weak self] in self?.miStaleSessions.append($0.id) }, refreshAfterMeetingIntelligence: { [weak self] s, f in self?.miRefreshes.append((s.id, f)) }, startTranscription: { [weak self] s, configured in guard let self else { return }; self.retainedImports.append(s.id); configured ? self.transcriptionStarts.append(s.id) : self.providerRecoverySessions.append(s.id) }, reportStatus: { [weak self] in self?.importStatuses.append($0) }, stopPlaybackIfActive: { [weak self] in self?.playbackStops.append($0) }, removeTranscriptionProjection: { [weak self] in self?.transcriptionRemovals.append($0) }, cancelAndRemoveMeetingIntelligence: { [weak self] in self?.miRemovals.append($0) }, replaceLoadedTranscriptionStates: { [weak self] in self?.loadedStates.append($0) }, reloadMeetingIntelligenceSessions: { [weak self] in self?.miReloads.append($0.map(\.id)) }, clearLibraryForWorkspaceChange: { [weak self] in self?.workspaceCalls.append(.clearLibrary) }, refreshLibrary: { [weak self] u, f in self?.workspaceCalls.append(.refreshLibrary(u, f)) }, advanceTranscriptionFence: { [weak self] in self?.workspaceCalls.append(.advanceASR($0)) }, resetMeetingIntelligenceForWorkspaceChange: { [weak self] in self?.workspaceCalls.append(.resetMI) }, clearTranscriptionProjections: { [weak self] in self?.workspaceCalls.append(.clearASR) }, providerSettingsSaved: { [weak self] e in self?.providerSaveEvents.append(e); self?.nextProviderRevision = e.profileRevision }, acceptRecordingFinalization: { [weak self] in self?.finalizationIDs.append($0.finalizationID) })
+        .init(currentWorkspace: { [weak self] in guard let self else { return nil }; self.currentWorkspaceReadCount += 1; return self.currentWorkspace }, canonicalSession: { [weak self] id in guard let self, !self.tombstonedCanonicalIDs.contains(id), !self.hiddenCanonicalIDs.contains(id) else { return nil }; return [session, otherSession].first { $0.id == id } }, expectedTranscriptionPublicationSourceID: transcriptionSourceID, expectedLibrarySourceID: librarySourceID, expectedMeetingIntelligencePublicationSourceID: miSourceID, registerTranscriptPublication: { [weak self] h in self?.register(\.transcript, h) ?? {} }, registerLibrarySessionsLoaded: { [weak self] h in self?.register(\.loaded, h) ?? {} }, registerLibraryTranscriptCommit: { [weak self] h in self?.register(\.commit, h) ?? {} }, registerTranscriptEdit: { [weak self] h in self?.register(\.edit, h) ?? {} }, registerMetadataSaved: { [weak self] h in self?.register(\.metadata, h) ?? {} }, registerImportedAudio: { [weak self] h in self?.register(\.imported, h) ?? {} }, registerSessionRemoval: { [weak self] h in self?.register(\.removed, h) ?? {} }, registerMeetingIntelligencePublication: { [weak self] h in self?.register(\.mi, h) ?? {} }, registerProviderSave: { [weak self] h in self?.register(\.provider, h) ?? {} }, acceptTranscriptPublication: { [weak self] in self?.acceptedTranscriptAttemptIDs.append($0.identity.attemptID) }, handleCommittedTranscriptPublication: { [weak self] in self?.miTranscriptAttemptIDs.append($0.identity.attemptID) }, markTranscriptStale: { [weak self] in self?.miStaleSessions.append($0.id) }, refreshAfterMeetingIntelligence: { [weak self] s, f in self?.miRefreshes.append((s.id, f)) }, requestTranscriptionOptions: { [weak self] session in self?.transcriptionOptionRequests.append(session.id) }, reportStatus: { [weak self] in self?.importStatuses.append($0) }, stopPlaybackIfActive: { [weak self] in self?.playbackStops.append($0) }, removeTranscriptionProjection: { [weak self] in self?.transcriptionRemovals.append($0) }, cancelAndRemoveMeetingIntelligence: { [weak self] in self?.miRemovals.append($0) }, replaceLoadedTranscriptionStates: { [weak self] in self?.loadedStates.append($0) }, reloadMeetingIntelligenceSessions: { [weak self] in self?.miReloads.append($0.map(\.id)) }, clearLibraryForWorkspaceChange: { [weak self] in self?.workspaceCalls.append(.clearLibrary) }, refreshLibrary: { [weak self] u, f in self?.workspaceCalls.append(.refreshLibrary(u, f)) }, advanceTranscriptionFence: { [weak self] in self?.workspaceCalls.append(.advanceASR($0)) }, resetMeetingIntelligenceForWorkspaceChange: { [weak self] in self?.workspaceCalls.append(.resetMI) }, clearTranscriptionProjections: { [weak self] in self?.workspaceCalls.append(.clearASR) }, providerSettingsSaved: { [weak self] e in self?.providerSaveEvents.append(e); self?.nextProviderRevision = e.profileRevision }, acceptRecordingFinalization: { [weak self] in self?.finalizationIDs.append($0.finalizationID) })
     }
     func emitTranscript(_ e: TranscriptPublished) { transcript?(e) }; func emitLibraryCommit(_ e: LibraryTranscriptProjectionCommitted) { commit?(e) }; func emitTranscriptEdit(_ e: TranscriptEdited) { indexedTranscriptRevisions.append(e.identity.transcriptRevision); edit?(e) }; func emitMetadataSaved(_ e: MetadataSaved) { metadataEvents.append(e.canonicalSession.id); metadata?(e) }; func emitSessionsLoaded(_ e: LibraryLoadedSnapshot) { loaded?(e) }; func emitMeetingIntelligence(_ e: MeetingIntelligencePublished) { mi?(e) }; func emitImport(_ e: ImportedAudioSessionReady) { imported?(e) }; func emitRemoval(_ e: SessionRemoved) { tombstonedCanonicalIDs.insert(e.identity.sessionID); tombstonedSessions.append(e.identity.sessionID); removed?(e) }; func emitProviderSave(_ e: ProviderSettingsSaved) { provider?(e) }
     func captureTranscriptCallback() -> (TranscriptPublished) -> Void { transcript! }

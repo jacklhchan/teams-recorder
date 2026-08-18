@@ -179,7 +179,7 @@ final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
                       == RecordingControllerAccessibility.panelToggleID
               }),
               let value = toggle.accessibilityValue() as? String else {
-            return panelState.accessibilityValue
+            return nil
         }
         return value
     }

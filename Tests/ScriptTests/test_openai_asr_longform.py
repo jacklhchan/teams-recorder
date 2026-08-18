@@ -235,10 +235,11 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(response.read_bytes(), raw_body)
 
     def test_manifest_records_acceptance_immediately_after_chunk(self):
+        client = RecordingTranscriptionClient([{"text": "正常內容。"}])
         transcriber = LongformTranscriber(
             self.config(),
             runner=FakeRunner(duration=30.0),
-            client=RecordingTranscriptionClient([{"text": "正常內容。"}]),
+            client=client,
             emit=lambda _: None,
         )
         transcriber.duration = 30.0
@@ -248,6 +249,9 @@ class CoordinatorTests(unittest.TestCase):
         manifest = json.loads(transcriber.manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(len(manifest["attempts"]), 1)
         self.assertEqual(len(manifest["accepted"]), 1)
+        self.assertNotIn("prompt_character_count", manifest["attempts"][0])
+        self.assertNotIn("prompt_character_count", manifest["accepted"][0])
+        self.assertEqual(client.requests[0]["prompt"], "會議術語")
 
     def test_sequential_planning_candidate_publish_and_manifest_acceptance(self):
         client = RecordingTranscriptionClient([{"text": "第一段正常內容。"}, {"text": "第二段正常內容。"}, {"text": "最後正常內容。"}])

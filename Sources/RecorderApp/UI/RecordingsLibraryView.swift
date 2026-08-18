@@ -14,7 +14,6 @@ struct RecordingsLibraryView: View {
     @State private var selectedSessionID: RecordingSession.ID?
     @State private var metadataSession: RecordingSession?
     @State private var sessionPendingTrash: RecordingSession?
-    @State private var transcriptionDraft: TranscriptionRequestDraft?
 
     init(model: AppModel) {
         self.model = model
@@ -110,7 +109,7 @@ struct RecordingsLibraryView: View {
             saveMeetingIntelligenceEdit: model.saveMeetingIntelligenceEdit,
             saveMetadata: model.saveMetadata,
             moveToTrash: model.moveSessionToTrash,
-            transcriptionDraft: $transcriptionDraft,
+            transcriptionDraft: $model.transcriptionRequestDraft,
             route: $route,
             selectedSessionID: $selectedSessionID,
             libraryFilter: $libraryFilter,
@@ -156,13 +155,12 @@ struct RecordingsLibraryView: View {
             )
         )
         .accessibilityIdentifier("recorder.destination.recordings")
-        .sheet(item: $transcriptionDraft) { draft in
+        .sheet(item: $model.transcriptionRequestDraft) { draft in
             TranscriptionRequestSheet(
                 draft: draft,
-                cancel: { transcriptionDraft = nil },
+                cancel: model.cancelTranscriptionRequest,
                 submit: { options in
-                    transcriptionDraft = nil
-                    model.transcribe(sessionID: draft.sessionID, options: options)
+                    model.submitTranscriptionRequest(options: options)
                 }
             )
         }

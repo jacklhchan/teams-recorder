@@ -1081,11 +1081,47 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
         }
         XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet))
+        XCTAssertEqual(
+            host.transcriptionPickerValue(for: RecorderActionID.transcriptionLanguage),
+            MeetingLanguage.cantonese.rawValue
+        )
+        XCTAssertEqual(
+            host.transcriptionPromptValue(for: RecorderActionID.transcriptionPrompt),
+            ""
+        )
+        XCTAssertTrue(host.selectTranscriptionPickerValue(
+            RecorderActionID.transcriptionLanguage,
+            value: MeetingLanguage.english.rawValue
+        ))
+        XCTAssertTrue(host.replaceTextEditor(
+            RecorderActionID.transcriptionPrompt,
+            with: "discard this draft"
+        ))
         XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.transcriptionCancel))
         try waitUntil(timeout: 1, message: "transcription sheet dismissal") {
             !host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
         }
         XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet))
+
+        XCTAssertTrue(host.invokeNativeMenuItem(
+            forButton: "recorder.row.more.\(rowID)",
+            itemIdentifier: "recorder.row.transcribe.\(rowID)"
+        ))
+        try waitUntil(timeout: 1, message: "fresh transcription sheet to render") {
+            host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
+        }
+        XCTAssertEqual(
+            host.transcriptionPickerValue(for: RecorderActionID.transcriptionLanguage),
+            MeetingLanguage.cantonese.rawValue
+        )
+        XCTAssertEqual(
+            host.transcriptionPromptValue(for: RecorderActionID.transcriptionPrompt),
+            ""
+        )
+        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.transcriptionCancel))
+        try waitUntil(timeout: 1, message: "fresh transcription sheet dismissal") {
+            !host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
+        }
         XCTAssertNil(fixture.model.transcribingSessionID)
     }
 
@@ -3220,6 +3256,19 @@ final class WorkspaceHost {
         return MeetingLanguage.allCases.first {
             $0.displayName == title
         }?.rawValue
+    }
+
+    func transcriptionPromptValue(for identifier: String) -> String? {
+        guard let markerFrame = frame(forAccessibilityIdentifier: identifier),
+              let editor = renderedRoots
+                  .flatMap({ allViews(startingAt: $0) })
+                  .compactMap({ $0 as? NSTextView })
+                  .first(where: {
+                      !$0.isHidden && markerFrame.intersects($0.accessibilityFrame())
+                  }) else {
+            return nil
+        }
+        return editor.string
     }
 
     @discardableResult

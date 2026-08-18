@@ -7,7 +7,7 @@ import XCTest
 final class AIProviderSettingsRenderTests: XCTestCase {
     func testProviderSettingsHideUniversalASROptions() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
-        let defaultsSuite = "provider-hide-asr-(UUID().uuidString)"
+        let defaultsSuite = "provider-hide-asr-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
         defer { defaults.removePersistentDomain(forName: defaultsSuite) }
         let appModel = AppModel(
@@ -30,7 +30,7 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         XCTAssertTrue(host.reveal(RecorderActionID.providerMeetingIntelligencePrompt))
     }
 
-    func testPromptEditorsAreIndependentlyReachableAndLabeledAtSupportedSizes() throws {
+    func testMeetingIntelligencePromptIsOnlyReachablePromptAtSupportedSizes() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
         let defaultsSuite = "provider-prompt-render-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
@@ -55,40 +55,27 @@ final class AIProviderSettingsRenderTests: XCTestCase {
             CGSize(width: 860, height: 680),
             CGSize(width: 1_280, height: 800)
         ] {
-            model.prompt = ""
+            model.prompt = "legacy universal guidance"
             model.meetingIntelligencePrompt = ""
             let host = ProviderSettingsProductionHost(model: appModel, size: size)
             host.selectSettingsSection("ai-provider")
             defer { host.close() }
 
-            XCTAssertTrue(host.reveal(RecorderActionID.providerPrompt))
+            XCTAssertFalse(host.reveal(RecorderActionID.providerLanguage))
+            XCTAssertFalse(host.reveal(RecorderActionID.providerPrompt))
             XCTAssertTrue(host.reveal(RecorderActionID.providerMeetingIntelligencePrompt))
-
-            host.replaceTextEditor(RecorderActionID.providerPrompt, with: "asr guidance")
-            assertSensitiveEqual(model.prompt, "asr guidance")
-            assertSensitiveEqual(model.meetingIntelligencePrompt, "")
 
             host.replaceTextEditor(
                 RecorderActionID.providerMeetingIntelligencePrompt,
                 with: "meeting guidance"
             )
-            assertSensitiveEqual(model.prompt, "asr guidance")
+            assertSensitiveEqual(model.prompt, "legacy universal guidance")
             assertSensitiveEqual(model.meetingIntelligencePrompt, "meeting guidance")
         }
     }
 
-    func testPromptEditorSourceContractRejectsDetachedLabelAndMissingFrame() {
+    func testMeetingIntelligencePromptSourceContractRejectsUniversalASRAndInvalidLayout() {
         let validSource = #"""
-        Text("ASR Prompt")
-            .font(.subheadline)
-        Text("Optional transcription guidance sent only with future transcription jobs.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        TextEditor(text: $model.prompt)
-            .accessibilityLabel("ASR Prompt")
-            .providerAccessibility(RecorderActionID.providerPrompt)
-            .frame(minHeight: 58, maxHeight: 96)
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
         Text("Meeting Intelligence Prompt")
             .font(.subheadline)
         Text("Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.")
@@ -103,6 +90,11 @@ final class AIProviderSettingsRenderTests: XCTestCase {
 
         HStack(alignment: .center, spacing: 10) {
         """#
+        let universalASRSource = #"""
+        Text("ASR Prompt")
+        TextEditor(text: $model.prompt)
+            .providerAccessibility(RecorderActionID.providerPrompt)
+        """# + validSource
         let detachedLabelSource = validSource.replacingOccurrences(
             of: #"""
             TextEditor(text: $model.meetingIntelligencePrompt)
@@ -168,27 +160,31 @@ final class AIProviderSettingsRenderTests: XCTestCase {
         )
 
         XCTAssertTrue(
-            PromptEditorSourceContract.matches(validSource),
+            MeetingIntelligencePromptSourceContract.matches(validSource),
             "Synthetic prompt editor contract fixture is invalid."
         )
         XCTAssertFalse(
-            PromptEditorSourceContract.matches(detachedLabelSource),
+            MeetingIntelligencePromptSourceContract.matches(universalASRSource),
+            "Prompt editor source contract accepted removed universal ASR controls."
+        )
+        XCTAssertFalse(
+            MeetingIntelligencePromptSourceContract.matches(detachedLabelSource),
             "Prompt editor source contract accepted an invalid mutation."
         )
         XCTAssertFalse(
-            PromptEditorSourceContract.matches(missingFrameSource),
+            MeetingIntelligencePromptSourceContract.matches(missingFrameSource),
             "Prompt editor source contract accepted an invalid mutation."
         )
         XCTAssertFalse(
-            PromptEditorSourceContract.matches(styleSwapSource),
+            MeetingIntelligencePromptSourceContract.matches(styleSwapSource),
             "Prompt editor source contract accepted an invalid mutation."
         )
         XCTAssertFalse(
-            PromptEditorSourceContract.matches(modifierReorderedSource),
+            MeetingIntelligencePromptSourceContract.matches(modifierReorderedSource),
             "Prompt editor source contract accepted an invalid mutation."
         )
         XCTAssertFalse(
-            PromptEditorSourceContract.matches(nestedLabelSource),
+            MeetingIntelligencePromptSourceContract.matches(nestedLabelSource),
             "Prompt editor source contract accepted an invalid mutation."
         )
     }
@@ -312,13 +308,13 @@ final class AIProviderSettingsRenderTests: XCTestCase {
     }
 
     private func assertSharedProviderLocationsAreReachable(in host: ProviderSettingsProductionHost) {
+        XCTAssertFalse(host.reveal(RecorderActionID.providerLanguage))
+        XCTAssertFalse(host.reveal(RecorderActionID.providerPrompt))
         for identifier in [
             RecorderActionID.providerKind,
             RecorderActionID.providerAPIKey,
             RecorderActionID.providerASRModel,
             RecorderActionID.providerLLMModel,
-            RecorderActionID.providerLanguage,
-            RecorderActionID.providerPrompt,
             RecorderActionID.providerMeetingIntelligencePrompt,
             RecorderActionID.providerSave,
             RecorderActionID.providerTest,
@@ -353,14 +349,14 @@ final class AIProviderSettingsRenderTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/RecorderApp/Views/AIProviderSettingsView.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        guard PromptEditorSourceContract.matches(source) else {
+        guard MeetingIntelligencePromptSourceContract.matches(source) else {
             XCTFail("Prompt editor source contract is incomplete.", file: file, line: line)
             return
         }
     }
 }
 
-private enum PromptEditorSourceContract {
+private enum MeetingIntelligencePromptSourceContract {
     private static let asrTitle = #"Text("ASR Prompt")"#
     private static let asrHelp = #"Text("Optional transcription guidance sent only with future transcription jobs.")"#
     private static let meetingIntelligenceTitle = #"Text("Meeting Intelligence Prompt")"#
@@ -375,13 +371,20 @@ private enum PromptEditorSourceContract {
     }
 
     static func matches(_ source: String) -> Bool {
-        let lines = normalizedLines(source)
-        guard let asrTitleIndex = lines.firstIndex(where: { $0.text == asrTitle }) else {
+        let forbiddenUniversalASRFragments = [
+            asrTitle,
+            asrHelp,
+            "TextEditor(text: $model.prompt)",
+            ".providerAccessibility(RecorderActionID.providerPrompt)",
+            ".providerAccessibility(RecorderActionID.providerLanguage)"
+        ]
+        guard forbiddenUniversalASRFragments.allSatisfy({ !source.contains($0) }) else {
             return false
         }
-        let afterASRTitle = lines.index(after: asrTitleIndex)
-        guard let meetingIntelligenceTitleIndex = lines[afterASRTitle...]
-            .firstIndex(where: { $0.text == meetingIntelligenceTitle }) else {
+        let lines = normalizedLines(source)
+        guard let meetingIntelligenceTitleIndex = lines.firstIndex(where: {
+            $0.text == meetingIntelligenceTitle
+        }) else {
             return false
         }
         let afterMeetingIntelligenceTitle = lines.index(after: meetingIntelligenceTitleIndex)
@@ -390,51 +393,26 @@ private enum PromptEditorSourceContract {
             return false
         }
 
-        let asrSection = Array(lines[asrTitleIndex..<meetingIntelligenceTitleIndex])
         let meetingIntelligenceSection = Array(
             lines[meetingIntelligenceTitleIndex..<actionsBoundaryIndex]
         )
-        return matchesPromptSection(
-            asrSection,
-            title: asrTitle,
-            help: asrHelp,
-            binding: "TextEditor(text: $model.prompt)",
-            accessibilityLabel: #".accessibilityLabel("ASR Prompt")"#,
-            accessibilityIdentifier: ".providerAccessibility(RecorderActionID.providerPrompt)",
-            expectsClosingBrace: false
-        ) && matchesPromptSection(
-            meetingIntelligenceSection,
-            title: meetingIntelligenceTitle,
-            help: meetingIntelligenceHelp,
-            binding: "TextEditor(text: $model.meetingIntelligencePrompt)",
-            accessibilityLabel: #".accessibilityLabel("Meeting Intelligence Prompt")"#,
-            accessibilityIdentifier: ".providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)",
-            expectsClosingBrace: true
-        )
+        return matchesPromptSection(meetingIntelligenceSection)
     }
 
-    private static func matchesPromptSection(
-        _ section: [SourceLine],
-        title: String,
-        help: String,
-        binding: String,
-        accessibilityLabel: String,
-        accessibilityIdentifier: String,
-        expectsClosingBrace: Bool
-    ) -> Bool {
+    private static func matchesPromptSection(_ section: [SourceLine]) -> Bool {
         let expectedCore = [
-            title,
+            meetingIntelligenceTitle,
             ".font(.subheadline)",
-            help,
+            meetingIntelligenceHelp,
             ".font(.caption)",
             ".foregroundStyle(.secondary)",
-            binding,
-            accessibilityLabel,
-            accessibilityIdentifier,
+            "TextEditor(text: $model.meetingIntelligencePrompt)",
+            #".accessibilityLabel("Meeting Intelligence Prompt")"#,
+            ".providerAccessibility(RecorderActionID.providerMeetingIntelligencePrompt)",
             frame,
             overlay
         ]
-        let expectedCount = expectedCore.count + (expectsClosingBrace ? 1 : 0)
+        let expectedCount = expectedCore.count + 1
         guard section.count == expectedCount else { return false }
 
         let core = Array(section.prefix(expectedCore.count))
@@ -448,7 +426,7 @@ private enum PromptEditorSourceContract {
             return false
         }
 
-        return !expectsClosingBrace || section.last?.text == "}"
+        return section.last?.text == "}"
     }
 
     private static func normalizedLines(_ source: String) -> [SourceLine] {

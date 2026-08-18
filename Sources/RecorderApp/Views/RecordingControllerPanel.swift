@@ -21,7 +21,6 @@ enum RecordingControllerAccessibility {
         statusID,
         elapsedID,
         recordingIndicatorID,
-        recordingIndicatorToggleID,
         systemWaveformID,
         microphoneWaveformID,
         microphoneMuteID,
@@ -31,14 +30,6 @@ enum RecordingControllerAccessibility {
     ]
     static let stopLabel = "Stop recording"
     static let screenCaptureLabel = "Capture Teams screen"
-
-    static func recordingIndicatorLabel(isVisible: Bool) -> String {
-        isVisible ? "Hide recording indicator" : "Show recording indicator"
-    }
-
-    static func recordingIndicatorValue(isVisible: Bool) -> String {
-        isVisible ? "Visible" : "Hidden"
-    }
 
     static func microphoneMuteLabel(isMuted: Bool) -> String {
         isMuted ? "Unmute microphone" : "Mute microphone"
@@ -175,8 +166,21 @@ struct RecordingControllerPanelPresenterFactory:
 final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
     private let panel = RecordingControllerPanel()
     private var hostingView: NSHostingView<RecordingControllerView>?
+    private var panelState: FloatingPanelPresentationState = .expanded
 
     var panelFrame: NSRect { panel.frame }
+
+    var panelToggleAccessibilityValue: String? {
+        guard let hostingView,
+              let toggle = allViews(hostingView).first(where: {
+                  $0.accessibilityIdentifier()
+                      == RecordingControllerAccessibility.panelToggleID
+              }),
+              let value = toggle.accessibilityValue() as? String else {
+            return panelState.accessibilityValue
+        }
+        return value
+    }
 
     func present(model: AppModel) {
         // A new hosting view gives every recording episode a fresh SwiftUI
@@ -212,6 +216,7 @@ final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
     }
 
     func setPresentation(_ state: FloatingPanelPresentationState) {
+        panelState = state
         let targetSize = state == .expanded
             ? RecordingControllerPanel.panelSize
             : FloatingPanelLayout.collapsedSize
@@ -222,6 +227,12 @@ final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
             ),
             display: true
         )
+    }
+
+    private func allViews(_ view: NSView) -> [NSView] {
+        let children = view.subviews
+            + ((view.accessibilityChildren() as? [NSView]) ?? [])
+        return [view] + children.flatMap(allViews)
     }
 }
 
@@ -345,13 +356,7 @@ struct RecordingControllerPanelContent: View {
     let isLocalMicrophoneMuted: Bool
     let panelState: FloatingPanelPresentationState
     let togglePanel: () -> Void
-    private let legacyShowsRecordingIndicator: Bool?
-    private let toggleRecordingIndicator: () -> Void
 
-    /// The production initializer owns the complete expanded/collapsed
-    /// presentation state.  The old indicator initializer below remains a
-    /// source-compatible adapter for callers that still render the legacy
-    /// indicator-only fixture.
     init(
         presentation: RecordingControllerPresentation,
         stop: @escaping () -> Void,
@@ -378,49 +383,10 @@ struct RecordingControllerPanelContent: View {
         self.isLocalMicrophoneMuted = isLocalMicrophoneMuted
         self.panelState = panelState
         self.togglePanel = togglePanel
-        legacyShowsRecordingIndicator = nil
-        toggleRecordingIndicator = {}
-    }
-
-    /// Compatibility initializer for the pre-collapse render fixtures.
-    init(
-        presentation: RecordingControllerPresentation,
-        stop: @escaping () -> Void,
-        toggleMicrophoneMute: @escaping () -> Void,
-        setScreenRequested: @escaping (Bool) -> Void,
-        systemLevel: LevelSnapshot,
-        microphoneLevel: LevelSnapshot,
-        isSystemConnected: Bool,
-        isMicrophoneConnected: Bool,
-        isMicrophoneMuted: Bool,
-        isLocalMicrophoneMuted: Bool,
-        showsRecordingIndicator: Bool = true,
-        toggleRecordingIndicator: @escaping () -> Void = {}
-    ) {
-        self.presentation = presentation
-        self.stop = stop
-        self.toggleMicrophoneMute = toggleMicrophoneMute
-        self.setScreenRequested = setScreenRequested
-        self.systemLevel = systemLevel
-        self.microphoneLevel = microphoneLevel
-        self.isSystemConnected = isSystemConnected
-        self.isMicrophoneConnected = isMicrophoneConnected
-        self.isMicrophoneMuted = isMicrophoneMuted
-        self.isLocalMicrophoneMuted = isLocalMicrophoneMuted
-        panelState = .expanded
-        togglePanel = {}
-        legacyShowsRecordingIndicator = showsRecordingIndicator
-        self.toggleRecordingIndicator = toggleRecordingIndicator
     }
 
     var body: some View {
-        if let legacyShowsRecordingIndicator {
-            expandedContent(
-                heading: presentation.title,
-                useLegacyIndicator: true,
-                showsLegacyIndicator: legacyShowsRecordingIndicator
-            )
-        } else if panelState == .collapsed {
+        if panelState == .collapsed {
             HStack(spacing: 10) {
                 Text("Running")
                     .accessibilityIdentifier(
@@ -438,43 +404,26 @@ struct RecordingControllerPanelContent: View {
             .frame(width: 132, height: 40)
             .recorderGlassSurface(.navigation)
         } else {
-            expandedContent(
-                heading: "Running",
-                useLegacyIndicator: false,
-                showsLegacyIndicator: false
-            )
+            expandedContent
         }
     }
 
-    @ViewBuilder
-    private func expandedContent(
-        heading: String,
-        useLegacyIndicator: Bool,
-        showsLegacyIndicator: Bool
-    ) -> some View {
+    private var expandedContent: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                if useLegacyIndicator {
-                    if showsLegacyIndicator {
-                        Circle()
-                            .fill(.red)
-                            .frame(width: 10, height: 10)
-                            .accessibilityHidden(true)
-                            .background(
-                                RecorderPanelRenderLocationMarker(
-                                    productionIdentifier:
-                                        RecordingControllerAccessibility
-                                        .recordingIndicatorID
-                                )
-                            )
-                    }
-                    legacyIndicatorButton(
-                        isVisible: showsLegacyIndicator
+                Circle()
+                    .fill(.red)
+                    .frame(width: 10, height: 10)
+                    .accessibilityHidden(true)
+                    .background(
+                        RecorderPanelRenderLocationMarker(
+                            productionIdentifier:
+                                RecordingControllerAccessibility
+                                .recordingIndicatorID
+                        )
                     )
-                } else {
-                    floatingPanelToggleButton
-                }
-                Text(heading)
+                floatingPanelToggleButton
+                Text("Running")
                     .font(.headline)
                     .accessibilityIdentifier(
                         RecordingControllerAccessibility.statusID
@@ -638,42 +587,6 @@ struct RecordingControllerPanelContent: View {
         )
     }
 
-    private func legacyIndicatorButton(isVisible: Bool) -> some View {
-        Button(action: toggleRecordingIndicator) {
-            Image(systemName: isVisible ? "eye.slash" : "eye")
-        }
-        .buttonStyle(.plain)
-        .help(
-            RecordingControllerAccessibility.recordingIndicatorLabel(
-                isVisible: isVisible
-            )
-        )
-        .accessibilityLabel(
-            RecordingControllerAccessibility.recordingIndicatorLabel(
-                isVisible: isVisible
-            )
-        )
-        .accessibilityValue(
-            RecordingControllerAccessibility.recordingIndicatorValue(
-                isVisible: isVisible
-            )
-        )
-        .accessibilityIdentifier(
-            RecordingControllerAccessibility.recordingIndicatorToggleID
-        )
-        .background(
-            RecorderPanelRenderLocationMarker(
-                productionIdentifier:
-                    RecordingControllerAccessibility.recordingIndicatorToggleID
-            )
-        )
-        .background(
-            RecorderPanelRenderLocationMarker(
-                productionIdentifier:
-                    RecordingControllerAccessibility.panelToggleID
-            )
-        )
-    }
 }
 
 private struct RecordingControllerInputRow: View {

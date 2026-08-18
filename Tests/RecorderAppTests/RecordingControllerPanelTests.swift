@@ -18,10 +18,13 @@ final class RecordingControllerPanelTests: XCTestCase {
         )
         for hidden in [
             RecordingControllerAccessibility.recordingIndicatorID,
+            RecordingControllerAccessibility.recordingIndicatorToggleID,
+            RecordingControllerAccessibility.statusID,
             RecordingControllerAccessibility.elapsedID,
             RecordingControllerAccessibility.systemWaveformID,
             RecordingControllerAccessibility.microphoneWaveformID,
             RecordingControllerAccessibility.microphoneMuteID,
+            RecordingControllerAccessibility.screenStatusID,
             RecordingControllerAccessibility.screenToggleID,
             RecordingControllerAccessibility.stopID,
         ] {
@@ -30,10 +33,24 @@ final class RecordingControllerPanelTests: XCTestCase {
         XCTAssertEqual(host.frame.size, .init(width: 132, height: 40))
     }
 
+    func testRecordingControllerExpandedRetainsRecordingIndicator() throws {
+        let host = makeRecordingControllerHost(state: .expanded)
+        defer { host.close() }
+
+        XCTAssertTrue(
+            host.contains(RecordingControllerAccessibility.recordingIndicatorID)
+        )
+        XCTAssertTrue(
+            host.contains(RecordingControllerAccessibility.panelToggleID)
+        )
+    }
+
     func testRecordingControllerCollapseRoundTripPreservesTopRightAndResetsEpisode() {
         let presenter = RecordingControllerPanelPresenter()
         let fixture = makeFixture()
+        presenter.setPresentation(.expanded)
         let initial = presenter.panelFrame
+        XCTAssertEqual(initial.size, .init(width: 390, height: 180))
         let topRight = (initial.maxX, initial.maxY)
 
         presenter.setPresentation(.collapsed)
@@ -59,6 +76,10 @@ final class RecordingControllerPanelTests: XCTestCase {
         XCTAssertEqual(
             presenter.panelFrame.size,
             .init(width: 390, height: 180)
+        )
+        XCTAssertEqual(
+            presenter.panelToggleAccessibilityValue,
+            FloatingPanelPresentationState.expanded.accessibilityValue
         )
     }
 

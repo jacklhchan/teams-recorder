@@ -5,9 +5,9 @@ import XCTest
 
 @MainActor
 final class RecordingControllerRenderTests: XCTestCase {
-    func testRecordingIndicatorButtonHidesAndRestoresTheRedBubble() throws {
+    func testExpandedPanelKeepsRecordingIndicatorAndUsesCollapseEye() throws {
         let host = PanelRenderHost(
-            rootView: RecordingIndicatorHarness(),
+            rootView: RecordingControllerPanelFixture(state: .expanded),
             size: .init(width: 390, height: 180)
         )
         defer { host.close() }
@@ -17,20 +17,14 @@ final class RecordingControllerRenderTests: XCTestCase {
                 "\(RecordingControllerAccessibility.recordingIndicatorID).marker"
             )
         )
-        try host.click(
-            RecordingControllerAccessibility.recordingIndicatorToggleID
+        XCTAssertTrue(
+            host.contains(
+                "\(RecordingControllerAccessibility.panelToggleID).marker"
+            )
         )
         XCTAssertFalse(
             host.contains(
-                "\(RecordingControllerAccessibility.recordingIndicatorID).marker"
-            )
-        )
-        try host.click(
-            RecordingControllerAccessibility.recordingIndicatorToggleID
-        )
-        XCTAssertTrue(
-            host.contains(
-                "\(RecordingControllerAccessibility.recordingIndicatorID).marker"
+                "\(RecordingControllerAccessibility.recordingIndicatorToggleID).marker"
             )
         )
     }
@@ -79,7 +73,8 @@ final class RecordingControllerRenderTests: XCTestCase {
                 isSystemConnected: true,
                 isMicrophoneConnected: true,
                 isMicrophoneMuted: false,
-                isLocalMicrophoneMuted: false
+                isLocalMicrophoneMuted: false,
+                panelState: .expanded
             ),
             size: .init(width: 390, height: 180)
         )
@@ -119,7 +114,8 @@ final class RecordingControllerRenderTests: XCTestCase {
                 isSystemConnected: true,
                 isMicrophoneConnected: true,
                 isMicrophoneMuted: false,
-                isLocalMicrophoneMuted: false
+                isLocalMicrophoneMuted: false,
+                panelState: .expanded
             ),
             size: .init(width: 390, height: 180)
         )
@@ -153,7 +149,8 @@ final class RecordingControllerRenderTests: XCTestCase {
                     isSystemConnected: true,
                     isMicrophoneConnected: true,
                     isMicrophoneMuted: false,
-                    isLocalMicrophoneMuted: false
+                    isLocalMicrophoneMuted: false,
+                    panelState: .expanded
                 )
                 .environment(\.recorderReduceMotionOverride, motion)
                 .environment(\.recorderReduceTransparencyOverride, transparency),
@@ -193,8 +190,8 @@ final class RecordingControllerRenderTests: XCTestCase {
 }
 
 @MainActor
-private struct RecordingIndicatorHarness: View {
-    @State private var showsRecordingIndicator = true
+private struct RecordingControllerPanelFixture: View {
+    let state: FloatingPanelPresentationState
 
     var body: some View {
         RecordingControllerPanelContent(
@@ -219,10 +216,7 @@ private struct RecordingIndicatorHarness: View {
             isMicrophoneConnected: true,
             isMicrophoneMuted: false,
             isLocalMicrophoneMuted: false,
-            showsRecordingIndicator: showsRecordingIndicator,
-            toggleRecordingIndicator: {
-                showsRecordingIndicator.toggle()
-            }
+            panelState: state
         )
     }
 }

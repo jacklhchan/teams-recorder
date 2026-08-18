@@ -250,6 +250,10 @@ public sealed record RecordingSessionLibraryItem(
 /// <summary>Owns only the app's session-library filesystem layout; capture code can use the returned paths directly.</summary>
 public sealed class SessionStorageService
 {
+    private const string MediaValidationCacheFileName = ".recorder-media-validation-cache-v1.json";
+    private const int MediaValidationCacheSchemaVersion = 1;
+    private const int MaximumPersistentMediaValidationEntries = 10_000;
+    private const long MaximumPersistentMediaValidationBytes = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly JsonSerializerOptions RecoveryJournalJsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -258,6 +262,8 @@ public sealed class SessionStorageService
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> MetadataWriteGates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, MediaValidationCacheEntry> mediaValidationCache =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly object mediaValidationPersistenceGate = new();
+    private int mediaValidationCacheDirty;
     private readonly string rootPath;
     private readonly RecordingStoragePolicy policy;
     private readonly IStorageCapacityProvider capacityProvider;
@@ -281,6 +287,7 @@ public sealed class SessionStorageService
         this.clock = clock ?? new SystemClock();
         this.videoValidator = videoValidator ?? new Mp4VideoMediaValidator();
         this.audioValidator = audioValidator ?? new M4aAudioBackupValidator();
+        LoadPersistentMediaValidationCache();
         // Retain the optional collision provider for source compatibility. Directory creation below is
         // the authoritative, cross-process collision check.
         _ = collisions;
@@ -889,6 +896,7 @@ public sealed class SessionStorageService
         }
         catch (IOException) { return Array.Empty<RecordingSessionLibraryItem>(); }
         catch (UnauthorizedAccessException) { return Array.Empty<RecordingSessionLibraryItem>(); }
+        finally { PersistMediaValidationCacheBestEffort(); }
         return result.OrderByDescending(x => File.GetLastWriteTimeUtc(x.AudioPath))
             .ThenByDescending(x => x.AudioPath, StringComparer.Ordinal)
             .ToArray();
@@ -1179,11 +1187,184 @@ public sealed class SessionStorageService
                 info.CreationTimeUtc.Ticks,
                 info.LastWriteTimeUtc.Ticks,
                 isValid);
+            Interlocked.Exchange(ref mediaValidationCacheDirty, 1);
             return isValid;
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
         catch (ArgumentException) { return false; }
+    }
+
+    /// <summary>
+    /// Startup recovery may trust this only as proof that this exact immutable
+    /// file fingerprint was decoded by a prior library pass. Every destructive
+    /// or playback action still bypasses this cache and revalidates its target.
+    /// </summary>
+    internal bool IsKnownValidCompletedMedia(string path, string mediaKind)
+    {
+        try
+        {
+            if (!IsSafeNonEmptyFile(path)) return false;
+            var fullPath = Path.GetFullPath(path);
+            var info = new FileInfo(fullPath);
+            return mediaValidationCache.TryGetValue(fullPath, out var cached) &&
+                   cached.IsValid &&
+                   cached.MediaKind == mediaKind &&
+                   cached.Length == info.Length &&
+                   cached.CreationUtcTicks == info.CreationTimeUtc.Ticks &&
+                   cached.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (ArgumentException) { return false; }
+    }
+
+    private void LoadPersistentMediaValidationCache()
+    {
+        try
+        {
+            if (!Directory.Exists(rootPath) || IsReparsePoint(rootPath)) return;
+            var cachePath = Path.Combine(rootPath, MediaValidationCacheFileName);
+            if (!IsSafeFile(cachePath)) return;
+            var info = new FileInfo(cachePath);
+            if (info.Length <= 0 || info.Length > MaximumPersistentMediaValidationBytes) return;
+            var document = JsonSerializer.Deserialize<PersistentMediaValidationCacheDocument>(
+                File.ReadAllText(cachePath),
+                JsonOptions);
+            if (document is null ||
+                document.SchemaVersion != MediaValidationCacheSchemaVersion ||
+                document.Entries is null ||
+                document.Entries.Count > MaximumPersistentMediaValidationEntries)
+            {
+                return;
+            }
+
+            foreach (var entry in document.Entries)
+            {
+                if (string.IsNullOrWhiteSpace(entry.RelativePath) ||
+                    Path.IsPathRooted(entry.RelativePath) ||
+                    entry.MediaKind is not ("audio" or "video") ||
+                    entry.Length <= 0 ||
+                    entry.CreationUtcTicks <= 0 ||
+                    entry.LastWriteUtcTicks <= 0)
+                {
+                    continue;
+                }
+                var fullPath = Path.GetFullPath(Path.Combine(
+                    rootPath,
+                    entry.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+                if (!IsDescendant(fullPath) || !IsSafeNonEmptyFile(fullPath)) continue;
+                var current = new FileInfo(fullPath);
+                if (current.Length != entry.Length ||
+                    current.CreationTimeUtc.Ticks != entry.CreationUtcTicks ||
+                    current.LastWriteTimeUtc.Ticks != entry.LastWriteUtcTicks)
+                {
+                    continue;
+                }
+                mediaValidationCache[fullPath] = new(
+                    entry.MediaKind,
+                    entry.Length,
+                    entry.CreationUtcTicks,
+                    entry.LastWriteUtcTicks,
+                    entry.IsValid);
+            }
+        }
+        catch (JsonException) { }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        catch (ArgumentException) { }
+        catch (NotSupportedException) { }
+    }
+
+    private void PersistMediaValidationCacheBestEffort()
+    {
+        if (Volatile.Read(ref mediaValidationCacheDirty) == 0) return;
+        lock (mediaValidationPersistenceGate)
+        {
+            if (Interlocked.Exchange(ref mediaValidationCacheDirty, 0) == 0) return;
+            var temporary = string.Empty;
+            var persisted = false;
+            try
+            {
+                Directory.CreateDirectory(rootPath);
+                EnsureSafeStorageRoot();
+                var cachePath = Path.Combine(rootPath, MediaValidationCacheFileName);
+                if (IsReparsePoint(cachePath)) return;
+                var entries = mediaValidationCache
+                    .Select(pair => ToPersistentMediaValidationEntry(pair.Key, pair.Value))
+                    .Where(static entry => entry is not null)
+                    .Cast<PersistentMediaValidationCacheEntry>()
+                    .OrderBy(static entry => entry.RelativePath, StringComparer.Ordinal)
+                    .Take(MaximumPersistentMediaValidationEntries)
+                    .ToArray();
+                var document = new PersistentMediaValidationCacheDocument(
+                    MediaValidationCacheSchemaVersion,
+                    entries);
+                temporary = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                using (var stream = new FileStream(
+                           temporary,
+                           FileMode.CreateNew,
+                           FileAccess.Write,
+                           FileShare.None,
+                           16 * 1024,
+                           FileOptions.WriteThrough))
+                {
+                    JsonSerializer.Serialize(stream, document, JsonOptions);
+                    stream.Flush(flushToDisk: true);
+                }
+                if (new FileInfo(temporary).Length > MaximumPersistentMediaValidationBytes)
+                {
+                    File.Delete(temporary);
+                    return;
+                }
+                ReplaceFileWriteThrough(temporary, cachePath);
+                temporary = string.Empty;
+                persisted = true;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (ArgumentException) { }
+            catch (NotSupportedException) { }
+            finally
+            {
+                if (!persisted) Interlocked.Exchange(ref mediaValidationCacheDirty, 1);
+                if (!string.IsNullOrEmpty(temporary))
+                {
+                    try { File.Delete(temporary); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+        }
+    }
+
+    private PersistentMediaValidationCacheEntry? ToPersistentMediaValidationEntry(
+        string fullPath,
+        MediaValidationCacheEntry cached)
+    {
+        try
+        {
+            if (!IsSafeNonEmptyFile(fullPath)) return null;
+            var info = new FileInfo(fullPath);
+            if (info.Length != cached.Length ||
+                info.CreationTimeUtc.Ticks != cached.CreationUtcTicks ||
+                info.LastWriteTimeUtc.Ticks != cached.LastWriteUtcTicks)
+            {
+                return null;
+            }
+            var relative = Path.GetRelativePath(rootPath, fullPath).Replace(Path.DirectorySeparatorChar, '/');
+            if (Path.IsPathRooted(relative) || relative.StartsWith("../", StringComparison.Ordinal)) return null;
+            return new(
+                relative,
+                cached.MediaKind,
+                cached.Length,
+                cached.CreationUtcTicks,
+                cached.LastWriteUtcTicks,
+                cached.IsValid);
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (ArgumentException) { return null; }
     }
 
     internal bool IsSafeNonEmptyFile(string path)
@@ -1240,6 +1421,18 @@ public sealed class SessionStorageService
     }
 
     private sealed record MediaValidationCacheEntry(
+        string MediaKind,
+        long Length,
+        long CreationUtcTicks,
+        long LastWriteUtcTicks,
+        bool IsValid);
+
+    private sealed record PersistentMediaValidationCacheDocument(
+        int SchemaVersion,
+        IReadOnlyList<PersistentMediaValidationCacheEntry> Entries);
+
+    private sealed record PersistentMediaValidationCacheEntry(
+        string RelativePath,
         string MediaKind,
         long Length,
         long CreationUtcTicks,

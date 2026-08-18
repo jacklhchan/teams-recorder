@@ -94,7 +94,6 @@ public sealed class SessionRecoveryService
                 File.Exists(Path.Combine(folder, RecordingSessionLayout.PartialVideoFileName)) ||
                 File.Exists(Path.Combine(folder, RecordingSessionLayout.LegacyDoublePartialVideoFileName)) ||
                 File.Exists(Path.Combine(folder, RecordingSessionLayout.AudioSafetyPartialFileName));
-            if (hasRecoveryMediaEvidence) return false;
 
             var canonical = current.MediaKind == "video"
                 ? RecordingInfoJson.CreateVideo(current.Document, current.Title, RecordingRecoveryState.None, kind)
@@ -105,7 +104,15 @@ public sealed class SessionRecoveryService
             var declaredFinal = current.MediaKind == "video" || File.Exists(finalVideo)
                 ? finalVideo
                 : Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
-            return storage.IsSafeNonEmptyFile(declaredFinal);
+            if (!storage.IsSafeNonEmptyFile(declaredFinal)) return false;
+            if (!hasRecoveryMediaEvidence) return true;
+
+            // A successful prior library pass already decoded this exact final
+            // file fingerprint. Leftover safety evidence remains untouched, but
+            // must not force the same completed media through recovery on every
+            // subsequent launch. A changed file invalidates the fingerprint and
+            // falls back to the full conservative recovery path.
+            return storage.IsKnownValidCompletedMedia(declaredFinal, current.MediaKind);
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }

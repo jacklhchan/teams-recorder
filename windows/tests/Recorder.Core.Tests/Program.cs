@@ -108,6 +108,8 @@ var tests = new (string Name, Action Run)[]
     ,("recording library requires recycle confirmation and preserves failed-start evidence", RecordingLibraryServiceTests.RecycleRequiresConfirmationAndFailedStartCleanupPreservesEvidence)
     ,("recording library lists legacy root M4A files as playback-only", RecordingLibraryServiceTests.LegacyRootM4aFilesRemainDiscoverableAndPlaybackOnly)
     ,("recording library refresh reuses unchanged media validation", RecordingLibraryServiceTests.RefreshReusesValidationForUnchangedMedia)
+    ,("recording library validation cache survives application restart", RecordingLibraryServiceTests.RefreshReusesValidationAcrossApplicationRestarts)
+    ,("completed media with retained evidence skips repeated recovery decode", RecordingLibraryServiceTests.CompletedSessionWithRetainedEvidenceSkipsRepeatedRecoveryDecode)
     ,("recording library canonical action validates only its selected session", RecordingLibraryServiceTests.CanonicalResolutionValidatesOnlyTheSelectedSession)
     ,("recording library canonical video action decodes each selected artifact once", RecordingLibraryServiceTests.CanonicalVideoResolutionDecodesEachSelectedArtifactOnce)
     ,("recording library never owns nested session-like folders", RecordingLibraryServiceTests.NestedSessionLikeFoldersAreNeverOwned)

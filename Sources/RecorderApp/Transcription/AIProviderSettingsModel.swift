@@ -6,20 +6,6 @@ enum APIKeyStatus: Equatable {
     case unavailable
 }
 
-enum MeetingLanguage: String, CaseIterable, Sendable {
-    case cantonese = "yue"
-    case english = "en"
-    case mandarin = "zh"
-
-    var displayName: String {
-        switch self {
-        case .cantonese: "Cantonese"
-        case .english: "English"
-        case .mandarin: "Mandarin"
-        }
-    }
-}
-
 @MainActor
 final class AIProviderSettingsModel: ObservableObject {
     @Published var selectedProviderKind: AIProviderKind = .openAICompatible {

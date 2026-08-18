@@ -4,6 +4,36 @@ import XCTest
 
 @MainActor
 final class TranscriptionJobCoordinatorTests: XCTestCase {
+    func testStartUsesPerJobOptionsInsteadOfStoredUniversalPrompt() async throws {
+        let fixture = try CoordinatorFixture.make(
+            storedLanguage: "en",
+            storedPrompt: "stored universal"
+        )
+        defer { fixture.remove() }
+        let service = CoordinatorService(result: .failure(CoordinatorError.failed))
+        let coordinator = TranscriptionJobCoordinator(
+            providerRepository: CoordinatorRepository(
+                snapshot: try fixture.snapshot()
+            ),
+            audioPreparer: CoordinatorPreparer(
+                result: .success(
+                    .init(audioURL: fixture.audioURL, cleanupURL: nil)
+                )
+            ),
+            service: service
+        )
+
+        coordinator.start(
+            session: fixture.session,
+            options: .init(language: .cantonese, prompt: "  meeting names  ")
+        )
+
+        await service.waitForRequest()
+        XCTAssertEqual(service.lastRequest?.snapshot.profile.language, "yue")
+        XCTAssertEqual(service.lastRequest?.snapshot.profile.prompt, "meeting names")
+        await waitForIdle(coordinator)
+    }
+
     func testCoordinatorOwnsLifecycleAndPublishesCompletedArtifacts() async throws {
         let fixture = try CoordinatorFixture.make()
         defer { fixture.remove() }
@@ -469,7 +499,10 @@ private struct CoordinatorFixture {
         )
     }
 
-    static func make() throws -> CoordinatorFixture {
+    static func make(
+        storedLanguage: String = "yue",
+        storedPrompt: String = ""
+    ) throws -> CoordinatorFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "transcription-coordinator-\(UUID().uuidString)",
@@ -508,9 +541,14 @@ private struct CoordinatorFixture {
             ),
             audioURL: audio,
             transcriptURL: transcript,
-            logURL: log
+            logURL: log,
+            storedLanguage: storedLanguage,
+            storedPrompt: storedPrompt
         )
     }
+
+    let storedLanguage: String
+    let storedPrompt: String
 
     func snapshot(
         apiKey: String? = nil
@@ -520,8 +558,8 @@ private struct CoordinatorFixture {
                 baseURLText: "https://api.example/v1",
                 asrModel: "asr",
                 llmModel: "llm",
-                language: "yue",
-                prompt: ""
+                language: storedLanguage,
+                prompt: storedPrompt
             ),
             apiKey: apiKey
         )
@@ -653,6 +691,10 @@ private final class CoordinatorService:
     private let result: Result<TranscriptionServiceResult, Error>
     private(set) var requests: [TranscriptionServiceRequest] = []
 
+    var lastRequest: TranscriptionServiceRequest? {
+        lock.withLock { requests.last }
+    }
+
     init(result: Result<TranscriptionServiceResult, Error>) {
         self.result = result
     }
@@ -666,6 +708,12 @@ private final class CoordinatorService:
         lock.withLock { requests.append(request) }
         onProgress(.uploading(chunk: 1, total: 1))
         return try result.get()
+    }
+
+    func waitForRequest() async {
+        while lock.withLock({ requests.isEmpty }) {
+            await Task.yield()
+        }
     }
 }
 

@@ -83,7 +83,10 @@ final class TranscriptionJobCoordinator: ObservableObject {
         workspacePublicationFence = fence
     }
 
-    func start(session: RecordingSession) {
+    func start(
+        session: RecordingSession,
+        options: TranscriptionRequestOptions = .init()
+    ) {
         guard !isRunning else {
             publishGlobalStatus("A transcription is already running.")
             return
@@ -92,6 +95,7 @@ final class TranscriptionJobCoordinator: ObservableObject {
         let snapshot: OpenAICompatibleProviderSnapshot
         do {
             snapshot = try providerRepository.snapshot()
+                .applyingTranscriptionOptions(options)
         } catch {
             lastTranscriptionSessionID = session.id
             lastTranscriptionStatus = error.localizedDescription

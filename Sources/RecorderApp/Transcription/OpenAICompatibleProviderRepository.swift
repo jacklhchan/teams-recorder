@@ -78,6 +78,15 @@ struct OpenAICompatibleProviderSnapshot: Equatable, Sendable {
         )
     }
 
+    func applyingTranscriptionOptions(
+        _ options: TranscriptionRequestOptions
+    ) throws -> Self {
+        try .validated(
+            profile: profile.applyingTranscriptionOptions(options),
+            apiKey: apiKey
+        )
+    }
+
 }
 
 enum OpenAICompatibleProviderCredential {

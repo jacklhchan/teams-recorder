@@ -3,6 +3,36 @@ import XCTest
 @testable import RecorderApp
 
 final class OpenAICompatibleProviderRepositoryTests: XCTestCase {
+    func testTranscriptionRequestOptionsDefaultToCantoneseAndBlankPrompt() {
+        let options = TranscriptionRequestOptions()
+        XCTAssertEqual(options.language, .cantonese)
+        XCTAssertEqual(options.prompt, "")
+        XCTAssertEqual(MeetingLanguage.allCases.map(\.rawValue), ["yue", "en", "zh"])
+    }
+
+    func testAttemptOptionsReplaceOnlyLanguageAndPrompt() throws {
+        let stored = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "asr", llmModel: "llm",
+            language: "en", prompt: "stored universal",
+            meetingIntelligencePrompt: "keep summary guidance"
+        )
+        let snapshot = try OpenAICompatibleProviderSnapshot.validated(
+            profile: stored, apiKey: "secret"
+        )
+        let attempt = try snapshot.applyingTranscriptionOptions(
+            .init(language: .mandarin, prompt: "  names: Alice  ")
+        )
+
+        XCTAssertEqual(attempt.profile.language, "zh")
+        XCTAssertEqual(attempt.profile.prompt, "names: Alice")
+        XCTAssertEqual(attempt.profile.baseURL, stored.baseURL)
+        XCTAssertEqual(attempt.profile.asrModel, stored.asrModel)
+        XCTAssertEqual(attempt.profile.llmModel, stored.llmModel)
+        XCTAssertEqual(attempt.profile.meetingIntelligencePrompt, "keep summary guidance")
+        XCTAssertEqual(attempt.apiKey, "secret")
+    }
+
     func testSnapshotCombinesProfileAndOptionalKey() throws {
         let profileStore = InMemoryProfileStore(profile: try makeProfile())
         let secure = InMemorySecureValueStore(stored: Data("secret-key".utf8))

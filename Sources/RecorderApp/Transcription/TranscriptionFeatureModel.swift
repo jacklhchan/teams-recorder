@@ -73,7 +73,11 @@ final class TranscriptionFeatureModel: ObservableObject {
         )
     }
 
-    func start(session: RecordingSession, providerIsConfigured: Bool) {
+    func start(
+        session: RecordingSession,
+        providerIsConfigured: Bool,
+        options: TranscriptionRequestOptions = .init()
+    ) {
         guard !isShutdown else { return }
         if thirdPartyProcessingAdmission.admitThirdPartyProcessing() == .blockedLocalOnly {
             onStatusMessage?(PrivacyModePolicy.localOnlyMessage)
@@ -83,7 +87,7 @@ final class TranscriptionFeatureModel: ObservableObject {
             onStatusMessage?("Configure and save an AI provider before starting transcription.")
             return
         }
-        coordinator.start(session: session)
+        coordinator.start(session: session, options: options)
     }
 
     func cancel() { coordinator.cancel() }

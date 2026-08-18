@@ -101,6 +101,34 @@ struct OpenAICompatibleProviderProfile: Codable, Equatable, Sendable {
         )
     }
 
+    func applyingTranscriptionOptions(
+        _ options: TranscriptionRequestOptions
+    ) throws -> Self {
+        switch providerKind {
+        case .openAICompatible:
+            return try Self.validated(
+                baseURLText: baseURL.absoluteString,
+                asrModel: asrModel,
+                llmModel: llmModel,
+                language: options.language.rawValue,
+                prompt: options.prompt,
+                meetingIntelligencePrompt: meetingIntelligencePrompt
+            )
+        case .hktGenAI:
+            guard let groupID else {
+                throw ProviderProfileValidationError.invalidHKTGroupID
+            }
+            return try Self.hktValidated(
+                groupID: groupID,
+                asrModel: asrModel,
+                llmModel: llmModel,
+                language: options.language.rawValue,
+                prompt: options.prompt,
+                meetingIntelligencePrompt: meetingIntelligencePrompt
+            )
+        }
+    }
+
     static func hktBaseURL(groupID: String) -> URL {
         URL(string: hktBaseURLPrefix + groupID + "/openai")!
     }

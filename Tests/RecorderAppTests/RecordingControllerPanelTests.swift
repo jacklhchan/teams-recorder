@@ -1,9 +1,67 @@
+import AppKit
 import Combine
+import SwiftUI
 import XCTest
 @testable import RecorderApp
 
 @MainActor
 final class RecordingControllerPanelTests: XCTestCase {
+    func testRecordingControllerCollapsedShowsOnlyRunningAndEye() throws {
+        let host = makeRecordingControllerHost(state: .collapsed)
+        defer { host.close() }
+
+        XCTAssertTrue(
+            host.contains(RecordingControllerAccessibility.runningID)
+        )
+        XCTAssertTrue(
+            host.contains(RecordingControllerAccessibility.panelToggleID)
+        )
+        for hidden in [
+            RecordingControllerAccessibility.recordingIndicatorID,
+            RecordingControllerAccessibility.elapsedID,
+            RecordingControllerAccessibility.systemWaveformID,
+            RecordingControllerAccessibility.microphoneWaveformID,
+            RecordingControllerAccessibility.microphoneMuteID,
+            RecordingControllerAccessibility.screenToggleID,
+            RecordingControllerAccessibility.stopID,
+        ] {
+            XCTAssertFalse(host.contains(hidden), hidden)
+        }
+        XCTAssertEqual(host.frame.size, .init(width: 132, height: 40))
+    }
+
+    func testRecordingControllerCollapseRoundTripPreservesTopRightAndResetsEpisode() {
+        let presenter = RecordingControllerPanelPresenter()
+        let fixture = makeFixture()
+        let initial = presenter.panelFrame
+        let topRight = (initial.maxX, initial.maxY)
+
+        presenter.setPresentation(.collapsed)
+        XCTAssertEqual(
+            presenter.panelFrame.size,
+            FloatingPanelLayout.collapsedSize
+        )
+        XCTAssertEqual(presenter.panelFrame.maxX, topRight.0)
+        XCTAssertEqual(presenter.panelFrame.maxY, topRight.1)
+
+        presenter.setPresentation(.expanded)
+        XCTAssertEqual(
+            presenter.panelFrame.size,
+            .init(width: 390, height: 180)
+        )
+        XCTAssertEqual(presenter.panelFrame.maxX, topRight.0)
+        XCTAssertEqual(presenter.panelFrame.maxY, topRight.1)
+
+        presenter.setPresentation(.collapsed)
+        presenter.dismiss()
+        presenter.present(model: fixture.model)
+        defer { presenter.dismiss() }
+        XCTAssertEqual(
+            presenter.panelFrame.size,
+            .init(width: 390, height: 180)
+        )
+    }
+
     func testRecordingFloatingPanelExposesNativeMinimizeButton() {
         let panel = RecordingControllerPanel()
         defer { panel.orderOut(nil) }
@@ -149,6 +207,94 @@ final class RecordingControllerPanelTests: XCTestCase {
             virtualMicStateProvider: { .absent }
         )
         return (model, recorder)
+    }
+
+    private func makeRecordingControllerHost(
+        state: FloatingPanelPresentationState
+    ) -> RecordingControllerCollapseRenderHost {
+        RecordingControllerCollapseRenderHost(state: state)
+    }
+}
+
+@MainActor
+private final class RecordingControllerCollapseRenderHost {
+    private let hostingView: NSHostingView<AnyView>
+    private let window: NSWindow
+
+    init(state: FloatingPanelPresentationState) {
+        let presentation = RecordingControllerPresentation.make(
+            snapshot: .init(
+                isRecording: true,
+                isFinalizing: false,
+                startedAt: Date(),
+                showsTeamsScreenControl: true,
+                screenRequested: false,
+                screenStatusText: TeamsScreenStatusText.off,
+                screenToggleDisabled: false
+            ),
+            now: Date()
+        )
+        hostingView = NSHostingView(
+            rootView: AnyView(
+                RecordingControllerPanelContent(
+                    presentation: presentation,
+                    stop: {},
+                    toggleMicrophoneMute: {},
+                    setScreenRequested: { _ in },
+                    systemLevel: .init(),
+                    microphoneLevel: .init(),
+                    isSystemConnected: true,
+                    isMicrophoneConnected: true,
+                    isMicrophoneMuted: false,
+                    isLocalMicrophoneMuted: false,
+                    panelState: state,
+                    togglePanel: {}
+                )
+            )
+        )
+        let size = state == .collapsed
+            ? FloatingPanelLayout.collapsedSize
+            : .init(width: 390, height: 180)
+        let frame = NSRect(origin: .zero, size: size)
+        hostingView.frame = frame
+        window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        render()
+    }
+
+    var frame: NSRect { hostingView.frame }
+
+    func contains(_ identifier: String) -> Bool {
+        view(identifier) != nil || view("\(identifier).marker") != nil
+    }
+
+    func close() {
+        window.orderOut(nil)
+        window.contentView = nil
+    }
+
+    private func render() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    private func view(_ identifier: String) -> NSView? {
+        allViews(hostingView).first {
+            $0.accessibilityIdentifier() == identifier
+        }
+    }
+
+    private func allViews(_ view: NSView) -> [NSView] {
+        let children = view.subviews
+            + ((view.accessibilityChildren() as? [NSView]) ?? [])
+        return [view] + children.flatMap(allViews)
     }
 }
 

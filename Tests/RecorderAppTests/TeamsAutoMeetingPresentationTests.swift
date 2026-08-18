@@ -4,6 +4,36 @@ import XCTest
 
 @MainActor
 final class TeamsAutoMeetingPresentationTests: XCTestCase {
+    func testCountdownCollapsePersistsWithinEpisodeAndResetsForNext() throws {
+        let presenter = TeamsAutoMeetingCountdownPanelController()
+        presenter.present(seconds: 5, cancel: {})
+        defer { presenter.dismiss() }
+
+        let panel = try XCTUnwrap(
+            NSApp.windows.first {
+                $0.title == "Teams Window Auto Recording" && $0.isVisible
+            }
+        )
+        XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
+
+        try click(
+            panel: panel,
+            identifier: TeamsAutoMeetingCountdownAccessibility.panelToggleID
+        )
+        XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.runningID))
+        XCTAssertFalse(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
+
+        presenter.present(seconds: 4, cancel: {})
+        XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.runningID))
+        XCTAssertFalse(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
+
+        presenter.dismiss()
+        presenter.present(seconds: 3, cancel: {})
+        XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
+        XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.cancelID))
+        XCTAssertFalse(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.runningID))
+    }
+
     func testAutoMeetingFloatingPanelExposesNativeMinimizeButton() {
         let presenter = TeamsAutoMeetingCountdownPanelController()
         presenter.present(seconds: 5, cancel: {})
@@ -205,5 +235,52 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
         episode.consumeCancel()
 
         XCTAssertEqual(invokedAction, "latest")
+    }
+
+    private func click(panel: NSWindow, identifier: String) throws {
+        let marker = try XCTUnwrap(
+            allViews(in: panel.contentView).first {
+                $0.accessibilityIdentifier() == "\(identifier).marker"
+            },
+            "missing marker for \(identifier)"
+        )
+        let location = marker.convert(
+            .init(x: marker.bounds.midX, y: marker.bounds.midY),
+            to: nil
+        )
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(
+                NSEvent.mouseEvent(
+                    with: type,
+                    location: location,
+                    modifierFlags: [],
+                    timestamp: 0,
+                    windowNumber: panel.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: type == .leftMouseDown ? 1 : 0
+                ),
+                "missing \(type) event"
+            )
+            panel.sendEvent(event)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        panel.layoutIfNeeded()
+        panel.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    private func allViews(in view: NSView?) -> [NSView] {
+        guard let view else { return [] }
+        let children = view.subviews
+            + ((view.accessibilityChildren() as? [NSView]) ?? [])
+        return [view] + children.flatMap { allViews(in: $0) }
+    }
+
+    private func contains(panel: NSWindow, identifier: String) -> Bool {
+        allViews(in: panel.contentView).contains {
+            $0.accessibilityIdentifier() == identifier
+                || $0.accessibilityIdentifier() == "\(identifier).marker"
+        }
     }
 }

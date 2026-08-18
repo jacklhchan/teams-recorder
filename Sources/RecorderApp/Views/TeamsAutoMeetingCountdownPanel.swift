@@ -3,26 +3,19 @@ import SwiftUI
 
 enum TeamsAutoMeetingCountdownAccessibility {
     static let panelID = "teams-auto-countdown-panel"
+    static let runningID = "teams-auto-countdown-running"
+    static let panelToggleID = "teams-auto-countdown-panel-toggle"
     static let secondsID = "teams-auto-countdown-seconds"
     static let recordingIndicatorID = "teams-auto-countdown-recording-indicator"
-    static let recordingIndicatorToggleID = "teams-auto-countdown-recording-indicator-toggle"
     static let cancelID = "teams-auto-countdown-cancel"
     static let allIDs = [
         panelID,
         secondsID,
         recordingIndicatorID,
-        recordingIndicatorToggleID,
+        panelToggleID,
         cancelID
     ]
     static let cancelLabel = "Cancel automatic recording"
-
-    static func recordingIndicatorLabel(isVisible: Bool) -> String {
-        isVisible ? "Hide recording indicator" : "Show recording indicator"
-    }
-
-    static func recordingIndicatorValue(isVisible: Bool) -> String {
-        isVisible ? "Visible" : "Hidden"
-    }
 }
 
 struct TeamsAutoMeetingPresentation: Equatable {
@@ -185,7 +178,7 @@ final class TeamsAutoMeetingCountdownPanelController:
 {
     private let panel: TeamsAutoMeetingPanel
     private let episode = TeamsAutoMeetingPresentationEpisode()
-    private var showsRecordingIndicator = true
+    private var panelState: FloatingPanelPresentationState = .expanded
 
     override init() {
         panel = TeamsAutoMeetingPanel(
@@ -214,33 +207,64 @@ final class TeamsAutoMeetingCountdownPanelController:
         seconds: Int,
         cancel: @escaping @MainActor () -> Void
     ) {
-        let shouldOrderPanel = episode.present(cancel: cancel)
-        panel.contentView = NSHostingView(
-            rootView: TeamsAutoMeetingCountdownView(
-                seconds: seconds,
-                cancel: { [weak self] in
-                    self?.episode.consumeCancel()
-                },
-                showsRecordingIndicator: showsRecordingIndicator,
-                toggleRecordingIndicator: { [weak self] in
-                    self?.showsRecordingIndicator.toggle()
-                }
-            )
-        )
-
-        if shouldOrderPanel {
+        let isNewEpisode = episode.present(cancel: cancel)
+        if isNewEpisode { panelState = .expanded }
+        render(seconds: seconds)
+        applyPanelState()
+        if isNewEpisode {
             positionPanel()
             panel.orderFrontRegardless()
         }
     }
 
     func dismiss() {
-        episode.dismiss()
         panel.orderOut(nil)
+        episode.dismiss()
+        panelState = .expanded
     }
 
     func windowWillClose(_ notification: Notification) {
         episode.consumeCancel()
+    }
+
+    private func render(seconds: Int) {
+        let hostingView = NSHostingView(
+            rootView: TeamsAutoMeetingCountdownView(
+                seconds: seconds,
+                cancel: { [weak self] in
+                    self?.episode.consumeCancel()
+                },
+                panelState: panelState,
+                togglePanel: { [weak self] in
+                    self?.togglePanelState(seconds: seconds)
+                }
+            )
+        )
+        hostingView.frame = NSRect(
+            origin: .zero,
+            size: panel.frame.size
+        )
+        hostingView.autoresizingMask = [.width, .height]
+        panel.contentView = hostingView
+    }
+
+    private func togglePanelState(seconds: Int) {
+        panelState = panelState == .expanded ? .collapsed : .expanded
+        render(seconds: seconds)
+        applyPanelState()
+    }
+
+    private func applyPanelState() {
+        let targetSize = panelState == .expanded
+            ? NSSize(width: 360, height: 94)
+            : FloatingPanelLayout.collapsedSize
+        panel.setFrame(
+            FloatingPanelLayout.frame(
+                preservingTopRightOf: panel.frame,
+                targetSize: targetSize
+            ),
+            display: true
+        )
     }
 
     private func positionPanel() {
@@ -268,36 +292,73 @@ final class TeamsAutoMeetingCountdownPanelController:
 struct TeamsAutoMeetingCountdownView: View {
     let seconds: Int
     let cancel: @MainActor () -> Void
-    let showsRecordingIndicator: Bool
-    let toggleRecordingIndicator: @MainActor () -> Void
+    let panelState: FloatingPanelPresentationState
+    let togglePanel: @MainActor () -> Void
 
     @MainActor
     init(
         seconds: Int,
         cancel: @escaping @MainActor () -> Void,
-        showsRecordingIndicator: Bool = true,
-        toggleRecordingIndicator: @escaping @MainActor () -> Void = {}
+        panelState: FloatingPanelPresentationState = .expanded,
+        togglePanel: @escaping @MainActor () -> Void = {}
     ) {
         self.seconds = seconds
         self.cancel = cancel
-        self.showsRecordingIndicator = showsRecordingIndicator
-        self.toggleRecordingIndicator = toggleRecordingIndicator
+        self.panelState = panelState
+        self.togglePanel = togglePanel
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            if showsRecordingIndicator {
-                Image(systemName: "record.circle")
-                    .font(.title2)
-                    .foregroundStyle(.red)
-                    .accessibilityHidden(true)
+        if panelState == .collapsed {
+            HStack(spacing: 10) {
+                Text("Running")
+                    .accessibilityIdentifier(
+                        TeamsAutoMeetingCountdownAccessibility.runningID
+                    )
                     .background(
                         RecorderPanelRenderLocationMarker(
                             productionIdentifier:
-                                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID
+                                TeamsAutoMeetingCountdownAccessibility.runningID
                         )
                     )
+                floatingPanelToggleButton
             }
+            .padding(.horizontal, 12)
+            .frame(width: 132, height: 40)
+            .recorderGlassSurface(.navigation)
+            .accessibilityIdentifier(TeamsAutoMeetingCountdownAccessibility.panelID)
+            .background(
+                RecorderPanelRenderLocationMarker(
+                    productionIdentifier:
+                        TeamsAutoMeetingCountdownAccessibility.panelID
+                )
+            )
+        } else {
+            expandedCountdownContent
+                .frame(width: 360, height: 94)
+                .recorderGlassSurface(.navigation)
+                .accessibilityIdentifier(TeamsAutoMeetingCountdownAccessibility.panelID)
+                .background(
+                    RecorderPanelRenderLocationMarker(
+                        productionIdentifier:
+                            TeamsAutoMeetingCountdownAccessibility.panelID
+                    )
+                )
+        }
+    }
+
+    private var expandedCountdownContent: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "record.circle")
+                .font(.title2)
+                .foregroundStyle(.red)
+                .accessibilityHidden(true)
+                .background(
+                    RecorderPanelRenderLocationMarker(
+                        productionIdentifier:
+                            TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID
+                    )
+                )
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Teams meeting detected")
@@ -308,57 +369,57 @@ struct TeamsAutoMeetingCountdownView: View {
                     .accessibilityIdentifier(
                         TeamsAutoMeetingCountdownAccessibility.secondsID
                     )
-                    .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
+                    .background(
+                        RecorderPanelRenderLocationMarker(
+                            productionIdentifier:
+                                TeamsAutoMeetingCountdownAccessibility.secondsID
+                        )
+                    )
             }
 
             Spacer(minLength: 8)
-
-            Button(action: toggleRecordingIndicator) {
-                Image(
-                    systemName: showsRecordingIndicator
-                        ? "eye.slash"
-                        : "eye"
-                )
-            }
-            .buttonStyle(RecorderMotionButtonStyle(prominence: .compact, tint: .secondary))
-            .help(
-                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorLabel(
-                    isVisible: showsRecordingIndicator
-                )
-            )
-            .accessibilityLabel(
-                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorLabel(
-                    isVisible: showsRecordingIndicator
-                )
-            )
-            .accessibilityValue(
-                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorValue(
-                    isVisible: showsRecordingIndicator
-                )
-            )
-            .accessibilityIdentifier(
-                TeamsAutoMeetingCountdownAccessibility.recordingIndicatorToggleID
-            )
-            .background(
-                RecorderPanelRenderLocationMarker(
-                    productionIdentifier:
-                        TeamsAutoMeetingCountdownAccessibility.recordingIndicatorToggleID
-                )
-            )
+            floatingPanelToggleButton
 
             Button(action: cancel) {
                 Image(systemName: "xmark")
             }
-            .buttonStyle(RecorderMotionButtonStyle(prominence: .compact, tint: .secondary))
-            .help("Cancel automatic recording")
+            .buttonStyle(
+                RecorderMotionButtonStyle(
+                    prominence: .compact,
+                    tint: .secondary
+                )
+            )
+            .help(TeamsAutoMeetingCountdownAccessibility.cancelLabel)
             .accessibilityLabel(TeamsAutoMeetingCountdownAccessibility.cancelLabel)
             .accessibilityIdentifier(TeamsAutoMeetingCountdownAccessibility.cancelID)
-            .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.cancelID))
+            .background(
+                RecorderPanelRenderLocationMarker(
+                    productionIdentifier:
+                        TeamsAutoMeetingCountdownAccessibility.cancelID
+                )
+            )
         }
         .padding(.horizontal, 16)
-        .frame(width: 360, height: 94)
-        .recorderGlassSurface(.navigation)
-        .accessibilityIdentifier(TeamsAutoMeetingCountdownAccessibility.panelID)
-        .background(RecorderPanelRenderLocationMarker(productionIdentifier: TeamsAutoMeetingCountdownAccessibility.panelID))
+    }
+
+    private var floatingPanelToggleButton: some View {
+        Button(action: togglePanel) {
+            Image(
+                systemName: panelState == .expanded ? "eye.slash" : "eye"
+            )
+        }
+        .buttonStyle(.plain)
+        .help(panelState.toggleLabel)
+        .accessibilityLabel(panelState.toggleLabel)
+        .accessibilityValue(panelState.accessibilityValue)
+        .accessibilityIdentifier(
+            TeamsAutoMeetingCountdownAccessibility.panelToggleID
+        )
+        .background(
+            RecorderPanelRenderLocationMarker(
+                productionIdentifier:
+                    TeamsAutoMeetingCountdownAccessibility.panelToggleID
+            )
+        )
     }
 }

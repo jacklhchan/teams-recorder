@@ -5,37 +5,43 @@ import XCTest
 
 @MainActor
 final class TeamsAutoMeetingCountdownRenderTests: XCTestCase {
-    func testCountdownIndicatorButtonHidesAndRestoresTheRedBubble() throws {
-        let host = CountdownRenderHost(rootView: CountdownIndicatorHarness())
+    func testCountdownEyeCollapsesAllInformationAndExpandsItAgain() throws {
+        let host = CountdownRenderHost(rootView: CountdownCollapseHarness())
         defer { host.close() }
 
         XCTAssertTrue(
-            host.contains(
-                "\(TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID).marker"
-            )
+            host.contains(TeamsAutoMeetingCountdownAccessibility.secondsID)
         )
-        try host.click(
-            TeamsAutoMeetingCountdownAccessibility.recordingIndicatorToggleID
-        )
-        XCTAssertFalse(
-            host.contains(
-                "\(TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID).marker"
-            )
-        )
-        try host.click(
-            TeamsAutoMeetingCountdownAccessibility.recordingIndicatorToggleID
+        try host.click(TeamsAutoMeetingCountdownAccessibility.panelToggleID)
+        XCTAssertTrue(
+            host.contains(TeamsAutoMeetingCountdownAccessibility.runningID)
         )
         XCTAssertTrue(
-            host.contains(
-                "\(TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID).marker"
-            )
+            host.contains(TeamsAutoMeetingCountdownAccessibility.panelToggleID)
         )
+        XCTAssertFalse(
+            host.contains(TeamsAutoMeetingCountdownAccessibility.recordingIndicatorID)
+        )
+        XCTAssertFalse(host.contains(TeamsAutoMeetingCountdownAccessibility.secondsID))
+        XCTAssertFalse(host.contains(TeamsAutoMeetingCountdownAccessibility.cancelID))
+        XCTAssertEqual(host.frame.size, .init(width: 132, height: 40))
+
+        try host.click(TeamsAutoMeetingCountdownAccessibility.panelToggleID)
+        XCTAssertTrue(host.contains(TeamsAutoMeetingCountdownAccessibility.secondsID))
+        XCTAssertTrue(host.contains(TeamsAutoMeetingCountdownAccessibility.cancelID))
+        XCTAssertEqual(host.frame.size, .init(width: 360, height: 94))
     }
 
     func testCountdownFixturesHaveFixedBoundsAndCancelOnce() throws {
         for seconds in [8, 7] {
             var cancellations = 0
-            let host = CountdownRenderHost(rootView: TeamsAutoMeetingCountdownView(seconds: seconds, cancel: { cancellations += 1 }))
+            let host = CountdownRenderHost(
+                rootView: TeamsAutoMeetingCountdownView(
+                    seconds: seconds,
+                    cancel: { cancellations += 1 },
+                    panelState: .expanded
+                )
+            )
             defer { host.close() }
             XCTAssertEqual(host.frame.size, .init(width: 360, height: 94))
             for identifier in TeamsAutoMeetingCountdownAccessibility.allIDs { XCTAssertTrue(host.boundsContain(identifier), identifier) }
@@ -51,7 +57,7 @@ final class TeamsAutoMeetingCountdownRenderTests: XCTestCase {
         for (motion, transparency, expectedMotion, expectedGlass) in variants {
             XCTAssertEqual(TeamsAutoMeetingCountdownAccessibility.allIDs, identifiers)
             XCTAssertEqual(TeamsAutoMeetingCountdownAccessibility.cancelLabel, "Cancel automatic recording")
-            let host = CountdownRenderHost(rootView: TeamsAutoMeetingCountdownView(seconds: 8, cancel: {}).environment(\.recorderReduceMotionOverride, motion).environment(\.recorderReduceTransparencyOverride, transparency))
+            let host = CountdownRenderHost(rootView: TeamsAutoMeetingCountdownView(seconds: 8, cancel: {}, panelState: .expanded).environment(\.recorderReduceMotionOverride, motion).environment(\.recorderReduceTransparencyOverride, transparency))
             defer { host.close() }
             XCTAssertTrue(host.contains(expectedMotion))
             XCTAssertFalse(host.contains(expectedMotion == "recorder.motion.scale" ? "recorder.motion.no-scale" : "recorder.motion.scale"))
@@ -74,16 +80,16 @@ final class TeamsAutoMeetingCountdownRenderTests: XCTestCase {
 }
 
 @MainActor
-private struct CountdownIndicatorHarness: View {
-    @State private var showsRecordingIndicator = true
+private struct CountdownCollapseHarness: View {
+    @State private var panelState: FloatingPanelPresentationState = .expanded
 
     var body: some View {
         TeamsAutoMeetingCountdownView(
             seconds: 8,
             cancel: {},
-            showsRecordingIndicator: showsRecordingIndicator,
-            toggleRecordingIndicator: {
-                showsRecordingIndicator.toggle()
+            panelState: panelState,
+            togglePanel: {
+                panelState = panelState == .expanded ? .collapsed : .expanded
             }
         )
     }
@@ -95,12 +101,22 @@ private final class CountdownRenderHost {
     private let window: NSWindow
     init<Content: View>(rootView: Content) { hostingView = NSHostingView(rootView: AnyView(rootView)); let frame = NSRect(x: 0, y: 0, width: 360, height: 94); hostingView.frame = frame; window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false); window.contentView = hostingView; window.makeKeyAndOrderFront(nil); render() }
     var frame: NSRect { hostingView.frame }
-    func contains(_ identifier: String) -> Bool { view(identifier) != nil }
+    func contains(_ identifier: String) -> Bool {
+        view(identifier) != nil || locationMarker(for: identifier) != nil
+    }
     func close() { window.orderOut(nil); window.contentView = nil }
     func boundsContain(_ productionIdentifier: String) -> Bool { guard let view = locationMarker(for: productionIdentifier) else { return false }; return hostingView.bounds.contains(hostingView.convert(view.bounds, from: view)) }
     func locationMarkerFrame(_ productionIdentifier: String) -> NSRect? { guard let view = locationMarker(for: productionIdentifier) else { return nil }; return hostingView.convert(view.bounds, from: view) }
     func click(_ productionIdentifier: String) throws { let view = try XCTUnwrap(locationMarker(for: productionIdentifier), "missing marker for \(productionIdentifier)"); let location = view.convert(.init(x: view.bounds.midX, y: view.bounds.midY), to: nil); for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] { let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0), "missing \(type) event"); window.sendEvent(event) }; render() }
-    private func render() { RunLoop.main.run(until: Date().addingTimeInterval(0.03)); window.layoutIfNeeded(); hostingView.layoutSubtreeIfNeeded() }
+    private func render() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        let size = hostingView.fittingSize
+        guard size.width > 0, size.height > 0 else { return }
+        hostingView.setFrameSize(size)
+        window.setContentSize(size)
+    }
     private func view(_ identifier: String) -> NSView? { allViews(hostingView).first { $0.accessibilityIdentifier() == identifier } }
     private func locationMarker(for productionIdentifier: String) -> NSView? { view("\(productionIdentifier).marker") }
     private func allViews(_ view: NSView) -> [NSView] {

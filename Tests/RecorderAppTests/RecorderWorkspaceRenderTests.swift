@@ -3232,11 +3232,19 @@ final class WorkspaceHost {
             render()
             return true
         }
+        if performAccessibilityPress(on: target.element) {
+            render()
+            return true
+        }
         // The Transcript button keeps the pre-existing generic action ID while
-        // its passive row marker carries the session-specific ID. Resolve that
-        // marker to the intersecting real AppKit control for a stable press.
+        // its passive row marker carries the session-specific ID. Resolve only
+        // that explicit marker to the intersecting real AppKit control; a
+        // same-ID passive marker must not press an unrelated button.
         let markerFrame = target.element.accessibilityFrame()
-        if let nativeButton = allViews(startingAt: targetRoot)
+        let isExplicitPassiveMarker =
+            target.element.accessibilityIdentifier?() == "\(identifier).marker"
+        if isExplicitPassiveMarker,
+           let nativeButton = allViews(startingAt: targetRoot)
             .compactMap({ $0 as? NSButton })
             .first(where: {
                 !$0.isHidden
@@ -3244,10 +3252,6 @@ final class WorkspaceHost {
                     && markerFrame.intersects($0.accessibilityFrame())
             }) {
             nativeButton.performClick(nil)
-            render()
-            return true
-        }
-        if performAccessibilityPress(on: target.element) {
             render()
             return true
         }

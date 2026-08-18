@@ -1265,6 +1265,66 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
+    func testTranscriptionSheetSubmitDoesNotPressOverlappingUnrelatedButton() throws {
+        let service = RenderCapturingTranscriptionService()
+        let fixture = makeFixtureWithOneSession(
+            transcriptionAudioPreparer: RenderImmediateTranscriptionAudioPreparer(),
+            transcriptionService: service
+        )
+        let settings = fixture.model.aiProviderSettingsModel
+        settings.baseURLText = "https://api.example.com/v1"
+        settings.asrModel = "asr"
+        settings.llmModel = "llm"
+        settings.save()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        XCTAssertTrue(host.invokeNativeMenuItem(
+            forButton: "recorder.row.more.\(rowID)",
+            itemIdentifier: "recorder.row.transcribe.\(rowID)"
+        ))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet))
+
+        let probe = RenderButtonPressProbe()
+        let unrelatedButton = NSButton(
+            title: "Unrelated",
+            target: probe,
+            action: #selector(RenderButtonPressProbe.press)
+        )
+        unrelatedButton.setAccessibilityIdentifier("recorder.test.unrelated")
+        XCTAssertTrue(host.addTestOverlayButton(
+            unrelatedButton,
+            overAccessibilityIdentifier: RecorderActionID.transcriptionSubmit
+        ))
+        let submitFrame = try XCTUnwrap(
+            host.frame(forAccessibilityIdentifier: RecorderActionID.transcriptionSubmit)
+        )
+        XCTAssertTrue(unrelatedButton.accessibilityFrame().intersects(submitFrame))
+
+        XCTAssertFalse(host.click(
+            atAccessibilityFrame: RecorderActionID.transcriptionSubmit
+        ))
+        XCTAssertEqual(probe.pressCount, 0)
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet))
+
+        unrelatedButton.removeFromSuperview()
+        XCTAssertTrue(host.click(
+            atAccessibilityFrame: RecorderActionID.transcriptionSubmit
+        ))
+        try waitUntil(timeout: 1, message: "transcription options capture") {
+            service.startedOptions != nil
+        }
+        XCTAssertEqual(
+            service.startedOptions,
+            .init(language: .cantonese, prompt: "")
+        )
+    }
+
     func testRecordingsNativeMenuPreservesExplicitEnablementAndStableActions() throws {
         let fixture = makeFixtureWithOneSession()
         let host = try makeWorkspaceHost(
@@ -3232,21 +3292,36 @@ final class WorkspaceHost {
             render()
             return true
         }
+        // Collect all exact-ID AX candidates in the target sheet and let the
+        // first candidate that actually performs a press win. This keeps a
+        // passive marker from shadowing a real actionable AX element.
+        for element in accessibilityElements(
+            forAccessibilityIdentifier: identifier,
+            in: target.window
+        ) {
+            if performAccessibilityPress(on: element) {
+                render()
+                return true
+            }
+        }
         if performAccessibilityPress(on: target.element) {
             render()
             return true
         }
         // The Transcript button keeps the pre-existing generic action ID while
-        // its passive row marker carries the session-specific ID. Resolve only
-        // that explicit marker to the intersecting real AppKit control; a
-        // same-ID passive marker must not press an unrelated button.
+        // its passive row marker carries the session-specific ID. Bind that
+        // marker to the known production action ID; never choose an arbitrary
+        // intersecting native button.
         let markerFrame = target.element.accessibilityFrame()
-        let isExplicitPassiveMarker =
-            target.element.accessibilityIdentifier?() == "\(identifier).marker"
-        if isExplicitPassiveMarker,
+        let isTranscriptRowMarker =
+            identifier.hasPrefix("recorder.row.transcript.")
+                && target.element.accessibilityIdentifier?() == "\(identifier).marker"
+        if isTranscriptRowMarker,
            let nativeButton = allViews(startingAt: targetRoot)
             .compactMap({ $0 as? NSButton })
             .first(where: {
+                $0.accessibilityIdentifier() == RecorderActionID.openTranscript
+                    &&
                 !$0.isHidden
                     && !$0.accessibilityFrame().isEmpty
                     && markerFrame.intersects($0.accessibilityFrame())
@@ -3257,6 +3332,12 @@ final class WorkspaceHost {
         }
         let screenPoint = NSPoint(x: markerFrame.midX, y: markerFrame.midY)
         let location = target.window.convertPoint(fromScreen: screenPoint)
+        let hitView = target.window.contentView?.hitTest(location)
+        guard let hitView,
+              !sequence(first: hitView, next: { $0.superview })
+                .contains(where: { $0 is NSControl }) else {
+            return false
+        }
         guard let down = NSEvent.mouseEvent(
             with: .leftMouseDown,
             location: location,
@@ -3369,6 +3450,37 @@ final class WorkspaceHost {
             return nil
         }
         return editor.string
+    }
+
+    @discardableResult
+    func addTestOverlayButton(
+        _ button: NSButton,
+        overAccessibilityIdentifier identifier: String
+    ) -> Bool {
+        guard let target = accessibilityTarget(
+            forAccessibilityIdentifier: identifier
+        ), let contentView = target.window.contentView else {
+            return false
+        }
+        let markerFrame = target.element.accessibilityFrame()
+        let windowOrigin = target.window.convertPoint(fromScreen: markerFrame.origin)
+        let origin = contentView.convert(windowOrigin, from: nil)
+        button.frame = .init(origin: origin, size: markerFrame.size)
+        button.isHidden = false
+        contentView.addSubview(button, positioned: .above, relativeTo: nil)
+        layout()
+        let accessibilityDelta = CGPoint(
+            x: markerFrame.midX - button.accessibilityFrame().midX,
+            y: markerFrame.midY - button.accessibilityFrame().midY
+        )
+        button.setFrameOrigin(
+            .init(
+                x: button.frame.origin.x + accessibilityDelta.x,
+                y: button.frame.origin.y - accessibilityDelta.y
+            )
+        )
+        layout()
+        return true
     }
 
     @discardableResult
@@ -3761,6 +3873,39 @@ final class WorkspaceHost {
         let implementation = pressingObject.method(for: selector)
         let press = unsafeBitCast(implementation, to: PressFunction.self)
         return press(pressingObject, selector)
+    }
+
+    private func accessibilityElements(
+        forAccessibilityIdentifier identifier: String,
+        in candidateWindow: NSWindow
+    ) -> [any NSAccessibilityElementProtocol] {
+        guard let root = candidateWindow.contentView else { return [] }
+
+        func collect(
+            in children: [Any],
+            into matches: inout [any NSAccessibilityElementProtocol]
+        ) {
+            for child in children {
+                if let element = child as? any NSAccessibilityElementProtocol,
+                   element.accessibilityIdentifier?() == identifier {
+                    matches.append(element)
+                }
+                collect(
+                    in: accessibilityChildren(of: child),
+                    into: &matches
+                )
+            }
+        }
+
+        var matches: [any NSAccessibilityElementProtocol] = []
+        if root.accessibilityIdentifier() == identifier {
+            matches.append(root)
+        }
+        collect(
+            in: root.accessibilityChildren() ?? [],
+            into: &matches
+        )
+        return matches
     }
 
     private func accessibilityTarget(
@@ -4177,6 +4322,14 @@ private struct RenderImmediateTranscriptionAudioPreparer: TranscriptionAudioPrep
 
 private enum RenderTranscriptionError: Error {
     case stopAfterCapture
+}
+
+private final class RenderButtonPressProbe: NSObject {
+    private(set) var pressCount = 0
+
+    @objc func press() {
+        pressCount += 1
+    }
 }
 
 private final class RenderCapturingTranscriptionService: TranscriptionServicing, @unchecked Sendable {

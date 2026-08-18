@@ -248,10 +248,13 @@ public sealed partial class RecordingOverlayWindow : Window
 
         // WS_EX_NOACTIVATE prevents reliable XAML pointer capture on this
         // auxiliary window. Hand the complete header (not a tiny handle) to
-        // Windows' native caption move loop instead.
+        // Windows' native caption move loop instead. Post rather than send the
+        // message so this routed pointer event can unwind before the modal
+        // native move loop begins; a synchronous SendMessage makes the header
+        // feel stuck while WinUI is still dispatching the press.
         e.Handled = true;
         _ = ReleaseCapture();
-        _ = SendMessage(
+        _ = PostMessage(
             WindowNative.GetWindowHandle(this),
             WmNcLButtonDown,
             HtCaption,
@@ -377,6 +380,7 @@ public sealed partial class RecordingOverlayWindow : Window
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ReleaseCapture();
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern nint SendMessage(nint hWnd, uint message, nint wParam, nint lParam);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(nint hWnd, uint message, nint wParam, nint lParam);
 }

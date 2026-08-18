@@ -574,6 +574,10 @@ void OverlayCanBeMovedSafely()
         "The full header must be identified as a native caption region.");
     Contains("ReleaseCapture", overlayCode,
         "XAML pointer capture must be released before native dragging.");
+    Contains("PostMessage", overlayCode,
+        "Native dragging must begin after the WinUI pointer event unwinds.");
+    DoesNotContain("SendMessage(", overlayCode,
+        "A synchronous native caption loop makes the non-activating overlay feel stuck before it moves.");
     Contains("IsInteractiveHeaderElement", overlayCode,
         "Header buttons must remain clickable rather than starting a drag.");
     Contains("WsExNoActivate", overlayCode,

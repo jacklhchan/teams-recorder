@@ -1125,6 +1125,36 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertNil(fixture.model.transcribingSessionID)
     }
 
+    func testTranscriptionSheetShowsVisibleOptionalPromptField() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.recordings)
+
+        fixture.model.requestTranscriptionOptions(sessionID: fixture.session.id)
+        try waitUntil(timeout: 1, message: "transcription prompt field") {
+            host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
+        }
+
+        XCTAssertTrue(host.containsText("Prompt (optional):"))
+        XCTAssertTrue(host.containsText("Names, terminology, or transcription guidance…"))
+        XCTAssertNotNil(
+            host.frame(forAccessibilityIdentifier: RecorderActionID.transcriptionPrompt)
+        )
+        XCTAssertTrue(host.replaceTextEditor(
+            RecorderActionID.transcriptionPrompt,
+            with: "Names: Ada and Grace"
+        ))
+        XCTAssertFalse(host.containsText("Names, terminology, or transcription guidance…"))
+        XCTAssertEqual(
+            host.transcriptionPromptValue(for: RecorderActionID.transcriptionPrompt),
+            "Names: Ada and Grace"
+        )
+    }
+
     func testTranscribeImportedCanonicalSessionOpensSharedSheetWithoutStarting() throws {
         let fixture = makeFixtureWithOneSession()
         let settings = fixture.model.aiProviderSettingsModel

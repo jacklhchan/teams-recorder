@@ -46,16 +46,54 @@ struct TranscriptionRequestSheet: View {
                     value: draft.language.displayName
                 )
             )
-            TextEditor(text: $draft.prompt)
-                .accessibilityLabel("Prompt")
-                .accessibilityIdentifier(RecorderActionID.transcriptionPrompt)
-                .frame(minHeight: 96)
-                .background(
-                    RecorderDestinationAccessibilityMarker(
-                        identifier: RecorderActionID.transcriptionPrompt,
-                        label: "Prompt"
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Prompt (optional):")
+                    .font(.subheadline.weight(.medium))
+                    .background(
+                        RecorderDestinationAccessibilityMarker(
+                            identifier: "\(RecorderActionID.transcriptionPrompt).label",
+                            label: "Prompt (optional):"
+                        )
                     )
-                )
+
+                ZStack(alignment: .topLeading) {
+                    Color(nsColor: .textBackgroundColor)
+
+                    TextEditor(text: $draft.prompt)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                        .padding(4)
+                        .accessibilityLabel("Prompt")
+                        .accessibilityIdentifier(RecorderActionID.transcriptionPrompt)
+                        .background(
+                            RecorderDestinationAccessibilityMarker(
+                                identifier: RecorderActionID.transcriptionPrompt,
+                                label: "Prompt"
+                            )
+                        )
+
+                    if draft.prompt.isEmpty {
+                        Text("Names, terminology, or transcription guidance…")
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 8)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                            .background(
+                                RecorderDestinationAccessibilityMarker(
+                                    identifier: "\(RecorderActionID.transcriptionPrompt).placeholder",
+                                    label: "Names, terminology, or transcription guidance…"
+                                )
+                            )
+                    }
+                }
+                .frame(minHeight: 96)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+            }
             HStack {
                 Spacer()
                 Button("Cancel", action: cancel)

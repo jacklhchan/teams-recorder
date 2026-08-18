@@ -1058,6 +1058,87 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         }
     }
 
+    func testTranscribeMenuOpensPerJobSheetAndCancelDoesNotStart() throws {
+        let fixture = makeFixtureWithOneSession()
+        let model = fixture.model.aiProviderSettingsModel
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.save()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        XCTAssertTrue(host.invokeNativeMenuItem(
+            forButton: "recorder.row.more.\(rowID)",
+            itemIdentifier: "recorder.row.transcribe.\(rowID)"
+        ))
+        try waitUntil(timeout: 1, message: "transcription sheet to render") {
+            host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
+        }
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet))
+        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.transcriptionCancel))
+        try waitUntil(timeout: 1, message: "transcription sheet dismissal") {
+            !host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
+        }
+        XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet))
+        XCTAssertNil(fixture.model.transcribingSessionID)
+    }
+
+    func testTranscriptionSheetSubmitsSelectedLanguageAndPrompt() throws {
+        let service = RenderCapturingTranscriptionService()
+        let fixture = makeFixtureWithOneSession(
+            transcriptionAudioPreparer: RenderImmediateTranscriptionAudioPreparer(),
+            transcriptionService: service
+        )
+        let model = fixture.model.aiProviderSettingsModel
+        model.baseURLText = "https://api.example.com/v1"
+        model.asrModel = "asr"
+        model.llmModel = "llm"
+        model.save()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.select(.recordings)
+        let rowID = fixture.session.id.lastPathComponent
+        XCTAssertTrue(host.invokeNativeMenuItem(
+            forButton: "recorder.row.more.\(rowID)",
+            itemIdentifier: "recorder.row.transcribe.\(rowID)"
+        ))
+        XCTAssertTrue(host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet))
+        XCTAssertEqual(
+            host.transcriptionPickerValue(for: RecorderActionID.transcriptionLanguage),
+            MeetingLanguage.cantonese.rawValue
+        )
+        XCTAssertTrue(host.selectTranscriptionPickerValue(
+            RecorderActionID.transcriptionLanguage,
+            value: MeetingLanguage.english.rawValue
+        ))
+        XCTAssertTrue(host.replaceTextEditor(
+            RecorderActionID.transcriptionPrompt,
+            with: "  speaker names  "
+        ))
+        XCTAssertTrue(host.click(atAccessibilityFrame: RecorderActionID.transcriptionSubmit))
+        try waitUntil(timeout: 1, message: "transcription sheet dismissal") {
+            !host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
+        }
+        XCTAssertFalse(host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet))
+        try waitUntil(timeout: 1, message: "transcription options capture") {
+            service.startedOptions != nil
+        }
+        XCTAssertEqual(
+            service.startedOptions,
+            .init(language: .english, prompt: "speaker names")
+        )
+    }
+
     func testRecordingsNativeMenuPreservesExplicitEnablementAndStableActions() throws {
         let fixture = makeFixtureWithOneSession()
         let host = try makeWorkspaceHost(
@@ -2326,7 +2407,10 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
 
     private func makeStartupDisabledFixture(
         systemPermission: CapturePermissionState = .notDetermined,
-        microphonePermission: CapturePermissionState = .granted
+        microphonePermission: CapturePermissionState = .granted,
+        transcriptionAudioPreparer: any TranscriptionAudioPreparing =
+            TranscriptionAudioPreparer(),
+        transcriptionService: (any TranscriptionServicing)? = nil
     ) -> StartupDisabledFixture {
         let suiteName = "RecorderWorkspaceRenderTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -2335,7 +2419,9 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             defaults: defaults,
             inputDevices: { [] },
             defaultInputDeviceID: { nil },
-            performStartupWork: false
+            performStartupWork: false,
+            transcriptionAudioPreparer: transcriptionAudioPreparer,
+            transcriptionService: transcriptionService
         )
         model.systemAudioPermission = systemPermission
         model.microphonePermission = microphonePermission
@@ -2409,10 +2495,16 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         )
     }
 
-    private func makeFixtureWithOneSession() -> SessionFixture {
+    private func makeFixtureWithOneSession(
+        transcriptionAudioPreparer: any TranscriptionAudioPreparing =
+            TranscriptionAudioPreparer(),
+        transcriptionService: (any TranscriptionServicing)? = nil
+    ) -> SessionFixture {
         let fixture = makeStartupDisabledFixture(
             systemPermission: .granted,
-            microphonePermission: .granted
+            microphonePermission: .granted,
+            transcriptionAudioPreparer: transcriptionAudioPreparer,
+            transcriptionService: transcriptionService
         )
         let folder = URL(
             fileURLWithPath: "/tmp/recorder-render-session-\(UUID().uuidString)",
@@ -3037,16 +3129,17 @@ final class WorkspaceHost {
         guard let frame = frame(forAccessibilityIdentifier: identifier) else {
             return false
         }
-        let location = window.convertPoint(fromScreen: .init(
-            x: frame.midX,
-            y: frame.midY
-        ))
+        let screenPoint = NSPoint(x: frame.midX, y: frame.midY)
+        let targetWindow = ([window] + window.sheets).reversed().first {
+            $0.isVisible && $0.frame.contains(screenPoint)
+        } ?? window
+        let location = targetWindow.convertPoint(fromScreen: screenPoint)
         guard let down = NSEvent.mouseEvent(
             with: .leftMouseDown,
             location: location,
             modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: window.windowNumber,
+            windowNumber: targetWindow.windowNumber,
             context: nil,
             eventNumber: 0,
             clickCount: 1,
@@ -3056,7 +3149,7 @@ final class WorkspaceHost {
             location: location,
             modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: window.windowNumber,
+            windowNumber: targetWindow.windowNumber,
             context: nil,
             eventNumber: 0,
             clickCount: 1,
@@ -3064,8 +3157,8 @@ final class WorkspaceHost {
         ) else {
             return false
         }
-        window.sendEvent(down)
-        window.sendEvent(up)
+        targetWindow.sendEvent(down)
+        targetWindow.sendEvent(up)
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         layout()
         return true
@@ -3088,6 +3181,62 @@ final class WorkspaceHost {
     func render() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         layout()
+    }
+
+    @discardableResult
+    func selectTranscriptionPickerValue(
+        _ identifier: String,
+        value: String
+    ) -> Bool {
+        guard let markerFrame = frame(forAccessibilityIdentifier: identifier),
+              let picker = renderedRoots
+                  .flatMap({ allViews(startingAt: $0) })
+                  .compactMap({ $0 as? NSPopUpButton })
+                  .first(where: {
+                      !$0.isHidden && markerFrame.intersects($0.accessibilityFrame())
+                  }),
+              let language = MeetingLanguage(rawValue: value),
+              let item = picker.itemArray.first(where: {
+                  $0.title == language.displayName
+              }), let action = item.action else {
+            return false
+        }
+        let didSend = NSApp.sendAction(action, to: item.target, from: item)
+        render()
+        return didSend
+    }
+
+    func transcriptionPickerValue(for identifier: String) -> String? {
+        guard let markerFrame = frame(forAccessibilityIdentifier: identifier),
+              let picker = renderedRoots
+                  .flatMap({ allViews(startingAt: $0) })
+                  .compactMap({ $0 as? NSPopUpButton })
+                  .first(where: {
+                      !$0.isHidden && markerFrame.intersects($0.accessibilityFrame())
+                  }),
+              let title = picker.selectedItem?.title else {
+            return nil
+        }
+        return MeetingLanguage.allCases.first {
+            $0.displayName == title
+        }?.rawValue
+    }
+
+    @discardableResult
+    func replaceTextEditor(_ identifier: String, with text: String) -> Bool {
+        guard let markerFrame = frame(forAccessibilityIdentifier: identifier),
+              let editor = renderedRoots
+                  .flatMap({ allViews(startingAt: $0) })
+                  .compactMap({ $0 as? NSTextView })
+                  .first(where: {
+                      !$0.isHidden && markerFrame.intersects($0.accessibilityFrame())
+                  }) else {
+            return false
+        }
+        editor.string = text
+        editor.didChangeText()
+        render()
+        return true
     }
 
     @discardableResult
@@ -3840,5 +3989,40 @@ private final class RenderMeetingIntelligenceEditSpy: MeetingIntelligenceArtifac
 
     func release() async {
         await gate.release()
+    }
+}
+
+private struct RenderImmediateTranscriptionAudioPreparer: TranscriptionAudioPreparing {
+    func prepare(for session: RecordingSession) async throws -> PreparedTranscriptionAudio {
+        .init(audioURL: session.recordingURL, cleanupURL: nil)
+    }
+
+    func cleanup(_: PreparedTranscriptionAudio) {}
+}
+
+private enum RenderTranscriptionError: Error {
+    case stopAfterCapture
+}
+
+private final class RenderCapturingTranscriptionService: TranscriptionServicing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var request: TranscriptionServiceRequest?
+
+    var startedOptions: TranscriptionRequestOptions? {
+        lock.withLock {
+            guard let profile = request?.snapshot.profile,
+                  let language = MeetingLanguage(rawValue: profile.language) else {
+                return nil
+            }
+            return .init(language: language, prompt: profile.prompt)
+        }
+    }
+
+    func transcribe(
+        _ request: TranscriptionServiceRequest,
+        onProgress _: @escaping @Sendable (TranscriptionServiceProgress) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        lock.withLock { self.request = request }
+        throw RenderTranscriptionError.stopAfterCapture
     }
 }

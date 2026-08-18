@@ -339,13 +339,13 @@ final class AIProviderSettingsModel: ObservableObject {
         case .openAICompatible:
             try OpenAICompatibleProviderProfile.validated(
                 baseURLText: baseURLText, asrModel: asrModel, llmModel: llmModel,
-                language: language, prompt: prompt,
+                language: MeetingLanguage.cantonese.rawValue, prompt: "",
                 meetingIntelligencePrompt: meetingIntelligencePrompt
             )
         case .hktGenAI:
             try OpenAICompatibleProviderProfile.hktValidated(
                 groupID: groupIDText, asrModel: asrModel, llmModel: llmModel,
-                language: language, prompt: prompt,
+                language: MeetingLanguage.cantonese.rawValue, prompt: "",
                 meetingIntelligencePrompt: meetingIntelligencePrompt
             )
         }

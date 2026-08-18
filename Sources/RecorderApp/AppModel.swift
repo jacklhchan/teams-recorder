@@ -1950,10 +1950,31 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(session.folderURL)
     }
 
+    func transcribe(
+        sessionID: RecordingSession.ID,
+        options: TranscriptionRequestOptions
+    ) {
+        guard let session = libraryFeature.snapshot.sessions.first(where: {
+            $0.id == sessionID
+        }) else {
+            statusMessage = "The recording is no longer available."
+            return
+        }
+        transcriptionFeature.start(
+            session: session,
+            providerIsConfigured: aiProviderSettingsModel.hasSavedProfile,
+            options: options
+        )
+    }
+
+    /// Compatibility entry point for existing non-UI callers. Recordings
+    /// submitted from the workspace use the ID-based canonical admission
+    /// above; this path always uses explicit default per-job options.
     func transcribe(session: RecordingSession) {
         transcriptionFeature.start(
             session: session,
-            providerIsConfigured: aiProviderSettingsModel.hasSavedProfile
+            providerIsConfigured: aiProviderSettingsModel.hasSavedProfile,
+            options: .init()
         )
     }
 

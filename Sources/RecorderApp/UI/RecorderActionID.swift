@@ -50,6 +50,11 @@ enum RecorderActionID {
     static let metadataFavorite = "recorder.metadata.favorite"
     static let transcriptDetailTitle = "recorder.transcript.detail.title"
     static let transcriptDetailFavorite = "recorder.transcript.detail.favorite"
+    static let transcriptionSheet = "recorder.transcription.sheet"
+    static let transcriptionLanguage = "recorder.transcription.language"
+    static let transcriptionPrompt = "recorder.transcription.prompt"
+    static let transcriptionCancel = "recorder.transcription.cancel"
+    static let transcriptionSubmit = "recorder.transcription.submit"
     static let captureRecovery = "recorder.action.capture-recovery"
     static let providerKind = "recorder.provider.kind"
     static let providerHKTGroupID = "recorder.provider.hkt-group-id"
@@ -136,6 +141,11 @@ enum RecorderActionID {
         metadataFavorite,
         transcriptDetailTitle,
         transcriptDetailFavorite,
+        transcriptionSheet,
+        transcriptionLanguage,
+        transcriptionPrompt,
+        transcriptionCancel,
+        transcriptionSubmit,
         captureRecovery,
         providerKind,
         providerHKTGroupID,

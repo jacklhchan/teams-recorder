@@ -3,6 +3,31 @@ import XCTest
 
 @MainActor
 final class AIProviderSettingsModelTests: XCTestCase {
+    func testSaveClearsUniversalASRValuesButKeepsMeetingIntelligencePrompt() throws {
+        let olderProfile = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "asr",
+            llmModel: "llm",
+            language: "en",
+            prompt: "stored universal",
+            meetingIntelligencePrompt: "keep this guidance"
+        )
+        let repository = RecordingProviderRepository(profile: olderProfile)
+        let model = AIProviderSettingsModel(
+            repository: repository,
+            client: StubProviderClient()
+        )
+
+        model.save()
+
+        XCTAssertEqual(repository.profiles[.openAICompatible]?.language, "yue")
+        XCTAssertEqual(repository.profiles[.openAICompatible]?.prompt, "")
+        XCTAssertEqual(
+            repository.profiles[.openAICompatible]?.meetingIntelligencePrompt,
+            "keep this guidance"
+        )
+    }
+
     @MainActor
     func testProviderSaveObserverTokenCannotRemoveReplacement() {
         let model = AIProviderSettingsModel(

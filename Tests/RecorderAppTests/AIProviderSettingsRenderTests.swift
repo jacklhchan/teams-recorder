@@ -5,6 +5,31 @@ import XCTest
 
 @MainActor
 final class AIProviderSettingsRenderTests: XCTestCase {
+    func testProviderSettingsHideUniversalASROptions() throws {
+        let repository = RecordingProviderRepository(hasAPIKey: true)
+        let defaultsSuite = "provider-hide-asr-(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let appModel = AppModel(
+            defaults: defaults,
+            providerRepository: repository,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            virtualMicStateProvider: { .absent }
+        )
+        let host = ProviderSettingsProductionHost(
+            model: appModel,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+
+        host.selectSettingsSection("ai-provider")
+        XCTAssertFalse(host.reveal(RecorderActionID.providerLanguage))
+        XCTAssertFalse(host.reveal(RecorderActionID.providerPrompt))
+        XCTAssertTrue(host.reveal(RecorderActionID.providerMeetingIntelligencePrompt))
+    }
+
     func testPromptEditorsAreIndependentlyReachableAndLabeledAtSupportedSizes() throws {
         let repository = RecordingProviderRepository(hasAPIKey: true)
         let defaultsSuite = "provider-prompt-render-\(UUID().uuidString)"

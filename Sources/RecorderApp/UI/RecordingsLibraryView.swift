@@ -14,6 +14,7 @@ struct RecordingsLibraryView: View {
     @State private var selectedSessionID: RecordingSession.ID?
     @State private var metadataSession: RecordingSession?
     @State private var sessionPendingTrash: RecordingSession?
+    @State private var transcriptionDraft: TranscriptionRequestDraft?
 
     init(model: AppModel) {
         self.model = model
@@ -76,7 +77,9 @@ struct RecordingsLibraryView: View {
             play: model.play,
             open: model.open,
             revealRecording: model.revealRecording,
-            transcribe: model.transcribe,
+            transcribe: { sessionID, options in
+                model.transcribe(sessionID: sessionID, options: options)
+            },
             cancelTranscription: model.cancelTranscription,
             openTranscript: model.openTranscript,
             openTranscriptLog: model.openTranscriptLog,
@@ -107,6 +110,7 @@ struct RecordingsLibraryView: View {
             saveMeetingIntelligenceEdit: model.saveMeetingIntelligenceEdit,
             saveMetadata: model.saveMetadata,
             moveToTrash: model.moveSessionToTrash,
+            transcriptionDraft: $transcriptionDraft,
             route: $route,
             selectedSessionID: $selectedSessionID,
             libraryFilter: $libraryFilter,
@@ -152,6 +156,16 @@ struct RecordingsLibraryView: View {
             )
         )
         .accessibilityIdentifier("recorder.destination.recordings")
+        .sheet(item: $transcriptionDraft) { draft in
+            TranscriptionRequestSheet(
+                draft: draft,
+                cancel: { transcriptionDraft = nil },
+                submit: { options in
+                    transcriptionDraft = nil
+                    model.transcribe(sessionID: draft.sessionID, options: options)
+                }
+            )
+        }
     }
 }
 
@@ -174,7 +188,7 @@ private struct SessionListView: View {
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
     let revealRecording: (RecordingSession) -> Void
-    let transcribe: (RecordingSession) -> Void
+    let transcribe: (RecordingSession.ID, TranscriptionRequestOptions) -> Void
     let cancelTranscription: () -> Void
     let openTranscript: (RecordingSession) -> Void
     let openTranscriptLog: (RecordingSession) -> Void
@@ -199,6 +213,7 @@ private struct SessionListView: View {
     ) async -> MeetingIntelligenceEditSaveOutcome
     let saveMetadata: (String, String, Bool, RecordingSession) async -> LibrarySaveOutcome
     let moveToTrash: (RecordingSession) async -> Void
+    @Binding var transcriptionDraft: TranscriptionRequestDraft?
     @Binding var route: RecordingsPresentationRoute
     @Binding var selectedSessionID: RecordingSession.ID?
     @Binding var libraryFilter: RecordingLibraryFilter
@@ -615,7 +630,10 @@ private struct SessionListView: View {
                               currentTranscribingSessionID() == nil else {
                             return
                         }
-                        transcribe(canonical)
+                        transcriptionDraft = .init(
+                            sessionID: canonical.id,
+                            sessionName: canonical.displayName
+                        )
                     }
                 }
             )
@@ -787,6 +805,10 @@ private struct SessionListView: View {
             }
             if let sessionPendingTrash, !allSessions.contains(where: { $0.id == sessionPendingTrash.id }) {
                 self.sessionPendingTrash = nil
+            }
+            if let transcriptionDraft,
+               !allSessions.contains(where: { $0.id == transcriptionDraft.sessionID }) {
+                self.transcriptionDraft = nil
             }
         }
         .sheet(item: $metadataSession) { session in

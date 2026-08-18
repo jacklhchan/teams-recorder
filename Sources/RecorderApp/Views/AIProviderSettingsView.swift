@@ -52,23 +52,6 @@ struct AIProviderSettingsView: View {
                 identifier: "recorder.provider.surface.transcription",
                 systemImage: "waveform"
             ) {
-                Picker("Language", selection: languageBinding) {
-                    ForEach(model.languages, id: \.rawValue) { language in
-                        Text(language.displayName).tag(language.rawValue)
-                    }
-                }
-                .providerAccessibility(RecorderActionID.providerLanguage)
-
-                Text("ASR Prompt")
-                    .font(.subheadline)
-                Text("Optional transcription guidance sent only with future transcription jobs.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $model.prompt)
-                    .accessibilityLabel("ASR Prompt")
-                    .providerAccessibility(RecorderActionID.providerPrompt)
-                    .frame(minHeight: 58, maxHeight: 96)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
                 Text("Meeting Intelligence Prompt")
                     .font(.subheadline)
                 Text("Optional guidance for future summaries and suggested titles. JSON output and transcript-safety requirements are always enforced.")
@@ -170,12 +153,6 @@ struct AIProviderSettingsView: View {
             get: { model.selectedProviderKind.rawValue },
             set: { if let kind = AIProviderKind(rawValue: $0) { model.selectedProviderKind = kind } }
         )
-    }
-
-    private var languageBinding: Binding<String> {
-        Binding(get: { model.selectedLanguage.rawValue }, set: {
-            if let language = MeetingLanguage(rawValue: $0) { model.selectedLanguage = language }
-        })
     }
 
     private func providerLabel(for kind: AIProviderKind) -> String {

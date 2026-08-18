@@ -3,6 +3,43 @@ import XCTest
 
 @MainActor
 final class AppModelTranscriptionTests: XCTestCase {
+    func testPerJobTranscriptionRevalidatesCanonicalSessionAndForwardsOptions() async throws {
+        let fixture = try makeFixtureWithConfiguredProvider()
+        defer { fixture.remove() }
+
+        fixture.model.transcribe(
+            sessionID: fixture.session.id,
+            options: .init(language: .english, prompt: "speaker names")
+        )
+
+        let started = await eventually {
+            fixture.service.startedSessionID != nil
+        }
+        XCTAssertTrue(started)
+        XCTAssertEqual(fixture.service.startedSessionID, fixture.session.id)
+        XCTAssertEqual(
+            fixture.service.startedOptions,
+            .init(language: .english, prompt: "speaker names")
+        )
+    }
+
+    func testPerJobTranscriptionRejectsRemovedSession() throws {
+        let fixture = try makeFixtureWithConfiguredProvider()
+        defer { fixture.remove() }
+        fixture.removeCanonicalSession()
+
+        fixture.model.transcribe(
+            sessionID: fixture.session.id,
+            options: .init(language: .english, prompt: "secret prompt")
+        )
+
+        XCTAssertNil(fixture.service.startedSessionID)
+        XCTAssertEqual(
+            fixture.model.statusMessage,
+            "The recording is no longer available."
+        )
+    }
+
     func testLifecyclePolicyStoreComposesBothDiagnosticWriterBoundaries() throws {
         let fixture = try TranscriptionFixture.make()
         defer { fixture.remove() }
@@ -1038,6 +1075,39 @@ final class AppModelTranscriptionTests: XCTestCase {
         return model
     }
 
+    private func makeFixtureWithConfiguredProvider() throws -> PerJobTranscriptionFixture {
+        let base = try TranscriptionFixture.make()
+        let profile = try OpenAICompatibleProviderProfile.validated(
+            baseURLText: "https://api.example.com/v1",
+            asrModel: "asr",
+            llmModel: "llm",
+            language: "en",
+            prompt: "stored universal"
+        )
+        let repository = RecordingProviderRepository(
+            profile: profile,
+            hasAPIKey: true
+        )
+        let service = CapturingTranscriptionService()
+        let model = AppModel(
+            providerRepository: repository,
+            inputDevices: { [] },
+            defaultInputDeviceID: { nil },
+            performStartupWork: false,
+            initialOutputFolder: base.root,
+            transcriptionAudioPreparer: ImmediateTranscriptionAudioPreparer(),
+            transcriptionService: service
+        )
+        model.aiProviderSettingsModel.reload()
+        model.seedLibrarySessionsForTesting([base.session])
+        return .init(
+            model: model,
+            session: base.session,
+            service: service,
+            root: base.root
+        )
+    }
+
     private func waitForIdle(
         _ model: AppModel,
         file: StaticString = #filePath,
@@ -1177,6 +1247,59 @@ private final class ControlledPreparer: TranscriptionAudioPreparing, @unchecked 
             return continuation
         }
         continuation?.resume(with: result)
+    }
+}
+
+private struct ImmediateTranscriptionAudioPreparer: TranscriptionAudioPreparing {
+    func prepare(for session: RecordingSession) async throws -> PreparedTranscriptionAudio {
+        .init(audioURL: session.recordingURL, cleanupURL: nil)
+    }
+
+    func cleanup(_: PreparedTranscriptionAudio) {}
+}
+
+private final class CapturingTranscriptionService: TranscriptionServicing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var request: TranscriptionServiceRequest?
+
+    var startedSessionID: RecordingSession.ID? {
+        lock.withLock {
+            request.map { RecordingLibraryURLIdentity.normalized($0.sessionFolder) }
+        }
+    }
+
+    var startedOptions: TranscriptionRequestOptions? {
+        lock.withLock {
+            guard let profile = request?.snapshot.profile,
+                  let language = MeetingLanguage(rawValue: profile.language) else {
+                return nil
+            }
+            return .init(language: language, prompt: profile.prompt)
+        }
+    }
+
+    func transcribe(
+        _ request: TranscriptionServiceRequest,
+        onProgress _: @escaping @Sendable (TranscriptionServiceProgress) -> Void
+    ) async throws -> TranscriptionServiceResult {
+        lock.withLock { self.request = request }
+        throw TestError.failed
+    }
+}
+
+@MainActor
+private struct PerJobTranscriptionFixture {
+    let model: AppModel
+    let session: RecordingSession
+    let service: CapturingTranscriptionService
+    let root: URL
+
+    func removeCanonicalSession() {
+        model.seedLibrarySessionsForTesting([])
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: root)
     }
 }
 

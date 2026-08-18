@@ -3347,6 +3347,22 @@ final class WorkspaceHost {
         // marker to the known production action ID; never choose an arbitrary
         // intersecting native button.
         let markerFrame = target.element.accessibilityFrame()
+        let isCaptureRecoveryMarker =
+            identifier == "recorder.probe.capture-recovery"
+                && target.element.accessibilityIdentifier?() == identifier
+        if isCaptureRecoveryMarker,
+           let nativeButton = allViews(startingAt: targetRoot)
+            .compactMap({ $0 as? NSButton })
+            .first(where: {
+                $0.accessibilityIdentifier() == RecorderActionID.captureRecovery
+                    && !$0.isHidden
+                    && !$0.accessibilityFrame().isEmpty
+                    && markerFrame.intersects($0.accessibilityFrame())
+            }) {
+            nativeButton.performClick(nil)
+            render()
+            return true
+        }
         let isTranscriptRowMarker =
             identifier.hasPrefix("recorder.row.transcript.")
                 && target.element.accessibilityIdentifier?() == "\(identifier).marker"

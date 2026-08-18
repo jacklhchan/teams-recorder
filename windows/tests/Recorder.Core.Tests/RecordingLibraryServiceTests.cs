@@ -83,14 +83,14 @@ internal static class RecordingLibraryServiceTests
             .ToArray();
         foreach (var plan in plans) File.WriteAllBytes(plan.FinalAudioPath, [1, 2, 3]);
 
-        if (storage.ListSessions().Count != plans.Length || validator.Count != plans.Length)
-            throw new InvalidOperationException("Initial library validation did not inspect each published file exactly once.");
-        if (storage.ListSessions().Count != plans.Length || validator.Count != plans.Length)
+        if (storage.ListSessions().Count != plans.Length || validator.Count != 0)
+            throw new InvalidOperationException("Initial library projection decoded historical media during startup.");
+        if (storage.ListSessions().Count != plans.Length || validator.Count != 0)
             throw new InvalidOperationException("An unchanged refresh decoded the complete library again.");
 
         File.AppendAllBytes(plans[0].FinalAudioPath, [4]);
-        if (storage.ListSessions().Count != plans.Length || validator.Count != plans.Length + 1)
-            throw new InvalidOperationException("The validation cache did not invalidate exactly the changed media file.");
+        if (storage.ListSessions().Count != plans.Length || validator.Count != 0)
+            throw new InvalidOperationException("A changed library row activated a decoder before a user action.");
     }
 
     public static void RefreshReusesValidationAcrossApplicationRestarts()
@@ -104,8 +104,8 @@ internal static class RecordingLibraryServiceTests
 
         var initialValidator = new CountingAudioValidator();
         var initial = new SessionStorageService(root.Path, audioValidator: initialValidator);
-        if (initial.ListSessions().Count != plans.Length || initialValidator.Count != plans.Length)
-            throw new InvalidOperationException("The initial application process did not validate every media fingerprint.");
+        if (initial.ListSessions().Count != plans.Length || initialValidator.Count != 0)
+            throw new InvalidOperationException("The initial application process decoded its historical library.");
 
         var restartedValidator = new CountingAudioValidator();
         var restarted = new SessionStorageService(root.Path, audioValidator: restartedValidator);
@@ -115,8 +115,8 @@ internal static class RecordingLibraryServiceTests
         File.AppendAllBytes(plans[0].FinalAudioPath, [4]);
         var changedValidator = new CountingAudioValidator();
         var changed = new SessionStorageService(root.Path, audioValidator: changedValidator);
-        if (changed.ListSessions().Count != plans.Length || changedValidator.Count != 1)
-            throw new InvalidOperationException("A persisted fingerprint did not invalidate exactly the changed media file.");
+        if (changed.ListSessions().Count != plans.Length || changedValidator.Count != 0)
+            throw new InvalidOperationException("A changed persistent fingerprint activated a decoder before playback.");
 
         var selected = changed.ListSessions()[1];
         var actionValidator = new CountingAudioValidator();
@@ -132,22 +132,28 @@ internal static class RecordingLibraryServiceTests
     public static void CompletedSessionWithRetainedEvidenceSkipsRepeatedRecoveryDecode()
     {
         using var root = new TestRoot();
-        var initialValidator = new CountingAudioValidator();
-        var initial = new SessionStorageService(root.Path, audioValidator: initialValidator);
+        var initialValidator = new CountingVideoValidator();
+        var initial = new SessionStorageService(
+            root.Path,
+            videoValidator: initialValidator,
+            audioValidator: new AlwaysValidAudio());
         var plan = initial.CreateSessionPlan(RecordingSessionKind.Meeting);
         File.WriteAllBytes(plan.FinalVideoPath, [1, 2, 3]);
         File.WriteAllBytes(plan.AudioSafetyPartialPath, [4, 5, 6]);
         File.WriteAllText(
             plan.MetadataPath,
-            RecordingInfoJson.CreateAudioOnly(
+            RecordingInfoJson.CreateVideo(
                 null,
                 null,
                 RecordingRecoveryState.None,
                 RecordingSessionKind.Meeting).Document.ToJsonString());
-        if (initial.ListSessions().Count != 1 || initialValidator.Count != 1)
-            throw new InvalidOperationException("The completed session was not initially validated and cached.");
+        if (initial.ListSessions().Count != 1 || initialValidator.Count != 0)
+            throw new InvalidOperationException("A completed video publication was decoded while rebuilding the library projection.");
 
-        var restarted = new SessionStorageService(root.Path, audioValidator: new ThrowingAudioValidator());
+        var restarted = new SessionStorageService(
+            root.Path,
+            videoValidator: new ThrowingVideoValidator(),
+            audioValidator: new ThrowingAudioValidator());
         var recovery = new SessionRecoveryService(restarted, new ThrowingAudioValidator())
             .RecoverAsync().GetAwaiter().GetResult().Single();
         if (recovery.Recovered ||
@@ -300,5 +306,11 @@ internal static class RecordingLibraryServiceTests
     {
         public bool IsValidNonEmptyAudio(string path) =>
             throw new InvalidOperationException("Completed media must not be decoded again after a validated restart fingerprint.");
+    }
+
+    private sealed class ThrowingVideoValidator : IVideoMediaValidator
+    {
+        public bool IsValidNonEmptyVideo(string path) =>
+            throw new InvalidOperationException("A canonical completed video must not be decoded again during startup recovery.");
     }
 }

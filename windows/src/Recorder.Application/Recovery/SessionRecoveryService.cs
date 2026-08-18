@@ -105,6 +105,12 @@ public sealed class SessionRecoveryService
                 ? finalVideo
                 : Path.Combine(folder, RecordingSessionLayout.FinalAudioFileName);
             if (!storage.IsSafeNonEmptyFile(declaredFinal)) return false;
+            // Provisional session intent is always audio. A canonical video
+            // declaration is written only after the final MP4 was promoted and
+            // decode-validated, so it is itself the durable publication commit.
+            // An independent audio-safety partial may intentionally remain, but
+            // it must not make every clean video session enter recovery again.
+            if (current.MediaKind == "video") return true;
             if (!hasRecoveryMediaEvidence) return true;
 
             // A successful prior library pass already decoded this exact final

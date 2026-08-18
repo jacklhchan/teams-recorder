@@ -949,6 +949,7 @@ public sealed class SessionStorageService
         catch (IOException) { return null; }
         catch (UnauthorizedAccessException) { return null; }
         catch (ArgumentException) { return null; }
+        finally { PersistMediaValidationCacheBestEffort(); }
     }
 
     private bool TryCreateManagedLibraryItem(
@@ -966,6 +967,13 @@ public sealed class SessionStorageService
             ? null
             : new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         var metadata = ReadMetadata(Path.Combine(folder, RecordingSessionLayout.MetadataFileName));
+        if (metadata.RecoveryState == RecordingRecoveryState.FailedEvidenceRetained)
+        {
+            // This terminal state intentionally preserves bytes for diagnosis;
+            // it is not a publication claim and must never become a library row
+            // merely because a final-looking file name is non-empty.
+            return false;
+        }
         if (metadata.MediaKind == "video")
         {
             // Do not surface legacy/imported target identity in the Windows
@@ -1165,6 +1173,7 @@ public sealed class SessionStorageService
                 return prior;
             var result = validate(fullPath);
             actionValidation?[key] = result;
+            RememberMediaValidation(fullPath, mediaKind, result, decodeValidated: true);
             return result;
         }
         try
@@ -1180,19 +1189,41 @@ public sealed class SessionStorageService
                 return cached.IsValid;
             }
 
-            var isValid = validate(fullPath);
+            // Library rows are a presentation index, not authority to play,
+            // mutate, recycle, publish, or recover media. The file is already
+            // an owned, regular, non-empty final artifact at this point, so do
+            // not activate a Media Foundation decoder for every historical
+            // recording during startup. Every action uses the non-cache branch
+            // above and obtains fresh decode proof for exactly one target.
+            RememberMediaValidation(fullPath, mediaKind, isValid: true, decodeValidated: false);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (ArgumentException) { return false; }
+    }
+
+    private void RememberMediaValidation(
+        string fullPath,
+        string mediaKind,
+        bool isValid,
+        bool decodeValidated)
+    {
+        try
+        {
+            var info = new FileInfo(fullPath);
             mediaValidationCache[fullPath] = new(
                 mediaKind,
                 info.Length,
                 info.CreationTimeUtc.Ticks,
                 info.LastWriteTimeUtc.Ticks,
-                isValid);
+                isValid,
+                decodeValidated);
             Interlocked.Exchange(ref mediaValidationCacheDirty, 1);
-            return isValid;
         }
-        catch (IOException) { return false; }
-        catch (UnauthorizedAccessException) { return false; }
-        catch (ArgumentException) { return false; }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        catch (ArgumentException) { }
     }
 
     /// <summary>
@@ -1209,6 +1240,7 @@ public sealed class SessionStorageService
             var info = new FileInfo(fullPath);
             return mediaValidationCache.TryGetValue(fullPath, out var cached) &&
                    cached.IsValid &&
+                   cached.DecodeValidated &&
                    cached.MediaKind == mediaKind &&
                    cached.Length == info.Length &&
                    cached.CreationUtcTicks == info.CreationTimeUtc.Ticks &&
@@ -1266,7 +1298,8 @@ public sealed class SessionStorageService
                     entry.Length,
                     entry.CreationUtcTicks,
                     entry.LastWriteUtcTicks,
-                    entry.IsValid);
+                    entry.IsValid,
+                    entry.DecodeValidated);
             }
         }
         catch (JsonException) { }
@@ -1360,7 +1393,8 @@ public sealed class SessionStorageService
                 cached.Length,
                 cached.CreationUtcTicks,
                 cached.LastWriteUtcTicks,
-                cached.IsValid);
+                cached.IsValid,
+                cached.DecodeValidated);
         }
         catch (IOException) { return null; }
         catch (UnauthorizedAccessException) { return null; }
@@ -1425,7 +1459,8 @@ public sealed class SessionStorageService
         long Length,
         long CreationUtcTicks,
         long LastWriteUtcTicks,
-        bool IsValid);
+        bool IsValid,
+        bool DecodeValidated);
 
     private sealed record PersistentMediaValidationCacheDocument(
         int SchemaVersion,
@@ -1437,7 +1472,8 @@ public sealed class SessionStorageService
         long Length,
         long CreationUtcTicks,
         long LastWriteUtcTicks,
-        bool IsValid);
+        bool IsValid,
+        bool DecodeValidated);
 
     private bool TryGetImportedAudioPath(string folder, out string mediaPath)
     {

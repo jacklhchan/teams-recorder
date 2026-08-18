@@ -1144,7 +1144,11 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             "Missing mounted transcription prompt editor"
         )
         XCTAssertFalse(promptFrame.isEmpty)
-        XCTAssertTrue(host.windowContentRect.intersects(promptFrame))
+        let owningWindowContentRect = try XCTUnwrap(
+            host.contentRect(forAccessibilityIdentifier: RecorderActionID.transcriptionPrompt),
+            "Missing owning window content rect for transcription prompt"
+        )
+        XCTAssertTrue(owningWindowContentRect.intersects(promptFrame))
         XCTAssertEqual(
             host.transcriptionPromptValue(for: RecorderActionID.transcriptionPrompt),
             ""
@@ -3289,6 +3293,19 @@ final class WorkspaceHost {
         let contentRect = window.contentLayoutRect
         return CGRect(
             origin: window.convertPoint(toScreen: contentRect.origin),
+            size: contentRect.size
+        )
+    }
+
+    func contentRect(forAccessibilityIdentifier identifier: String) -> CGRect? {
+        guard let target = accessibilityTarget(
+            forAccessibilityIdentifier: identifier
+        ) else {
+            return nil
+        }
+        let contentRect = target.window.contentLayoutRect
+        return CGRect(
+            origin: target.window.convertPoint(toScreen: contentRect.origin),
             size: contentRect.size
         )
     }

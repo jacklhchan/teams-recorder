@@ -115,7 +115,6 @@ private final class CountdownRenderHost {
         let size = hostingView.fittingSize
         guard size.width > 0, size.height > 0 else { return }
         hostingView.setFrameSize(size)
-        window.setContentSize(size)
     }
     private func view(_ identifier: String) -> NSView? { allViews(hostingView).first { $0.accessibilityIdentifier() == identifier } }
     private func locationMarker(for productionIdentifier: String) -> NSView? { view("\(productionIdentifier).marker") }

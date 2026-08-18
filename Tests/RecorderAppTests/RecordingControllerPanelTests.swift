@@ -48,15 +48,28 @@ final class RecordingControllerPanelTests: XCTestCase {
     func testRecordingControllerCollapseRoundTripPreservesTopRightAndResetsEpisode() {
         let presenter = RecordingControllerPanelPresenter()
         let fixture = makeFixture()
+        let frameProbe = RecordingControllerPanel()
+        let expandedOuterSize = frameProbe.frameRect(
+            forContentRect: NSRect(
+                origin: .zero,
+                size: .init(width: 390, height: 180)
+            )
+        ).size
+        let collapsedOuterSize = frameProbe.frameRect(
+            forContentRect: NSRect(
+                origin: .zero,
+                size: FloatingPanelLayout.collapsedSize
+            )
+        ).size
         presenter.setPresentation(.expanded)
         let initial = presenter.panelFrame
-        XCTAssertEqual(initial.size, .init(width: 390, height: 180))
+        XCTAssertEqual(initial.size, expandedOuterSize)
         let topRight = (initial.maxX, initial.maxY)
 
         presenter.setPresentation(.collapsed)
         XCTAssertEqual(
             presenter.panelFrame.size,
-            FloatingPanelLayout.collapsedSize
+            collapsedOuterSize
         )
         XCTAssertEqual(presenter.panelFrame.maxX, topRight.0)
         XCTAssertEqual(presenter.panelFrame.maxY, topRight.1)
@@ -64,7 +77,7 @@ final class RecordingControllerPanelTests: XCTestCase {
         presenter.setPresentation(.expanded)
         XCTAssertEqual(
             presenter.panelFrame.size,
-            .init(width: 390, height: 180)
+            expandedOuterSize
         )
         XCTAssertEqual(presenter.panelFrame.maxX, topRight.0)
         XCTAssertEqual(presenter.panelFrame.maxY, topRight.1)
@@ -75,12 +88,54 @@ final class RecordingControllerPanelTests: XCTestCase {
         defer { presenter.dismiss() }
         XCTAssertEqual(
             presenter.panelFrame.size,
-            .init(width: 390, height: 180)
+            expandedOuterSize
         )
         XCTAssertEqual(
             presenter.panelToggleAccessibilityValue,
             FloatingPanelPresentationState.expanded.accessibilityValue
         )
+        frameProbe.orderOut(nil)
+    }
+
+    func testRecordingControllerContentSizesUseNativeFrameConversion() {
+        let presenter = RecordingControllerPanelPresenter()
+        let fixture = makeFixture()
+        presenter.present(model: fixture.model)
+        defer { presenter.dismiss() }
+
+        let initialTopRight = (presenter.panelFrame.maxX, presenter.panelFrame.maxY)
+        XCTAssertEqual(
+            presenter.panelContentLayoutRect.size,
+            .init(width: 390, height: 180)
+        )
+        XCTAssertEqual(
+            presenter.panelContentBounds.size,
+            .init(width: 390, height: 180)
+        )
+
+        presenter.setPresentation(.collapsed)
+        XCTAssertEqual(
+            presenter.panelContentLayoutRect.size,
+            FloatingPanelLayout.collapsedSize
+        )
+        XCTAssertEqual(
+            presenter.panelContentBounds.size,
+            FloatingPanelLayout.collapsedSize
+        )
+        XCTAssertEqual(presenter.panelFrame.maxX, initialTopRight.0)
+        XCTAssertEqual(presenter.panelFrame.maxY, initialTopRight.1)
+
+        presenter.setPresentation(.expanded)
+        XCTAssertEqual(
+            presenter.panelContentLayoutRect.size,
+            .init(width: 390, height: 180)
+        )
+        XCTAssertEqual(
+            presenter.panelContentBounds.size,
+            .init(width: 390, height: 180)
+        )
+        XCTAssertEqual(presenter.panelFrame.maxX, initialTopRight.0)
+        XCTAssertEqual(presenter.panelFrame.maxY, initialTopRight.1)
     }
 
     func testRecordingFloatingPanelExposesNativeMinimizeButton() {

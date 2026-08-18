@@ -14,6 +14,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
                 $0.title == "Teams Window Auto Recording" && $0.isVisible
             }
         )
+        render(panel: panel)
         XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
 
         try click(
@@ -24,14 +25,69 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
         XCTAssertFalse(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
 
         presenter.present(seconds: 4, cancel: {})
+        render(panel: panel)
         XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.runningID))
         XCTAssertFalse(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
 
         presenter.dismiss()
         presenter.present(seconds: 3, cancel: {})
+        render(panel: panel)
         XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.secondsID))
         XCTAssertTrue(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.cancelID))
         XCTAssertFalse(contains(panel: panel, identifier: TeamsAutoMeetingCountdownAccessibility.runningID))
+    }
+
+    func testCountdownContentSizesUseNativeFrameConversion() throws {
+        let presenter = TeamsAutoMeetingCountdownPanelController()
+        presenter.present(seconds: 5, cancel: {})
+        defer { presenter.dismiss() }
+
+        let panel = try XCTUnwrap(
+            NSApp.windows.first {
+                $0.title == "Teams Window Auto Recording" && $0.isVisible
+            }
+        )
+        let initialTopRight = (presenter.panelFrame.maxX, presenter.panelFrame.maxY)
+        XCTAssertEqual(
+            presenter.panelContentLayoutRect.size,
+            .init(width: 360, height: 94)
+        )
+        XCTAssertEqual(
+            presenter.panelContentBounds.size,
+            .init(width: 360, height: 94)
+        )
+
+        try click(
+            panel: panel,
+            identifier: TeamsAutoMeetingCountdownAccessibility.panelToggleID
+        )
+        XCTAssertEqual(
+            presenter.panelContentLayoutRect.size,
+            FloatingPanelLayout.collapsedSize
+        )
+        XCTAssertEqual(
+            presenter.panelContentBounds.size,
+            FloatingPanelLayout.collapsedSize
+        )
+        XCTAssertEqual(presenter.panelFrame.maxX, initialTopRight.0)
+        XCTAssertEqual(presenter.panelFrame.maxY, initialTopRight.1)
+
+        presenter.present(seconds: 4, cancel: {})
+        XCTAssertEqual(
+            presenter.panelContentBounds.size,
+            FloatingPanelLayout.collapsedSize
+        )
+
+        presenter.dismiss()
+        presenter.present(seconds: 3, cancel: {})
+        XCTAssertEqual(
+            presenter.panelContentLayoutRect.size,
+            .init(width: 360, height: 94)
+        )
+        XCTAssertEqual(
+            presenter.panelContentBounds.size,
+            .init(width: 360, height: 94)
+        )
     }
 
     func testAutoMeetingFloatingPanelExposesNativeMinimizeButton() {
@@ -238,6 +294,7 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
     }
 
     private func click(panel: NSWindow, identifier: String) throws {
+        render(panel: panel)
         let marker = try XCTUnwrap(
             allViews(in: panel.contentView).first {
                 $0.accessibilityIdentifier() == "\(identifier).marker"
@@ -265,6 +322,10 @@ final class TeamsAutoMeetingPresentationTests: XCTestCase {
             )
             panel.sendEvent(event)
         }
+        render(panel: panel)
+    }
+
+    private func render(panel: NSWindow) {
         RunLoop.main.run(until: Date().addingTimeInterval(0.03))
         panel.layoutIfNeeded()
         panel.contentView?.layoutSubtreeIfNeeded()

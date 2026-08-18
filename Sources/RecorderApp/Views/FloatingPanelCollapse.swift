@@ -29,4 +29,18 @@ enum FloatingPanelLayout {
             height: targetSize.height
         )
     }
+
+    static func frame(
+        preservingTopRightOf current: NSRect,
+        targetContentSize: NSSize,
+        in window: NSWindow
+    ) -> NSRect {
+        let targetFrame = window.frameRect(
+            forContentRect: NSRect(origin: .zero, size: targetContentSize)
+        )
+        return frame(
+            preservingTopRightOf: current,
+            targetSize: targetFrame.size
+        )
+    }
 }

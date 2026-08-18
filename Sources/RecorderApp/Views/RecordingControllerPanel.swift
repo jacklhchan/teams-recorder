@@ -169,6 +169,8 @@ final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
     private var panelState: FloatingPanelPresentationState = .expanded
 
     var panelFrame: NSRect { panel.frame }
+    var panelContentLayoutRect: NSRect { panel.contentLayoutRect }
+    var panelContentBounds: NSRect { panel.contentView?.bounds ?? .zero }
 
     var panelToggleAccessibilityValue: String? {
         guard let hostingView,
@@ -196,10 +198,6 @@ final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
                 }
             )
         )
-        hostingView.frame = NSRect(
-            origin: .zero,
-            size: panel.frame.size
-        )
         hostingView.autoresizingMask = [.width, .height]
         panel.contentView = hostingView
         self.hostingView = hostingView
@@ -217,16 +215,18 @@ final class RecordingControllerPanelPresenter: RecordingControllerPresenting {
 
     func setPresentation(_ state: FloatingPanelPresentationState) {
         panelState = state
-        let targetSize = state == .expanded
+        let targetContentSize = state == .expanded
             ? RecordingControllerPanel.panelSize
             : FloatingPanelLayout.collapsedSize
         panel.setFrame(
             FloatingPanelLayout.frame(
                 preservingTopRightOf: panel.frame,
-                targetSize: targetSize
+                targetContentSize: targetContentSize,
+                in: panel
             ),
             display: true
         )
+        panel.contentView?.setFrameSize(targetContentSize)
     }
 
     private func allViews(_ view: NSView) -> [NSView] {

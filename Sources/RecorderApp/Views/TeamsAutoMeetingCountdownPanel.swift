@@ -180,6 +180,10 @@ final class TeamsAutoMeetingCountdownPanelController:
     private let episode = TeamsAutoMeetingPresentationEpisode()
     private var panelState: FloatingPanelPresentationState = .expanded
 
+    var panelFrame: NSRect { panel.frame }
+    var panelContentLayoutRect: NSRect { panel.contentLayoutRect }
+    var panelContentBounds: NSRect { panel.contentView?.bounds ?? .zero }
+
     override init() {
         panel = TeamsAutoMeetingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 94),
@@ -240,10 +244,6 @@ final class TeamsAutoMeetingCountdownPanelController:
                 }
             )
         )
-        hostingView.frame = NSRect(
-            origin: .zero,
-            size: panel.frame.size
-        )
         hostingView.autoresizingMask = [.width, .height]
         panel.contentView = hostingView
     }
@@ -261,10 +261,12 @@ final class TeamsAutoMeetingCountdownPanelController:
         panel.setFrame(
             FloatingPanelLayout.frame(
                 preservingTopRightOf: panel.frame,
-                targetSize: targetSize
+                targetContentSize: targetSize,
+                in: panel
             ),
             display: true
         )
+        panel.contentView?.setFrameSize(targetSize)
     }
 
     private func positionPanel() {

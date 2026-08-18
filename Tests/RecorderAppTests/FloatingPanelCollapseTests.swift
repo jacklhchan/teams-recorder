@@ -33,4 +33,29 @@ final class FloatingPanelCollapseTests: XCTestCase {
             "Collapsed"
         )
     }
+
+    func testContentSizeConversionPreservesOuterTopRightAnchor() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 400, y: 300, width: 390, height: 180),
+            styleMask: [.titled, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        let current = panel.frame
+        let collapsed = FloatingPanelLayout.frame(
+            preservingTopRightOf: current,
+            targetContentSize: FloatingPanelLayout.collapsedSize,
+            in: panel
+        )
+        let expectedSize = panel.frameRect(
+            forContentRect: NSRect(
+                origin: .zero,
+                size: FloatingPanelLayout.collapsedSize
+            )
+        ).size
+
+        XCTAssertEqual(collapsed.size, expectedSize)
+        XCTAssertEqual(collapsed.maxX, current.maxX)
+        XCTAssertEqual(collapsed.maxY, current.maxY)
+    }
 }

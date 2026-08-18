@@ -11,9 +11,6 @@ struct TranscriptionRequestDraft: Identifiable, Equatable {
         .init(language: language, prompt: prompt)
     }
 
-    var languageAccessibilityValue: String {
-        language.displayName
-    }
 }
 
 struct TranscriptionRequestSheet: View {
@@ -41,11 +38,12 @@ struct TranscriptionRequestSheet: View {
             }
             .pickerStyle(.menu)
             .accessibilityIdentifier(RecorderActionID.transcriptionLanguage)
-            .accessibilityValue(draft.languageAccessibilityValue)
+            .accessibilityValue(draft.language.displayName)
             .background(
                 RecorderDestinationAccessibilityMarker(
                     identifier: RecorderActionID.transcriptionLanguage,
-                    label: "Language"
+                    label: "Language",
+                    value: draft.language.displayName
                 )
             )
             TextEditor(text: $draft.prompt)

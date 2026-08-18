@@ -1156,6 +1156,12 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             MeetingLanguage.cantonese.rawValue
         )
         XCTAssertEqual(
+            host.transcriptionPickerMarkerAccessibilityValue(
+                for: RecorderActionID.transcriptionLanguage
+            ),
+            MeetingLanguage.cantonese.displayName
+        )
+        XCTAssertEqual(
             host.transcriptionPromptValue(
                 for: RecorderActionID.transcriptionPrompt
             ),
@@ -1165,12 +1171,48 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertTrue(host.click(
             atAccessibilityFrame: RecorderActionID.transcriptionCancel
         ))
+        XCTAssertNil(fixture.model.transcriptionRequestDraft)
         try waitUntil(timeout: 1, message: "import sheet dismissal") {
             !host.containsAccessibilityIdentifier(
                 RecorderActionID.transcriptionSheet
             )
         }
         XCTAssertNil(fixture.model.transcribingSessionID)
+    }
+
+    func testUploadAudioIsDisabledWhileTranscriptionDraftIsPending() throws {
+        let fixture = makeFixtureWithOneSession()
+        let host = try makeWorkspaceHost(
+            model: fixture.model,
+            size: .init(width: 1_280, height: 800)
+        )
+        defer { host.close() }
+        host.select(.recordings)
+        XCTAssertEqual(
+            host.toolbarItemIsEnabled(label: "Upload Audio"),
+            true
+        )
+
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+        host.render()
+
+        XCTAssertEqual(
+            host.toolbarItemIsEnabled(label: "Upload Audio"),
+            false
+        )
+        let draft = try XCTUnwrap(
+            fixture.model.transcriptionRequestDraft
+        )
+        fixture.model.cancelTranscriptionRequest(
+            expectedDraftID: draft.id
+        )
+        host.render()
+        XCTAssertEqual(
+            host.toolbarItemIsEnabled(label: "Upload Audio"),
+            true
+        )
     }
 
     func testTranscriptionSheetSubmitsSelectedLanguageAndPrompt() throws {
@@ -3158,12 +3200,8 @@ final class WorkspaceHost {
     }
 
     func frame(forAccessibilityIdentifier identifier: String) -> CGRect? {
-        if let element = accessibilityElement(forAccessibilityIdentifier: identifier) {
-            return element.accessibilityFrame()
-        }
-        return view(forAccessibilityIdentifier: identifier)?.accessibilityFrame()
-            ?? view(forAccessibilityIdentifier: identifier + ".marker")?
-                .accessibilityFrame()
+        accessibilityTarget(forAccessibilityIdentifier: identifier)?
+            .element.accessibilityFrame()
     }
 
     @discardableResult
@@ -3173,18 +3211,22 @@ final class WorkspaceHost {
         )), identifier.hasPrefix("recorder.settings.navigation.") {
             return clickSettingsRailRow(for: section)
         }
+        guard let target = accessibilityTarget(
+            forAccessibilityIdentifier: identifier
+        ), let targetRoot = target.window.contentView else {
+            return false
+        }
         // Prefer the real AppKit control whenever SwiftUI materializes one.
         // Coordinate-only mouse-down dispatch can enter AppKit's synchronous
         // tracking loop before the test has a chance to deliver mouse-up.
-        let matchingNativeButtons = renderedRoots
-            .flatMap({ allViews(startingAt: $0) })
+        let matchingNativeButtons = allViews(startingAt: targetRoot)
             .compactMap({ $0 as? NSButton })
             .filter { $0.accessibilityIdentifier() == identifier }
         if let nativeButton = matchingNativeButtons.first(where: {
                 guard $0.accessibilityIdentifier() == identifier,
                       !$0.isHidden else { return false }
                 let frame = $0.accessibilityFrame()
-                return !frame.isEmpty && windowContentRect.intersects(frame)
+                return !frame.isEmpty && target.window.frame.intersects(frame)
             }) {
             nativeButton.performClick(nil)
             render()
@@ -3193,9 +3235,8 @@ final class WorkspaceHost {
         // The Transcript button keeps the pre-existing generic action ID while
         // its passive row marker carries the session-specific ID. Resolve that
         // marker to the intersecting real AppKit control for a stable press.
-        if let markerFrame = frame(forAccessibilityIdentifier: identifier),
-           let nativeButton = renderedRoots
-            .flatMap({ allViews(startingAt: $0) })
+        let markerFrame = target.element.accessibilityFrame()
+        if let nativeButton = allViews(startingAt: targetRoot)
             .compactMap({ $0 as? NSButton })
             .first(where: {
                 !$0.isHidden
@@ -3206,24 +3247,18 @@ final class WorkspaceHost {
             render()
             return true
         }
-        if performAccessibilityPress(forAccessibilityIdentifier: identifier) {
+        if performAccessibilityPress(on: target.element) {
             render()
             return true
         }
-        guard let frame = frame(forAccessibilityIdentifier: identifier) else {
-            return false
-        }
-        let screenPoint = NSPoint(x: frame.midX, y: frame.midY)
-        let targetWindow = ([window] + window.sheets).reversed().first {
-            $0.isVisible && $0.frame.contains(screenPoint)
-        } ?? window
-        let location = targetWindow.convertPoint(fromScreen: screenPoint)
+        let screenPoint = NSPoint(x: markerFrame.midX, y: markerFrame.midY)
+        let location = target.window.convertPoint(fromScreen: screenPoint)
         guard let down = NSEvent.mouseEvent(
             with: .leftMouseDown,
             location: location,
             modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: targetWindow.windowNumber,
+            windowNumber: target.window.windowNumber,
             context: nil,
             eventNumber: 0,
             clickCount: 1,
@@ -3233,7 +3268,7 @@ final class WorkspaceHost {
             location: location,
             modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: targetWindow.windowNumber,
+            windowNumber: target.window.windowNumber,
             context: nil,
             eventNumber: 0,
             clickCount: 1,
@@ -3241,8 +3276,8 @@ final class WorkspaceHost {
         ) else {
             return false
         }
-        targetWindow.sendEvent(down)
-        targetWindow.sendEvent(up)
+        target.window.sendEvent(down)
+        target.window.sendEvent(up)
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         layout()
         return true
@@ -3304,6 +3339,19 @@ final class WorkspaceHost {
         return MeetingLanguage.allCases.first {
             $0.displayName == title
         }?.rawValue
+    }
+
+    func transcriptionPickerMarkerAccessibilityValue(
+        for identifier: String
+    ) -> String? {
+        return renderedRoots
+            .flatMap({ allViews(startingAt: $0) })
+            .first(where: {
+                $0.accessibilityIdentifier() == identifier
+                    && !($0 is NSControl)
+                    && $0.accessibilityValue() is String
+            })?
+            .accessibilityValue() as? String
     }
 
     func transcriptionPromptValue(for identifier: String) -> String? {
@@ -3412,6 +3460,17 @@ final class WorkspaceHost {
 
     func nativeButtonAccessibilityLabel(for identifier: String) -> String? {
         nativeButtons(for: identifier).first?.accessibilityLabel()
+    }
+
+    func toolbarItemIsEnabled(label: String) -> Bool? {
+        window.toolbar?.validateVisibleItems()
+        return window.toolbar?.items.lazy.compactMap { item in
+            if let group = item as? NSToolbarItemGroup {
+                return group.subitems.first(where: { $0.label == label })?
+                    .isEnabled
+            }
+            return item.label == label ? item.isEnabled : nil
+        }.first
     }
 
     fileprivate func nativeMenuItems(
@@ -3597,7 +3656,7 @@ final class WorkspaceHost {
         hostingView.layoutSubtreeIfNeeded()
     }
 
-    private var renderedRoots: [NSView] {
+    private var renderedWindows: [NSWindow] {
         // The transcript detail is an AppKit sheet owned by this host window.
         // Do not search every application window: playback lifecycle tests can
         // leave unrelated `AVPlayerView` windows alive in the same process.
@@ -3605,7 +3664,14 @@ final class WorkspaceHost {
             $0.sheetParent === window
         }
         var seen = Set<ObjectIdentifier>()
-        return windows.compactMap(\.contentView).filter {
+        return windows.filter {
+            seen.insert(ObjectIdentifier($0)).inserted
+        }
+    }
+
+    private var renderedRoots: [NSView] {
+        var seen = Set<ObjectIdentifier>()
+        return renderedWindows.compactMap(\.contentView).filter {
             seen.insert(ObjectIdentifier($0)).inserted
         }
     }
@@ -3667,7 +3733,41 @@ final class WorkspaceHost {
     private func accessibilityElement(
         forAccessibilityIdentifier identifier: String
     ) -> (any NSAccessibilityElementProtocol)? {
-        func find(in children: [Any]) -> (any NSAccessibilityElementProtocol)? {
+        accessibilityTarget(forAccessibilityIdentifier: identifier)?.element
+    }
+
+    private func performAccessibilityPress(
+        forAccessibilityIdentifier identifier: String
+    ) -> Bool {
+        guard let element = accessibilityTarget(
+            forAccessibilityIdentifier: identifier
+        )?.element else {
+            return false
+        }
+        return performAccessibilityPress(on: element)
+    }
+
+    private func performAccessibilityPress(
+        on element: any NSAccessibilityElementProtocol
+    ) -> Bool {
+        let selector = NSSelectorFromString("accessibilityPerformPress")
+        guard let pressingObject = element as? NSObject,
+              pressingObject.responds(to: selector) else { return false }
+        typealias PressFunction = @convention(c) (AnyObject, Selector) -> Bool
+        let implementation = pressingObject.method(for: selector)
+        let press = unsafeBitCast(implementation, to: PressFunction.self)
+        return press(pressingObject, selector)
+    }
+
+    private func accessibilityTarget(
+        forAccessibilityIdentifier identifier: String
+    ) -> (
+        window: NSWindow,
+        element: any NSAccessibilityElementProtocol
+    )? {
+        func find(
+            in children: [Any]
+        ) -> (any NSAccessibilityElementProtocol)? {
             for child in children {
                 if let element = child as? any NSAccessibilityElementProtocol,
                    element.accessibilityIdentifier?() == identifier {
@@ -3679,52 +3779,26 @@ final class WorkspaceHost {
             }
             return nil
         }
-        for root in renderedRoots {
+
+        for candidateWindow in renderedWindows.reversed() {
+            guard let root = candidateWindow.contentView else { continue }
             if root.accessibilityIdentifier() == identifier {
-                return root
+                return (candidateWindow, root)
             }
-            if let found = find(in: root.accessibilityChildren() ?? []) {
-                return found
+            if let element = find(in: root.accessibilityChildren() ?? []) {
+                return (candidateWindow, element)
+            }
+            if let view = findView(
+                forAccessibilityIdentifier: identifier,
+                in: root
+            ) ?? findView(
+                forAccessibilityIdentifier: identifier + ".marker",
+                in: root
+            ) {
+                return (candidateWindow, view)
             }
         }
         return nil
-    }
-
-    private func performAccessibilityPress(
-        forAccessibilityIdentifier identifier: String
-    ) -> Bool {
-        let selector = NSSelectorFromString("accessibilityPerformPress")
-        func find(in children: [Any]) -> NSObject? {
-            for child in children {
-                if let element = child as? any NSAccessibilityElementProtocol,
-                   element.accessibilityIdentifier?() == identifier,
-                   let object = child as? NSObject,
-                   object.responds(to: selector) {
-                    return object
-                }
-                if let found = find(in: accessibilityChildren(of: child)) {
-                    return found
-                }
-            }
-            return nil
-        }
-        var pressingObject: NSObject?
-        for root in renderedRoots {
-            if root.accessibilityIdentifier() == identifier,
-               root.responds(to: selector) {
-                pressingObject = root
-                break
-            }
-            if let found = find(in: root.accessibilityChildren() ?? []) {
-                pressingObject = found
-                break
-            }
-        }
-        guard let pressingObject else { return false }
-        typealias PressFunction = @convention(c) (AnyObject, Selector) -> Bool
-        let implementation = pressingObject.method(for: selector)
-        let press = unsafeBitCast(implementation, to: PressFunction.self)
-        return press(pressingObject, selector)
     }
 
     private func accessibilityChildren(of element: Any) -> [Any] {

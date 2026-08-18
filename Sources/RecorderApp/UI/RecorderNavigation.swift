@@ -26,22 +26,32 @@ enum RecorderDestination: String, CaseIterable, Identifiable, Hashable {
 struct RecorderDestinationAccessibilityMarker: NSViewRepresentable {
     let identifier: String
     let label: String?
+    let value: String?
 
-    init(identifier: String, label: String? = nil) {
+    init(
+        identifier: String,
+        label: String? = nil,
+        value: String? = nil
+    ) {
         self.identifier = identifier
         self.label = label
+        self.value = value
     }
 
     func makeNSView(context _: Context) -> NSView {
         let view = NSView(frame: .zero)
+        view.setAccessibilityElement(value != nil)
         view.setAccessibilityIdentifier(identifier)
         view.setAccessibilityLabel(label)
+        view.setAccessibilityValue(value)
         return view
     }
 
     func updateNSView(_ nsView: NSView, context _: Context) {
+        nsView.setAccessibilityElement(value != nil)
         nsView.setAccessibilityIdentifier(identifier)
         nsView.setAccessibilityLabel(label)
+        nsView.setAccessibilityValue(value)
     }
 }
 

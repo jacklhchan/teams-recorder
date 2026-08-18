@@ -94,7 +94,11 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         )
         XCTAssertNil(model.transcribingSessionID)
         XCTAssertEqual(preparer.requestCount, 0)
-        model.cancelTranscriptionRequest()
+        model.cancelTranscriptionRequest(
+            expectedDraftID: try XCTUnwrap(
+                model.transcriptionRequestDraft?.id
+            )
+        )
 
         let nextWorkspace = try makeTemporaryFolder()
         defer { try? FileManager.default.removeItem(at: nextWorkspace) }
@@ -123,6 +127,77 @@ final class AppModelLibraryFeatureIntegrationTests: XCTestCase {
         ) else { return XCTFail("failed import must fail") }
         XCTAssertNil(failingModel.transcriptionRequestDraft)
         XCTAssertEqual(preparer.requestCount, 0)
+    }
+
+    func testInFlightImportRejectsReverseCompletionWithoutDraftMismatch() async throws {
+        let root = try makeTemporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let firstSource = root.appendingPathComponent("first-source.m4a")
+        let secondSource = root.appendingPathComponent("second-source.m4a")
+        try Data([1]).write(to: firstSource)
+        try Data([2]).write(to: secondSource)
+        let firstImported = makeSession(in: root, name: "first-imported")
+        let secondImported = makeSession(in: root, name: "second-imported")
+        let firstAdmission = expectation(
+            description: "first import reaches controlled boundary"
+        )
+        let blocker = AsyncActionBlocker(onAdmission: {
+            firstAdmission.fulfill()
+        })
+        defer { blocker.release() }
+        let invocations = ImportInvocationCounter()
+        let feature = LibraryFeatureModel(
+            sessionLoader: { _ in [] },
+            sessionReloader: { $0 },
+            searchDocumentLoader: { $0.searchDocument },
+            recovery: { _ in },
+            trashHandler: { _ in true },
+            audioImporter: { source, _ in
+                invocations.record()
+                if source.standardizedFileURL
+                    == firstSource.standardizedFileURL {
+                    blocker.block()
+                    return firstImported
+                }
+                return secondImported
+            }
+        )
+        let model = AppModel(
+            performStartupWork: false,
+            initialOutputFolder: root,
+            libraryFeature: feature
+        )
+        model.seedLibrarySessionsForTesting([])
+
+        let firstTask = Task {
+            await model.importAudioForTranscription(firstSource)
+        }
+        await fulfillment(of: [firstAdmission], timeout: 1)
+
+        let secondOutcome = await model.importAudioForTranscription(
+            secondSource
+        )
+
+        if case .failure(let failure) = secondOutcome {
+            XCTAssertEqual(
+                failure.message,
+                "Another transcription request is already in progress."
+            )
+        } else {
+            XCTFail("A second import must be rejected before its async work")
+        }
+        XCTAssertEqual(invocations.count, 1)
+        XCTAssertNil(model.transcriptionRequestDraft)
+
+        blocker.release()
+        let firstOutcome = await firstTask.value
+        if case .failure(let failure) = firstOutcome {
+            XCTFail("The reserved import should succeed: \(failure.message)")
+        }
+        XCTAssertEqual(
+            model.transcriptionRequestDraft?.sessionID,
+            RecordingLibraryURLIdentity.normalized(firstImported.id)
+        )
     }
 
     func testForgedImportedAudioEventsRequireCurrentCanonicalLibraryAdmission() async throws {
@@ -719,6 +794,17 @@ private final class AsyncActionBlocker: @unchecked Sendable {
     }
     func release() {
         condition.lock(); released = true; condition.broadcast(); condition.unlock()
+    }
+}
+
+private final class ImportInvocationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var count: Int { lock.withLock { storage } }
+
+    func record() {
+        lock.withLock { storage += 1 }
     }
 }
 

@@ -21,7 +21,15 @@ struct RecordToolbarPresentation: Equatable {
 struct RecordingsToolbarPresentation: Equatable {
     let uploadDisabled: Bool
 
-    static func make(isTranscribing: Bool) -> Self {
-        .init(uploadDisabled: isTranscribing)
+    static func make(
+        isImportingAudio: Bool,
+        hasPendingDraft: Bool,
+        isTranscribing: Bool
+    ) -> Self {
+        .init(
+            uploadDisabled: isImportingAudio
+                || hasPendingDraft
+                || isTranscribing
+        )
     }
 }

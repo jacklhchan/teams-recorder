@@ -35,6 +35,8 @@ struct RecordingsLibraryView: View {
         // The UI never reconstructs meeting-intelligence state in AppModel.
         let meetingIntelligenceSnapshot = meetingIntelligenceFeature.snapshot
         let toolbarPresentation = RecordingsToolbarPresentation.make(
+            isImportingAudio: model.isImportingAudioForTranscription,
+            hasPendingDraft: model.transcriptionRequestDraft != nil,
             isTranscribing: transcription.transcribingSessionID != nil
         )
         let palette = RecordingsPalette(colorScheme: systemColorScheme)
@@ -76,9 +78,6 @@ struct RecordingsLibraryView: View {
             play: model.play,
             open: model.open,
             revealRecording: model.revealRecording,
-            transcribe: { sessionID, options in
-                model.transcribe(sessionID: sessionID, options: options)
-            },
             cancelTranscription: model.cancelTranscription,
             openTranscript: model.openTranscript,
             openTranscriptLog: model.openTranscriptLog,
@@ -109,7 +108,9 @@ struct RecordingsLibraryView: View {
             saveMeetingIntelligenceEdit: model.saveMeetingIntelligenceEdit,
             saveMetadata: model.saveMetadata,
             moveToTrash: model.moveSessionToTrash,
-            transcriptionDraft: $model.transcriptionRequestDraft,
+            transcriptionDraft: model.transcriptionRequestDraft,
+            requestTranscriptionOptions: model.requestTranscriptionOptions,
+            cancelTranscriptionRequest: model.cancelTranscriptionRequest,
             route: $route,
             selectedSessionID: $selectedSessionID,
             libraryFilter: $libraryFilter,
@@ -155,15 +156,40 @@ struct RecordingsLibraryView: View {
             )
         )
         .accessibilityIdentifier("recorder.destination.recordings")
-        .sheet(item: $model.transcriptionRequestDraft) { draft in
+        .sheet(item: transcriptionRequestDraftBinding) { draft in
             TranscriptionRequestSheet(
                 draft: draft,
-                cancel: model.cancelTranscriptionRequest,
+                cancel: {
+                    model.cancelTranscriptionRequest(
+                        expectedDraftID: draft.id
+                    )
+                },
                 submit: { options in
-                    model.submitTranscriptionRequest(options: options)
+                    model.submitTranscriptionRequest(
+                        expectedDraftID: draft.id,
+                        options: options
+                    )
                 }
             )
+            .id(draft.id)
         }
+    }
+
+    private var transcriptionRequestDraftBinding: Binding<
+        TranscriptionRequestDraft?
+    > {
+        Binding(
+            get: { model.transcriptionRequestDraft },
+            set: { value in
+                guard value == nil,
+                      let draft = model.transcriptionRequestDraft else {
+                    return
+                }
+                model.cancelTranscriptionRequest(
+                    expectedDraftID: draft.id
+                )
+            }
+        )
     }
 }
 
@@ -186,7 +212,6 @@ private struct SessionListView: View {
     let play: (RecordingSession) -> Void
     let open: (RecordingSession) -> Void
     let revealRecording: (RecordingSession) -> Void
-    let transcribe: (RecordingSession.ID, TranscriptionRequestOptions) -> Void
     let cancelTranscription: () -> Void
     let openTranscript: (RecordingSession) -> Void
     let openTranscriptLog: (RecordingSession) -> Void
@@ -211,7 +236,9 @@ private struct SessionListView: View {
     ) async -> MeetingIntelligenceEditSaveOutcome
     let saveMetadata: (String, String, Bool, RecordingSession) async -> LibrarySaveOutcome
     let moveToTrash: (RecordingSession) async -> Void
-    @Binding var transcriptionDraft: TranscriptionRequestDraft?
+    let transcriptionDraft: TranscriptionRequestDraft?
+    let requestTranscriptionOptions: (RecordingSession.ID) -> Void
+    let cancelTranscriptionRequest: (TranscriptionRequestDraft.ID) -> Void
     @Binding var route: RecordingsPresentationRoute
     @Binding var selectedSessionID: RecordingSession.ID?
     @Binding var libraryFilter: RecordingLibraryFilter
@@ -628,10 +655,7 @@ private struct SessionListView: View {
                               currentTranscribingSessionID() == nil else {
                             return
                         }
-                        transcriptionDraft = .init(
-                            sessionID: canonical.id,
-                            sessionName: canonical.displayName
-                        )
+                        requestTranscriptionOptions(canonical.id)
                     }
                 }
             )
@@ -806,7 +830,7 @@ private struct SessionListView: View {
             }
             if let transcriptionDraft,
                !allSessions.contains(where: { $0.id == transcriptionDraft.sessionID }) {
-                self.transcriptionDraft = nil
+                cancelTranscriptionRequest(transcriptionDraft.id)
             }
         }
         .sheet(item: $metadataSession) { session in

@@ -50,13 +50,37 @@ final class RecorderToolbarPresentationTests: XCTestCase {
         )
     }
 
-    func testRecordingsToolbarDisablesUploadOnlyWhileTranscribing() {
+    func testRecordingsToolbarDisablesUploadWhileAnyTranscriptionRequestIsBusy() {
         XCTAssertFalse(
-            RecordingsToolbarPresentation.make(isTranscribing: false)
+            RecordingsToolbarPresentation.make(
+                isImportingAudio: false,
+                hasPendingDraft: false,
+                isTranscribing: false
+            )
                 .uploadDisabled
         )
         XCTAssertTrue(
-            RecordingsToolbarPresentation.make(isTranscribing: true)
+            RecordingsToolbarPresentation.make(
+                isImportingAudio: true,
+                hasPendingDraft: false,
+                isTranscribing: false
+            )
+                .uploadDisabled
+        )
+        XCTAssertTrue(
+            RecordingsToolbarPresentation.make(
+                isImportingAudio: false,
+                hasPendingDraft: true,
+                isTranscribing: false
+            )
+                .uploadDisabled
+        )
+        XCTAssertTrue(
+            RecordingsToolbarPresentation.make(
+                isImportingAudio: false,
+                hasPendingDraft: false,
+                isTranscribing: true
+            )
                 .uploadDisabled
         )
     }

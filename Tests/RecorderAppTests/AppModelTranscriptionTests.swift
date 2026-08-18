@@ -3,6 +3,114 @@ import XCTest
 
 @MainActor
 final class AppModelTranscriptionTests: XCTestCase {
+    func testPendingDraftRejectsAnotherRowRequestWithoutReplacement() throws {
+        let fixture = try makeFixtureWithConfiguredProvider()
+        defer { fixture.remove() }
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+        let pending = try XCTUnwrap(
+            fixture.model.transcriptionRequestDraft
+        )
+
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+
+        XCTAssertEqual(fixture.model.transcriptionRequestDraft, pending)
+        XCTAssertEqual(
+            fixture.model.statusMessage,
+            "Another transcription request is already in progress."
+        )
+    }
+
+    func testActiveJobRejectsRowRequestWithoutOpeningDraft() async throws {
+        let fixture = try TranscriptionFixture.make()
+        defer { fixture.remove() }
+        let preparationStarted = expectation(
+            description: "transcription preparation started"
+        )
+        let preparer = ControlledPreparer(.suspended(
+            started: preparationStarted
+        ))
+        let model = makeModel(
+            fixture: fixture,
+            preparer: preparer,
+            launcher: ControlledLauncher()
+        )
+        model.seedLibrarySessionsForTesting([fixture.session])
+        model.transcribe(session: fixture.session)
+        await fulfillment(of: [preparationStarted], timeout: 1)
+
+        model.requestTranscriptionOptions(sessionID: fixture.session.id)
+
+        XCTAssertNil(model.transcriptionRequestDraft)
+        XCTAssertEqual(
+            model.statusMessage,
+            "Another transcription request is already in progress."
+        )
+        model.cancelTranscription()
+    }
+
+    func testStaleCancelCannotClearReplacementDraft() throws {
+        let fixture = try makeFixtureWithConfiguredProvider()
+        defer { fixture.remove() }
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+        let stale = try XCTUnwrap(
+            fixture.model.transcriptionRequestDraft
+        )
+        fixture.model.cancelTranscriptionRequest(
+            expectedDraftID: stale.id
+        )
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+        let replacement = try XCTUnwrap(
+            fixture.model.transcriptionRequestDraft
+        )
+
+        fixture.model.cancelTranscriptionRequest(
+            expectedDraftID: stale.id
+        )
+
+        XCTAssertEqual(fixture.model.transcriptionRequestDraft, replacement)
+    }
+
+    func testStaleSubmitCannotStartOrClearReplacementDraft() throws {
+        let fixture = try makeFixtureWithConfiguredProvider()
+        defer { fixture.remove() }
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+        let stale = try XCTUnwrap(
+            fixture.model.transcriptionRequestDraft
+        )
+        fixture.model.cancelTranscriptionRequest(
+            expectedDraftID: stale.id
+        )
+        fixture.model.requestTranscriptionOptions(
+            sessionID: fixture.session.id
+        )
+        let replacement = try XCTUnwrap(
+            fixture.model.transcriptionRequestDraft
+        )
+        fixture.model.statusMessage = "replacement remains pending"
+
+        fixture.model.submitTranscriptionRequest(
+            expectedDraftID: stale.id,
+            options: .init(language: .english, prompt: "stale prompt")
+        )
+
+        XCTAssertEqual(fixture.model.transcriptionRequestDraft, replacement)
+        XCTAssertNil(fixture.service.startedSessionID)
+        XCTAssertEqual(
+            fixture.model.statusMessage,
+            "replacement remains pending"
+        )
+    }
+
     func testImportedTranscriptionRequestDefaultsAndCancelDoesNotStart() throws {
         let fixture = try makeFixtureWithConfiguredProvider()
         defer { fixture.remove() }
@@ -19,15 +127,14 @@ final class AppModelTranscriptionTests: XCTestCase {
             fixture.model.transcriptionRequestDraft?.language,
             .cantonese
         )
-        XCTAssertEqual(
-            fixture.model.transcriptionRequestDraft?
-                .languageAccessibilityValue,
-            MeetingLanguage.cantonese.displayName
-        )
         XCTAssertEqual(fixture.model.transcriptionRequestDraft?.prompt, "")
         XCTAssertNil(fixture.service.startedSessionID)
 
-        fixture.model.cancelTranscriptionRequest()
+        fixture.model.cancelTranscriptionRequest(
+            expectedDraftID: try XCTUnwrap(
+                fixture.model.transcriptionRequestDraft?.id
+            )
+        )
 
         XCTAssertNil(fixture.model.transcriptionRequestDraft)
         XCTAssertNil(fixture.service.startedSessionID)
@@ -48,8 +155,12 @@ final class AppModelTranscriptionTests: XCTestCase {
         fixture.model.requestTranscriptionOptions(
             sessionID: fixture.session.id
         )
+        let draft = try XCTUnwrap(
+            fixture.model.transcriptionRequestDraft
+        )
 
         fixture.model.submitTranscriptionRequest(
+            expectedDraftID: draft.id,
             options: .init(language: .mandarin, prompt: "  imported names  ")
         )
 
@@ -71,9 +182,13 @@ final class AppModelTranscriptionTests: XCTestCase {
         fixture.model.requestTranscriptionOptions(
             sessionID: fixture.session.id
         )
+        let draft = try XCTUnwrap(
+            fixture.model.transcriptionRequestDraft
+        )
         fixture.removeCanonicalSession()
 
         fixture.model.submitTranscriptionRequest(
+            expectedDraftID: draft.id,
             options: .init(language: .english, prompt: "secret prompt")
         )
 

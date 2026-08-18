@@ -28,6 +28,8 @@ private struct TestRecordingAutoplayIntent {
 
 @MainActor
 final class AppModel: ObservableObject {
+    private static let transcriptionRequestBusyStatus =
+        "Another transcription request is already in progress."
     static let supportedRetentionClasses: Set<RetainableArtifactClass> = [
         .transcriptionLog,
         .transcriptionFailureDiagnostic,
@@ -78,7 +80,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var retentionScanAggregate = RecordingRetentionAggregate()
     @Published private(set) var localRecorderControlEnabled: Bool
     @Published var statusMessage = "Ready"
-    @Published var transcriptionRequestDraft: TranscriptionRequestDraft?
+    @Published private(set) var isImportingAudioForTranscription = false
+    @Published private(set) var transcriptionRequestDraft: TranscriptionRequestDraft?
     @Published var lastHealthReport: RecordingHealthReport?
     @Published private(set) var lastRecordingSavedAsM4A = false
     @Published var isRunningTestRecording = false
@@ -663,7 +666,9 @@ final class AppModel: ObservableObject {
                 )
             },
             requestTranscriptionOptions: { [weak self] session in
-                self?.requestTranscriptionOptions(sessionID: session.id)
+                self?.requestImportedTranscriptionOptions(
+                    sessionID: session.id
+                )
             },
             reportStatus: { [weak self] message in
                 self?.statusMessage = message
@@ -1848,6 +1853,7 @@ final class AppModel: ObservableObject {
     }
 
     func chooseAudioFileForTranscription() {
+        guard reserveAudioImportForTranscription() else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -1857,11 +1863,14 @@ final class AppModel: ObservableObject {
             .compactMap { UTType(filenameExtension: $0) }
         panel.prompt = "Transcribe"
 
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url else {
+            isImportingAudioForTranscription = false
+            return
+        }
 
         Task { [weak self] in
             guard let self else { return }
-            _ = await self.importAudioForTranscription(url)
+            _ = await self.performReservedAudioImportForTranscription(url)
         }
     }
 
@@ -1869,6 +1878,18 @@ final class AppModel: ObservableObject {
     func importAudioForTranscription(
         _ url: URL
     ) async -> Result<RecordingSession, LibraryFeatureFailure> {
+        guard reserveAudioImportForTranscription() else {
+            return .failure(.init(
+                message: Self.transcriptionRequestBusyStatus
+            ))
+        }
+        return await performReservedAudioImportForTranscription(url)
+    }
+
+    private func performReservedAudioImportForTranscription(
+        _ url: URL
+    ) async -> Result<RecordingSession, LibraryFeatureFailure> {
+        defer { isImportingAudioForTranscription = false }
         let workspace = outputFolder
         let fence = workspacePublicationFence
         let outcome = await libraryFeature.importAudio(
@@ -1879,6 +1900,17 @@ final class AppModel: ObservableObject {
             statusMessage = error.message
         }
         return outcome
+    }
+
+    private func reserveAudioImportForTranscription() -> Bool {
+        guard !isImportingAudioForTranscription,
+              transcriptionRequestDraft == nil,
+              transcribingSessionID == nil else {
+            statusMessage = Self.transcriptionRequestBusyStatus
+            return false
+        }
+        isImportingAudioForTranscription = true
+        return true
     }
 
     func openRecordingFolder() {
@@ -1970,6 +2002,31 @@ final class AppModel: ObservableObject {
     func requestTranscriptionOptions(
         sessionID: RecordingSession.ID
     ) {
+        admitTranscriptionOptions(
+            sessionID: sessionID,
+            permitsReservedImport: false
+        )
+    }
+
+    private func requestImportedTranscriptionOptions(
+        sessionID: RecordingSession.ID
+    ) {
+        admitTranscriptionOptions(
+            sessionID: sessionID,
+            permitsReservedImport: true
+        )
+    }
+
+    private func admitTranscriptionOptions(
+        sessionID: RecordingSession.ID,
+        permitsReservedImport: Bool
+    ) {
+        guard (permitsReservedImport || !isImportingAudioForTranscription),
+              transcriptionRequestDraft == nil,
+              transcribingSessionID == nil else {
+            statusMessage = Self.transcriptionRequestBusyStatus
+            return
+        }
         guard let session = libraryFeature.snapshot.sessions.first(where: {
             $0.id == sessionID
         }) else {
@@ -1982,14 +2039,19 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func cancelTranscriptionRequest() {
+    func cancelTranscriptionRequest(
+        expectedDraftID: TranscriptionRequestDraft.ID
+    ) {
+        guard transcriptionRequestDraft?.id == expectedDraftID else { return }
         transcriptionRequestDraft = nil
     }
 
     func submitTranscriptionRequest(
+        expectedDraftID: TranscriptionRequestDraft.ID,
         options: TranscriptionRequestOptions
     ) {
-        guard let draft = transcriptionRequestDraft else { return }
+        guard let draft = transcriptionRequestDraft,
+              draft.id == expectedDraftID else { return }
         transcriptionRequestDraft = nil
         transcribe(sessionID: draft.sessionID, options: options)
     }

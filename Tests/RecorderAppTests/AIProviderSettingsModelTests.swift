@@ -125,7 +125,7 @@ final class AIProviderSettingsModelTests: XCTestCase {
         XCTAssertEqual(repository.saveCount, 0)
     }
 
-    func testSaveAndReloadRoundTripsASRAndMeetingIntelligencePrompts() {
+    func testSaveAndReloadUsesASRCompatibilityValuesAndPreservesMeetingIntelligencePrompt() {
         let repository = RecordingProviderRepository()
         let model = AIProviderSettingsModel(
             repository: repository,
@@ -135,24 +135,30 @@ final class AIProviderSettingsModelTests: XCTestCase {
         model.baseURLText = "https://api.example.com/v1"
         model.asrModel = "asr"
         model.llmModel = "llm"
-        model.selectedLanguage = .cantonese
+        model.selectedLanguage = .english
         model.prompt = "ASR guidance"
         model.meetingIntelligencePrompt = "Summarize decisions"
 
         model.save()
+        model.selectedLanguage = .mandarin
         model.prompt = "discarded ASR"
         model.meetingIntelligencePrompt = "discarded MI"
         model.reload()
 
+        XCTAssertEqual(
+            repository.profiles[.openAICompatible]?.language,
+            MeetingLanguage.cantonese.rawValue
+        )
         assertSensitiveEqual(
             repository.profiles[.openAICompatible]?.prompt,
-            "ASR guidance"
+            ""
         )
         assertSensitiveEqual(
             repository.profiles[.openAICompatible]?.meetingIntelligencePrompt,
             "Summarize decisions"
         )
-        assertSensitiveEqual(model.prompt, "ASR guidance")
+        XCTAssertEqual(model.selectedLanguage, .cantonese)
+        assertSensitiveEqual(model.prompt, "")
         assertSensitiveEqual(model.meetingIntelligencePrompt, "Summarize decisions")
     }
 

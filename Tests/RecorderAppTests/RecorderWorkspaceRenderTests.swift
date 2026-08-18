@@ -1125,7 +1125,7 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
         XCTAssertNil(fixture.model.transcribingSessionID)
     }
 
-    func testTranscriptionSheetShowsVisibleOptionalPromptField() throws {
+    func testTranscriptionSheetMountsPromptEditor() throws {
         let fixture = makeFixtureWithOneSession()
         let host = try makeWorkspaceHost(
             model: fixture.model,
@@ -1139,16 +1139,20 @@ final class RecorderWorkspaceRenderTests: XCTestCase {
             host.containsAccessibilityIdentifier(RecorderActionID.transcriptionSheet)
         }
 
-        XCTAssertTrue(host.containsText("Prompt (optional):"))
-        XCTAssertTrue(host.containsText("Names, terminology, or transcription guidance…"))
-        XCTAssertNotNil(
-            host.frame(forAccessibilityIdentifier: RecorderActionID.transcriptionPrompt)
+        let promptFrame = try XCTUnwrap(
+            host.frame(forAccessibilityIdentifier: RecorderActionID.transcriptionPrompt),
+            "Missing mounted transcription prompt editor"
+        )
+        XCTAssertFalse(promptFrame.isEmpty)
+        XCTAssertTrue(host.windowContentRect.intersects(promptFrame))
+        XCTAssertEqual(
+            host.transcriptionPromptValue(for: RecorderActionID.transcriptionPrompt),
+            ""
         )
         XCTAssertTrue(host.replaceTextEditor(
             RecorderActionID.transcriptionPrompt,
             with: "Names: Ada and Grace"
         ))
-        XCTAssertFalse(host.containsText("Names, terminology, or transcription guidance…"))
         XCTAssertEqual(
             host.transcriptionPromptValue(for: RecorderActionID.transcriptionPrompt),
             "Names: Ada and Grace"

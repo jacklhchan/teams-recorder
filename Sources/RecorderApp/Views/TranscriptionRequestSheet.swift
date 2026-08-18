@@ -49,12 +49,6 @@ struct TranscriptionRequestSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Prompt (optional):")
                     .font(.subheadline.weight(.medium))
-                    .background(
-                        RecorderDestinationAccessibilityMarker(
-                            identifier: "\(RecorderActionID.transcriptionPrompt).label",
-                            label: "Prompt (optional):"
-                        )
-                    )
 
                 ZStack(alignment: .topLeading) {
                     Color(nsColor: .textBackgroundColor)
@@ -79,12 +73,6 @@ struct TranscriptionRequestSheet: View {
                             .padding(.vertical, 8)
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
-                            .background(
-                                RecorderDestinationAccessibilityMarker(
-                                    identifier: "\(RecorderActionID.transcriptionPrompt).placeholder",
-                                    label: "Names, terminology, or transcription guidance…"
-                                )
-                            )
                     }
                 }
                 .frame(minHeight: 96)
